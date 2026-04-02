@@ -13,6 +13,10 @@
  */
 
 const logger = require('./logger');
+const {
+  getClaudeTimeoutSeconds,
+  getMaxTurns,
+} = require('./phone-agent-config');
 
 // Audio cue URLs
 const READY_BEEP_URL = 'http://127.0.0.1:3000/static/ready-beep.wav';
@@ -141,6 +145,8 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
   const devicePrompt = deviceConfig?.prompt || null;
   const sessionType = deviceConfig?.sessionType || 'phone';
   const voiceId = deviceConfig?.voiceId || null;  // null = use default Morpheus voice
+  const claudeTimeoutSeconds = getClaudeTimeoutSeconds(deviceConfig);
+  const resolvedMaxTurns = getMaxTurns(deviceConfig, maxTurns);
   let session = null;
   let forkRunning = false;
   let callActive = true;
@@ -177,7 +183,13 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
       logger.info('Priming Claude with outbound context (non-blocking)', { callUuid });
       claudeBridge.query(
         `[SYSTEM CONTEXT - DO NOT REPEAT]: You just called the user to tell them: "${initialContext}". They have answered. Now listen to their response and help them.`,
-        { callId: callUuid, devicePrompt: devicePrompt, isSystemPrime: true, sessionType }
+        {
+          callId: callUuid,
+          devicePrompt: devicePrompt,
+          isSystemPrime: true,
+          sessionType,
+          timeout: claudeTimeoutSeconds
+        }
       ).catch(err => logger.warn('Prime query failed', { callUuid, error: err.message }));
     }
 
@@ -247,9 +259,14 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
     // Main conversation loop
     let turnCount = 0;
 
-    while (turnCount < maxTurns && callActive) {
+    while (turnCount < resolvedMaxTurns && callActive) {
       turnCount++;
-      logger.info('Conversation turn', { callUuid, turn: turnCount, maxTurns });
+      logger.info('Conversation turn', {
+        callUuid,
+        turn: turnCount,
+        maxTurns: resolvedMaxTurns,
+        claudeTimeoutSeconds
+      });
 
       // Check if call is still active
       if (!callActive) {
@@ -359,7 +376,12 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
       logger.info('Querying Claude', { callUuid });
       const claudeResponse = await claudeBridge.query(
         transcript,
-        { callId: callUuid, devicePrompt: devicePrompt, sessionType }
+        {
+          callId: callUuid,
+          devicePrompt: devicePrompt,
+          sessionType,
+          timeout: claudeTimeoutSeconds
+        }
       );
 
       // 4. Stop hold music
@@ -390,7 +412,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
     }
 
     // Max turns reached
-    if (turnCount >= maxTurns && callActive) {
+    if (turnCount >= resolvedMaxTurns && callActive) {
       const maxUrl = await ttsService.generateSpeech(
         "We've been talking for a while. Goodbye!",
         voiceId

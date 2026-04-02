@@ -30,7 +30,7 @@ async function query(prompt, options = {}) {
 
     const response = await axios.post(
       `${CLAUDE_API_URL}/ask`,
-      { prompt, callId, devicePrompt, sessionType },
+      { prompt, callId, devicePrompt, sessionType, timeoutSeconds: timeout },
       {
         timeout: timeout * 1000,
         headers: buildClaudeApiHeaders({ 'Content-Type': 'application/json' })

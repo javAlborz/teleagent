@@ -70,6 +70,11 @@ function parseListEnv(value) {
     .filter(Boolean);
 }
 
+function parsePositiveInteger(value, fallback = null) {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
 const CLAUDE_ALLOWED_TOOLS = parseListEnv(process.env.CLAUDE_ALLOWED_TOOLS);
 const PHONE_CLAUDE_ALLOWED_TOOLS = parseListEnv(process.env.PHONE_CLAUDE_ALLOWED_TOOLS);
 const PHONE_HAIKU_CLAUDE_ALLOWED_TOOLS = parseListEnv(process.env.PHONE_HAIKU_CLAUDE_ALLOWED_TOOLS || process.env.PHONE_CLAUDE_ALLOWED_TOOLS);
@@ -263,9 +268,10 @@ function parseClaudeStdout(stdout) {
   return { response, sessionId };
 }
 
-function runClaudeOnce({ fullPrompt, callId, timestamp, sessionType }) {
+function runClaudeOnce({ fullPrompt, callId, timestamp, sessionType, timeoutSeconds = null }) {
   const startTime = Date.now();
   const profile = resolveClaudeProfile(sessionType);
+  const resolvedTimeoutSeconds = parsePositiveInteger(timeoutSeconds);
 
   const args = [
     '-p', fullPrompt,
@@ -302,17 +308,45 @@ function runClaudeOnce({ fullPrompt, callId, timestamp, sessionType }) {
 
     let stdout = '';
     let stderr = '';
+    let timedOut = false;
+    let killTimer = null;
+    let forceKillTimer = null;
 
     claude.stdin.end();
     claude.stdout.on('data', (data) => { stdout += data.toString(); });
     claude.stderr.on('data', (data) => { stderr += data.toString(); });
 
+    if (resolvedTimeoutSeconds) {
+      killTimer = setTimeout(() => {
+        timedOut = true;
+        console.error(`[${new Date().toISOString()}] CLAUDE TIMEOUT after ${resolvedTimeoutSeconds}s; terminating request`);
+        claude.kill('SIGTERM');
+        forceKillTimer = setTimeout(() => {
+          if (timedOut) {
+            claude.kill('SIGKILL');
+          }
+        }, 2000);
+      }, resolvedTimeoutSeconds * 1000);
+    }
+
     claude.on('error', (error) => {
+      if (killTimer) clearTimeout(killTimer);
+      if (forceKillTimer) clearTimeout(forceKillTimer);
       reject(error);
     });
 
     claude.on('close', (code) => {
+      if (killTimer) clearTimeout(killTimer);
+      if (forceKillTimer) clearTimeout(forceKillTimer);
       const duration_ms = Date.now() - startTime;
+      if (timedOut) {
+        const error = new Error(`Claude request timed out after ${resolvedTimeoutSeconds} seconds`);
+        error.code = 'CLAUDE_TIMEOUT';
+        error.stdout = stdout;
+        error.stderr = stderr;
+        error.duration_ms = duration_ms;
+        return reject(error);
+      }
       resolve({ code, stdout, stderr, duration_ms });
     });
   });
@@ -403,10 +437,11 @@ app.use((req, res, next) => {
  *   - This allows each device (NAS, Proxmox, etc.) to have its own identity and skills
  */
 app.post('/ask', async (req, res) => {
-  const { prompt, callId, devicePrompt, sessionType } = req.body;
+  const { prompt, callId, devicePrompt, sessionType, timeoutSeconds } = req.body;
   const startTime = Date.now();
   const timestamp = new Date().toISOString();
   const profile = resolveClaudeProfile(sessionType);
+  const resolvedTimeoutSeconds = parsePositiveInteger(timeoutSeconds);
 
   if (!prompt) {
     return res.status(400).json({
@@ -423,6 +458,7 @@ app.post('/ask', async (req, res) => {
   console.log(`[${timestamp}] PERMISSION MODE: ${profile.permissionMode}`);
   console.log(`[${timestamp}] SESSION TYPE: ${profile.sessionType}`);
   console.log(`[${timestamp}] TOOLS: ${profile.tools.length > 0 ? profile.tools.join(',') : 'default'}`);
+  console.log(`[${timestamp}] TIMEOUT: ${resolvedTimeoutSeconds || 'none'}s`);
   console.log(`[${timestamp}] SESSION: callId=${callId || 'none'}, existing=${existingSession || 'none'}`);
   console.log(`[${timestamp}] DEVICE PROMPT: ${devicePrompt ? 'Yes (' + devicePrompt.substring(0, 30) + '...)' : 'No'}`);
 
@@ -446,7 +482,8 @@ app.post('/ask', async (req, res) => {
       fullPrompt,
       callId,
       timestamp,
-      sessionType
+      sessionType,
+      timeoutSeconds: resolvedTimeoutSeconds
     });
 
     if (code !== 0) {
@@ -511,6 +548,7 @@ app.post('/ask-structured', async (req, res) => {
     callId,
     devicePrompt,
     sessionType,
+    timeoutSeconds,
     schema = {},
     includeVoiceContext = false,
     maxRetries = 1,
@@ -518,6 +556,7 @@ app.post('/ask-structured', async (req, res) => {
 
   const timestamp = new Date().toISOString();
   const profile = resolveClaudeProfile(sessionType);
+  const resolvedTimeoutSeconds = parsePositiveInteger(timeoutSeconds);
 
   if (!prompt) {
     return res.status(400).json({ success: false, error: 'Missing prompt in request body' });
@@ -542,6 +581,7 @@ app.post('/ask-structured', async (req, res) => {
   console.log(`[${timestamp}] PERMISSION MODE: ${profile.permissionMode}`);
   console.log(`[${timestamp}] SESSION TYPE: ${profile.sessionType}`);
   console.log(`[${timestamp}] TOOLS: ${profile.tools.length > 0 ? profile.tools.join(',') : 'default'}`);
+  console.log(`[${timestamp}] TIMEOUT: ${resolvedTimeoutSeconds || 'none'}s`);
   console.log(`[${timestamp}] SESSION: callId=${callId || 'none'}, existing=${callId ? (sessions.has(callId) ? 'yes' : 'no') : 'none'}`);
 
   try {
@@ -557,7 +597,8 @@ app.post('/ask-structured', async (req, res) => {
         fullPrompt,
         callId,
         timestamp,
-        sessionType
+        sessionType,
+        timeoutSeconds: resolvedTimeoutSeconds
       });
       totalDuration += duration_ms;
 

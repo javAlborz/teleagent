@@ -266,6 +266,7 @@ router.post('/query', async (req, res) => {
           callId,
           devicePrompt,
           sessionType: 'api',
+          timeoutSeconds: timeout,
           schema: {
             queryType: schema?.queryType || 'general',
             requiredFields: schema?.requiredFields || [],
@@ -395,13 +396,15 @@ router.get('/devices', (req, res) => {
   try {
     const allDevices = deviceRegistry.getAll();
 
-    const deviceList = Object.values(allDevices).map(device => ({
-      name: device.name,
-      extension: device.extension,
-      modelProfile: device.sessionType || 'phone',
-      hasVoice: !!device.voiceId,
-      hasPrompt: !!device.prompt
-    }));
+      const deviceList = Object.values(allDevices).map(device => ({
+        name: device.name,
+        extension: device.extension,
+        modelProfile: device.sessionType || 'phone',
+        hasVoice: !!device.voiceId,
+        hasPrompt: !!device.prompt,
+        claudeTimeoutSeconds: device.claudeTimeoutSeconds,
+        maxTurns: device.maxTurns
+      }));
 
     res.json({
       success: true,
@@ -448,7 +451,9 @@ router.get('/device/:identifier', (req, res) => {
         modelProfile: device.sessionType || 'phone',
         hasVoice: !!device.voiceId,
         hasPrompt: !!device.prompt,
-        voiceId: device.voiceId
+        voiceId: device.voiceId,
+        claudeTimeoutSeconds: device.claudeTimeoutSeconds,
+        maxTurns: device.maxTurns
       }
     });
 

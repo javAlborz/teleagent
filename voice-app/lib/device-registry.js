@@ -11,6 +11,8 @@
  * - password: 3CX authentication password
  * - voiceId: TTS provider voice name or ID
  * - sessionType: Claude profile selector (e.g. phone-haiku)
+ * - claudeTimeoutSeconds: Claude request timeout for this phone agent
+ * - maxTurns: Maximum conversation turns for this phone agent
  * - prompt: System prompt that defines device personality
  */
 

@@ -4,6 +4,10 @@
  */
 
 const { setTimeout: sleep } = require('node:timers/promises');
+const {
+  getClaudeTimeoutSeconds,
+  getMaxTurns,
+} = require('./phone-agent-config');
 
 // Audio cue URLs
 const READY_BEEP_URL = 'http://127.0.0.1:3000/static/ready-beep.wav';
@@ -119,6 +123,8 @@ async function conversationLoop(endpoint, dialog, callUuid, options, deviceConfi
   const devicePrompt = deviceConfig ? deviceConfig.prompt : null;
   const sessionType = (deviceConfig && deviceConfig.sessionType) ? deviceConfig.sessionType : 'phone';
   const voiceId = (deviceConfig && deviceConfig.voiceId) ? deviceConfig.voiceId : DEFAULT_VOICE_ID;
+  const claudeTimeoutSeconds = getClaudeTimeoutSeconds(deviceConfig);
+  const maxTurns = getMaxTurns(deviceConfig);
   const greeting = deviceConfig && deviceConfig.name !== 'Morpheus'
     ? "Hello! I'm " + deviceConfig.name + ". How can I help you today?"
     : "Hello! I'm your server. How can I help you today?";
@@ -146,11 +152,10 @@ async function conversationLoop(endpoint, dialog, callUuid, options, deviceConfi
 
     // Main conversation loop
     let turnCount = 0;
-    const MAX_TURNS = 20;
 
-    while (turnCount < MAX_TURNS) {
+    while (turnCount < maxTurns) {
       turnCount++;
-      console.log('[' + new Date().toISOString() + '] CONVERSATION Turn ' + turnCount + '/' + MAX_TURNS);
+      console.log('[' + new Date().toISOString() + '] CONVERSATION Turn ' + turnCount + '/' + maxTurns + ' (Claude timeout: ' + claudeTimeoutSeconds + 's)');
 
       // READY BEEP
       try {
@@ -222,7 +227,12 @@ async function conversationLoop(endpoint, dialog, callUuid, options, deviceConfi
       console.log('[' + new Date().toISOString() + '] CLAUDE Querying (device: ' + deviceName + ')...');
       const claudeResponse = await claudeBridge.query(
         transcript,
-        { callId: callUuid, devicePrompt: devicePrompt, sessionType: sessionType }
+        {
+          callId: callUuid,
+          devicePrompt: devicePrompt,
+          sessionType: sessionType,
+          timeout: claudeTimeoutSeconds
+        }
       );
 
       // Stop hold music
@@ -244,7 +254,7 @@ async function conversationLoop(endpoint, dialog, callUuid, options, deviceConfi
       console.log('[' + new Date().toISOString() + '] CONVERSATION Turn ' + turnCount + ' complete');
     }
 
-    if (turnCount >= MAX_TURNS) {
+    if (turnCount >= maxTurns) {
       const maxUrl = await ttsService.generateSpeech("We've been talking for a while. Goodbye!", voiceId);
       await endpoint.play(maxUrl);
     }
