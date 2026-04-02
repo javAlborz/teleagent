@@ -58,7 +58,7 @@ services:
       # Audio files directory for TTS playback
       - ./voice-app/audio:/app/audio
       # Device configurations
-      - ./voice-app/config:/app/config
+      - ${DEVICE_CONFIG_DIR:-./voice-app/config}:/app/config:ro
     depends_on:
       - drachtio
       - freeswitch

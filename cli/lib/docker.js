@@ -150,7 +150,7 @@ services:
       - ${getEnvPath()}
     volumes:
       - ${config.paths.voiceApp}/audio:/app/audio
-      - ${config.paths.voiceApp}/config:/app/config
+      - \${DEVICE_CONFIG_DIR:-${config.paths.voiceApp}/config}:/app/config:ro
     depends_on:
       - drachtio
       - freeswitch
@@ -193,6 +193,9 @@ export function generateEnvFile(config) {
   const ttsModel = ttsConfig.model || 'kokoro';
   const sttModel = sttConfig.model || 'whisper-1';
   const defaultVoice = config.devices[0].voiceId || ttsConfig.defaultVoice || 'af_bella';
+  const deviceConfigDir = config.paths?.voiceApp
+    ? `${config.paths.voiceApp}/config`
+    : './voice-app/config';
 
   const lines = [
     '# ====================================',
@@ -205,6 +208,7 @@ export function generateEnvFile(config) {
     '',
     '# Network Configuration',
     `EXTERNAL_IP=${config.server.externalIp === 'auto' ? 'auto' : config.server.externalIp}`,
+    `DEVICE_CONFIG_DIR=${deviceConfigDir}`,
     '',
     '# Drachtio Configuration',
     'DRACHTIO_HOST=127.0.0.1',
