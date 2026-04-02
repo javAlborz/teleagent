@@ -117,6 +117,7 @@ async function conversationLoop(endpoint, dialog, callUuid, options, deviceConfi
   // Get device-specific settings
   const deviceName = deviceConfig ? deviceConfig.name : 'Morpheus';
   const devicePrompt = deviceConfig ? deviceConfig.prompt : null;
+  const sessionType = (deviceConfig && deviceConfig.sessionType) ? deviceConfig.sessionType : 'phone';
   const voiceId = (deviceConfig && deviceConfig.voiceId) ? deviceConfig.voiceId : DEFAULT_VOICE_ID;
   const greeting = deviceConfig && deviceConfig.name !== 'Morpheus'
     ? "Hello! I'm " + deviceConfig.name + ". How can I help you today?"
@@ -221,7 +222,7 @@ async function conversationLoop(endpoint, dialog, callUuid, options, deviceConfi
       console.log('[' + new Date().toISOString() + '] CLAUDE Querying (device: ' + deviceName + ')...');
       const claudeResponse = await claudeBridge.query(
         transcript,
-        { callId: callUuid, devicePrompt: devicePrompt, sessionType: 'phone' }
+        { callId: callUuid, devicePrompt: devicePrompt, sessionType: sessionType }
       );
 
       // Stop hold music

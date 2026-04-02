@@ -56,6 +56,12 @@ const CLAUDE_MODEL = process.env.CLAUDE_MODEL || 'claude-sonnet-4-20250514';
 const CLAUDE_PERMISSION_MODE = process.env.CLAUDE_PERMISSION_MODE || 'bypassPermissions';
 const PHONE_CLAUDE_MODEL = process.env.PHONE_CLAUDE_MODEL || 'haiku';
 const PHONE_CLAUDE_PERMISSION_MODE = process.env.PHONE_CLAUDE_PERMISSION_MODE || 'dontAsk';
+const PHONE_HAIKU_CLAUDE_MODEL = process.env.PHONE_HAIKU_CLAUDE_MODEL || PHONE_CLAUDE_MODEL;
+const PHONE_SONNET_CLAUDE_MODEL = process.env.PHONE_SONNET_CLAUDE_MODEL || process.env.CLAUDE_MODEL || 'sonnet';
+const PHONE_OPUS_CLAUDE_MODEL = process.env.PHONE_OPUS_CLAUDE_MODEL || 'opus';
+const PHONE_HAIKU_CLAUDE_PERMISSION_MODE = process.env.PHONE_HAIKU_CLAUDE_PERMISSION_MODE || PHONE_CLAUDE_PERMISSION_MODE;
+const PHONE_SONNET_CLAUDE_PERMISSION_MODE = process.env.PHONE_SONNET_CLAUDE_PERMISSION_MODE || PHONE_CLAUDE_PERMISSION_MODE;
+const PHONE_OPUS_CLAUDE_PERMISSION_MODE = process.env.PHONE_OPUS_CLAUDE_PERMISSION_MODE || PHONE_CLAUDE_PERMISSION_MODE;
 
 function parseListEnv(value) {
   return String(value || '')
@@ -66,27 +72,55 @@ function parseListEnv(value) {
 
 const CLAUDE_ALLOWED_TOOLS = parseListEnv(process.env.CLAUDE_ALLOWED_TOOLS);
 const PHONE_CLAUDE_ALLOWED_TOOLS = parseListEnv(process.env.PHONE_CLAUDE_ALLOWED_TOOLS);
+const PHONE_HAIKU_CLAUDE_ALLOWED_TOOLS = parseListEnv(process.env.PHONE_HAIKU_CLAUDE_ALLOWED_TOOLS || process.env.PHONE_CLAUDE_ALLOWED_TOOLS);
+const PHONE_SONNET_CLAUDE_ALLOWED_TOOLS = parseListEnv(process.env.PHONE_SONNET_CLAUDE_ALLOWED_TOOLS || process.env.PHONE_CLAUDE_ALLOWED_TOOLS);
+const PHONE_OPUS_CLAUDE_ALLOWED_TOOLS = parseListEnv(process.env.PHONE_OPUS_CLAUDE_ALLOWED_TOOLS || process.env.PHONE_CLAUDE_ALLOWED_TOOLS);
 
 function normalizeSessionType(sessionType) {
-  return sessionType === 'phone' ? 'phone' : 'default';
+  switch (sessionType) {
+    case 'phone':
+    case 'phone-haiku':
+      return 'phone-haiku';
+    case 'phone-sonnet':
+      return 'phone-sonnet';
+    case 'phone-opus':
+      return 'phone-opus';
+    default:
+      return 'default';
+  }
 }
 
 function resolveClaudeProfile(sessionType) {
-  if (normalizeSessionType(sessionType) === 'phone') {
-    return {
-      sessionType: 'phone',
-      model: PHONE_CLAUDE_MODEL,
-      permissionMode: PHONE_CLAUDE_PERMISSION_MODE,
-      allowedTools: PHONE_CLAUDE_ALLOWED_TOOLS,
-    };
+  switch (normalizeSessionType(sessionType)) {
+    case 'phone-haiku':
+      return {
+        sessionType: 'phone-haiku',
+        model: PHONE_HAIKU_CLAUDE_MODEL,
+        permissionMode: PHONE_HAIKU_CLAUDE_PERMISSION_MODE,
+        allowedTools: PHONE_HAIKU_CLAUDE_ALLOWED_TOOLS,
+      };
+    case 'phone-sonnet':
+      return {
+        sessionType: 'phone-sonnet',
+        model: PHONE_SONNET_CLAUDE_MODEL,
+        permissionMode: PHONE_SONNET_CLAUDE_PERMISSION_MODE,
+        allowedTools: PHONE_SONNET_CLAUDE_ALLOWED_TOOLS,
+      };
+    case 'phone-opus':
+      return {
+        sessionType: 'phone-opus',
+        model: PHONE_OPUS_CLAUDE_MODEL,
+        permissionMode: PHONE_OPUS_CLAUDE_PERMISSION_MODE,
+        allowedTools: PHONE_OPUS_CLAUDE_ALLOWED_TOOLS,
+      };
+    default:
+      return {
+        sessionType: 'default',
+        model: CLAUDE_MODEL,
+        permissionMode: CLAUDE_PERMISSION_MODE,
+        allowedTools: CLAUDE_ALLOWED_TOOLS,
+      };
   }
-
-  return {
-    sessionType: 'default',
-    model: CLAUDE_MODEL,
-    permissionMode: CLAUDE_PERMISSION_MODE,
-    allowedTools: CLAUDE_ALLOWED_TOOLS,
-  };
 }
 
 /**

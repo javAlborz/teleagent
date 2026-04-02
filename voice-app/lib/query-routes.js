@@ -398,6 +398,7 @@ router.get('/devices', (req, res) => {
     const deviceList = Object.values(allDevices).map(device => ({
       name: device.name,
       extension: device.extension,
+      modelProfile: device.sessionType || 'phone',
       hasVoice: !!device.voiceId,
       hasPrompt: !!device.prompt
     }));
@@ -444,6 +445,7 @@ router.get('/device/:identifier', (req, res) => {
       device: {
         name: device.name,
         extension: device.extension,
+        modelProfile: device.sessionType || 'phone',
         hasVoice: !!device.voiceId,
         hasPrompt: !!device.prompt,
         voiceId: device.voiceId

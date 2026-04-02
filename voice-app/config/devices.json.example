@@ -1,18 +1,23 @@
 {
-  "9000": {
-    "name": "Assistant",
-    "extension": "9000",
-    "authId": "your-3cx-auth-id",
-    "password": "your-3cx-password",
+  "1": {
+    "name": "Haiku",
+    "extension": "1",
     "voiceId": "af_bella",
+    "sessionType": "phone-haiku",
     "prompt": "You are a helpful AI assistant. Keep voice responses under 40 words."
   },
-  "9002": {
-    "name": "ServerBot",
-    "extension": "9002",
-    "authId": "another-auth-id",
-    "password": "another-password",
-    "voiceId": "am_adam",
-    "prompt": "You are a server monitoring assistant. Report on system health and alerts. Keep voice responses under 40 words."
+  "2": {
+    "name": "Sonnet",
+    "extension": "2",
+    "voiceId": "af_bella",
+    "sessionType": "phone-sonnet",
+    "prompt": "You are a helpful AI assistant. Keep voice responses under 40 words."
+  },
+  "3": {
+    "name": "Opus",
+    "extension": "3",
+    "voiceId": "af_bella",
+    "sessionType": "phone-opus",
+    "prompt": "You are a helpful AI assistant. Keep voice responses under 40 words."
   }
 }

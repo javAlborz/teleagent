@@ -10,6 +10,7 @@
  * - authId: 3CX authentication ID for SIP REGISTER
  * - password: 3CX authentication password
  * - voiceId: TTS provider voice name or ID
+ * - sessionType: Claude profile selector (e.g. phone-haiku)
  * - prompt: System prompt that defines device personality
  */
 
@@ -24,6 +25,7 @@ const MORPHEUS_DEFAULT = {
   name: 'Morpheus',
   extension: '9000',
   voiceId: process.env.TTS_VOICE || 'af_bella',
+  sessionType: 'phone-sonnet',
   prompt: 'You are Morpheus, the primary AI assistant. You are meticulous, systematic, and excellence-driven. Keep voice responses under 40 words.'
 };
 
