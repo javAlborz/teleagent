@@ -23,8 +23,6 @@ const CONFIG_PATH = path.join(__dirname, '../config/devices.json');
 const MORPHEUS_DEFAULT = {
   name: 'Morpheus',
   extension: '9000',
-  authId: 'Au0XZPTpJY',
-  password: 'DGHwMW6v25',
   voiceId: process.env.TTS_VOICE || 'af_bella',
   prompt: 'You are Morpheus, the primary AI assistant. You are meticulous, systematic, and excellence-driven. Keep voice responses under 40 words.'
 };

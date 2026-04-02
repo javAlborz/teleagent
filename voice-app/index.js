@@ -45,17 +45,17 @@ var config = {
   drachtio: {
     host: process.env.DRACHTIO_HOST || "drachtio",
     port: parseInt(process.env.DRACHTIO_PORT) || 9022,
-    secret: process.env.DRACHTIO_SECRET || "cymru"
+    secret: process.env.DRACHTIO_SECRET || ""
   },
   freeswitch: {
     host: process.env.FREESWITCH_HOST || "freeswitch",
     port: parseInt(process.env.FREESWITCH_PORT) || 8021,
-    secret: process.env.FREESWITCH_SECRET || "JambonzR0ck$"
+    secret: process.env.FREESWITCH_SECRET || ""
   },
   sip: {
     extension: process.env.SIP_EXTENSION || "9000",
-    auth_id: process.env.SIP_AUTH_ID || "Au0XZPTpJY",
-    password: process.env.SIP_AUTH_PASSWORD || "DGHwMW6v25",
+    auth_id: process.env.SIP_AUTH_ID || "",
+    password: process.env.SIP_AUTH_PASSWORD || "",
     domain: process.env.SIP_DOMAIN || "hello.networkchuck.com",
     registrar: process.env.SIP_REGISTRAR || "hello.networkchuck.com",
     registrar_port: parseInt(process.env.SIP_REGISTRAR_PORT) || 5060,

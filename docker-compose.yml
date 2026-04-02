@@ -15,7 +15,7 @@ services:
       --contact "sip:127.0.0.1:${DRACHTIO_SIP_PORT:-5060};transport=tcp,udp"
       --address 127.0.0.1
       --external-ip ${DRACHTIO_EXTERNAL_IP}
-      --secret ${DRACHTIO_SECRET:-cymru}
+      --secret ${DRACHTIO_SECRET}
       --port 9022
       --loglevel info
     # Ports (for reference - host mode doesn't need port mapping):
@@ -34,6 +34,7 @@ services:
     command: >
       freeswitch
       --sip-port 5080
+      --password ${FREESWITCH_SECRET}
       --rtp-range-start 30000
       --rtp-range-end 30100
     environment:

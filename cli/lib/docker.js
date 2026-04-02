@@ -134,6 +134,7 @@ services:
     command: >
       freeswitch
       --sip-port 5080
+      --password \${FREESWITCH_SECRET}
       --rtp-range-start 30000
       --rtp-range-end 30100
     # RTP ports 30000-30100 avoid conflict with 3CX SBC (uses 20000-20099)
@@ -215,8 +216,7 @@ export function generateEnvFile(config) {
     '# FreeSWITCH Configuration',
     'FREESWITCH_HOST=127.0.0.1',
     'FREESWITCH_PORT=8021',
-    // Note: This is the default ESL password for drachtio/drachtio-freeswitch-mrf
-    'FREESWITCH_SECRET=JambonzR0ck$',
+    `FREESWITCH_SECRET=${config.secrets.freeswitch}`,
     '',
     '# 3CX / SIP Configuration',
     `SIP_DOMAIN=${config.sip.domain}`,
