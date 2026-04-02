@@ -34,7 +34,8 @@ test('config module', async (t) => {
     const config = {
       version: '1.0.0',
       api: {
-        elevenlabs: { apiKey: 'test-key-123', validated: true }
+        elevenlabs: { apiKey: 'test-key-123', defaultVoiceId: 'legacy-voice', validated: true },
+        openai: { apiKey: 'legacy-openai-key', validated: false }
       }
     };
 
@@ -51,7 +52,9 @@ test('config module', async (t) => {
   await t.test('loadConfig reads saved config', async () => {
     const config = await loadConfig();
     assert.strictEqual(config.version, '1.0.0');
-    assert.strictEqual(config.api.elevenlabs.apiKey, 'test-key-123');
+    assert.strictEqual(config.api.tts.apiKey, 'test-key-123');
+    assert.strictEqual(config.api.tts.defaultVoice, 'legacy-voice');
+    assert.strictEqual(config.api.stt.apiKey, 'legacy-openai-key');
   });
 
   await t.test('configExists returns true after save', () => {
@@ -62,15 +65,27 @@ test('config module', async (t) => {
     const updated = {
       version: '1.0.0',
       api: {
-        elevenlabs: { apiKey: 'updated-key', validated: true },
-        openai: { apiKey: 'openai-key', validated: false }
+        tts: {
+          baseUrl: 'http://127.0.0.1:18080/v1',
+          apiKey: 'not-needed',
+          model: 'kokoro',
+          defaultVoice: 'af_sky',
+          validated: true
+        },
+        stt: {
+          baseUrl: 'http://127.0.0.1:18001/v1',
+          apiKey: 'not-needed',
+          model: 'whisper-1',
+          validated: false
+        }
       }
     };
 
     await saveConfig(updated);
     const config = await loadConfig();
-    assert.strictEqual(config.api.elevenlabs.apiKey, 'updated-key');
-    assert.strictEqual(config.api.openai.apiKey, 'openai-key');
+    assert.strictEqual(config.api.tts.baseUrl, 'http://127.0.0.1:18080/v1');
+    assert.strictEqual(config.api.tts.defaultVoice, 'af_sky');
+    assert.strictEqual(config.api.stt.baseUrl, 'http://127.0.0.1:18001/v1');
   });
 
   await t.test('config with deployment.mode defaults to standard', async () => {

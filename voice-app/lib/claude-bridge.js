@@ -4,8 +4,7 @@
  */
 
 const axios = require('axios');
-
-const CLAUDE_API_URL = process.env.CLAUDE_API_URL || 'http://localhost:3333';
+const { CLAUDE_API_URL, buildClaudeApiHeaders } = require('./claude-api-config');
 
 /**
  * Query Claude via HTTP API with session support
@@ -17,7 +16,7 @@ const CLAUDE_API_URL = process.env.CLAUDE_API_URL || 'http://localhost:3333';
  * @returns {Promise<string>} Claude's response
  */
 async function query(prompt, options = {}) {
-  const { callId, devicePrompt, timeout = 30 } = options; // AC27: Default 30s timeout
+  const { callId, devicePrompt, timeout = 30, sessionType } = options; // AC27: Default 30s timeout
   const timestamp = new Date().toISOString();
 
   try {
@@ -31,10 +30,10 @@ async function query(prompt, options = {}) {
 
     const response = await axios.post(
       `${CLAUDE_API_URL}/ask`,
-      { prompt, callId, devicePrompt },
+      { prompt, callId, devicePrompt, sessionType },
       {
         timeout: timeout * 1000,
-        headers: { 'Content-Type': 'application/json' }
+        headers: buildClaudeApiHeaders({ 'Content-Type': 'application/json' })
       }
     );
 
@@ -82,7 +81,7 @@ async function endSession(callId) {
       { callId },
       { 
         timeout: 5000,
-        headers: { 'Content-Type': 'application/json' }
+        headers: buildClaudeApiHeaders({ 'Content-Type': 'application/json' })
       }
     );
     console.log(`[${timestamp}] CLAUDE Session ended: ${callId}`);
@@ -98,7 +97,10 @@ async function endSession(callId) {
  */
 async function isAvailable() {
   try {
-    await axios.get(`${CLAUDE_API_URL}/health`, { timeout: 5000 });
+    await axios.get(`${CLAUDE_API_URL}/health`, {
+      timeout: 5000,
+      headers: buildClaudeApiHeaders()
+    });
     return true;
   } catch {
     return false;

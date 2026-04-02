@@ -1,28 +1,46 @@
 import axios from 'axios';
 
+function normalizeBaseUrl(baseUrl) {
+  if (!baseUrl || baseUrl.trim() === '') {
+    return '';
+  }
+
+  const trimmed = baseUrl.trim().replace(/\/+$/, '');
+  return trimmed.endsWith('/v1') ? trimmed : `${trimmed}/v1`;
+}
+
+function buildAuthHeaders(apiKey) {
+  return {
+    'Authorization': `Bearer ${apiKey || 'not-needed'}`
+  };
+}
+
 /**
- * Validate ElevenLabs API key by making a test request
- * @param {string} apiKey - ElevenLabs API key
- * @returns {Promise<{valid: boolean, error?: string}>} Validation result
+ * Validate an OpenAI-compatible TTS endpoint by listing voices
+ * @param {string} baseUrl - Endpoint base URL
+ * @param {string} apiKey - Optional API key
+ * @returns {Promise<{valid: boolean, voices?: string[], error?: string}>} Validation result
  */
-export async function validateElevenLabsKey(apiKey) {
-  if (!apiKey || apiKey.trim() === '') {
+export async function validateTtsEndpoint(baseUrl, apiKey) {
+  const normalizedBaseUrl = normalizeBaseUrl(baseUrl);
+  if (!normalizedBaseUrl) {
     return {
       valid: false,
-      error: 'API key cannot be empty'
+      error: 'Endpoint URL cannot be empty'
     };
   }
 
   try {
-    const response = await axios.get('https://api.elevenlabs.io/v1/voices', {
-      headers: {
-        'xi-api-key': apiKey
-      },
+    const response = await axios.get(`${normalizedBaseUrl}/audio/voices`, {
+      headers: buildAuthHeaders(apiKey),
       timeout: 10000
     });
 
-    if (response.status === 200) {
-      return { valid: true };
+    if (response.status === 200 && Array.isArray(response.data?.voices)) {
+      return {
+        valid: true,
+        voices: response.data.voices
+      };
     }
 
     return {
@@ -31,22 +49,16 @@ export async function validateElevenLabsKey(apiKey) {
     };
   } catch (error) {
     if (error.response) {
-      if (error.response.status === 401) {
-        return {
-          valid: false,
-          error: 'Invalid API key (401 Unauthorized)'
-        };
-      }
       return {
         valid: false,
-        error: `API error: ${error.response.status} ${error.response.statusText}`
+        error: `Endpoint error: ${error.response.status} ${error.response.statusText}`
       };
     }
 
     if (error.code === 'ECONNABORTED') {
       return {
         valid: false,
-        error: 'Request timeout - check your internet connection'
+        error: 'Request timeout - check the endpoint URL and network path'
       };
     }
 
@@ -58,27 +70,27 @@ export async function validateElevenLabsKey(apiKey) {
 }
 
 /**
- * Validate OpenAI API key by making a test request
- * @param {string} apiKey - OpenAI API key
+ * Validate an OpenAI-compatible STT endpoint by listing models
+ * @param {string} baseUrl - Endpoint base URL
+ * @param {string} apiKey - Optional API key
  * @returns {Promise<{valid: boolean, error?: string}>} Validation result
  */
-export async function validateOpenAIKey(apiKey) {
-  if (!apiKey || apiKey.trim() === '') {
+export async function validateSttEndpoint(baseUrl, apiKey) {
+  const normalizedBaseUrl = normalizeBaseUrl(baseUrl);
+  if (!normalizedBaseUrl) {
     return {
       valid: false,
-      error: 'API key cannot be empty'
+      error: 'Endpoint URL cannot be empty'
     };
   }
 
   try {
-    const response = await axios.get('https://api.openai.com/v1/models', {
-      headers: {
-        'Authorization': `Bearer ${apiKey}`
-      },
+    const response = await axios.get(`${normalizedBaseUrl}/models`, {
+      headers: buildAuthHeaders(apiKey),
       timeout: 10000
     });
 
-    if (response.status === 200) {
+    if (response.status === 200 && Array.isArray(response.data?.data)) {
       return { valid: true };
     }
 
@@ -88,22 +100,16 @@ export async function validateOpenAIKey(apiKey) {
     };
   } catch (error) {
     if (error.response) {
-      if (error.response.status === 401) {
-        return {
-          valid: false,
-          error: 'Invalid API key (401 Unauthorized)'
-        };
-      }
       return {
         valid: false,
-        error: `API error: ${error.response.status} ${error.response.statusText}`
+        error: `Endpoint error: ${error.response.status} ${error.response.statusText}`
       };
     }
 
     if (error.code === 'ECONNABORTED') {
       return {
         valid: false,
-        error: 'Request timeout - check your internet connection'
+        error: 'Request timeout - check the endpoint URL and network path'
       };
     }
 
@@ -152,12 +158,13 @@ export function validateHostname(hostname) {
 }
 
 /**
- * Validate ElevenLabs voice ID
- * @param {string} apiKey - ElevenLabs API key
+ * Validate a TTS voice name or ID against an OpenAI-compatible voice list
+ * @param {string} baseUrl - Endpoint base URL
+ * @param {string} apiKey - Optional API key
  * @param {string} voiceId - Voice ID to validate
  * @returns {Promise<{valid: boolean, name?: string, error?: string}>} Validation result
  */
-export async function validateVoiceId(apiKey, voiceId) {
+export async function validateTtsVoice(baseUrl, apiKey, voiceId) {
   if (!voiceId || voiceId.trim() === '') {
     return {
       valid: false,
@@ -165,55 +172,23 @@ export async function validateVoiceId(apiKey, voiceId) {
     };
   }
 
-  try {
-    const response = await axios.get(`https://api.elevenlabs.io/v1/voices/${voiceId}`, {
-      headers: {
-        'xi-api-key': apiKey
-      },
-      timeout: 10000
-    });
-
-    if (response.status === 200 && response.data.name) {
-      return {
-        valid: true,
-        name: response.data.name
-      };
-    }
-
+  const endpointResult = await validateTtsEndpoint(baseUrl, apiKey);
+  if (!endpointResult.valid) {
     return {
       valid: false,
-      error: `Unexpected response: ${response.status}`
-    };
-  } catch (error) {
-    if (error.response) {
-      if (error.response.status === 404) {
-        return {
-          valid: false,
-          error: 'Voice ID not found'
-        };
-      }
-      if (error.response.status === 401) {
-        return {
-          valid: false,
-          error: 'Invalid API key (cannot validate voice ID)'
-        };
-      }
-      return {
-        valid: false,
-        error: `API error: ${error.response.status} ${error.response.statusText}`
-      };
-    }
-
-    if (error.code === 'ECONNABORTED') {
-      return {
-        valid: false,
-        error: 'Request timeout - check your internet connection'
-      };
-    }
-
-    return {
-      valid: false,
-      error: `Network error: ${error.message}`
+      error: endpointResult.error
     };
   }
+
+  if (!endpointResult.voices.includes(voiceId)) {
+    return {
+      valid: false,
+      error: 'Voice ID not found in endpoint voice list'
+    };
+  }
+
+  return {
+    valid: true,
+    name: voiceId
+  };
 }

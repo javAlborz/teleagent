@@ -24,9 +24,10 @@ const FILE_MAX_AGE = 600000;
  *
  * @param {string} audioDir - Directory to serve audio files from
  * @param {number} port - Port to listen on (default: 3000)
+ * @param {string} host - Host/interface to bind (default: 0.0.0.0)
  * @returns {Object} { app, server, saveAudio, getAudioUrl, close, finalize }
  */
-function createHttpServer(audioDir, port = 3000) {
+function createHttpServer(audioDir, port = 3000, host = '0.0.0.0') {
   const app = express();
 
   // Parse JSON bodies
@@ -64,7 +65,8 @@ function createHttpServer(audioDir, port = 3000) {
       status: 'healthy',
       timestamp: new Date().toISOString(),
       audioDir,
-      port
+      port,
+      host
     });
   });
 
@@ -112,8 +114,8 @@ function createHttpServer(audioDir, port = 3000) {
   // NOTE: 404 and error handlers are added in finalize() AFTER additional routes
 
   // Start server
-  const server = app.listen(port, () => {
-    debug(`HTTP server listening on port ${port}`);
+  const server = app.listen(port, host, () => {
+    debug(`HTTP server listening on ${host}:${port}`);
     debug(`Serving audio files from ${audioDir}`);
   });
 

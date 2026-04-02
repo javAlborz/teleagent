@@ -16,6 +16,7 @@
 const express = require('express');
 const { spawn } = require('child_process');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const {
   buildQueryContext,
@@ -25,17 +26,75 @@ const {
   buildRepairPrompt,
 } = require('./structured');
 
+function loadEnvFile(envPath) {
+  if (!fs.existsSync(envPath)) return;
+
+  const envContent = fs.readFileSync(envPath, 'utf8');
+  for (const line of envContent.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+
+    const [key, ...valueParts] = trimmed.split('=');
+    if (!key || valueParts.length === 0) continue;
+
+    if (process.env[key] === undefined) {
+      process.env[key] = valueParts.join('=');
+    }
+  }
+}
+
+// Load the project-level .env so the voice app and Claude bridge can share bind/auth settings.
+loadEnvFile(path.join(__dirname, '..', '.env'));
+
+const HOME = process.env.HOME || os.homedir() || '/root';
 const app = express();
 const PORT = process.env.PORT || 3333;
+const BIND_HOST = process.env.CLAUDE_API_BIND_HOST || '0.0.0.0';
+const CLAUDE_API_TOKEN = process.env.CLAUDE_API_TOKEN || '';
+const CLAUDE_WORKING_DIR = process.env.CLAUDE_WORKING_DIR || HOME;
+const CLAUDE_MODEL = process.env.CLAUDE_MODEL || 'claude-sonnet-4-20250514';
+const CLAUDE_PERMISSION_MODE = process.env.CLAUDE_PERMISSION_MODE || 'bypassPermissions';
+const PHONE_CLAUDE_MODEL = process.env.PHONE_CLAUDE_MODEL || 'haiku';
+const PHONE_CLAUDE_PERMISSION_MODE = process.env.PHONE_CLAUDE_PERMISSION_MODE || 'dontAsk';
+
+function parseListEnv(value) {
+  return String(value || '')
+    .split(/[,\s]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+const CLAUDE_ALLOWED_TOOLS = parseListEnv(process.env.CLAUDE_ALLOWED_TOOLS);
+const PHONE_CLAUDE_ALLOWED_TOOLS = parseListEnv(process.env.PHONE_CLAUDE_ALLOWED_TOOLS);
+
+function normalizeSessionType(sessionType) {
+  return sessionType === 'phone' ? 'phone' : 'default';
+}
+
+function resolveClaudeProfile(sessionType) {
+  if (normalizeSessionType(sessionType) === 'phone') {
+    return {
+      sessionType: 'phone',
+      model: PHONE_CLAUDE_MODEL,
+      permissionMode: PHONE_CLAUDE_PERMISSION_MODE,
+      allowedTools: PHONE_CLAUDE_ALLOWED_TOOLS,
+    };
+  }
+
+  return {
+    sessionType: 'default',
+    model: CLAUDE_MODEL,
+    permissionMode: CLAUDE_PERMISSION_MODE,
+    allowedTools: CLAUDE_ALLOWED_TOOLS,
+  };
+}
 
 /**
- * Build the full environment that Claude Code expects
- * This mimics what happens when you run `claude` in a terminal
- * with your zsh profile fully loaded.
+ * Build the full environment that Claude Code expects.
+ * This avoids hardcoding macOS-specific paths so the server works on Linux.
  */
 function buildClaudeEnvironment() {
-  const HOME = process.env.HOME || '/Users/networkchuck';
-  const PAI_DIR = path.join(HOME, '.claude');
+  const PAI_DIR = process.env.PAI_DIR || path.join(HOME, '.claude');
 
   // Load ~/.claude/.env (all API keys)
   const envPath = path.join(PAI_DIR, '.env');
@@ -53,26 +112,45 @@ function buildClaudeEnvironment() {
     }
   }
 
-  // Build PATH like zsh profile does
+  const nvmBins = [];
+  const nvmVersionsDir = path.join(HOME, '.nvm/versions/node');
+  if (fs.existsSync(nvmVersionsDir)) {
+    for (const version of fs.readdirSync(nvmVersionsDir)) {
+      const binPath = path.join(nvmVersionsDir, version, 'bin');
+      if (fs.existsSync(binPath)) {
+        nvmBins.push(binPath);
+      }
+    }
+  }
+
   const fullPath = [
-    '/opt/homebrew/bin',
-    '/opt/homebrew/opt/python@3.12/bin',
-    '/opt/homebrew/opt/libpq/bin',
-    path.join(HOME, '.bun/bin'),
     path.join(HOME, '.local/bin'),
+    path.join(HOME, '.bun/bin'),
+    path.join(HOME, '.cargo/bin'),
     path.join(HOME, '.pyenv/bin'),
     path.join(HOME, '.pyenv/shims'),
     path.join(HOME, 'go/bin'),
-    '/usr/local/go/bin',
     path.join(HOME, 'bin'),
     path.join(HOME, '.lmstudio/bin'),
     path.join(HOME, '.opencode/bin'),
+    ...nvmBins,
+    '/usr/local/go/bin',
     '/usr/local/bin',
+    '/usr/local/sbin',
     '/usr/bin',
-    '/bin',
     '/usr/sbin',
-    '/sbin'
-  ].join(':');
+    '/bin',
+    '/sbin',
+    '/snap/bin',
+    '/opt/homebrew/bin',
+    '/opt/homebrew/opt/python@3.12/bin',
+    '/opt/homebrew/opt/libpq/bin',
+    ...(process.env.PATH ? process.env.PATH.split(':') : [])
+  ]
+    .filter(Boolean)
+    .filter((entry, index, entries) => entries.indexOf(entry) === index)
+    .filter((entry) => entry.startsWith('/opt/homebrew') || fs.existsSync(entry))
+    .join(':');
 
   const env = {
     ...process.env,
@@ -103,6 +181,7 @@ function buildClaudeEnvironment() {
 const claudeEnv = buildClaudeEnvironment();
 console.log('[STARTUP] Loaded environment with', Object.keys(claudeEnv).length, 'variables');
 console.log('[STARTUP] PATH includes:', claudeEnv.PATH.split(':').slice(0, 5).join(', '), '...');
+console.log('[STARTUP] Claude working directory:', CLAUDE_WORKING_DIR);
 
 // Log which API keys are available (without showing values)
 const apiKeys = Object.keys(claudeEnv).filter(k =>
@@ -112,9 +191,6 @@ console.log('[STARTUP] API keys loaded:', apiKeys.join(', '));
 
 // Session storage: callId -> claudeSessionId
 const sessions = new Map();
-
-// Model selection - Sonnet for balanced speed/quality
-const CLAUDE_MODEL = process.env.CLAUDE_MODEL || 'claude-sonnet-4-20250514';
 
 function parseClaudeStdout(stdout) {
   // Claude Code CLI may output JSONL; when it does, extract the `result` message.
@@ -144,14 +220,19 @@ function parseClaudeStdout(stdout) {
   return { response, sessionId };
 }
 
-function runClaudeOnce({ fullPrompt, callId, timestamp }) {
+function runClaudeOnce({ fullPrompt, callId, timestamp, sessionType }) {
   const startTime = Date.now();
+  const profile = resolveClaudeProfile(sessionType);
 
   const args = [
-    '--dangerously-skip-permissions',
     '-p', fullPrompt,
-    '--model', CLAUDE_MODEL
+    '--model', profile.model,
+    '--permission-mode', profile.permissionMode
   ];
+
+  if (profile.allowedTools.length > 0) {
+    args.push('--allowedTools', profile.allowedTools.join(','));
+  }
 
   if (callId) {
     if (sessions.has(callId)) {
@@ -168,6 +249,7 @@ function runClaudeOnce({ fullPrompt, callId, timestamp }) {
     const claude = spawn('claude', args, {
       stdio: ['pipe', 'pipe', 'pipe'],
       shell: false,
+      cwd: CLAUDE_WORKING_DIR,
       env: claudeEnv
     });
 
@@ -231,6 +313,25 @@ app.use((req, res, next) => {
   next();
 });
 
+app.use((req, res, next) => {
+  if (!CLAUDE_API_TOKEN || req.path === '/' || req.path === '/health') {
+    return next();
+  }
+
+  const authHeader = req.get('authorization') || '';
+  const bearerMatch = authHeader.match(/^Bearer\s+(.+)$/i);
+  const providedToken = bearerMatch ? bearerMatch[1].trim() : (req.get('x-api-key') || '').trim();
+
+  if (providedToken && providedToken === CLAUDE_API_TOKEN) {
+    return next();
+  }
+
+  return res.status(401).json({
+    success: false,
+    error: 'unauthorized'
+  });
+});
+
 /**
  * POST /ask
  *
@@ -238,7 +339,8 @@ app.use((req, res, next) => {
  *   {
  *     "prompt": "What Docker containers are running?",
  *     "callId": "optional-call-uuid",
- *     "devicePrompt": "optional device-specific prompt"
+ *     "devicePrompt": "optional device-specific prompt",
+ *     "sessionType": "optional profile name such as phone"
  *   }
  *
  * Response:
@@ -254,9 +356,10 @@ app.use((req, res, next) => {
  *   - This allows each device (NAS, Proxmox, etc.) to have its own identity and skills
  */
 app.post('/ask', async (req, res) => {
-  const { prompt, callId, devicePrompt } = req.body;
+  const { prompt, callId, devicePrompt, sessionType } = req.body;
   const startTime = Date.now();
   const timestamp = new Date().toISOString();
+  const profile = resolveClaudeProfile(sessionType);
 
   if (!prompt) {
     return res.status(400).json({
@@ -269,7 +372,9 @@ app.post('/ask', async (req, res) => {
   const existingSession = callId ? sessions.get(callId) : null;
 
   console.log(`[${timestamp}] QUERY: "${prompt.substring(0, 100)}..."`);
-  console.log(`[${timestamp}] MODEL: ${CLAUDE_MODEL}`);
+  console.log(`[${timestamp}] MODEL: ${profile.model}`);
+  console.log(`[${timestamp}] PERMISSION MODE: ${profile.permissionMode}`);
+  console.log(`[${timestamp}] SESSION TYPE: ${profile.sessionType}`);
   console.log(`[${timestamp}] SESSION: callId=${callId || 'none'}, existing=${existingSession || 'none'}`);
   console.log(`[${timestamp}] DEVICE PROMPT: ${devicePrompt ? 'Yes (' + devicePrompt.substring(0, 30) + '...)' : 'No'}`);
 
@@ -289,7 +394,12 @@ app.post('/ask', async (req, res) => {
     fullPrompt += VOICE_CONTEXT;
     fullPrompt += prompt;
 
-    const { code, stdout, stderr, duration_ms } = await runClaudeOnce({ fullPrompt, callId, timestamp });
+    const { code, stdout, stderr, duration_ms } = await runClaudeOnce({
+      fullPrompt,
+      callId,
+      timestamp,
+      sessionType
+    });
 
     if (code !== 0) {
       console.error(`[${new Date().toISOString()}] ERROR: Claude CLI exited with code ${code}`);
@@ -332,6 +442,7 @@ app.post('/ask', async (req, res) => {
  *     "prompt": "Check Ceph health",
  *     "callId": "optional-call-uuid",
  *     "devicePrompt": "optional device-specific prompt",
+ *     "sessionType": "optional profile name such as phone",
  *     "schema": {
  *        "queryType": "ceph_health",
  *        "requiredFields": ["cluster_status","ssd_usage_percent","recommendation"],
@@ -351,12 +462,14 @@ app.post('/ask-structured', async (req, res) => {
     prompt,
     callId,
     devicePrompt,
+    sessionType,
     schema = {},
     includeVoiceContext = false,
     maxRetries = 1,
   } = req.body || {};
 
   const timestamp = new Date().toISOString();
+  const profile = resolveClaudeProfile(sessionType);
 
   if (!prompt) {
     return res.status(400).json({ success: false, error: 'Missing prompt in request body' });
@@ -377,7 +490,9 @@ app.post('/ask-structured', async (req, res) => {
   });
 
   console.log(`[${timestamp}] STRUCTURED QUERY: "${String(prompt).substring(0, 100)}..."`);
-  console.log(`[${timestamp}] MODEL: ${CLAUDE_MODEL}`);
+  console.log(`[${timestamp}] MODEL: ${profile.model}`);
+  console.log(`[${timestamp}] PERMISSION MODE: ${profile.permissionMode}`);
+  console.log(`[${timestamp}] SESSION TYPE: ${profile.sessionType}`);
   console.log(`[${timestamp}] SESSION: callId=${callId || 'none'}, existing=${callId ? (sessions.has(callId) ? 'yes' : 'no') : 'none'}`);
 
   try {
@@ -389,7 +504,12 @@ app.post('/ask-structured', async (req, res) => {
 
     for (let attempt = 0; attempt <= retries; attempt++) {
       attemptsMade = attempt + 1;
-      const { code, stdout, stderr, duration_ms } = await runClaudeOnce({ fullPrompt, callId, timestamp });
+      const { code, stdout, stderr, duration_ms } = await runClaudeOnce({
+        fullPrompt,
+        callId,
+        timestamp,
+        sessionType
+      });
       totalDuration += duration_ms;
 
       if (code !== 0) {
@@ -509,12 +629,13 @@ app.get('/', (req, res) => {
 });
 
 // Start server
-app.listen(PORT, '0.0.0.0', () => {
+app.listen(PORT, BIND_HOST, () => {
   console.log('='.repeat(64));
   console.log('Claude HTTP API Server');
   console.log('='.repeat(64));
-  console.log(`\nListening on: http://0.0.0.0:${PORT}`);
+  console.log(`\nListening on: http://${BIND_HOST}:${PORT}`);
   console.log(`Health check: http://localhost:${PORT}/health`);
+  console.log(`Claude API auth: ${CLAUDE_API_TOKEN ? 'enabled' : 'disabled'}`);
   console.log('\nReady to receive Claude queries from voice interface.\n');
 });
 

@@ -1,6 +1,6 @@
 /**
- * OpenAI Whisper API Client for Speech-to-Text
- * Converts audio buffers (L16 PCM from FreeSWITCH) to text
+ * OpenAI-compatible Whisper client for speech-to-text.
+ * Converts audio buffers (L16 PCM from FreeSWITCH) to text.
  */
 
 const OpenAI = require("openai");
@@ -11,14 +11,19 @@ const path = require("path");
 // Lazy-initialized OpenAI client
 let openai = null;
 
+const DEFAULT_STT_BASE_URL = "http://127.0.0.1:18001/v1";
+const DEFAULT_STT_MODEL = process.env.STT_MODEL || "whisper-1";
+
+function normalizeBaseUrl(rawUrl) {
+  const trimmed = (rawUrl || DEFAULT_STT_BASE_URL).trim().replace(/\/+$/, "");
+  return trimmed.endsWith("/v1") ? trimmed : `${trimmed}/v1`;
+}
+
 function getOpenAIClient() {
   if (!openai) {
-    if (!process.env.OPENAI_API_KEY) {
-      console.warn("[WHISPER] OPENAI_API_KEY not set - STT will not work");
-      return null;
-    }
     openai = new OpenAI({
-      apiKey: process.env.OPENAI_API_KEY
+      apiKey: process.env.STT_API_KEY || "not-needed",
+      baseURL: normalizeBaseUrl(process.env.STT_BASE_URL || DEFAULT_STT_BASE_URL)
     });
   }
   return openai;
@@ -43,7 +48,7 @@ function pcmToWav(pcmBuffer, sampleRate = 8000) {
 }
 
 /**
- * Transcribe audio using OpenAI Whisper API
+ * Transcribe audio using an OpenAI-compatible Whisper endpoint
  * @param {Buffer} audioBuffer - Audio data (either WAV or raw PCM)
  * @param {Object} options - Transcription options
  * @param {string} options.format - Input format: "wav" or "pcm" (default: "pcm")
@@ -60,7 +65,7 @@ async function transcribe(audioBuffer, options = {}) {
 
   const client = getOpenAIClient();
   if (!client) {
-    throw new Error("OpenAI API key not configured");
+    throw new Error("STT client not configured");
   }
 
   // Convert PCM to WAV if needed
@@ -78,7 +83,7 @@ async function transcribe(audioBuffer, options = {}) {
   try {
     const transcription = await client.audio.transcriptions.create({
       file: fs.createReadStream(tempFile),
-      model: "whisper-1",
+      model: DEFAULT_STT_MODEL,
       language: language,
       response_format: "text"
     });
@@ -99,10 +104,10 @@ async function transcribe(audioBuffer, options = {}) {
 
 /**
  * Check if Whisper API is configured and available
- * @returns {boolean} True if API key is set
+ * @returns {boolean} True if an endpoint URL is available
  */
 function isAvailable() {
-  return !!process.env.OPENAI_API_KEY;
+  return !!normalizeBaseUrl(process.env.STT_BASE_URL || DEFAULT_STT_BASE_URL);
 }
 
 module.exports = {

@@ -183,6 +183,16 @@ export function generateEnvFile(config) {
     claudeApiUrl = `http://localhost:${config.server.claudeApiPort}`;
   }
 
+  const ttsConfig = config.api?.tts || {};
+  const sttConfig = config.api?.stt || {};
+  const ttsBaseUrl = ttsConfig.baseUrl || 'http://127.0.0.1:18000/v1';
+  const sttBaseUrl = sttConfig.baseUrl || 'http://127.0.0.1:18001/v1';
+  const ttsApiKey = ttsConfig.apiKey || 'not-needed';
+  const sttApiKey = sttConfig.apiKey || 'not-needed';
+  const ttsModel = ttsConfig.model || 'kokoro';
+  const sttModel = sttConfig.model || 'whisper-1';
+  const defaultVoice = config.devices[0].voiceId || ttsConfig.defaultVoice || 'af_bella';
+
   const lines = [
     '# ====================================',
     '# WARNING: DO NOT SHARE THIS FILE',
@@ -215,17 +225,21 @@ export function generateEnvFile(config) {
     '# Default extension (primary device)',
     `SIP_EXTENSION=${config.devices[0].extension}`,
     `SIP_AUTH_ID=${config.devices[0].authId}`,
-    `SIP_PASSWORD=${config.devices[0].password}`,
+    `SIP_AUTH_PASSWORD=${config.devices[0].password}`,
     '',
     '# Claude API Server',
     `CLAUDE_API_URL=${claudeApiUrl}`,
     '',
-    '# ElevenLabs TTS',
-    `ELEVENLABS_API_KEY=${config.api.elevenlabs.apiKey}`,
-    `ELEVENLABS_VOICE_ID=${config.devices[0].voiceId}`,
+    '# OpenAI-compatible TTS',
+    `TTS_BASE_URL=${ttsBaseUrl}`,
+    `TTS_API_KEY=${ttsApiKey}`,
+    `TTS_MODEL=${ttsModel}`,
+    `TTS_VOICE=${defaultVoice}`,
     '',
-    '# OpenAI (Whisper STT)',
-    `OPENAI_API_KEY=${config.api.openai.apiKey}`,
+    '# OpenAI-compatible STT',
+    `STT_BASE_URL=${sttBaseUrl}`,
+    `STT_API_KEY=${sttApiKey}`,
+    `STT_MODEL=${sttModel}`,
     '',
     '# Application Settings',
     `HTTP_PORT=${config.server.httpPort}`,

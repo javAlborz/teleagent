@@ -208,7 +208,7 @@ async function initiateOutboundCall(srf, mediaServer, options) {
  * @param {Object} endpoint - FreeSWITCH endpoint
  * @param {string} message - Text to convert to speech and play
  * @param {Object} [options] - Playback options
- * @param {string} [options.voiceId] - ElevenLabs voice ID for device-specific voice
+ * @param {string} [options.voiceId] - TTS provider voice ID/name for device-specific voice
  * @returns {Promise<void>}
  */
 async function playMessage(endpoint, message, options) {

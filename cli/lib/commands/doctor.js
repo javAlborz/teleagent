@@ -5,7 +5,7 @@ import axios from 'axios';
 import { loadConfig, configExists, getInstallationType } from '../config.js';
 import { checkDocker, getContainerStatus } from '../docker.js';
 import { isServerRunning, getServerPid } from '../process-manager.js';
-import { validateElevenLabsKey, validateOpenAIKey } from '../validators.js';
+import { validateTtsEndpoint, validateSttEndpoint } from '../validators.js';
 import { isReachable, checkClaudeApiServer as checkClaudeApiHealth } from '../network.js';
 import { checkPort } from '../port-check.js';
 
@@ -54,13 +54,14 @@ async function checkClaudeCLI() {
 }
 
 /**
- * Check ElevenLabs API connectivity
- * @param {string} apiKey - ElevenLabs API key
+ * Check TTS endpoint connectivity
+ * @param {string} baseUrl - TTS endpoint URL
+ * @param {string} apiKey - Optional API key
  * @returns {Promise<{connected: boolean, error?: string}>}
  */
-async function checkElevenLabsAPI(apiKey) {
+async function checkTtsEndpoint(baseUrl, apiKey) {
   try {
-    const result = await validateElevenLabsKey(apiKey);
+    const result = await validateTtsEndpoint(baseUrl, apiKey);
     if (result.valid) {
       return { connected: true };
     } else {
@@ -72,13 +73,14 @@ async function checkElevenLabsAPI(apiKey) {
 }
 
 /**
- * Check OpenAI API connectivity
- * @param {string} apiKey - OpenAI API key
+ * Check STT endpoint connectivity
+ * @param {string} baseUrl - STT endpoint URL
+ * @param {string} apiKey - Optional API key
  * @returns {Promise<{connected: boolean, error?: string}>}
  */
-async function checkOpenAIAPI(apiKey) {
+async function checkSttEndpoint(baseUrl, apiKey) {
   try {
-    const result = await validateOpenAIKey(apiKey);
+    const result = await validateSttEndpoint(baseUrl, apiKey);
     if (result.valid) {
       return { connected: true };
     } else {
@@ -283,32 +285,32 @@ async function runVoiceServerChecks(config, isPiSplit) {
   }
   checks.push({ name: 'Docker', passed: dockerResult.installed && dockerResult.running });
 
-  // Check ElevenLabs API (only if configured)
-  if (config.api && config.api.elevenlabs && config.api.elevenlabs.apiKey) {
-    const elevenLabsSpinner = ora('Checking ElevenLabs API...').start();
-    const elevenLabsResult = await checkElevenLabsAPI(config.api.elevenlabs.apiKey);
+  // Check TTS endpoint
+  if (config.api?.tts?.baseUrl) {
+    const elevenLabsSpinner = ora('Checking TTS endpoint...').start();
+    const elevenLabsResult = await checkTtsEndpoint(config.api.tts.baseUrl, config.api.tts.apiKey);
     if (elevenLabsResult.connected) {
-      elevenLabsSpinner.succeed(chalk.green('ElevenLabs API connected'));
+      elevenLabsSpinner.succeed(chalk.green('TTS endpoint connected'));
       passedCount++;
     } else {
-      elevenLabsSpinner.fail(chalk.red(`ElevenLabs API failed: ${elevenLabsResult.error}`));
-      console.log(chalk.gray('  → Check your API key in ~/.claude-phone/config.json\n'));
+      elevenLabsSpinner.fail(chalk.red(`TTS endpoint failed: ${elevenLabsResult.error}`));
+      console.log(chalk.gray('  → Check your TTS endpoint URL in ~/.claude-phone/config.json\n'));
     }
-    checks.push({ name: 'ElevenLabs API', passed: elevenLabsResult.connected });
+    checks.push({ name: 'TTS endpoint', passed: elevenLabsResult.connected });
   }
 
-  // Check OpenAI API (only if configured)
-  if (config.api && config.api.openai && config.api.openai.apiKey) {
-    const openAISpinner = ora('Checking OpenAI API...').start();
-    const openAIResult = await checkOpenAIAPI(config.api.openai.apiKey);
+  // Check STT endpoint
+  if (config.api?.stt?.baseUrl) {
+    const openAISpinner = ora('Checking STT endpoint...').start();
+    const openAIResult = await checkSttEndpoint(config.api.stt.baseUrl, config.api.stt.apiKey);
     if (openAIResult.connected) {
-      openAISpinner.succeed(chalk.green('OpenAI API connected'));
+      openAISpinner.succeed(chalk.green('STT endpoint connected'));
       passedCount++;
     } else {
-      openAISpinner.fail(chalk.red(`OpenAI API failed: ${openAIResult.error}`));
-      console.log(chalk.gray('  → Check your API key in ~/.claude-phone/config.json\n'));
+      openAISpinner.fail(chalk.red(`STT endpoint failed: ${openAIResult.error}`));
+      console.log(chalk.gray('  → Check your STT endpoint URL in ~/.claude-phone/config.json\n'));
     }
-    checks.push({ name: 'OpenAI API', passed: openAIResult.connected });
+    checks.push({ name: 'STT endpoint', passed: openAIResult.connected });
   }
 
   // Check Voice-app container

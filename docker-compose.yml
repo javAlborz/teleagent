@@ -12,13 +12,14 @@ services:
     network_mode: host
     command: >
       drachtio
-      --contact "sip:*:5060;transport=tcp,udp"
-      --external-ip ${EXTERNAL_IP}
+      --contact "sip:127.0.0.1:${DRACHTIO_SIP_PORT:-5060};transport=tcp,udp"
+      --address 127.0.0.1
+      --external-ip ${DRACHTIO_EXTERNAL_IP}
       --secret ${DRACHTIO_SECRET:-cymru}
       --port 9022
       --loglevel info
     # Ports (for reference - host mode doesn't need port mapping):
-    # - 5060: SIP UDP/TCP
+    # - ${DRACHTIO_SIP_PORT:-5060}: SIP UDP/TCP
     # - 9022: Admin/App Port
 
   freeswitch:
@@ -26,14 +27,15 @@ services:
     container_name: freeswitch
     restart: unless-stopped
     network_mode: host
+    entrypoint: /usr/local/bin/entrypoint-hermes-freeswitch.sh
+    volumes:
+      - ./freeswitch/entrypoint.sh:/usr/local/bin/entrypoint-hermes-freeswitch.sh:ro
+      - ./freeswitch/mrf.xml:/usr/local/freeswitch/conf/sip_profiles/mrf.xml:ro
     command: >
       freeswitch
       --sip-port 5080
       --rtp-range-start 30000
       --rtp-range-end 30100
-      --ext-rtp-ip ${EXTERNAL_IP}
-      --ext-sip-ip ${EXTERNAL_IP}
-      --advertise-external-ip
     environment:
       # CRITICAL: Set this to your server's LAN IP
       # This IP goes into SDP packets so 3CX knows where to send audio

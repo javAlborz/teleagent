@@ -1,6 +1,6 @@
 /**
- * ElevenLabs Text-to-Speech Service
- * Generates speech audio files and returns URLs for FreeSWITCH playback
+ * OpenAI-compatible Text-to-Speech Service
+ * Generates speech audio files and returns URLs for FreeSWITCH playback.
  */
 
 const axios = require('axios');
@@ -9,15 +9,44 @@ const path = require('path');
 const crypto = require('crypto');
 const logger = require('./logger');
 
-const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
-const ELEVENLABS_API_URL = 'https://api.elevenlabs.io/v1';
-
-// Default voice IDs (can be customized)
-const DEFAULT_VOICE_ID = 'JAgnJveGGUh4qy4kh6dF'; // Morpheus voice
-const MODEL_ID = 'eleven_turbo_v2'; // Fast, low-latency model
+const DEFAULT_TTS_BASE_URL = 'http://127.0.0.1:18000/v1';
+const DEFAULT_VOICE_ID = process.env.TTS_VOICE || 'af_bella';
+const MODEL_ID = process.env.TTS_MODEL || 'kokoro';
+const RESPONSE_FORMAT = process.env.TTS_RESPONSE_FORMAT || 'mp3';
+const TTS_TIMEOUT_MS = parseInt(process.env.TTS_TIMEOUT_MS || '30000', 10);
 
 // Audio output directory (set via setAudioDir)
 let audioDir = path.join(__dirname, '../audio-temp');
+
+function normalizeBaseUrl(rawUrl) {
+  const trimmed = (rawUrl || DEFAULT_TTS_BASE_URL).trim().replace(/\/+$/, '');
+  return trimmed.endsWith('/v1') ? trimmed : `${trimmed}/v1`;
+}
+
+function getTtsBaseUrl() {
+  return normalizeBaseUrl(process.env.TTS_BASE_URL || DEFAULT_TTS_BASE_URL);
+}
+
+function getTtsApiKey() {
+  return process.env.TTS_API_KEY || 'not-needed';
+}
+
+function getAudioExtension() {
+  const format = RESPONSE_FORMAT.toLowerCase();
+  return format === 'mpeg' ? 'mp3' : format;
+}
+
+function stringifyErrorData(data) {
+  if (!data) return undefined;
+  if (Buffer.isBuffer(data)) return data.toString('utf8');
+  if (typeof data === 'string') return data;
+
+  try {
+    return JSON.stringify(data);
+  } catch {
+    return String(data);
+  }
+}
 
 /**
  * Set the audio output directory
@@ -42,49 +71,47 @@ function generateFilename(text) {
   // Hash text to create unique identifier
   const hash = crypto.createHash('md5').update(text).digest('hex').substring(0, 8);
   const timestamp = Date.now();
-  return `tts-${timestamp}-${hash}.mp3`;
+  return `tts-${timestamp}-${hash}.${getAudioExtension()}`;
 }
 
 /**
- * Convert text to speech using ElevenLabs API
+ * Convert text to speech using an OpenAI-compatible API
  * @param {string} text - Text to convert to speech
- * @param {string} voiceId - ElevenLabs voice ID (optional)
+ * @param {string} voiceId - Provider voice ID or name (optional)
  * @returns {Promise<string>} HTTP URL to audio file
  */
 async function generateSpeech(text, voiceId = DEFAULT_VOICE_ID) {
   const startTime = Date.now();
 
   try {
-    if (!ELEVENLABS_API_KEY) {
-      throw new Error('ELEVENLABS_API_KEY environment variable not set');
-    }
+    const baseUrl = getTtsBaseUrl();
+    const apiKey = getTtsApiKey();
 
-    logger.info('Generating speech with ElevenLabs', {
+    logger.info('Generating speech with OpenAI-compatible TTS', {
       textLength: text.length,
       voiceId,
-      model: MODEL_ID
+      model: MODEL_ID,
+      baseUrl
     });
 
-    // Call ElevenLabs API
+    // Call OpenAI-compatible TTS endpoint (for example Kokoro-FastAPI)
     const response = await axios({
       method: 'POST',
-      url: `${ELEVENLABS_API_URL}/text-to-speech/${voiceId}`,
+      url: `${baseUrl}/audio/speech`,
       headers: {
         'Accept': 'audio/mpeg',
         'Content-Type': 'application/json',
-        'xi-api-key': ELEVENLABS_API_KEY
+        'Authorization': `Bearer ${apiKey}`
       },
       data: {
-        text,
-        model_id: MODEL_ID,
-        voice_settings: {
-          stability: 0.5,
-          similarity_boost: 0.75,
-          style: 0.0,
-          use_speaker_boost: true
-        }
+        input: text,
+        model: MODEL_ID,
+        voice: voiceId || DEFAULT_VOICE_ID,
+        response_format: RESPONSE_FORMAT,
+        speed: parseFloat(process.env.TTS_SPEED || '1.0')
       },
-      responseType: 'arraybuffer'
+      responseType: 'arraybuffer',
+      timeout: TTS_TIMEOUT_MS
     });
 
     // Generate filename and save audio
@@ -118,16 +145,16 @@ async function generateSpeech(text, voiceId = DEFAULT_VOICE_ID) {
       latency,
       textLength: text?.length,
       responseStatus: error.response?.status,
-      responseData: error.response?.data?.toString()
+      responseData: stringifyErrorData(error.response?.data)
     });
 
     // Handle specific errors
     if (error.response?.status === 401) {
-      throw new Error('ElevenLabs API authentication failed - check API key');
+      throw new Error('TTS endpoint authentication failed');
     } else if (error.response?.status === 429) {
-      throw new Error('ElevenLabs API rate limit exceeded');
+      throw new Error('TTS endpoint rate limit exceeded');
     } else if (error.response?.status === 400) {
-      throw new Error('Invalid request to ElevenLabs API');
+      throw new Error('Invalid request to TTS endpoint');
     }
 
     throw new Error(`TTS generation failed: ${error.message}`);
@@ -169,24 +196,20 @@ function cleanupOldFiles(maxAgeMs = 60 * 60 * 1000) {
 }
 
 /**
- * Get list of available ElevenLabs voices
- * @returns {Promise<Array>} Array of voice objects
+ * Get list of available TTS voices
+ * @returns {Promise<Array>} Array of voice names
  */
 async function getAvailableVoices() {
   try {
-    if (!ELEVENLABS_API_KEY) {
-      throw new Error('ELEVENLABS_API_KEY environment variable not set');
-    }
-
     const response = await axios({
       method: 'GET',
-      url: `${ELEVENLABS_API_URL}/voices`,
+      url: `${getTtsBaseUrl()}/audio/voices`,
       headers: {
-        'xi-api-key': ELEVENLABS_API_KEY
+        'Authorization': `Bearer ${getTtsApiKey()}`
       }
     });
 
-    return response.data.voices;
+    return response.data?.voices || [];
 
   } catch (error) {
     logger.error('Failed to fetch available voices', { error: error.message });

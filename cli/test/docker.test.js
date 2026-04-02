@@ -131,8 +131,8 @@ test('docker compose generation', async (t) => {
         }
       ],
       api: {
-        elevenlabs: { apiKey: 'elev-key' },
-        openai: { apiKey: 'openai-key' }
+        tts: { baseUrl: 'http://127.0.0.1:18000/v1', apiKey: 'not-needed', model: 'kokoro', defaultVoice: 'af_bella' },
+        stt: { baseUrl: 'http://127.0.0.1:18001/v1', apiKey: 'not-needed', model: 'whisper-1' }
       },
       secrets: {
         drachtio: 'drachtio-secret',
@@ -175,8 +175,8 @@ test('docker compose generation', async (t) => {
         }
       ],
       api: {
-        elevenlabs: { apiKey: 'elev-key' },
-        openai: { apiKey: 'openai-key' }
+        tts: { baseUrl: 'http://127.0.0.1:18000/v1', apiKey: 'not-needed', model: 'kokoro', defaultVoice: 'af_bella' },
+        stt: { baseUrl: 'http://127.0.0.1:18001/v1', apiKey: 'not-needed', model: 'whisper-1' }
       },
       secrets: {
         drachtio: 'drachtio-secret',
@@ -192,6 +192,9 @@ test('docker compose generation', async (t) => {
     // Should use localhost for standard mode
     assert.ok(envFile.includes('CLAUDE_API_URL=http://localhost:3333'),
       'Should use localhost for standard mode');
+    assert.ok(envFile.includes('TTS_BASE_URL=http://127.0.0.1:18000/v1'));
+    assert.ok(envFile.includes('STT_BASE_URL=http://127.0.0.1:18001/v1'));
+    assert.ok(envFile.includes('SIP_AUTH_PASSWORD=pass123'));
   });
 
   await t.test('generates env file with localhost for both mode (all-in-one)', () => {
@@ -214,8 +217,8 @@ test('docker compose generation', async (t) => {
         }
       ],
       api: {
-        elevenlabs: { apiKey: 'elev-key' },
-        openai: { apiKey: 'openai-key' }
+        tts: { baseUrl: 'http://127.0.0.1:18000/v1', apiKey: 'not-needed', model: 'kokoro', defaultVoice: 'af_bella' },
+        stt: { baseUrl: 'http://127.0.0.1:18001/v1', apiKey: 'not-needed', model: 'whisper-1' }
       },
       secrets: {
         drachtio: 'drachtio-secret',
@@ -257,8 +260,8 @@ test('docker compose generation', async (t) => {
         }
       ],
       api: {
-        elevenlabs: { apiKey: 'elev-key' },
-        openai: { apiKey: 'openai-key' }
+        tts: { baseUrl: 'http://127.0.0.1:18000/v1', apiKey: 'not-needed', model: 'kokoro', defaultVoice: 'af_bella' },
+        stt: { baseUrl: 'http://127.0.0.1:18001/v1', apiKey: 'not-needed', model: 'whisper-1' }
       },
       secrets: {
         drachtio: 'drachtio-secret',

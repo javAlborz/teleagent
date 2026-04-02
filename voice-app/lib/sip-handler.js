@@ -10,8 +10,8 @@ const READY_BEEP_URL = 'http://127.0.0.1:3000/static/ready-beep.wav';
 const GOTIT_BEEP_URL = 'http://127.0.0.1:3000/static/gotit-beep.wav';
 const HOLD_MUSIC_URL = 'http://127.0.0.1:3000/static/hold-music.mp3';
 
-// Default voice ID (Morpheus)
-const DEFAULT_VOICE_ID = 'JAgnJveGGUh4qy4kh6dF';
+// Default TTS voice for the primary assistant
+const DEFAULT_VOICE_ID = process.env.TTS_VOICE || 'af_bella';
 
 // Claude Code-style thinking phrases
 const THINKING_PHRASES = [
@@ -221,7 +221,7 @@ async function conversationLoop(endpoint, dialog, callUuid, options, deviceConfi
       console.log('[' + new Date().toISOString() + '] CLAUDE Querying (device: ' + deviceName + ')...');
       const claudeResponse = await claudeBridge.query(
         transcript,
-        { callId: callUuid, devicePrompt: devicePrompt }
+        { callId: callUuid, devicePrompt: devicePrompt, sessionType: 'phone' }
       );
 
       // Stop hold music

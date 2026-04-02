@@ -12,12 +12,10 @@ const crypto = require('crypto');
 const router = express.Router();
 const logger = require('./logger');
 const deviceRegistry = require('./device-registry');
+const { CLAUDE_API_URL, buildClaudeApiHeaders } = require('./claude-api-config');
 
 // Dependencies injected via setupRoutes()
 let claudeBridge = null;
-
-// Claude API server URL (same as used by claudeBridge)
-const CLAUDE_API_URL = process.env.CLAUDE_API_URL || 'http://localhost:3333';
 
 /**
  * Extract voice-friendly line from Claude response
@@ -267,6 +265,7 @@ router.post('/query', async (req, res) => {
           prompt: fullPrompt,
           callId,
           devicePrompt,
+          sessionType: 'api',
           schema: {
             queryType: schema?.queryType || 'general',
             requiredFields: schema?.requiredFields || [],
@@ -279,7 +278,7 @@ router.post('/query', async (req, res) => {
         },
         {
           timeout: timeout * 1000,
-          headers: { 'Content-Type': 'application/json' }
+          headers: buildClaudeApiHeaders({ 'Content-Type': 'application/json' })
         }
       );
 
@@ -309,7 +308,8 @@ router.post('/query', async (req, res) => {
       response = await claudeBridge.query(fullPrompt, {
         callId,
         devicePrompt,
-        timeout
+        timeout,
+        sessionType: 'api'
       });
     }
 

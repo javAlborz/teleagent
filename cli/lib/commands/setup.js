@@ -11,9 +11,9 @@ import {
   configExists
 } from '../config.js';
 import {
-  validateElevenLabsKey,
-  validateOpenAIKey,
-  validateVoiceId,
+  validateTtsEndpoint,
+  validateSttEndpoint,
+  validateTtsVoice,
   validateExtension,
   validateIP,
   validateHostname
@@ -457,7 +457,7 @@ async function setupPi(config) {
   if (config.deployment && config.deployment.mode === 'standard') {
     console.log(chalk.yellow('\n⚠️  Detected existing standard configuration'));
     console.log(chalk.gray('Your config will be migrated to Pi split-mode while preserving:'));
-    console.log(chalk.gray('  • API keys (ElevenLabs, OpenAI)'));
+    console.log(chalk.gray('  • Speech endpoint settings (TTS/STT)'));
     console.log(chalk.gray('  • Device configurations'));
     console.log(chalk.gray('  • SIP settings\n'));
 
@@ -669,8 +669,19 @@ function createDefaultConfig() {
   return {
     version: '1.0.0',
     api: {
-      elevenlabs: { apiKey: '', defaultVoiceId: '', validated: false },
-      openai: { apiKey: '', validated: false }
+      tts: {
+        baseUrl: 'http://127.0.0.1:18000/v1',
+        apiKey: 'not-needed',
+        model: 'kokoro',
+        defaultVoice: 'af_bella',
+        validated: false
+      },
+      stt: {
+        baseUrl: 'http://127.0.0.1:18001/v1',
+        apiKey: 'not-needed',
+        model: 'whisper-1',
+        validated: false
+      }
     },
     sip: {
       domain: '',
@@ -695,34 +706,33 @@ function createDefaultConfig() {
 }
 
 /**
- * Setup API keys with validation
+ * Setup TTS/STT endpoints with validation
  * @param {object} config - Current config
  * @returns {Promise<object>} Updated config
  */
 async function setupAPIKeys(config) {
-  // ElevenLabs API Key
-  const elevenLabsAnswers = await inquirer.prompt([
+  const ttsAnswers = await inquirer.prompt([
     {
-      type: 'password',
-      name: 'apiKey',
-      message: 'ElevenLabs API key:',
-      default: config.api.elevenlabs.apiKey,
+      type: 'input',
+      name: 'baseUrl',
+      message: 'TTS endpoint URL (Kokoro/OpenAI-compatible):',
+      default: config.api.tts.baseUrl,
       validate: (input) => {
         if (!input || input.trim() === '') {
-          return 'API key is required';
+          return 'Endpoint URL is required';
         }
         return true;
       }
     }
   ]);
 
-  const elevenLabsKey = elevenLabsAnswers.apiKey;
-  const spinner = ora('Validating ElevenLabs API key...').start();
+  const ttsBaseUrl = ttsAnswers.baseUrl;
+  const spinner = ora('Validating TTS endpoint...').start();
+  const ttsResult = await validateTtsEndpoint(ttsBaseUrl, config.api.tts.apiKey);
 
-  const elevenLabsResult = await validateElevenLabsKey(elevenLabsKey);
-  if (!elevenLabsResult.valid) {
-    spinner.fail(`Invalid ElevenLabs API key: ${elevenLabsResult.error}`);
-    console.log(chalk.yellow('\n⚠️  You can continue setup, but the key may not work.'));
+  if (!ttsResult.valid) {
+    spinner.fail(`TTS endpoint validation failed: ${ttsResult.error}`);
+    console.log(chalk.yellow('\n⚠️  You can continue setup, but the endpoint may not work.'));
     const { continueAnyway } = await inquirer.prompt([
       {
         type: 'confirm',
@@ -733,22 +743,21 @@ async function setupAPIKeys(config) {
     ]);
 
     if (!continueAnyway) {
-      throw new Error('Setup cancelled due to invalid API key');
+      throw new Error('Setup cancelled due to invalid TTS endpoint');
     }
 
-    config.api.elevenlabs = { apiKey: elevenLabsKey, defaultVoiceId: '', validated: false };
+    config.api.tts = { ...config.api.tts, baseUrl: ttsBaseUrl, validated: false };
   } else {
-    spinner.succeed('ElevenLabs API key validated');
-    config.api.elevenlabs = { apiKey: elevenLabsKey, defaultVoiceId: '', validated: true };
+    spinner.succeed('TTS endpoint validated');
+    config.api.tts = { ...config.api.tts, baseUrl: ttsBaseUrl, validated: true };
   }
 
-  // Ask for default voice ID immediately after API key
   const voiceIdAnswers = await inquirer.prompt([
     {
       type: 'input',
       name: 'voiceId',
-      message: 'ElevenLabs default voice ID (for all devices):',
-      default: config.api.elevenlabs.defaultVoiceId || '',
+      message: 'Default TTS voice (for all devices):',
+      default: config.api.tts.defaultVoice || '',
       validate: (input) => {
         if (!input || input.trim() === '') {
           return 'Voice ID is required';
@@ -759,9 +768,9 @@ async function setupAPIKeys(config) {
   ]);
 
   const defaultVoiceId = voiceIdAnswers.voiceId;
-  const voiceSpinner = ora('Validating ElevenLabs voice ID...').start();
+  const voiceSpinner = ora('Validating TTS voice...').start();
+  const voiceValidation = await validateTtsVoice(ttsBaseUrl, config.api.tts.apiKey, defaultVoiceId);
 
-  const voiceValidation = await validateVoiceId(elevenLabsKey, defaultVoiceId);
   if (!voiceValidation.valid) {
     voiceSpinner.fail(`Voice ID validation failed: ${voiceValidation.error}`);
     console.log(chalk.yellow('\n⚠️  You can continue setup, but the voice ID may not work.'));
@@ -778,35 +787,34 @@ async function setupAPIKeys(config) {
       throw new Error('Setup cancelled due to invalid voice ID');
     }
 
-    config.api.elevenlabs.defaultVoiceId = defaultVoiceId;
+    config.api.tts.defaultVoice = defaultVoiceId;
   } else {
     voiceSpinner.succeed(`Voice ID validated: ${voiceValidation.name}`);
-    config.api.elevenlabs.defaultVoiceId = defaultVoiceId;
+    config.api.tts.defaultVoice = defaultVoiceId;
   }
 
-  // OpenAI API Key
-  const openAIAnswers = await inquirer.prompt([
+  const sttAnswers = await inquirer.prompt([
     {
-      type: 'password',
-      name: 'apiKey',
-      message: 'OpenAI API key (for Whisper STT):',
-      default: config.api.openai.apiKey,
+      type: 'input',
+      name: 'baseUrl',
+      message: 'STT endpoint URL (Whisper/OpenAI-compatible):',
+      default: config.api.stt.baseUrl,
       validate: (input) => {
         if (!input || input.trim() === '') {
-          return 'API key is required';
+          return 'Endpoint URL is required';
         }
         return true;
       }
     }
   ]);
 
-  const openAIKey = openAIAnswers.apiKey;
-  const openAISpinner = ora('Validating OpenAI API key...').start();
+  const sttBaseUrl = sttAnswers.baseUrl;
+  const sttSpinner = ora('Validating STT endpoint...').start();
+  const sttResult = await validateSttEndpoint(sttBaseUrl, config.api.stt.apiKey);
 
-  const openAIResult = await validateOpenAIKey(openAIKey);
-  if (!openAIResult.valid) {
-    openAISpinner.fail(`Invalid OpenAI API key: ${openAIResult.error}`);
-    console.log(chalk.yellow('\n⚠️  You can continue setup, but the key may not work.'));
+  if (!sttResult.valid) {
+    sttSpinner.fail(`STT endpoint validation failed: ${sttResult.error}`);
+    console.log(chalk.yellow('\n⚠️  You can continue setup, but the endpoint may not work.'));
     const { continueAnyway } = await inquirer.prompt([
       {
         type: 'confirm',
@@ -817,13 +825,13 @@ async function setupAPIKeys(config) {
     ]);
 
     if (!continueAnyway) {
-      throw new Error('Setup cancelled due to invalid API key');
+      throw new Error('Setup cancelled due to invalid STT endpoint');
     }
 
-    config.api.openai = { apiKey: openAIKey, validated: false };
+    config.api.stt = { ...config.api.stt, baseUrl: sttBaseUrl, validated: false };
   } else {
-    openAISpinner.succeed('OpenAI API key validated');
-    config.api.openai = { apiKey: openAIKey, validated: true };
+    sttSpinner.succeed('STT endpoint validated');
+    config.api.stt = { ...config.api.stt, baseUrl: sttBaseUrl, validated: true };
   }
 
   return config;
@@ -971,8 +979,8 @@ async function setupDevice(config) {
     {
       type: 'input',
       name: 'voiceId',
-      message: 'ElevenLabs voice ID:',
-      default: existingDevice?.voiceId || config.api.elevenlabs.defaultVoiceId || '',
+      message: 'TTS voice name/ID:',
+      default: existingDevice?.voiceId || config.api.tts.defaultVoice || '',
       validate: (input) => {
         if (!input || input.trim() === '') {
           return 'Voice ID is required';
@@ -994,9 +1002,9 @@ async function setupDevice(config) {
     }
   ]);
 
-  // Validate voice ID with ElevenLabs API
-  const voiceSpinner = ora('Validating ElevenLabs voice ID...').start();
-  const voiceValidation = await validateVoiceId(config.api.elevenlabs.apiKey, answers.voiceId);
+  // Validate voice ID with the configured TTS endpoint
+  const voiceSpinner = ora('Validating TTS voice...').start();
+  const voiceValidation = await validateTtsVoice(config.api.tts.baseUrl, config.api.tts.apiKey, answers.voiceId);
 
   if (!voiceValidation.valid) {
     voiceSpinner.fail(`Voice ID validation failed: ${voiceValidation.error}`);

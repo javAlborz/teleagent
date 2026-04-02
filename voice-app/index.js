@@ -62,7 +62,9 @@ var config = {
     expiry: parseInt(process.env.SIP_EXPIRY) || 3600
   },
   external_ip: process.env.EXTERNAL_IP || "10.70.7.81",
+  http_host: process.env.HTTP_HOST || "0.0.0.0",
   http_port: parseInt(process.env.HTTP_PORT) || 3000,
+  ws_host: process.env.WS_HOST || "0.0.0.0",
   ws_port: parseInt(process.env.WS_PORT) || 3001,
   audio_dir: process.env.AUDIO_DIR || "/tmp/voice-audio"
 };
@@ -88,8 +90,8 @@ console.log("  - FreeSWITCH:  " + config.freeswitch.host + ":" + config.freeswit
 console.log("  - SIP Domain:  " + config.sip.domain);
 console.log("  - Registrar:   " + config.sip.registrar + ":" + config.sip.registrar_port);
 console.log("  - External IP: " + config.external_ip);
-console.log("  - HTTP Port:   " + config.http_port);
-console.log("  - WS Port:     " + config.ws_port);
+console.log("  - HTTP API:    " + config.http_host + ":" + config.http_port);
+console.log("  - WS Audio:    " + config.ws_host + ":" + config.ws_port);
 console.log("  - Audio Dir:   " + config.audio_dir);
 console.log("  - Mix Type:    " + (process.env.AUDIO_FORK_MIXTYPE || "L") + " (capture direction)");
 console.log("\n[DEVICES] Loaded " + Object.keys(deviceRegistry.getAllDevices()).length + " device extensions");
@@ -178,14 +180,14 @@ function initializeServers() {
   }
 
   // HTTP server for TTS audio
-  httpServer = createHttpServer(config.audio_dir, config.http_port);
-  console.log("[" + new Date().toISOString() + "] HTTP Server started on port " + config.http_port);
+  httpServer = createHttpServer(config.audio_dir, config.http_port, config.http_host);
+  console.log("[" + new Date().toISOString() + "] HTTP Server started on " + config.http_host + ":" + config.http_port);
 
   // WebSocket server for audio fork
-  audioForkServer = new AudioForkServer({ port: config.ws_port });
+  audioForkServer = new AudioForkServer({ port: config.ws_port, host: config.ws_host });
   audioForkServer.start();
   audioForkServer.on("listening", function() {
-    console.log("[" + new Date().toISOString() + "] WEBSOCKET Audio fork server started on port " + config.ws_port);
+    console.log("[" + new Date().toISOString() + "] WEBSOCKET Audio fork server started on " + config.ws_host + ":" + config.ws_port);
   });
   audioForkServer.on("session", function(session) {
     console.log("[AUDIO] New session for call " + session.callUuid);

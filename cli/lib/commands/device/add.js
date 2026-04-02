@@ -2,7 +2,7 @@ import inquirer from 'inquirer';
 import chalk from 'chalk';
 import ora from 'ora';
 import { loadConfig, saveConfig, configExists } from '../../config.js';
-import { validateExtension, validateVoiceId } from '../../validators.js';
+import { validateExtension, validateTtsVoice } from '../../validators.js';
 import { writeDockerConfig } from '../../docker.js';
 
 /**
@@ -74,8 +74,8 @@ export async function deviceAddCommand() {
     {
       type: 'input',
       name: 'voiceId',
-      message: 'ElevenLabs voice ID:',
-      default: config.api.elevenlabs.defaultVoiceId || '',
+      message: 'TTS voice name/ID:',
+      default: config.api.tts.defaultVoice || '',
       validate: (input) => {
         if (!input || input.trim() === '') {
           return 'Voice ID cannot be empty';
@@ -91,9 +91,9 @@ export async function deviceAddCommand() {
     }
   ]);
 
-  // Validate voice ID with ElevenLabs API
-  const spinner = ora('Validating voice ID with ElevenLabs...').start();
-  const voiceResult = await validateVoiceId(config.api.elevenlabs.apiKey, answers.voiceId);
+  // Validate voice ID with the configured TTS endpoint
+  const spinner = ora('Validating voice ID with the TTS endpoint...').start();
+  const voiceResult = await validateTtsVoice(config.api.tts.baseUrl, config.api.tts.apiKey, answers.voiceId);
 
   if (!voiceResult.valid) {
     spinner.fail(chalk.red(`Voice ID validation failed: ${voiceResult.error}`));

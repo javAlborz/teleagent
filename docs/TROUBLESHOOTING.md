@@ -14,27 +14,18 @@ claude-phone logs     # View recent logs
 
 ## Setup Issues
 
-### "API key validation failed"
+### "Speech endpoint validation failed"
 
-**Symptom:** Setup fails when validating ElevenLabs or OpenAI key.
+**Symptom:** Setup fails when validating the configured TTS or STT endpoint.
 
 **Causes & Solutions:**
 
 | Cause | Solution |
 |-------|----------|
-| Key is incorrect | Double-check you copied the full key |
-| No billing enabled | Add payment method to your account |
-| Account suspended | Check account status on provider dashboard |
-| Network issue | Check internet connectivity |
-
-**For OpenAI specifically:**
-- New accounts need billing enabled before API works
-- Free tier credits expire after 3 months
-- Check [platform.openai.com/account/billing](https://platform.openai.com/account/billing)
-
-**For ElevenLabs:**
-- Free tier has limited characters/month
-- Check [elevenlabs.io/subscription](https://elevenlabs.io/subscription)
+| Endpoint URL is wrong | Double-check the host, port, and `/v1` path |
+| Service is down | Verify Kokoro/Whisper is running |
+| Network issue | Check routing and local tunnels |
+| Auth mismatch | If your endpoint requires auth, update the local API key field |
 
 ### "Can't detect 3CX SBC"
 
@@ -191,18 +182,18 @@ claude-phone start
 
 | Cause | Solution |
 |-------|----------|
-| OpenAI billing exhausted | Add credits to OpenAI account |
+| STT endpoint unavailable | Verify the Whisper service and `STT_BASE_URL` |
 | Audio quality poor | Check microphone, reduce background noise |
 | Network latency | Audio chunks may be lost; check connection |
 
-### ElevenLabs TTS errors
+### TTS endpoint errors
 
 **Symptom:** Claude's responses aren't spoken, or voice sounds wrong.
 
 **Solutions:**
-1. Check ElevenLabs character quota isn't exhausted
+1. Check the configured TTS endpoint is reachable
 2. Verify voice ID is valid: `claude-phone device list`
-3. Check API key still works
+3. Check `TTS_BASE_URL` and `TTS_VOICE` in your config
 
 ### Calls disconnect after a few seconds
 
@@ -230,7 +221,7 @@ claude-phone logs freeswitch | tail -100
 curl http://<api-server-ip>:3333/health
 
 # Check configured API URL:
-claude-phone config show | grep claudeApiUrl
+grep '^CLAUDE_API_URL=' ~/.claude-phone/.env
 ```
 
 **Solutions:**

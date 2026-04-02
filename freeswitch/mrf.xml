@@ -1,0 +1,43 @@
+<?xml version="1.0"?>
+<include>
+  <profile name="drachtio_mrf">
+    <domains>
+      <domain name="all" alias="true" parse="false"/>
+    </domains>
+    <settings>
+      <param name="sip-trace" value="no"/>
+      <param name="rfc2833-pt" value="101"/>
+      <param name="dtmf-type" value="rfc2833"/>
+      <param name="inbound-late-negotiation" value="true"/>
+      <param name="rtp-ip" value="127.0.0.1"/>
+      <param name="sip-ip" value="127.0.0.1"/>
+      <param name="sip-port" value="5080"/>
+      <param name="ext-rtp-ip" value="127.0.0.1"/>
+      <param name="ext-sip-ip" value="127.0.0.1"/>
+      <param name="auth-calls" value="false"/>
+      <param name="enable-timer" value="false"/>
+      <param name="user-agent-string" value="Jambonz media gateway"/>
+      <param name="username" value="Jambonz-Mediaserver"/>
+      <param name="apply-nat-acl" value="nat.auto"/>
+      <param name="context" value="mrf"/>
+      <param name="rtp-timer-name" value="soft"/>
+      <param name="codec-prefs" value="$${global_codec_prefs}"/>
+      <param name="inbound-codec-negotiation" value="greedy"/>
+      <param name="inbound-reg-force-matching-username" value="false"/>
+      <param name="nonce-ttl" value="86400"/>
+      <param name="manage-presence" value="false"/>
+      <param name="enable-3pcc" value="true"/>
+      <param name="tls" value="false"/>
+      <param name="tls-only" value="false"/>
+      <param name="tls-bind-params" value="transport=tls"/>
+      <param name="tls-sip-port" value="5061"/>
+      <param name="tls-passphrase" value=""/>
+      <param name="tls-verify-date" value="true"/>
+      <param name="tls-verify-policy" value="none"/>
+      <param name="tls-verify-depth" value="2"/>
+      <param name="tls-verify-in-subjects" value=""/>
+      <param name="tls-version" value="$${sip_tls_version}"/>
+      <param name="tls-ciphers" value="$${sip_tls_ciphers}"/>
+    </settings>
+  </profile>
+</include>

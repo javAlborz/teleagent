@@ -18,8 +18,8 @@ Claude Phone gives your Claude Code installation a phone number. You can:
 | Requirement | Where to Get It | Notes |
 |-------------|-----------------|-------|
 | **3CX Cloud Account** | [3cx.com](https://www.3cx.com/) | Free tier works |
-| **ElevenLabs API Key** | [elevenlabs.io](https://elevenlabs.io/) | For text-to-speech |
-| **OpenAI API Key** | [platform.openai.com](https://platform.openai.com/) | For Whisper speech-to-text |
+| **OpenAI-compatible TTS endpoint** | Kokoro-FastAPI or similar | For text-to-speech |
+| **OpenAI-compatible STT endpoint** | Whisper or similar | For speech-to-text |
 | **Claude Code CLI** | [claude.ai/code](https://claude.ai/code) | Requires Claude Max subscription |
 
 ## Platform Support
@@ -201,6 +201,16 @@ claude-phone logs      # View logs
 See [Troubleshooting Guide](docs/TROUBLESHOOTING.md) for more.
 
 ## Configuration
+
+The voice-app expects OpenAI-compatible speech endpoints via `.env`:
+
+```bash
+TTS_BASE_URL=http://127.0.0.1:18000/v1
+TTS_VOICE=af_bella
+STT_BASE_URL=http://127.0.0.1:18001/v1
+```
+
+For the Hermes/Zeus split deployment, `18000` and `18001` are Hermes-local tunnels to Zeus-hosted Kokoro and Whisper services.
 
 Configuration is stored in `~/.claude-phone/config.json` with restricted permissions (chmod 600).
 

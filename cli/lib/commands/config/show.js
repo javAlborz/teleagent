@@ -37,11 +37,15 @@ export async function configShowCommand() {
   }
 
   const config = await loadConfig();
+  const ttsConfig = config.api?.tts || {};
+  const sttConfig = config.api?.stt || {};
 
-  // API Keys
-  console.log(chalk.bold('API Keys:'));
-  console.log(chalk.gray(`  OpenAI API Key: ${redactValue(config.apiKeys.openai)}`));
-  console.log(chalk.gray(`  ElevenLabs API Key: ${redactValue(config.apiKeys.elevenlabs)}`));
+  console.log(chalk.bold('Speech Endpoints:'));
+  console.log(chalk.gray(`  TTS Endpoint: ${ttsConfig.baseUrl || '[not set]'}`));
+  console.log(chalk.gray(`  TTS Voice: ${ttsConfig.defaultVoice || '[not set]'}`));
+  console.log(chalk.gray(`  TTS API Key: ${redactValue(ttsConfig.apiKey)}`));
+  console.log(chalk.gray(`  STT Endpoint: ${sttConfig.baseUrl || '[not set]'}`));
+  console.log(chalk.gray(`  STT API Key: ${redactValue(sttConfig.apiKey)}`));
 
   // 3CX Configuration
   console.log(chalk.bold('\n3CX Configuration:'));
@@ -51,9 +55,8 @@ export async function configShowCommand() {
   // Server Configuration
   console.log(chalk.bold('\nServer:'));
   console.log(chalk.gray(`  External IP: ${config.server.externalIp}`));
-  console.log(chalk.gray(`  Voice App Port: ${config.server.voiceAppPort}`));
+  console.log(chalk.gray(`  Voice App Port: ${config.server.httpPort}`));
   console.log(chalk.gray(`  Claude API Port: ${config.server.claudeApiPort}`));
-  console.log(chalk.gray(`  Claude API URL: ${config.server.claudeApiUrl}`));
 
   // Devices
   console.log(chalk.bold('\nDevices:'));

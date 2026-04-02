@@ -34,8 +34,8 @@ Select this when setting up a Raspberry Pi or dedicated voice box that connects 
 **What it asks for:**
 1. 3CX SIP domain and registrar
 2. API server IP and port (where claude-api-server runs)
-3. ElevenLabs API key and default voice ID
-4. OpenAI API key (for Whisper STT)
+3. TTS endpoint URL and default voice
+4. STT endpoint URL
 5. Device configuration (name, extension, auth, voice, prompt)
 6. Server LAN IP (for RTP audio routing)
 
@@ -60,8 +60,8 @@ Select this when setting up the Claude API wrapper on a machine with Claude Code
 Select this for a single machine running everything.
 
 **What it asks for:**
-1. ElevenLabs API key and default voice ID
-2. OpenAI API key
+1. TTS endpoint URL and default voice
+2. STT endpoint URL
 3. 3CX SIP domain and registrar
 4. Device configuration
 5. Server LAN IP, API port, and HTTP port
@@ -151,8 +151,19 @@ All configuration is stored in `~/.claude-phone/`:
   "version": "1.0.0",
   "installationType": "both",
   "api": {
-    "elevenlabs": { "apiKey": "...", "defaultVoiceId": "...", "validated": true },
-    "openai": { "apiKey": "...", "validated": true }
+    "tts": {
+      "baseUrl": "http://127.0.0.1:18000/v1",
+      "apiKey": "not-needed",
+      "model": "kokoro",
+      "defaultVoice": "af_bella",
+      "validated": true
+    },
+    "stt": {
+      "baseUrl": "http://127.0.0.1:18001/v1",
+      "apiKey": "not-needed",
+      "model": "whisper-1",
+      "validated": true
+    }
   },
   "sip": {
     "domain": "your-3cx.3cx.us",
@@ -169,7 +180,7 @@ All configuration is stored in `~/.claude-phone/`:
     "extension": "9000",
     "authId": "9000",
     "password": "***",
-    "voiceId": "elevenlabs-voice-id",
+    "voiceId": "af_bella",
     "prompt": "You are Morpheus..."
   }],
   "deployment": {

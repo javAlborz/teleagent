@@ -2,6 +2,53 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 
+function getDefaultApiConfig() {
+  return {
+    tts: {
+      baseUrl: 'http://127.0.0.1:18000/v1',
+      apiKey: 'not-needed',
+      model: 'kokoro',
+      defaultVoice: 'af_bella',
+      validated: false
+    },
+    stt: {
+      baseUrl: 'http://127.0.0.1:18001/v1',
+      apiKey: 'not-needed',
+      model: 'whisper-1',
+      validated: false
+    }
+  };
+}
+
+function migrateApiConfig(config) {
+  const defaults = getDefaultApiConfig();
+  const api = config.api || {};
+  const legacyTts = api.elevenlabs || {};
+  const legacyStt = api.openai || {};
+
+  config.api = {
+    ...api,
+    tts: {
+      ...defaults.tts,
+      ...(legacyTts.apiKey ? { apiKey: legacyTts.apiKey } : {}),
+      ...(legacyTts.defaultVoiceId ? { defaultVoice: legacyTts.defaultVoiceId } : {}),
+      ...(legacyTts.validated !== undefined ? { validated: legacyTts.validated } : {}),
+      ...(api.tts || {})
+    },
+    stt: {
+      ...defaults.stt,
+      ...(legacyStt.apiKey ? { apiKey: legacyStt.apiKey } : {}),
+      ...(legacyStt.validated !== undefined ? { validated: legacyStt.validated } : {}),
+      ...(api.stt || {})
+    }
+  };
+
+  delete config.api.elevenlabs;
+  delete config.api.openai;
+
+  return config;
+}
+
 /**
  * Get the config directory path
  * @returns {string} Path to ~/.claude-phone
@@ -44,6 +91,8 @@ export async function loadConfig() {
   if (!config.installationType) {
     config.installationType = 'both';
   }
+
+  migrateApiConfig(config);
 
   return config;
 }
