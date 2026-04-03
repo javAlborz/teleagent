@@ -29,6 +29,13 @@ const SPOKEN_CANCEL_ENABLED = true;
 const SPOKEN_CANCEL_LISTEN_TIMEOUT_MS = 1000;
 const SPOKEN_CANCEL_PHRASES = new Set([
   'cancel request',
+  'cancel requests',
+  'cancel the request',
+  'cancel the requests',
+  'please cancel request',
+  'please cancel requests',
+  'cancel request please',
+  'cancel requests please',
 ]);
 
 // Claude Code-style thinking phrases
