@@ -4,6 +4,7 @@
  */
 
 const { setTimeout: sleep } = require('node:timers/promises');
+const { runConversationLoop } = require('./conversation-loop');
 const {
   getClaudeTimeoutSeconds,
   getMaxTurns,
@@ -359,7 +360,20 @@ async function handleInvite(req, res, options) {
       if (endpoint) endpoint.destroy().catch(function() {});
     });
 
-    await conversationLoop(endpoint, dialog, callUuid, options, deviceConfig);
+    await runConversationLoop(endpoint, dialog, callUuid, {
+      audioForkServer: options.audioForkServer,
+      whisperClient: options.whisperClient,
+      claudeBridge: options.claudeBridge,
+      ttsService: options.ttsService,
+      wsPort: options.wsPort,
+      deviceConfig: deviceConfig,
+      maxTurns: deviceConfig?.maxTurns
+    });
+    try {
+      if (!dialog.destroyed) {
+        await dialog.destroy();
+      }
+    } catch (e) {}
     return { endpoint: endpoint, dialog: dialog, callerId: callerId, callUuid: callUuid };
 
   } catch (error) {

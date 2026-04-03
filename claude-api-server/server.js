@@ -9,6 +9,7 @@
  *
  * Endpoints:
  *   POST /ask - Send a prompt to Claude (with optional callId for session)
+ *   POST /cancel-session - Cancel active Claude work for a call
  *   POST /end-session - Clean up session for a call
  *   GET /health - Health check
  */
@@ -239,6 +240,120 @@ console.log('[STARTUP] API keys loaded:', apiKeys.join(', '));
 
 // Session storage: callId -> claudeSessionId
 const sessions = new Map();
+// Active request storage: callId -> Map(requestId -> requestRecord)
+const activeRequests = new Map();
+let activeRequestSequence = 0;
+
+function nextRequestId(callId) {
+  activeRequestSequence += 1;
+  return `${callId || 'request'}:${activeRequestSequence}`;
+}
+
+function getActiveRequestBucket(callId, create = false) {
+  if (!callId) return null;
+
+  if (!activeRequests.has(callId) && create) {
+    activeRequests.set(callId, new Map());
+  }
+
+  return activeRequests.get(callId) || null;
+}
+
+function registerActiveRequest(callId, requestRecord) {
+  const bucket = getActiveRequestBucket(callId, true);
+  if (!bucket) return;
+  bucket.set(requestRecord.requestId, requestRecord);
+}
+
+function clearActiveRequest(callId, requestId) {
+  const bucket = getActiveRequestBucket(callId, false);
+  if (!bucket) return;
+
+  bucket.delete(requestId);
+  if (bucket.size === 0) {
+    activeRequests.delete(callId);
+  }
+}
+
+function killChildProcess(record, signal) {
+  const pid = record?.child?.pid;
+  if (!pid) return false;
+
+  if (record.detached && process.platform !== 'win32') {
+    try {
+      process.kill(-pid, signal);
+      return true;
+    } catch (error) {
+      if (error.code !== 'ESRCH') {
+        console.warn(`[${new Date().toISOString()}] Failed to send ${signal} to process group ${pid}: ${error.message}`);
+      }
+    }
+  }
+
+  try {
+    process.kill(pid, signal);
+    return true;
+  } catch (error) {
+    if (error.code !== 'ESRCH') {
+      console.warn(`[${new Date().toISOString()}] Failed to send ${signal} to pid ${pid}: ${error.message}`);
+    }
+    return false;
+  }
+}
+
+function transitionActiveRequest(record, state, reason) {
+  if (!record || record.state !== 'running') {
+    return false;
+  }
+
+  record.state = state;
+  record.reason = reason;
+
+  if (record.killTimer) {
+    clearTimeout(record.killTimer);
+    record.killTimer = null;
+  }
+
+  killChildProcess(record, 'SIGTERM');
+
+  if (record.forceKillTimer) {
+    clearTimeout(record.forceKillTimer);
+  }
+
+  record.forceKillTimer = setTimeout(() => {
+    if (record.state === state) {
+      killChildProcess(record, 'SIGKILL');
+    }
+  }, 2000);
+
+  return true;
+}
+
+function cancelActiveRequests(callId, { resetSession = false, reason = 'cancel_session' } = {}) {
+  const bucket = getActiveRequestBucket(callId, false);
+  const requestIds = [];
+  let canceledCount = 0;
+
+  if (bucket) {
+    for (const record of bucket.values()) {
+      if (transitionActiveRequest(record, 'canceled', reason)) {
+        canceledCount += 1;
+        requestIds.push(record.requestId);
+      }
+    }
+  }
+
+  if (resetSession && callId && sessions.has(callId)) {
+    sessions.delete(callId);
+  }
+
+  return {
+    active: !!(bucket && bucket.size > 0),
+    canceledCount,
+    requestIds,
+    resetSession,
+  };
+}
 
 function parseClaudeStdout(stdout) {
   // Claude Code CLI may output JSONL; when it does, extract the `result` message.
@@ -272,6 +387,7 @@ function runClaudeOnce({ fullPrompt, callId, timestamp, sessionType, timeoutSeco
   const startTime = Date.now();
   const profile = resolveClaudeProfile(sessionType);
   const resolvedTimeoutSeconds = parsePositiveInteger(timeoutSeconds);
+  const requestId = nextRequestId(callId);
 
   const args = [
     '-p', fullPrompt,
@@ -302,52 +418,93 @@ function runClaudeOnce({ fullPrompt, callId, timestamp, sessionType, timeoutSeco
     const claude = spawn('claude', args, {
       stdio: ['pipe', 'pipe', 'pipe'],
       shell: false,
+      detached: process.platform !== 'win32',
       cwd: CLAUDE_WORKING_DIR,
       env: claudeEnv
     });
 
+    const requestRecord = {
+      requestId,
+      callId,
+      child: claude,
+      detached: process.platform !== 'win32',
+      state: 'running',
+      reason: null,
+      killTimer: null,
+      forceKillTimer: null,
+      startedAt: startTime,
+    };
+
+    if (callId) {
+      registerActiveRequest(callId, requestRecord);
+      console.log(`[${timestamp}] ACTIVE REQUEST STARTED: ${callId} -> ${requestId}`);
+    }
+
     let stdout = '';
     let stderr = '';
-    let timedOut = false;
-    let killTimer = null;
-    let forceKillTimer = null;
+    let settled = false;
 
     claude.stdin.end();
     claude.stdout.on('data', (data) => { stdout += data.toString(); });
     claude.stderr.on('data', (data) => { stderr += data.toString(); });
 
+    function cleanup() {
+      if (requestRecord.killTimer) {
+        clearTimeout(requestRecord.killTimer);
+        requestRecord.killTimer = null;
+      }
+      if (requestRecord.forceKillTimer) {
+        clearTimeout(requestRecord.forceKillTimer);
+        requestRecord.forceKillTimer = null;
+      }
+      clearActiveRequest(callId, requestId);
+    }
+
+    function settleWithError(error) {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    }
+
+    function settleWithSuccess(result) {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(result);
+    }
+
     if (resolvedTimeoutSeconds) {
-      killTimer = setTimeout(() => {
-        timedOut = true;
+      requestRecord.killTimer = setTimeout(() => {
         console.error(`[${new Date().toISOString()}] CLAUDE TIMEOUT after ${resolvedTimeoutSeconds}s; terminating request`);
-        claude.kill('SIGTERM');
-        forceKillTimer = setTimeout(() => {
-          if (timedOut) {
-            claude.kill('SIGKILL');
-          }
-        }, 2000);
+        transitionActiveRequest(requestRecord, 'timed_out', `timeout_${resolvedTimeoutSeconds}s`);
       }, resolvedTimeoutSeconds * 1000);
     }
 
     claude.on('error', (error) => {
-      if (killTimer) clearTimeout(killTimer);
-      if (forceKillTimer) clearTimeout(forceKillTimer);
-      reject(error);
+      settleWithError(error);
     });
 
     claude.on('close', (code) => {
-      if (killTimer) clearTimeout(killTimer);
-      if (forceKillTimer) clearTimeout(forceKillTimer);
       const duration_ms = Date.now() - startTime;
-      if (timedOut) {
+      if (requestRecord.state === 'timed_out') {
         const error = new Error(`Claude request timed out after ${resolvedTimeoutSeconds} seconds`);
         error.code = 'CLAUDE_TIMEOUT';
         error.stdout = stdout;
         error.stderr = stderr;
         error.duration_ms = duration_ms;
-        return reject(error);
+        return settleWithError(error);
       }
-      resolve({ code, stdout, stderr, duration_ms });
+      if (requestRecord.state === 'canceled') {
+        const error = new Error('Claude request canceled');
+        error.code = 'CLAUDE_CANCELED';
+        error.reason = requestRecord.reason || 'cancel_session';
+        error.stdout = stdout;
+        error.stderr = stderr;
+        error.duration_ms = duration_ms;
+        return settleWithError(error);
+      }
+      settleWithSuccess({ code, stdout, stderr, duration_ms });
     });
   });
 }
@@ -509,11 +666,20 @@ app.post('/ask', async (req, res) => {
     const duration_ms = Date.now() - startTime;
     console.error(`[${timestamp}] ERROR:`, error.message);
 
-    res.json({
+    const payload = {
       success: false,
       error: error.message,
       duration_ms
-    });
+    };
+
+    if (error.code) {
+      payload.code = error.code;
+    }
+    if (error.reason) {
+      payload.reason = error.reason;
+    }
+
+    res.json(payload);
   }
 });
 
@@ -666,8 +832,47 @@ app.post('/ask-structured', async (req, res) => {
     });
   } catch (error) {
     console.error(`[${timestamp}] ERROR:`, error.message);
-    return res.status(500).json({ success: false, error: error.message });
+    const payload = { success: false, error: error.message };
+    if (error.code) {
+      payload.code = error.code;
+    }
+    if (error.reason) {
+      payload.reason = error.reason;
+    }
+    return res.status(500).json(payload);
   }
+});
+
+/**
+ * POST /cancel-session
+ *
+ * Cancel active Claude work for a call without ending the call itself.
+ *
+ * Request body:
+ *   { "callId": "call-uuid", "resetSession": true, "reason": "dtmf_cancel" }
+ */
+app.post('/cancel-session', (req, res) => {
+  const { callId, resetSession = true, reason = 'cancel_session' } = req.body || {};
+  const timestamp = new Date().toISOString();
+
+  if (!callId) {
+    return res.status(400).json({
+      success: false,
+      error: 'Missing callId in request body'
+    });
+  }
+
+  const result = cancelActiveRequests(callId, { resetSession: !!resetSession, reason });
+
+  console.log(
+    `[${timestamp}] SESSION CANCELED: ${callId} active=${result.active} canceled=${result.canceledCount} resetSession=${result.resetSession} reason=${reason}`
+  );
+
+  return res.json({
+    success: true,
+    callId,
+    ...result,
+  });
 });
 
 /**
@@ -713,6 +918,8 @@ app.get('/', (req, res) => {
     endpoints: {
       'POST /ask': 'Send a prompt to Claude',
       'POST /ask-structured': 'Send a prompt and return validated JSON (n8n)',
+      'POST /cancel-session': 'Cancel active Claude work for a call',
+      'POST /end-session': 'Clean up session state for a call',
       'GET /health': 'Health check'
     }
   });

@@ -5,6 +5,8 @@
  * Features:
  * - VAD-based speech detection
  * - DTMF # key to end speech early
+ * - DTMF * key to cancel in-flight Claude work
+ * - Spoken cancel phrases during the thinking phase
  * - Whisper transcription
  * - Claude API integration
  * - TTS response generation
@@ -22,6 +24,12 @@ const {
 const READY_BEEP_URL = 'http://127.0.0.1:3000/static/ready-beep.wav';
 const GOTIT_BEEP_URL = 'http://127.0.0.1:3000/static/gotit-beep.wav';
 const HOLD_MUSIC_URL = 'http://127.0.0.1:3000/static/hold-music.mp3';
+const CANCEL_ACKNOWLEDGEMENT = 'Stopped.';
+const SPOKEN_CANCEL_ENABLED = true;
+const SPOKEN_CANCEL_LISTEN_TIMEOUT_MS = 1000;
+const SPOKEN_CANCEL_PHRASES = new Set([
+  'cancel request',
+]);
 
 // Claude Code-style thinking phrases
 const THINKING_PHRASES = [
@@ -53,6 +61,108 @@ function isGoodbye(transcript) {
     return lower === phrase || lower.includes(` ${phrase}`) ||
            lower.startsWith(`${phrase} `) || lower.endsWith(` ${phrase}`);
   });
+}
+
+function normalizeControlTranscript(transcript) {
+  return String(transcript || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function isSpokenCancelPhrase(transcript) {
+  const normalized = normalizeControlTranscript(transcript);
+  if (!normalized) return false;
+
+  const wordCount = normalized.split(' ').filter(Boolean).length;
+  if (wordCount > 4) return false;
+
+  return SPOKEN_CANCEL_PHRASES.has(normalized);
+}
+
+async function watchForSpokenCancel({
+  session,
+  callUuid,
+  whisperClient,
+  isActive,
+  onCancel,
+}) {
+  logger.info('Spoken cancel watcher started', { callUuid });
+  session.setCaptureEnabled(true);
+
+  try {
+    while (isActive()) {
+      let utterance = null;
+      try {
+        utterance = await session.waitForUtterance({
+          timeoutMs: SPOKEN_CANCEL_LISTEN_TIMEOUT_MS,
+        });
+      } catch (error) {
+        if (!isActive()) break;
+
+        if (error && error.message === 'Timed out waiting for utterance') {
+          continue;
+        }
+
+        logger.warn('Spoken cancel utterance wait failed', {
+          callUuid,
+          error: error.message,
+        });
+        continue;
+      }
+
+      if (!utterance || !isActive()) {
+        continue;
+      }
+
+      let transcript = '';
+      try {
+        transcript = await whisperClient.transcribe(utterance.audio, {
+          format: 'pcm',
+          sampleRate: 16000,
+        });
+      } catch (error) {
+        if (!isActive()) break;
+
+        logger.warn('Spoken cancel transcription failed', {
+          callUuid,
+          error: error.message,
+        });
+        continue;
+      }
+
+      const normalized = normalizeControlTranscript(transcript);
+      if (!normalized) {
+        continue;
+      }
+
+      logger.info('Spoken cancel candidate', {
+        callUuid,
+        transcript: normalized,
+        reason: utterance.reason,
+      });
+
+      if (!isSpokenCancelPhrase(normalized)) {
+        continue;
+      }
+
+      logger.info('Spoken cancel phrase detected', {
+        callUuid,
+        transcript: normalized,
+      });
+
+      const canceled = await onCancel(normalized);
+      if (canceled) {
+        return true;
+      }
+    }
+  } finally {
+    session.setCaptureEnabled(false);
+    logger.info('Spoken cancel watcher stopped', { callUuid });
+  }
+
+  return false;
 }
 
 /**
@@ -151,6 +261,8 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
   let forkRunning = false;
   let callActive = true;
   let dtmfHandler = null;
+  let claudeInFlight = false;
+  let cancelRequested = false;
 
   // Track when call ends to prevent operations on dead endpoints
   const onDialogDestroy = () => {
@@ -228,7 +340,53 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
       return;
     }
 
-    // Set up DTMF handler for # key
+    const requestCancel = async (reason, source, extra = {}) => {
+      if (!claudeInFlight || cancelRequested) {
+        return false;
+      }
+
+      cancelRequested = true;
+      logger.info('Cancel requested', {
+        callUuid,
+        reason,
+        source,
+        ...extra,
+      });
+
+      try {
+        const result = await claudeBridge.cancelSession(callUuid, {
+          resetSession: true,
+          reason,
+        });
+
+        logger.info('Cancel request completed', {
+          callUuid,
+          source,
+          success: !!result.success,
+          canceledCount: result.canceledCount || 0,
+        });
+      } catch (error) {
+        logger.warn('Cancel request failed', {
+          callUuid,
+          source,
+          error: error.message,
+        });
+      }
+
+      try {
+        await endpoint.api('uuid_break', endpoint.uuid);
+      } catch (error) {
+        logger.warn('Cancel audio break failed', {
+          callUuid,
+          source,
+          error: error.message,
+        });
+      }
+
+      return true;
+    };
+
+    // Set up DTMF handler for # (finalize speech) and * (cancel active work)
     dtmfHandler = (evt) => {
       const digit = evt.dtmf || evt.digit;
       logger.info('DTMF received', { callUuid, digit });
@@ -236,6 +394,19 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
       if (digit === '#' && session) {
         logger.info('DTMF # pressed - forcing utterance finalization', { callUuid });
         session.forceFinalize();
+        return;
+      }
+
+      if (digit === '*' && claudeInFlight && !cancelRequested) {
+        logger.info('DTMF * pressed - canceling active Claude work', { callUuid });
+        requestCancel('dtmf_cancel', 'dtmf').catch((error) => {
+          logger.warn('DTMF cancel request failed', { callUuid, error: error.message });
+        });
+        return;
+      }
+
+      if (digit === '*') {
+        logger.info('DTMF * pressed with no active Claude work', { callUuid });
       }
     };
 
@@ -363,26 +534,65 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
       const thinkingUrl = await ttsService.generateSpeech(thinkingPhrase, voiceId);
       if (callActive) await endpoint.play(thinkingUrl);
 
-      // 2. Start hold music in background
+      // 2. Start hold music in background unless spoken cancel listening is active
       let musicPlaying = false;
-      if (callActive) {
+      if (callActive && !SPOKEN_CANCEL_ENABLED) {
         endpoint.play(HOLD_MUSIC_URL).catch(e => {
           logger.warn('Hold music failed', { callUuid, error: e.message });
         });
         musicPlaying = true;
+      } else if (callActive && SPOKEN_CANCEL_ENABLED) {
+        logger.info('Skipping hold music while spoken cancel is active', { callUuid });
       }
 
       // 3. Query Claude
       logger.info('Querying Claude', { callUuid });
-      const claudeResponse = await claudeBridge.query(
-        transcript,
-        {
-          callId: callUuid,
-          devicePrompt: devicePrompt,
-          sessionType,
-          timeout: claudeTimeoutSeconds
+      let claudeResult;
+      let spokenCancelWatcher = null;
+      const spokenCancelState = { stopped: false };
+      claudeInFlight = true;
+      cancelRequested = false;
+      try {
+        if (SPOKEN_CANCEL_ENABLED) {
+          spokenCancelWatcher = watchForSpokenCancel({
+            session,
+            callUuid,
+            whisperClient,
+            isActive: () => (
+              callActive &&
+              claudeInFlight &&
+              !cancelRequested &&
+              !spokenCancelState.stopped
+            ),
+            onCancel: (spokenTranscript) => requestCancel('spoken_cancel', 'spoken', {
+              transcript: spokenTranscript,
+            }),
+          }).catch((error) => {
+            logger.warn('Spoken cancel watcher failed', {
+              callUuid,
+              error: error.message,
+            });
+            return false;
+          });
         }
-      );
+
+        claudeResult = await claudeBridge.queryDetailed(
+          transcript,
+          {
+            callId: callUuid,
+            devicePrompt: devicePrompt,
+            sessionType,
+            timeout: claudeTimeoutSeconds
+          }
+        );
+      } finally {
+        claudeInFlight = false;
+        spokenCancelState.stopped = true;
+
+        if (spokenCancelWatcher) {
+          await spokenCancelWatcher;
+        }
+      }
 
       // 4. Stop hold music
       if (musicPlaying && callActive) {
@@ -399,10 +609,32 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
         break;
       }
 
+      if (cancelRequested) {
+        logger.info('Claude work canceled', { callUuid, turn: turnCount });
+        const canceledUrl = await ttsService.generateSpeech(CANCEL_ACKNOWLEDGEMENT, voiceId);
+        if (callActive) await endpoint.play(canceledUrl);
+        continue;
+      }
+
+      if (!claudeResult.success) {
+        logger.warn('Claude query failed', {
+          callUuid,
+          code: claudeResult.code || 'CLAUDE_ERROR',
+          error: claudeResult.error
+        });
+
+        const errorUrl = await ttsService.generateSpeech(
+          claudeResult.userMessage || 'Sorry, something went wrong.',
+          voiceId
+        );
+        if (callActive) await endpoint.play(errorUrl);
+        continue;
+      }
+
       logger.info('Claude responded', { callUuid });
 
       // 5. Extract and play voice line
-      const voiceLine = extractVoiceLine(claudeResponse);
+      const voiceLine = extractVoiceLine(claudeResult.response);
       logger.info('Voice line', { callUuid, voiceLine });
 
       const responseUrl = await ttsService.generateSpeech(voiceLine, voiceId);
