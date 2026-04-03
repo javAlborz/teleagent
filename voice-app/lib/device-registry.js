@@ -13,6 +13,8 @@
  * - sessionType: Claude profile selector (e.g. phone-haiku)
  * - claudeTimeoutSeconds: Claude request timeout for this phone agent
  * - maxTurns: Maximum conversation turns for this phone agent
+ * - resumeTargetExtension: Base extension whose most recent session should be resumed
+ * - resumeTtlSeconds: How long completed sessions stay resumable after hangup
  * - prompt: System prompt that defines device personality
  */
 

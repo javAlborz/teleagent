@@ -278,6 +278,10 @@ function extractVoiceLine(response) {
  * @param {string} [options.initialContext] - Context for outbound calls (why we're calling)
  * @param {boolean} [options.skipGreeting=false] - Skip greeting (for outbound, greeting already played)
  * @param {number} [options.maxTurns=20] - Maximum conversation turns
+ * @param {string} [options.sessionKey=callUuid] - Stable Claude session key for resumable context
+ * @param {number} [options.sessionEndPreserveSeconds=0] - Preserve Claude session after hangup for this many seconds
+ * @param {string} [options.startupAnnouncement] - Optional message to play before the normal greeting
+ * @param {Function} [options.onSessionEnded] - Callback invoked with end-session result
  * @returns {Promise<void>}
  */
 async function runConversationLoop(endpoint, dialog, callUuid, options) {
@@ -290,7 +294,11 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
     initialContext = null,
     skipGreeting = false,
     deviceConfig = null,
-    maxTurns = 20
+    maxTurns = 20,
+    sessionKey = callUuid,
+    sessionEndPreserveSeconds = 0,
+    startupAnnouncement = null,
+    onSessionEnded = null,
   } = options;
 
   // Extract devicePrompt and voiceId from deviceConfig (for Cephanie etc)
@@ -318,13 +326,24 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
   try {
     logger.info('Conversation loop starting', {
       callUuid,
+      sessionKey,
+      sessionEndPreserveSeconds,
       skipGreeting,
       hasInitialContext: !!initialContext,
-      holdMusicUrl
+      holdMusicUrl,
+      startupAnnouncement: !!startupAnnouncement,
     });
 
     // Listen for call end
     dialog.on('destroy', onDialogDestroy);
+
+    if (startupAnnouncement && callActive) {
+      const startupAnnouncementUrl = await ttsService.generateSpeech(
+        startupAnnouncement,
+        voiceId
+      );
+      await endpoint.play(startupAnnouncementUrl);
+    }
 
     // Play greeting (skip for outbound where initial message already played)
     if (!skipGreeting && callActive) {
@@ -343,6 +362,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
         `[SYSTEM CONTEXT - DO NOT REPEAT]: You just called the user to tell them: "${initialContext}". They have answered. Now listen to their response and help them.`,
         {
           callId: callUuid,
+          sessionKey,
           devicePrompt: devicePrompt,
           isSystemPrime: true,
           sessionType,
@@ -394,6 +414,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
       cancelRequested = true;
       logger.info('Cancel requested', {
         callUuid,
+        sessionKey,
         reason,
         source,
         ...extra,
@@ -401,12 +422,14 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
 
       try {
         const result = await claudeBridge.cancelSession(callUuid, {
+          sessionKey,
           resetSession: false,
           reason,
         });
 
         logger.info('Cancel request completed', {
           callUuid,
+          sessionKey,
           source,
           success: !!result.success,
           canceledCount: result.canceledCount || 0,
@@ -414,6 +437,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
       } catch (error) {
         logger.warn('Cancel request failed', {
           callUuid,
+          sessionKey,
           source,
           error: error.message,
         });
@@ -653,7 +677,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
       const holdMusicPlayback = startHoldMusic();
 
       // 3. Query Claude
-      logger.info('Querying Claude', { callUuid });
+      logger.info('Querying Claude', { callUuid, sessionKey });
       let claudeResult;
       let spokenCancelWatcher = null;
       const spokenCancelState = { stopped: false };
@@ -687,6 +711,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
           transcript,
           {
             callId: callUuid,
+            sessionKey,
             devicePrompt: devicePrompt,
             sessionType,
             timeout: claudeTimeoutSeconds
@@ -753,7 +778,11 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
       await endpoint.play(maxUrl);
     }
 
-    logger.info('Conversation loop ended normally', { callUuid, turns: turnCount });
+    logger.info('Conversation loop ended normally', {
+      callUuid,
+      sessionKey,
+      turns: turnCount,
+    });
 
   } catch (error) {
     logger.error('Conversation loop error', {
@@ -772,7 +801,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
       // Ignore cleanup errors
     }
   } finally {
-    logger.info('Conversation loop cleanup', { callUuid });
+    logger.info('Conversation loop cleanup', { callUuid, sessionKey });
 
     // Remove dialog listener
     dialog.off('destroy', onDialogDestroy);
@@ -789,7 +818,14 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
 
     // End Claude session
     try {
-      await claudeBridge.endSession(callUuid);
+      const endSessionResult = await claudeBridge.endSession(callUuid, {
+        sessionKey,
+        preserveForSeconds: sessionEndPreserveSeconds,
+      });
+
+      if (typeof onSessionEnded === 'function') {
+        await onSessionEnded(endSessionResult);
+      }
     } catch (e) {
       // Ignore
     }

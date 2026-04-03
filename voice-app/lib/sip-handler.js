@@ -9,6 +9,11 @@ const {
   getClaudeTimeoutSeconds,
   getMaxTurns,
 } = require('./phone-agent-config');
+const {
+  getRecentSession,
+  getResumeTtlSeconds,
+  rememberRecentSession,
+} = require('./recent-session-cache');
 
 // Audio cue URLs
 const READY_BEEP_URL = 'http://127.0.0.1:3000/static/ready-beep.wav';
@@ -326,6 +331,10 @@ async function handleInvite(req, res, options) {
 
   const callerId = extractCallerId(req);
   const dialedExt = extractDialedExtension(req);
+  let sessionKey = null;
+  let startupAnnouncement = null;
+  let sessionEndPreserveSeconds = 0;
+  let resumeCacheExtension = dialedExt;
 
   // Look up device config using deviceRegistry.get() (works with name OR extension)
   let deviceConfig = null;
@@ -337,6 +346,36 @@ async function handleInvite(req, res, options) {
       console.log('[' + new Date().toISOString() + '] CALL Unknown extension ' + dialedExt + ', using default');
       deviceConfig = deviceRegistry.getDefault();
     }
+  }
+
+  const resumeTargetExtension = deviceConfig?.resumeTargetExtension;
+  if (resumeTargetExtension) {
+    resumeCacheExtension = resumeTargetExtension;
+
+    const baseDeviceConfig = deviceRegistry?.get(resumeTargetExtension) || deviceConfig;
+    if (baseDeviceConfig) {
+      deviceConfig = baseDeviceConfig;
+    }
+
+    const recentSession = getRecentSession(callerId, resumeTargetExtension);
+    sessionEndPreserveSeconds = getResumeTtlSeconds(deviceConfig);
+
+    if (recentSession.hit && recentSession.entry?.sessionKey) {
+      sessionKey = recentSession.entry.sessionKey;
+      startupAnnouncement = `Resuming your recent ${deviceConfig.name} session.`;
+      console.log(
+        '[' + new Date().toISOString() + '] CALL Resume hit for caller ' + callerId +
+        ' ext ' + resumeTargetExtension + ' using session ' + sessionKey
+      );
+    } else {
+      startupAnnouncement = `I couldn't find a recent ${deviceConfig.name} session, so I'm starting a fresh one.`;
+      console.log(
+        '[' + new Date().toISOString() + '] CALL Resume miss for caller ' + callerId +
+        ' ext ' + resumeTargetExtension + ' reason ' + recentSession.reason
+      );
+    }
+  } else {
+    sessionEndPreserveSeconds = getResumeTtlSeconds(deviceConfig);
   }
 
   console.log('[' + new Date().toISOString() + '] CALL Incoming from: ' + callerId + ' to ext: ' + (dialedExt || 'unknown'));
@@ -352,8 +391,14 @@ async function handleInvite(req, res, options) {
     const result = await mediaServer.connectCaller(req, res, { remoteSdp: audioOnlySdp });
     const { endpoint, dialog } = result;
     const callUuid = endpoint.uuid;
+    sessionKey = sessionKey || callUuid;
 
-    console.log('[' + new Date().toISOString() + '] CALL Connected: ' + callUuid);
+    console.log(
+      '[' + new Date().toISOString() + '] CALL Connected: ' + callUuid +
+      ' sessionKey: ' + sessionKey +
+      ' resumeExt: ' + (resumeCacheExtension || 'none') +
+      ' preserveSeconds: ' + sessionEndPreserveSeconds
+    );
 
     dialog.on('destroy', function() {
       console.log('[' + new Date().toISOString() + '] CALL Ended');
@@ -367,7 +412,31 @@ async function handleInvite(req, res, options) {
       ttsService: options.ttsService,
       wsPort: options.wsPort,
       deviceConfig: deviceConfig,
-      maxTurns: deviceConfig?.maxTurns
+      maxTurns: deviceConfig?.maxTurns,
+      sessionKey,
+      sessionEndPreserveSeconds,
+      startupAnnouncement,
+      onSessionEnded: async (endSessionResult) => {
+        if (!endSessionResult?.hadSession || !endSessionResult?.preserved || !resumeCacheExtension) {
+          console.log(
+            '[' + new Date().toISOString() + '] CALL Session not cached for resume: ' +
+            'callUuid=' + callUuid +
+            ' sessionKey=' + sessionKey +
+            ' hadSession=' + !!endSessionResult?.hadSession +
+            ' preserved=' + !!endSessionResult?.preserved
+          );
+          return;
+        }
+
+        rememberRecentSession({
+          callerId,
+          extension: resumeCacheExtension,
+          sessionKey,
+          sessionType: deviceConfig?.sessionType || 'phone',
+          deviceName: deviceConfig?.name || 'Morpheus',
+          ttlSeconds: sessionEndPreserveSeconds,
+        });
+      }
     });
     try {
       if (!dialog.destroyed) {

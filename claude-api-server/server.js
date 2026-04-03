@@ -238,11 +238,70 @@ const apiKeys = Object.keys(claudeEnv).filter(k =>
 );
 console.log('[STARTUP] API keys loaded:', apiKeys.join(', '));
 
-// Session storage: callId -> claudeSessionId
+// Session storage: sessionKey -> claudeSessionId
 const sessions = new Map();
 // Active request storage: callId -> Map(requestId -> requestRecord)
 const activeRequests = new Map();
+// Deferred session expiry timers: sessionKey -> Timeout
+const sessionExpiryTimers = new Map();
 let activeRequestSequence = 0;
+
+function resolveSessionKey(callId, sessionKey) {
+  return sessionKey || callId || null;
+}
+
+function clearSessionExpiryTimer(sessionKey) {
+  if (!sessionKey || !sessionExpiryTimers.has(sessionKey)) {
+    return;
+  }
+
+  clearTimeout(sessionExpiryTimers.get(sessionKey));
+  sessionExpiryTimers.delete(sessionKey);
+}
+
+function deleteSessionState(sessionKey) {
+  if (!sessionKey) return false;
+
+  clearSessionExpiryTimer(sessionKey);
+  return sessions.delete(sessionKey);
+}
+
+function scheduleSessionExpiry(sessionKey, preserveForSeconds) {
+  const ttlSeconds = parsePositiveInteger(preserveForSeconds);
+  if (!sessionKey || !ttlSeconds || !sessions.has(sessionKey)) {
+    const hadSession = !!(sessionKey && sessions.has(sessionKey));
+    if (sessionKey && !ttlSeconds) {
+      deleteSessionState(sessionKey);
+    }
+    return {
+      hadSession,
+      preserved: false,
+      ttlSeconds: ttlSeconds || 0,
+      expiresAt: null,
+    };
+  }
+
+  clearSessionExpiryTimer(sessionKey);
+
+  const expiresAt = new Date(Date.now() + ttlSeconds * 1000).toISOString();
+  sessionExpiryTimers.set(
+    sessionKey,
+    setTimeout(() => {
+      const deleted = sessions.delete(sessionKey);
+      sessionExpiryTimers.delete(sessionKey);
+      console.log(
+        `[${new Date().toISOString()}] SESSION EXPIRED: sessionKey=${sessionKey}, deleted=${deleted}`
+      );
+    }, ttlSeconds * 1000)
+  );
+
+  return {
+    hadSession: true,
+    preserved: true,
+    ttlSeconds,
+    expiresAt,
+  };
+}
 
 function nextRequestId(callId) {
   activeRequestSequence += 1;
@@ -329,8 +388,13 @@ function transitionActiveRequest(record, state, reason) {
   return true;
 }
 
-function cancelActiveRequests(callId, { resetSession = false, reason = 'cancel_session' } = {}) {
+function cancelActiveRequests(callId, {
+  sessionKey = null,
+  resetSession = false,
+  reason = 'cancel_session'
+} = {}) {
   const bucket = getActiveRequestBucket(callId, false);
+  const resolvedSessionKey = resolveSessionKey(callId, sessionKey);
   const requestIds = [];
   let canceledCount = 0;
 
@@ -343,8 +407,8 @@ function cancelActiveRequests(callId, { resetSession = false, reason = 'cancel_s
     }
   }
 
-  if (resetSession && callId && sessions.has(callId)) {
-    sessions.delete(callId);
+  if (resetSession && resolvedSessionKey) {
+    deleteSessionState(resolvedSessionKey);
   }
 
   return {
@@ -383,11 +447,19 @@ function parseClaudeStdout(stdout) {
   return { response, sessionId };
 }
 
-function runClaudeOnce({ fullPrompt, callId, timestamp, sessionType, timeoutSeconds = null }) {
+function runClaudeOnce({
+  fullPrompt,
+  callId,
+  sessionKey,
+  timestamp,
+  sessionType,
+  timeoutSeconds = null
+}) {
   const startTime = Date.now();
   const profile = resolveClaudeProfile(sessionType);
   const resolvedTimeoutSeconds = parsePositiveInteger(timeoutSeconds);
   const requestId = nextRequestId(callId);
+  const resolvedSessionKey = resolveSessionKey(callId, sessionKey);
 
   const args = [
     '-p', fullPrompt,
@@ -403,14 +475,16 @@ function runClaudeOnce({ fullPrompt, callId, timestamp, sessionType, timeoutSeco
     args.push('--allowedTools', profile.allowedTools.join(','));
   }
 
-  if (callId) {
-    if (sessions.has(callId)) {
-      args.push('--resume', callId);
-      console.log(`[${timestamp}] Resuming session: ${callId}`);
+  if (resolvedSessionKey) {
+    clearSessionExpiryTimer(resolvedSessionKey);
+
+    if (sessions.has(resolvedSessionKey)) {
+      args.push('--resume', resolvedSessionKey);
+      console.log(`[${timestamp}] Resuming session: ${resolvedSessionKey}`);
     } else {
-      args.push('--session-id', callId);
-      sessions.set(callId, true);
-      console.log(`[${timestamp}] Starting new session: ${callId}`);
+      args.push('--session-id', resolvedSessionKey);
+      sessions.set(resolvedSessionKey, true);
+      console.log(`[${timestamp}] Starting new session: ${resolvedSessionKey}`);
     }
   }
 
@@ -577,6 +651,7 @@ app.use((req, res, next) => {
  *   {
  *     "prompt": "What Docker containers are running?",
  *     "callId": "optional-call-uuid",
+ *     "sessionKey": "optional-stable-session-uuid",
  *     "devicePrompt": "optional device-specific prompt",
  *     "sessionType": "optional profile name such as phone"
  *   }
@@ -585,8 +660,9 @@ app.use((req, res, next) => {
  *   { "success": true, "response": "...", "duration_ms": 1234, "sessionId": "..." }
  *
  * Session Management:
- *   - If callId is provided and we have a stored session, uses --resume
- *   - First query for a callId captures the session_id for future turns
+ *   - If sessionKey is provided and we have a stored session, uses --resume
+ *   - First query for a sessionKey captures the session_id for future turns
+ *   - If sessionKey is omitted, callId is used as the session key for compatibility
  *   - This maintains conversation context across multiple turns in a phone call
  *
  * Device Prompts:
@@ -594,11 +670,12 @@ app.use((req, res, next) => {
  *   - This allows each device (NAS, Proxmox, etc.) to have its own identity and skills
  */
 app.post('/ask', async (req, res) => {
-  const { prompt, callId, devicePrompt, sessionType, timeoutSeconds } = req.body;
+  const { prompt, callId, sessionKey, devicePrompt, sessionType, timeoutSeconds } = req.body;
   const startTime = Date.now();
   const timestamp = new Date().toISOString();
   const profile = resolveClaudeProfile(sessionType);
   const resolvedTimeoutSeconds = parsePositiveInteger(timeoutSeconds);
+  const resolvedSessionKey = resolveSessionKey(callId, sessionKey);
 
   if (!prompt) {
     return res.status(400).json({
@@ -608,7 +685,7 @@ app.post('/ask', async (req, res) => {
   }
 
   // Check if we have an existing session for this call
-  const existingSession = callId ? sessions.get(callId) : null;
+  const existingSession = resolvedSessionKey ? sessions.get(resolvedSessionKey) : null;
 
   console.log(`[${timestamp}] QUERY: "${prompt.substring(0, 100)}..."`);
   console.log(`[${timestamp}] MODEL: ${profile.model}`);
@@ -616,7 +693,9 @@ app.post('/ask', async (req, res) => {
   console.log(`[${timestamp}] SESSION TYPE: ${profile.sessionType}`);
   console.log(`[${timestamp}] TOOLS: ${profile.tools.length > 0 ? profile.tools.join(',') : 'default'}`);
   console.log(`[${timestamp}] TIMEOUT: ${resolvedTimeoutSeconds || 'none'}s`);
-  console.log(`[${timestamp}] SESSION: callId=${callId || 'none'}, existing=${existingSession || 'none'}`);
+  console.log(
+    `[${timestamp}] SESSION: callId=${callId || 'none'}, sessionKey=${resolvedSessionKey || 'none'}, existing=${existingSession || 'none'}`
+  );
   console.log(`[${timestamp}] DEVICE PROMPT: ${devicePrompt ? 'Yes (' + devicePrompt.substring(0, 30) + '...)' : 'No'}`);
 
   try {
@@ -638,6 +717,7 @@ app.post('/ask', async (req, res) => {
     const { code, stdout, stderr, duration_ms } = await runClaudeOnce({
       fullPrompt,
       callId,
+      sessionKey: resolvedSessionKey,
       timestamp,
       sessionType,
       timeoutSeconds: resolvedTimeoutSeconds
@@ -653,9 +733,11 @@ app.post('/ask', async (req, res) => {
 
     const { response, sessionId } = parseClaudeStdout(stdout);
 
-    if (sessionId && callId) {
-      sessions.set(callId, sessionId);
-      console.log(`[${new Date().toISOString()}] SESSION STORED: ${callId} -> ${sessionId}`);
+    if (sessionId && resolvedSessionKey) {
+      sessions.set(resolvedSessionKey, sessionId);
+      console.log(
+        `[${new Date().toISOString()}] SESSION STORED: ${resolvedSessionKey} -> ${sessionId}`
+      );
     }
 
     console.log(`[${new Date().toISOString()}] RESPONSE (${duration_ms}ms): "${response.substring(0, 100)}..."`);
@@ -692,6 +774,7 @@ app.post('/ask', async (req, res) => {
  *   {
  *     "prompt": "Check Ceph health",
  *     "callId": "optional-call-uuid",
+ *     "sessionKey": "optional-stable-session-uuid",
  *     "devicePrompt": "optional device-specific prompt",
  *     "sessionType": "optional profile name such as phone",
  *     "schema": {
@@ -712,6 +795,7 @@ app.post('/ask-structured', async (req, res) => {
   const {
     prompt,
     callId,
+    sessionKey,
     devicePrompt,
     sessionType,
     timeoutSeconds,
@@ -723,6 +807,7 @@ app.post('/ask-structured', async (req, res) => {
   const timestamp = new Date().toISOString();
   const profile = resolveClaudeProfile(sessionType);
   const resolvedTimeoutSeconds = parsePositiveInteger(timeoutSeconds);
+  const resolvedSessionKey = resolveSessionKey(callId, sessionKey);
 
   if (!prompt) {
     return res.status(400).json({ success: false, error: 'Missing prompt in request body' });
@@ -748,7 +833,9 @@ app.post('/ask-structured', async (req, res) => {
   console.log(`[${timestamp}] SESSION TYPE: ${profile.sessionType}`);
   console.log(`[${timestamp}] TOOLS: ${profile.tools.length > 0 ? profile.tools.join(',') : 'default'}`);
   console.log(`[${timestamp}] TIMEOUT: ${resolvedTimeoutSeconds || 'none'}s`);
-  console.log(`[${timestamp}] SESSION: callId=${callId || 'none'}, existing=${callId ? (sessions.has(callId) ? 'yes' : 'no') : 'none'}`);
+  console.log(
+    `[${timestamp}] SESSION: callId=${callId || 'none'}, sessionKey=${resolvedSessionKey || 'none'}, existing=${resolvedSessionKey ? (sessions.has(resolvedSessionKey) ? 'yes' : 'no') : 'none'}`
+  );
 
   try {
     let lastRaw = '';
@@ -762,6 +849,7 @@ app.post('/ask-structured', async (req, res) => {
       const { code, stdout, stderr, duration_ms } = await runClaudeOnce({
         fullPrompt,
         callId,
+        sessionKey: resolvedSessionKey,
         timestamp,
         sessionType,
         timeoutSeconds: resolvedTimeoutSeconds
@@ -783,7 +871,7 @@ app.post('/ask-structured', async (req, res) => {
       const { response, sessionId } = parseClaudeStdout(stdout);
       lastRaw = response;
 
-      if (sessionId && callId) sessions.set(callId, sessionId);
+      if (sessionId && resolvedSessionKey) sessions.set(resolvedSessionKey, sessionId);
 
       const parsed = tryParseJsonFromText(response);
       if (!parsed.ok) {
@@ -849,11 +937,22 @@ app.post('/ask-structured', async (req, res) => {
  * Cancel active Claude work for a call without ending the call itself.
  *
  * Request body:
- *   { "callId": "call-uuid", "resetSession": false, "reason": "dtmf_cancel" }
+ *   {
+ *     "callId": "call-uuid",
+ *     "sessionKey": "optional-stable-session-uuid",
+ *     "resetSession": false,
+ *     "reason": "dtmf_cancel"
+ *   }
  */
 app.post('/cancel-session', (req, res) => {
-  const { callId, resetSession = false, reason = 'cancel_session' } = req.body || {};
+  const {
+    callId,
+    sessionKey,
+    resetSession = false,
+    reason = 'cancel_session'
+  } = req.body || {};
   const timestamp = new Date().toISOString();
+  const resolvedSessionKey = resolveSessionKey(callId, sessionKey);
 
   if (!callId) {
     return res.status(400).json({
@@ -862,15 +961,20 @@ app.post('/cancel-session', (req, res) => {
     });
   }
 
-  const result = cancelActiveRequests(callId, { resetSession: !!resetSession, reason });
+  const result = cancelActiveRequests(callId, {
+    sessionKey: resolvedSessionKey,
+    resetSession: !!resetSession,
+    reason
+  });
 
   console.log(
-    `[${timestamp}] SESSION CANCELED: ${callId} active=${result.active} canceled=${result.canceledCount} resetSession=${result.resetSession} reason=${reason}`
+    `[${timestamp}] SESSION CANCELED: callId=${callId} sessionKey=${resolvedSessionKey || 'none'} active=${result.active} canceled=${result.canceledCount} resetSession=${result.resetSession} reason=${reason}`
   );
 
   return res.json({
     success: true,
     callId,
+    sessionKey: resolvedSessionKey,
     ...result,
   });
 });
@@ -881,18 +985,33 @@ app.post('/cancel-session', (req, res) => {
  * Clean up session when a call ends
  *
  * Request body:
- *   { "callId": "call-uuid" }
+ *   {
+ *     "callId": "call-uuid",
+ *     "sessionKey": "optional-stable-session-uuid",
+ *     "preserveForSeconds": 0
+ *   }
  */
 app.post('/end-session', (req, res) => {
-  const { callId } = req.body;
+  const { callId, sessionKey, preserveForSeconds = 0 } = req.body || {};
   const timestamp = new Date().toISOString();
+  const resolvedSessionKey = resolveSessionKey(callId, sessionKey);
+  const preserveSeconds = parsePositiveInteger(preserveForSeconds) || 0;
+  const hadSession = !!(resolvedSessionKey && sessions.has(resolvedSessionKey));
+  const expiry = scheduleSessionExpiry(resolvedSessionKey, preserveSeconds);
 
-  if (callId && sessions.has(callId)) {
-    sessions.delete(callId);
-    console.log(`[${timestamp}] SESSION ENDED: ${callId}`);
-  }
+  console.log(
+    `[${timestamp}] SESSION ENDED: callId=${callId || 'none'} sessionKey=${resolvedSessionKey || 'none'} hadSession=${hadSession} preserved=${expiry.preserved} ttlSeconds=${expiry.ttlSeconds} expiresAt=${expiry.expiresAt || 'none'}`
+  );
 
-  res.json({ success: true });
+  res.json({
+    success: true,
+    callId: callId || null,
+    sessionKey: resolvedSessionKey,
+    hadSession,
+    preserved: expiry.preserved,
+    ttlSeconds: expiry.ttlSeconds,
+    expiresAt: expiry.expiresAt,
+  });
 });
 
 /**

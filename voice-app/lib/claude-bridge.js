@@ -20,7 +20,13 @@ function buildFriendlyErrorMessage(code) {
 }
 
 async function sendQuery(prompt, options = {}) {
-  const { callId, devicePrompt, timeout = 30, sessionType } = options;
+  const {
+    callId,
+    sessionKey = callId,
+    devicePrompt,
+    timeout = 30,
+    sessionType
+  } = options;
   const timestamp = new Date().toISOString();
 
   try {
@@ -28,13 +34,16 @@ async function sendQuery(prompt, options = {}) {
     if (callId) {
       console.log(`[${timestamp}] CLAUDE Session: ${callId}`);
     }
+    if (sessionKey && sessionKey !== callId) {
+      console.log(`[${timestamp}] CLAUDE Session key: ${sessionKey}`);
+    }
     if (devicePrompt) {
       console.log(`[${timestamp}] CLAUDE Device prompt: ${devicePrompt.substring(0, 50)}...`);
     }
 
     const response = await axios.post(
       `${CLAUDE_API_URL}/ask`,
-      { prompt, callId, devicePrompt, sessionType, timeoutSeconds: timeout },
+      { prompt, callId, sessionKey, devicePrompt, sessionType, timeoutSeconds: timeout },
       {
         timeout: timeout * 1000,
         headers: buildClaudeApiHeaders({ 'Content-Type': 'application/json' })
@@ -103,7 +112,8 @@ async function sendQuery(prompt, options = {}) {
  * Query Claude via HTTP API with session support
  * @param {string} prompt - The prompt/question to send to Claude
  * @param {Object} options - Options including callId for session management
- * @param {string} options.callId - Call UUID for maintaining conversation context
+ * @param {string} options.callId - Call UUID for active request cancellation
+ * @param {string} [options.sessionKey] - Stable Claude session UUID for resumable context
  * @param {string} options.devicePrompt - Device-specific personality prompt
  * @param {number} options.timeout - Timeout in seconds (default: 30, AC27)
  * @returns {Promise<string>} Claude's response
@@ -124,12 +134,16 @@ async function cancelSession(callId, options = {}) {
   if (!callId) return { success: false, error: 'Missing callId' };
 
   const timestamp = new Date().toISOString();
-  const { resetSession = false, reason = 'cancel_session' } = options;
+  const {
+    sessionKey = callId,
+    resetSession = false,
+    reason = 'cancel_session'
+  } = options;
 
   try {
     const response = await axios.post(
       `${CLAUDE_API_URL}/cancel-session`,
-      { callId, resetSession, reason },
+      { callId, sessionKey, resetSession, reason },
       {
         timeout: 5000,
         headers: buildClaudeApiHeaders({ 'Content-Type': 'application/json' })
@@ -152,25 +166,44 @@ async function cancelSession(callId, options = {}) {
 /**
  * End a Claude session when a call ends
  * @param {string} callId - The call UUID to end the session for
+ * @param {Object} options - Session end options
+ * @param {string} [options.sessionKey] - Stable Claude session UUID
+ * @param {number} [options.preserveForSeconds=0] - Keep session resumable for this many seconds
  */
-async function endSession(callId) {
+async function endSession(callId, options = {}) {
   if (!callId) return;
+
+  const {
+    sessionKey = callId,
+    preserveForSeconds = 0
+  } = options;
   
   const timestamp = new Date().toISOString();
   
   try {
-    await axios.post(
+    const response = await axios.post(
       `${CLAUDE_API_URL}/end-session`,
-      { callId },
+      { callId, sessionKey, preserveForSeconds },
       { 
         timeout: 5000,
         headers: buildClaudeApiHeaders({ 'Content-Type': 'application/json' })
       }
     );
-    console.log(`[${timestamp}] CLAUDE Session ended: ${callId}`);
+    console.log(
+      `[${timestamp}] CLAUDE Session ended: ${callId} sessionKey=${sessionKey} preserved=${response.data.preserved}`
+    );
+    return response.data;
   } catch (error) {
     // Non-critical, just log
     console.warn(`[${timestamp}] CLAUDE Failed to end session: ${error.message}`);
+    return {
+      success: false,
+      error: error.message,
+      callId,
+      sessionKey,
+      preserved: false,
+      hadSession: false,
+    };
   }
 }
 
