@@ -123,6 +123,13 @@ function isSpokenCancelPhrase(transcript) {
   return SPOKEN_CANCEL_PHRASES.has(normalized);
 }
 
+function isUtteranceTimeoutError(error) {
+  return Boolean(
+    error?.message &&
+    error.message.startsWith('Timed out waiting for utterance')
+  );
+}
+
 async function watchForSpokenCancel({
   session,
   callUuid,
@@ -139,11 +146,12 @@ async function watchForSpokenCancel({
       try {
         utterance = await session.waitForUtterance({
           timeoutMs: SPOKEN_CANCEL_LISTEN_TIMEOUT_MS,
+          logTimeout: false,
         });
       } catch (error) {
         if (!isActive()) break;
 
-        if (error && error.message === 'Timed out waiting for utterance') {
+        if (isUtteranceTimeoutError(error)) {
           continue;
         }
 

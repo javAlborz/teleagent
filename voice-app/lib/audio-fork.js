@@ -250,7 +250,7 @@ class AudioForkSession extends EventEmitter {
     if (this._silenceMs >= this.endSilenceMs) return this._finalizeUtterance('end_silence');
   }
 
-  waitForUtterance({ timeoutMs = 30000 } = {}) {
+  waitForUtterance({ timeoutMs = 30000, logTimeout = true } = {}) {
     console.log('[AUDIO-DEBUG] waitForUtterance called, timeoutMs=' + timeoutMs + ', captureEnabled=' + this.captureEnabled);
     return new Promise((resolve, reject) => {
       const onUtterance = (u) => {
@@ -269,7 +269,9 @@ class AudioForkSession extends EventEmitter {
 
       const timer = setTimeout(() => {
         cleanup();
-        console.log('[AUDIO-DEBUG] waitForUtterance TIMEOUT after ' + timeoutMs + 'ms. Binary chunks received: ' + this._binaryCount);
+        if (logTimeout) {
+          console.log('[AUDIO-DEBUG] waitForUtterance TIMEOUT after ' + timeoutMs + 'ms. Binary chunks received: ' + this._binaryCount);
+        }
         reject(new Error('Timed out waiting for utterance (' + timeoutMs + 'ms) for call ' + this.callUuid));
       }, timeoutMs);
 
