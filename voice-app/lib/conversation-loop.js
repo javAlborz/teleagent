@@ -297,6 +297,8 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
   const claudeTimeoutSeconds = getClaudeTimeoutSeconds(deviceConfig);
   const resolvedMaxTurns = getMaxTurns(deviceConfig, maxTurns);
   const holdMusicUrl = getRandomHoldMusicUrl();
+  let holdMusicSeekOffset = 0;
+  let holdMusicStopRequested = false;
   let session = null;
   let forkRunning = false;
   let callActive = true;
@@ -425,6 +427,75 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
       }
 
       return true;
+    };
+
+    const startHoldMusic = () => {
+      if (!callActive || !holdMusicUrl) {
+        if (callActive) {
+          logger.info('No hold music file available', { callUuid });
+        }
+        return null;
+      }
+
+      const playbackOptions = {
+        file: holdMusicUrl,
+        seekOffset: holdMusicSeekOffset,
+      };
+      holdMusicStopRequested = false;
+
+      logger.info('Starting hold music playback', {
+        callUuid,
+        holdMusicUrl,
+        seekOffset: holdMusicSeekOffset,
+      });
+
+      return endpoint.play(playbackOptions)
+        .then((result) => {
+          const nextOffset = Number.parseInt(result?.playbackLastOffsetPos, 10);
+          if (holdMusicStopRequested && Number.isFinite(nextOffset) && nextOffset >= 0) {
+            holdMusicSeekOffset = nextOffset;
+          } else if (!holdMusicStopRequested) {
+            holdMusicSeekOffset = 0;
+          }
+
+          logger.info('Hold music playback finished', {
+            callUuid,
+            holdMusicUrl,
+            playbackMilliseconds: result?.playbackMilliseconds,
+            playbackLastOffsetPos: result?.playbackLastOffsetPos,
+            nextSeekOffset: holdMusicSeekOffset,
+          });
+
+          return result;
+        })
+        .catch((error) => {
+          logger.warn('Hold music failed', {
+            callUuid,
+            holdMusicUrl,
+            seekOffset: holdMusicSeekOffset,
+            error: error.message,
+          });
+          return null;
+        });
+    };
+
+    const stopHoldMusic = async (playbackPromise) => {
+      if (!playbackPromise || !callActive) {
+        return;
+      }
+
+      holdMusicStopRequested = true;
+
+      try {
+        await endpoint.api('uuid_break', endpoint.uuid);
+      } catch (error) {
+        logger.debug('Hold music break ignored', {
+          callUuid,
+          error: error.message,
+        });
+      }
+
+      await playbackPromise;
     };
 
     // Set up DTMF handler for # (finalize speech) and * (cancel active work)
@@ -576,15 +647,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
       if (callActive) await endpoint.play(thinkingUrl);
 
       // 2. Start hold music in background
-      let musicPlaying = false;
-      if (callActive && holdMusicUrl) {
-        endpoint.play(holdMusicUrl).catch(e => {
-          logger.warn('Hold music failed', { callUuid, error: e.message });
-        });
-        musicPlaying = true;
-      } else if (callActive) {
-        logger.info('No hold music file available', { callUuid });
-      }
+      const holdMusicPlayback = startHoldMusic();
 
       // 3. Query Claude
       logger.info('Querying Claude', { callUuid });
@@ -636,13 +699,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
       }
 
       // 4. Stop hold music
-      if (musicPlaying && callActive) {
-        try {
-          await endpoint.api('uuid_break', endpoint.uuid);
-        } catch (e) {
-          // Ignore - music may have already stopped
-        }
-      }
+      await stopHoldMusic(holdMusicPlayback);
 
       // Check if call ended during Claude processing
       if (!callActive) {
