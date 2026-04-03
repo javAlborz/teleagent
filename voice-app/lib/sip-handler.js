@@ -335,6 +335,7 @@ async function handleInvite(req, res, options) {
   let startupAnnouncement = null;
   let sessionEndPreserveSeconds = 0;
   let resumeCacheExtension = dialedExt;
+  let skipGreeting = false;
 
   // Look up device config using deviceRegistry.get() (works with name OR extension)
   let deviceConfig = null;
@@ -363,6 +364,7 @@ async function handleInvite(req, res, options) {
     if (recentSession.hit && recentSession.entry?.sessionKey) {
       sessionKey = recentSession.entry.sessionKey;
       startupAnnouncement = `Resuming your recent ${deviceConfig.name} session.`;
+      skipGreeting = true;
       console.log(
         '[' + new Date().toISOString() + '] CALL Resume hit for caller ' + callerId +
         ' ext ' + resumeTargetExtension + ' using session ' + sessionKey
@@ -416,6 +418,7 @@ async function handleInvite(req, res, options) {
       sessionKey,
       sessionEndPreserveSeconds,
       startupAnnouncement,
+      skipGreeting,
       onSessionEnded: async (endSessionResult) => {
         if (!endSessionResult?.hadSession || !endSessionResult?.preserved || !resumeCacheExtension) {
           console.log(
