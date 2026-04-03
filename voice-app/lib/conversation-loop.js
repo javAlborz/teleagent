@@ -15,6 +15,8 @@
  */
 
 const logger = require('./logger');
+const fs = require('fs');
+const path = require('path');
 const {
   getClaudeTimeoutSeconds,
   getMaxTurns,
@@ -23,7 +25,11 @@ const {
 // Audio cue URLs
 const READY_BEEP_URL = 'http://127.0.0.1:3000/static/ready-beep.wav';
 const GOTIT_BEEP_URL = 'http://127.0.0.1:3000/static/gotit-beep.wav';
-const HOLD_MUSIC_URL = 'http://127.0.0.1:3000/static/hold-music.mp3';
+const STATIC_AUDIO_DIR = path.join(__dirname, '..', 'static');
+const HOLD_MUSIC_DIR = path.join(STATIC_AUDIO_DIR, 'hold-music');
+const HOLD_MUSIC_URL_PREFIX = 'http://127.0.0.1:3000/static/hold-music';
+const HOLD_MUSIC_FALLBACK_FILE = path.join(STATIC_AUDIO_DIR, 'hold-music.mp3');
+const HOLD_MUSIC_FALLBACK_URL = 'http://127.0.0.1:3000/static/hold-music.mp3';
 const CANCEL_ACKNOWLEDGEMENT = 'Stopped.';
 const SPOKEN_CANCEL_ENABLED = true;
 const SPOKEN_CANCEL_LISTEN_TIMEOUT_MS = 1000;
@@ -59,6 +65,32 @@ const THINKING_PHRASES = [
 
 function getRandomThinkingPhrase() {
   return THINKING_PHRASES[Math.floor(Math.random() * THINKING_PHRASES.length)];
+}
+
+function getRandomHoldMusicUrl() {
+  try {
+    const files = fs.readdirSync(HOLD_MUSIC_DIR)
+      .filter((filename) => /\.mp3$/i.test(filename))
+      .sort();
+
+    if (files.length > 0) {
+      const selected = files[Math.floor(Math.random() * files.length)];
+      return `${HOLD_MUSIC_URL_PREFIX}/${encodeURIComponent(selected)}`;
+    }
+  } catch (error) {
+    if (error.code !== 'ENOENT') {
+      logger.warn('Failed to read hold music directory', {
+        directory: HOLD_MUSIC_DIR,
+        error: error.message,
+      });
+    }
+  }
+
+  if (fs.existsSync(HOLD_MUSIC_FALLBACK_FILE)) {
+    return HOLD_MUSIC_FALLBACK_URL;
+  }
+
+  return null;
 }
 
 function isGoodbye(transcript) {
@@ -264,6 +296,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
   const voiceId = deviceConfig?.voiceId || null;  // null = use default Morpheus voice
   const claudeTimeoutSeconds = getClaudeTimeoutSeconds(deviceConfig);
   const resolvedMaxTurns = getMaxTurns(deviceConfig, maxTurns);
+  const holdMusicUrl = getRandomHoldMusicUrl();
   let session = null;
   let forkRunning = false;
   let callActive = true;
@@ -281,7 +314,8 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
     logger.info('Conversation loop starting', {
       callUuid,
       skipGreeting,
-      hasInitialContext: !!initialContext
+      hasInitialContext: !!initialContext,
+      holdMusicUrl
     });
 
     // Listen for call end
@@ -541,15 +575,15 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
       const thinkingUrl = await ttsService.generateSpeech(thinkingPhrase, voiceId);
       if (callActive) await endpoint.play(thinkingUrl);
 
-      // 2. Start hold music in background unless spoken cancel listening is active
+      // 2. Start hold music in background
       let musicPlaying = false;
-      if (callActive && !SPOKEN_CANCEL_ENABLED) {
-        endpoint.play(HOLD_MUSIC_URL).catch(e => {
+      if (callActive && holdMusicUrl) {
+        endpoint.play(holdMusicUrl).catch(e => {
           logger.warn('Hold music failed', { callUuid, error: e.message });
         });
         musicPlaying = true;
-      } else if (callActive && SPOKEN_CANCEL_ENABLED) {
-        logger.info('Skipping hold music while spoken cancel is active', { callUuid });
+      } else if (callActive) {
+        logger.info('No hold music file available', { callUuid });
       }
 
       // 3. Query Claude
@@ -716,7 +750,7 @@ module.exports = {
   extractVoiceLine,
   isGoodbye,
   getRandomThinkingPhrase,
+  getRandomHoldMusicUrl,
   READY_BEEP_URL,
-  GOTIT_BEEP_URL,
-  HOLD_MUSIC_URL
+  GOTIT_BEEP_URL
 };

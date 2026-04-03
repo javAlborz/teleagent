@@ -10,6 +10,7 @@ package-lock.json
 # Generated audio files
 voice-app/audio/*.mp3
 voice-app/audio/*.wav
+voice-app/static/hold-music/*
 claude-api-server/audio/
 
 # Logs

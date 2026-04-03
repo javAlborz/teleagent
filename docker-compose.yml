@@ -57,6 +57,8 @@ services:
     volumes:
       # Audio files directory for TTS playback
       - ./voice-app/audio:/app/audio
+      # Static phone assets, including locally synced hold music
+      - ./voice-app/static:/app/static:ro
       # Device configurations
       - ${DEVICE_CONFIG_DIR:-./voice-app/config}:/app/config:ro
     depends_on:
