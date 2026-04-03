@@ -401,7 +401,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
 
       try {
         const result = await claudeBridge.cancelSession(callUuid, {
-          resetSession: true,
+          resetSession: false,
           reason,
         });
 

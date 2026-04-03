@@ -124,7 +124,7 @@ async function cancelSession(callId, options = {}) {
   if (!callId) return { success: false, error: 'Missing callId' };
 
   const timestamp = new Date().toISOString();
-  const { resetSession = true, reason = 'cancel_session' } = options;
+  const { resetSession = false, reason = 'cancel_session' } = options;
 
   try {
     const response = await axios.post(

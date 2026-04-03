@@ -849,10 +849,10 @@ app.post('/ask-structured', async (req, res) => {
  * Cancel active Claude work for a call without ending the call itself.
  *
  * Request body:
- *   { "callId": "call-uuid", "resetSession": true, "reason": "dtmf_cancel" }
+ *   { "callId": "call-uuid", "resetSession": false, "reason": "dtmf_cancel" }
  */
 app.post('/cancel-session', (req, res) => {
-  const { callId, resetSession = true, reason = 'cancel_session' } = req.body || {};
+  const { callId, resetSession = false, reason = 'cancel_session' } = req.body || {};
   const timestamp = new Date().toISOString();
 
   if (!callId) {
