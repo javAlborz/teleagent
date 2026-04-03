@@ -11,6 +11,12 @@ const logger = require('./logger');
 
 const DEFAULT_TTS_BASE_URL = 'http://127.0.0.1:18000/v1';
 const DEFAULT_VOICE_ID = process.env.TTS_VOICE || 'af_bella';
+const ALLOWED_VOICE_IDS = new Set(
+  (process.env.TTS_ALLOWED_VOICES || '')
+    .split(',')
+    .map((voice) => voice.trim())
+    .filter(Boolean)
+);
 const MODEL_ID = process.env.TTS_MODEL || 'kokoro';
 const RESPONSE_FORMAT = process.env.TTS_RESPONSE_FORMAT || 'mp3';
 const TTS_TIMEOUT_MS = parseInt(process.env.TTS_TIMEOUT_MS || '30000', 10);
@@ -34,6 +40,30 @@ function getTtsApiKey() {
 function getAudioExtension() {
   const format = RESPONSE_FORMAT.toLowerCase();
   return format === 'mpeg' ? 'mp3' : format;
+}
+
+function resolveVoiceId(voiceId) {
+  const selectedVoiceId = (voiceId || DEFAULT_VOICE_ID).trim() || DEFAULT_VOICE_ID;
+
+  if (ALLOWED_VOICE_IDS.size > 0 && !ALLOWED_VOICE_IDS.has(selectedVoiceId)) {
+    throw new Error(
+      `TTS voice "${selectedVoiceId}" is not allowed. Allowed voices: ${[...ALLOWED_VOICE_IDS].join(', ')}`
+    );
+  }
+
+  return selectedVoiceId;
+}
+
+function normalizeVoiceList(responseData) {
+  if (Array.isArray(responseData?.voices)) {
+    return responseData.voices;
+  }
+
+  if (Array.isArray(responseData?.voices?.custom)) {
+    return responseData.voices.custom;
+  }
+
+  return [];
 }
 
 function stringifyErrorData(data) {
@@ -86,10 +116,11 @@ async function generateSpeech(text, voiceId = DEFAULT_VOICE_ID) {
   try {
     const baseUrl = getTtsBaseUrl();
     const apiKey = getTtsApiKey();
+    const selectedVoiceId = resolveVoiceId(voiceId);
 
     logger.info('Generating speech with OpenAI-compatible TTS', {
       textLength: text.length,
-      voiceId,
+      voiceId: selectedVoiceId,
       model: MODEL_ID,
       baseUrl
     });
@@ -106,7 +137,7 @@ async function generateSpeech(text, voiceId = DEFAULT_VOICE_ID) {
       data: {
         input: text,
         model: MODEL_ID,
-        voice: voiceId || DEFAULT_VOICE_ID,
+        voice: selectedVoiceId,
         response_format: RESPONSE_FORMAT,
         speed: parseFloat(process.env.TTS_SPEED || '1.0')
       },
@@ -209,7 +240,17 @@ async function getAvailableVoices() {
       }
     });
 
-    return response.data?.voices || [];
+    const voices = normalizeVoiceList(response.data);
+    if (ALLOWED_VOICE_IDS.size === 0) {
+      return voices;
+    }
+
+    const allowedVoices = voices.filter((voiceId) => ALLOWED_VOICE_IDS.has(voiceId));
+    if (allowedVoices.length > 0) {
+      return allowedVoices;
+    }
+
+    return [...ALLOWED_VOICE_IDS];
 
   } catch (error) {
     logger.error('Failed to fetch available voices', { error: error.message });
