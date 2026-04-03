@@ -30,6 +30,7 @@ const HOLD_MUSIC_DIR = path.join(STATIC_AUDIO_DIR, 'hold-music');
 const HOLD_MUSIC_URL_PREFIX = 'http://127.0.0.1:3000/static/hold-music';
 const HOLD_MUSIC_FALLBACK_FILE = path.join(STATIC_AUDIO_DIR, 'hold-music.mp3');
 const HOLD_MUSIC_FALLBACK_URL = 'http://127.0.0.1:3000/static/hold-music.mp3';
+let nextHoldMusicFileIndex = 0;
 const CANCEL_ACKNOWLEDGEMENT = 'Stopped.';
 const SPOKEN_CANCEL_ENABLED = true;
 const SPOKEN_CANCEL_LISTEN_TIMEOUT_MS = 1000;
@@ -67,14 +68,16 @@ function getRandomThinkingPhrase() {
   return THINKING_PHRASES[Math.floor(Math.random() * THINKING_PHRASES.length)];
 }
 
-function getRandomHoldMusicUrl() {
+function getNextHoldMusicUrl() {
   try {
     const files = fs.readdirSync(HOLD_MUSIC_DIR)
       .filter((filename) => /\.mp3$/i.test(filename))
       .sort();
 
     if (files.length > 0) {
-      const selected = files[Math.floor(Math.random() * files.length)];
+      const selectedIndex = nextHoldMusicFileIndex % files.length;
+      nextHoldMusicFileIndex = (selectedIndex + 1) % files.length;
+      const selected = files[selectedIndex];
       return `${HOLD_MUSIC_URL_PREFIX}/${encodeURIComponent(selected)}`;
     }
   } catch (error) {
@@ -296,7 +299,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
   const voiceId = deviceConfig?.voiceId || null;  // null = use default Morpheus voice
   const claudeTimeoutSeconds = getClaudeTimeoutSeconds(deviceConfig);
   const resolvedMaxTurns = getMaxTurns(deviceConfig, maxTurns);
-  const holdMusicUrl = getRandomHoldMusicUrl();
+  const holdMusicUrl = getNextHoldMusicUrl();
   let holdMusicSeekOffset = 0;
   let holdMusicStopRequested = false;
   let session = null;
@@ -807,7 +810,7 @@ module.exports = {
   extractVoiceLine,
   isGoodbye,
   getRandomThinkingPhrase,
-  getRandomHoldMusicUrl,
+  getNextHoldMusicUrl,
   READY_BEEP_URL,
   GOTIT_BEEP_URL
 };
