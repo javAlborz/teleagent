@@ -19,6 +19,7 @@ const fs = require('fs');
 const path = require('path');
 const {
   getClaudeTimeoutSeconds,
+  getHoldMusicEnabled,
   getMaxTurns,
 } = require('./phone-agent-config');
 
@@ -314,8 +315,9 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
   const sessionType = deviceConfig?.sessionType || 'phone';
   const voiceId = deviceConfig?.voiceId || null;  // null = use default Morpheus voice
   const claudeTimeoutSeconds = getClaudeTimeoutSeconds(deviceConfig);
+  const holdMusicEnabled = getHoldMusicEnabled(deviceConfig);
   const resolvedMaxTurns = getMaxTurns(deviceConfig, maxTurns);
-  const holdMusicUrl = getNextHoldMusicUrl();
+  const holdMusicUrl = holdMusicEnabled ? getNextHoldMusicUrl() : null;
   let holdMusicSeekOffset = 0;
   let holdMusicStopRequested = false;
   let session = null;
@@ -338,6 +340,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
       sessionEndPreserveSeconds,
       skipGreeting,
       hasInitialContext: !!initialContext,
+      holdMusicEnabled,
       holdMusicUrl,
       startupAnnouncement: !!startupAnnouncement,
     });
@@ -466,7 +469,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
 
     const startHoldMusic = () => {
       if (!callActive || !holdMusicUrl) {
-        if (callActive) {
+        if (callActive && holdMusicEnabled) {
           logger.info('No hold music file available', { callUuid });
         }
         return null;

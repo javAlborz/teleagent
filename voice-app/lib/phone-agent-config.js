@@ -1,5 +1,6 @@
 const DEFAULT_MAX_TURNS = 20;
 const DEFAULT_CLAUDE_TIMEOUT_SECONDS = 30;
+const DEFAULT_HOLD_MUSIC_ENABLED = true;
 
 function parsePositiveInteger(value, fallback) {
   const parsed = Number.parseInt(value, 10);
@@ -17,9 +18,19 @@ function getClaudeTimeoutSeconds(deviceConfig, fallback = DEFAULT_CLAUDE_TIMEOUT
   );
 }
 
+function getHoldMusicEnabled(deviceConfig, fallback = DEFAULT_HOLD_MUSIC_ENABLED) {
+  if (typeof deviceConfig?.holdMusicEnabled === 'boolean') {
+    return deviceConfig.holdMusicEnabled;
+  }
+
+  return fallback;
+}
+
 module.exports = {
   DEFAULT_MAX_TURNS,
   DEFAULT_CLAUDE_TIMEOUT_SECONDS,
+  DEFAULT_HOLD_MUSIC_ENABLED,
   getMaxTurns,
   getClaudeTimeoutSeconds,
+  getHoldMusicEnabled,
 };

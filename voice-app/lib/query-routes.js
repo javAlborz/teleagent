@@ -13,6 +13,7 @@ const router = express.Router();
 const logger = require('./logger');
 const deviceRegistry = require('./device-registry');
 const { CLAUDE_API_URL, buildClaudeApiHeaders } = require('./claude-api-config');
+const { getHoldMusicEnabled } = require('./phone-agent-config');
 
 // Dependencies injected via setupRoutes()
 let claudeBridge = null;
@@ -403,6 +404,7 @@ router.get('/devices', (req, res) => {
         hasVoice: !!device.voiceId,
         hasPrompt: !!device.prompt,
         claudeTimeoutSeconds: device.claudeTimeoutSeconds,
+        holdMusicEnabled: getHoldMusicEnabled(device),
         maxTurns: device.maxTurns
       }));
 
@@ -453,6 +455,7 @@ router.get('/device/:identifier', (req, res) => {
         hasPrompt: !!device.prompt,
         voiceId: device.voiceId,
         claudeTimeoutSeconds: device.claudeTimeoutSeconds,
+        holdMusicEnabled: getHoldMusicEnabled(device),
         maxTurns: device.maxTurns
       }
     });
