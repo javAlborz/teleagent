@@ -39,7 +39,7 @@ class AudioForkSession extends EventEmitter {
     sampleRate = 16000,
     endSilenceMs = 1500,
     minSpeechMs = 350,
-    maxUtteranceMs = 60000
+    maxUtteranceMs = 120000
   }) {
     super();
     this.ws = ws;
