@@ -175,7 +175,7 @@ async function conversationLoop(endpoint, dialog, callUuid, options, deviceConfi
 
       let utterance = null;
       try {
-        utterance = await session.waitForUtterance({ timeoutMs: 30000 });
+        utterance = await session.waitForUtterance({ timeoutMs: 120000 });
         console.log('[' + new Date().toISOString() + '] LISTEN Got: ' + utterance.audio.length + ' bytes');
       } catch (err) {
         console.log('[' + new Date().toISOString() + '] LISTEN Timeout: ' + err.message);

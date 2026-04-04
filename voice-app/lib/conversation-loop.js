@@ -611,7 +611,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
 
       let utterance = null;
       try {
-        utterance = await session.waitForUtterance({ timeoutMs: 30000 });
+        utterance = await session.waitForUtterance({ timeoutMs: 120000 });
         logger.info('Got utterance', { callUuid, bytes: utterance.audio.length, reason: utterance.reason });
       } catch (err) {
         if (!callActive) break;
