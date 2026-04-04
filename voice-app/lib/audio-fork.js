@@ -1,6 +1,14 @@
 const { EventEmitter } = require('node:events');
 const WebSocket = require('ws');
 
+const AUDIO_DEBUG = String(process.env.AUDIO_DEBUG || '').toLowerCase() === 'true';
+
+function audioDebugLog(...args) {
+  if (AUDIO_DEBUG) {
+    console.log(...args);
+  }
+}
+
 function pcmStats(buf, endian = 'LE') {
   const sampleCount = Math.floor(buf.length / 2);
   if (sampleCount <= 0) {
@@ -62,21 +70,21 @@ class AudioForkSession extends EventEmitter {
 
     ws.on('message', (data) => this._onMessage(data));
     ws.on('close', () => {
-      console.log('[AUDIO-DEBUG] WebSocket CLOSED for ' + callUuid + '. Total messages: ' + this._messageCount + ', binary: ' + this._binaryCount);
+      audioDebugLog('[AUDIO-DEBUG] WebSocket CLOSED for ' + callUuid + '. Total messages: ' + this._messageCount + ', binary: ' + this._binaryCount);
       this.emit('close');
     });
     ws.on('error', (err) => {
-      console.log('[AUDIO-DEBUG] WebSocket ERROR for ' + callUuid + ': ' + err.message);
+      audioDebugLog('[AUDIO-DEBUG] WebSocket ERROR for ' + callUuid + ': ' + err.message);
       this.emit('error', err);
     });
 
-    console.log('[AUDIO-DEBUG] AudioForkSession created for ' + callUuid);
+    audioDebugLog('[AUDIO-DEBUG] AudioForkSession created for ' + callUuid);
   }
 
   setCaptureEnabled(enabled) {
     const was = this.captureEnabled;
     this.captureEnabled = Boolean(enabled);
-    console.log('[AUDIO-DEBUG] setCaptureEnabled: ' + was + ' -> ' + this.captureEnabled + ' for ' + this.callUuid);
+    audioDebugLog('[AUDIO-DEBUG] setCaptureEnabled: ' + was + ' -> ' + this.captureEnabled + ' for ' + this.callUuid);
     if (!this.captureEnabled) this._resetUtterance();
   }
 
@@ -107,7 +115,7 @@ class AudioForkSession extends EventEmitter {
       this._preRollChunks = [];
       this._preRollBytes = 0;
     }
-    console.log('[AUDIO-DEBUG] Started utterance with pre-roll for ' + this.callUuid);
+    audioDebugLog('[AUDIO-DEBUG] Started utterance with pre-roll for ' + this.callUuid);
   }
 
   _appendUtterance(buf, countsAsSpeech) {
@@ -132,7 +140,7 @@ class AudioForkSession extends EventEmitter {
     const audio = Buffer.concat(this._utteranceChunks);
     this._resetUtterance();
 
-    console.log('[AUDIO-DEBUG] Finalizing utterance: ' + audio.length + ' bytes, ' + Math.round(durationMs) + 'ms duration, ' + Math.round(speechMs) + 'ms speech, ratio=' + speechRatio.toFixed(2) + ', reason=' + reason);
+    audioDebugLog('[AUDIO-DEBUG] Finalizing utterance: ' + audio.length + ' bytes, ' + Math.round(durationMs) + 'ms duration, ' + Math.round(speechMs) + 'ms speech, ratio=' + speechRatio.toFixed(2) + ', reason=' + reason);
 
     // For DTMF-triggered finalization, be more lenient with requirements
     const isDtmfTriggered = reason === 'dtmf_trigger';
@@ -140,10 +148,10 @@ class AudioForkSession extends EventEmitter {
     const minRatioRequired = isDtmfTriggered ? 0.05 : 0.12;
 
     if (speechMs < minSpeechRequired || speechRatio < minRatioRequired) {
-      console.log('[AUDIO-DEBUG] Utterance REJECTED: speechMs=' + Math.round(speechMs) + ' < ' + minSpeechRequired + ' OR speechRatio=' + speechRatio.toFixed(2) + ' < ' + minRatioRequired);
+      audioDebugLog('[AUDIO-DEBUG] Utterance REJECTED: speechMs=' + Math.round(speechMs) + ' < ' + minSpeechRequired + ' OR speechRatio=' + speechRatio.toFixed(2) + ' < ' + minRatioRequired);
       return false;
     }
-    console.log('[AUDIO-DEBUG] Utterance ACCEPTED, emitting event');
+    audioDebugLog('[AUDIO-DEBUG] Utterance ACCEPTED, emitting event');
     this.emit('utterance', { callUuid: this.callUuid, audio, durationMs, speechMs, reason });
     return true;
   }
@@ -153,10 +161,10 @@ class AudioForkSession extends EventEmitter {
    * Returns true if an utterance was finalized, false if there was nothing to finalize
    */
   forceFinalize() {
-    console.log('[AUDIO-DEBUG] forceFinalize called for ' + this.callUuid + ', inSpeech=' + this._inSpeech + ', bytes=' + this._utteranceBytes);
+    audioDebugLog('[AUDIO-DEBUG] forceFinalize called for ' + this.callUuid + ', inSpeech=' + this._inSpeech + ', bytes=' + this._utteranceBytes);
 
     if (!this._inSpeech || this._utteranceBytes === 0) {
-      console.log('[AUDIO-DEBUG] forceFinalize: No speech to finalize');
+      audioDebugLog('[AUDIO-DEBUG] forceFinalize: No speech to finalize');
       return false;
     }
 
@@ -169,7 +177,7 @@ class AudioForkSession extends EventEmitter {
     const leScore = le.maxAbs + le.rms;
     const beScore = be.maxAbs + be.rms;
     const result = leScore >= beScore ? 'LE' : 'BE';
-    console.log('[AUDIO-DEBUG] Detected endian: ' + result + ' (LE score=' + Math.round(leScore) + ', BE score=' + Math.round(beScore) + ')');
+    audioDebugLog('[AUDIO-DEBUG] Detected endian: ' + result + ' (LE score=' + Math.round(leScore) + ', BE score=' + Math.round(beScore) + ')');
     return result;
   }
 
@@ -189,14 +197,14 @@ class AudioForkSession extends EventEmitter {
     this._messageCount++;
 
     if (typeof data === 'string') {
-      console.log('[AUDIO-DEBUG] Received STRING message #' + this._messageCount + ': ' + data.substring(0, 200));
+      audioDebugLog('[AUDIO-DEBUG] Received STRING message #' + this._messageCount + ': ' + data.substring(0, 200));
       try {
         const meta = JSON.parse(data);
         this.emit('metadata', meta);
         if (meta && meta.sampleRate && Number.isFinite(Number(meta.sampleRate))) {
           this.sampleRate = Number(meta.sampleRate);
           this._preRollMaxBytes = Math.floor((this.sampleRate * 0.2) * 2);
-          console.log('[AUDIO-DEBUG] Updated sampleRate to ' + this.sampleRate);
+          audioDebugLog('[AUDIO-DEBUG] Updated sampleRate to ' + this.sampleRate);
         }
       } catch {
         this.emit('metadata', data);
@@ -205,7 +213,7 @@ class AudioForkSession extends EventEmitter {
     }
 
     if (!Buffer.isBuffer(data)) {
-      console.log('[AUDIO-DEBUG] Received non-buffer, non-string message type: ' + typeof data);
+      audioDebugLog('[AUDIO-DEBUG] Received non-buffer, non-string message type: ' + typeof data);
       return;
     }
 
@@ -215,7 +223,7 @@ class AudioForkSession extends EventEmitter {
     const now = Date.now();
     if (this._binaryCount % 50 === 1 || now - this._lastLogTime > 5000) {
       const stats = pcmStats(data, this._pcmEndian || 'LE');
-      console.log('[AUDIO-DEBUG] Binary chunk #' + this._binaryCount + ': ' + data.length + ' bytes, RMS=' + Math.round(stats.rms) + ', max=' + stats.maxAbs + ', nearZero=' + (stats.nearZeroRatio*100).toFixed(1) + '%, captureEnabled=' + this.captureEnabled);
+      audioDebugLog('[AUDIO-DEBUG] Binary chunk #' + this._binaryCount + ': ' + data.length + ' bytes, RMS=' + Math.round(stats.rms) + ', max=' + stats.maxAbs + ', nearZero=' + (stats.nearZeroRatio*100).toFixed(1) + '%, captureEnabled=' + this.captureEnabled);
       this._lastLogTime = now;
     }
 
@@ -231,7 +239,7 @@ class AudioForkSession extends EventEmitter {
     // Log speech detection periodically
     if (this._binaryCount % 50 === 1) {
       const stats = pcmStats(data, this._pcmEndian || 'LE');
-      console.log('[AUDIO-DEBUG] VAD: isSpeech=' + isSpeech + ', inSpeech=' + this._inSpeech + ', silenceMs=' + Math.round(this._silenceMs) + ', RMS=' + Math.round(stats.rms) + ', max=' + stats.maxAbs);
+      audioDebugLog('[AUDIO-DEBUG] VAD: isSpeech=' + isSpeech + ', inSpeech=' + this._inSpeech + ', silenceMs=' + Math.round(this._silenceMs) + ', RMS=' + Math.round(stats.rms) + ', max=' + stats.maxAbs);
     }
 
     if (!this._inSpeech) {
@@ -251,11 +259,11 @@ class AudioForkSession extends EventEmitter {
   }
 
   waitForUtterance({ timeoutMs = 30000, logTimeout = true } = {}) {
-    console.log('[AUDIO-DEBUG] waitForUtterance called, timeoutMs=' + timeoutMs + ', captureEnabled=' + this.captureEnabled);
+    audioDebugLog('[AUDIO-DEBUG] waitForUtterance called, timeoutMs=' + timeoutMs + ', captureEnabled=' + this.captureEnabled);
     return new Promise((resolve, reject) => {
       const onUtterance = (u) => {
         cleanup();
-        console.log('[AUDIO-DEBUG] waitForUtterance resolved with ' + u.audio.length + ' bytes');
+        audioDebugLog('[AUDIO-DEBUG] waitForUtterance resolved with ' + u.audio.length + ' bytes');
         resolve(u);
       };
       const onClose = () => {
@@ -270,7 +278,7 @@ class AudioForkSession extends EventEmitter {
       const timer = setTimeout(() => {
         cleanup();
         if (logTimeout) {
-          console.log('[AUDIO-DEBUG] waitForUtterance TIMEOUT after ' + timeoutMs + 'ms. Binary chunks received: ' + this._binaryCount);
+          audioDebugLog('[AUDIO-DEBUG] waitForUtterance TIMEOUT after ' + timeoutMs + 'ms. Binary chunks received: ' + this._binaryCount);
         }
         reject(new Error('Timed out waiting for utterance (' + timeoutMs + 'ms) for call ' + this.callUuid));
       }, timeoutMs);
@@ -305,7 +313,7 @@ class AudioForkServer extends EventEmitter {
 
     this.wss.on('connection', (ws, req) => {
       const url = (req && req.url) || '/';
-      console.log('[AUDIO-DEBUG] WebSocket connection received, URL: ' + url);
+      audioDebugLog('[AUDIO-DEBUG] WebSocket connection received, URL: ' + url);
 
       const path = url.split('?')[0] || '/';
       const candidate = decodeURIComponent(path).replace(/^\/+/, '').trim();
@@ -313,16 +321,16 @@ class AudioForkServer extends EventEmitter {
       const callUuidFromUrl = candidate.length ? candidate.split('/')[0] : '';
       const callUuid = callUuidFromUrl || null;
 
-      console.log('[AUDIO-DEBUG] Extracted callUuid from URL: ' + callUuid);
+      audioDebugLog('[AUDIO-DEBUG] Extracted callUuid from URL: ' + callUuid);
 
       if (callUuid) {
         const idx = this._pending.findIndex((p) => p.callUuid === callUuid);
         const pending = idx >= 0 ? this._pending.splice(idx, 1)[0] : null;
         if (pending) {
           clearTimeout(pending.timeout);
-          console.log('[AUDIO-DEBUG] Found pending expectation for ' + callUuid);
+          audioDebugLog('[AUDIO-DEBUG] Found pending expectation for ' + callUuid);
         } else {
-          console.log('[AUDIO-DEBUG] No pending expectation for ' + callUuid + ', creating session anyway');
+          audioDebugLog('[AUDIO-DEBUG] No pending expectation for ' + callUuid + ', creating session anyway');
         }
 
         const session = new AudioForkSession({ ws, callUuid });
@@ -337,7 +345,7 @@ class AudioForkServer extends EventEmitter {
 
       const pending = this._pending.shift();
       if (!pending) {
-        console.log('[AUDIO-DEBUG] No pending session and no callUuid in URL, closing connection');
+        audioDebugLog('[AUDIO-DEBUG] No pending session and no callUuid in URL, closing connection');
         ws.close(1011, 'No pending audio session');
         return;
       }
@@ -353,7 +361,7 @@ class AudioForkServer extends EventEmitter {
     });
 
     this.wss.on('listening', () => {
-      console.log('[AUDIO-DEBUG] WebSocket server listening on ' + this.host + ':' + this.port);
+      audioDebugLog('[AUDIO-DEBUG] WebSocket server listening on ' + this.host + ':' + this.port);
       this.emit('listening', { host: this.host, port: this.port });
     });
     this.wss.on('error', (err) => this.emit('error', err));
@@ -375,19 +383,19 @@ class AudioForkServer extends EventEmitter {
     if (idx >= 0) {
       const pending = this._pending.splice(idx, 1)[0];
       clearTimeout(pending.timeout);
-      console.log('[AUDIO-DEBUG] Cancelled pending expectation for ' + callUuid);
+      audioDebugLog('[AUDIO-DEBUG] Cancelled pending expectation for ' + callUuid);
       return true;
     }
     return false;
   }
 
   expectSession(callUuid, { timeoutMs = 5000 } = {}) {
-    console.log('[AUDIO-DEBUG] expectSession called for ' + callUuid + ', timeoutMs=' + timeoutMs);
+    audioDebugLog('[AUDIO-DEBUG] expectSession called for ' + callUuid + ', timeoutMs=' + timeoutMs);
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         const idx = this._pending.findIndex((p) => p.callUuid === callUuid);
         if (idx >= 0) this._pending.splice(idx, 1);
-        console.log('[AUDIO-DEBUG] expectSession TIMEOUT for ' + callUuid + ' (this is handled, not a crash)');
+        audioDebugLog('[AUDIO-DEBUG] expectSession TIMEOUT for ' + callUuid + ' (this is handled, not a crash)');
         reject(new Error('Timed out waiting for WebSocket audio session (' + timeoutMs + 'ms) for call ' + callUuid));
       }, timeoutMs);
 
@@ -403,7 +411,7 @@ class AudioForkServer extends EventEmitter {
 // Add global unhandled rejection handler to prevent crashes
 // This is a safety net - the actual fix is proper cleanup in conversation-loop.js
 process.on('unhandledRejection', (reason, promise) => {
-  console.log('[AUDIO-DEBUG] Unhandled Rejection (caught, not crashing):', reason);
+  audioDebugLog('[AUDIO-DEBUG] Unhandled Rejection (caught, not crashing):', reason);
 });
 
 module.exports = { AudioForkServer, AudioForkSession };
