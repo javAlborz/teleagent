@@ -600,6 +600,10 @@ This query comes via voice call. You MUST include BOTH of these lines in your re
 
 IMPORTANT: The VOICE_RESPONSE line is what the caller HEARS. Make it conversational and complete - don't just say "Done" or "Task completed". Actually answer their question or confirm what you did in a natural way.
 
+PHONE GIT SAFETY:
+- For repo commit/push requests, use the phone-publish Bash wrapper instead of raw git commit/git push commands.
+- For GitHub PR merge requests, use the phone-merge-pr Bash wrapper instead of raw gh pr merge.
+
 SLACK DELIVERY: When the caller requests delivery to Slack (phrases like "send to Slack", "post to #channel", "message me when done"):
 1. Do the requested work (research, generate content, analyze, etc.)
 2. Send results to the specified Slack channel using the Slack skill
