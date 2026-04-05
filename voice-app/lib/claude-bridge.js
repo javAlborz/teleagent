@@ -5,6 +5,12 @@
 
 const axios = require('axios');
 const { CLAUDE_API_URL, buildClaudeApiHeaders } = require('./claude-api-config');
+const { looksLikePhoneDeployRequest } = require('../../lib/phone-deploy-intent');
+
+const PHONE_DEPLOY_TIMEOUT_SECONDS = (() => {
+  const parsed = Number.parseInt(process.env.PHONE_DEPLOY_TIMEOUT_SECONDS || '', 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : 900;
+})();
 
 function buildFriendlyErrorMessage(code) {
   switch (code) {
@@ -28,6 +34,10 @@ async function sendQuery(prompt, options = {}) {
     sessionType
   } = options;
   const timestamp = new Date().toISOString();
+  const deployIntent =
+    String(sessionType || '').startsWith('phone') &&
+    looksLikePhoneDeployRequest(prompt, devicePrompt);
+  const effectiveTimeout = deployIntent ? Math.max(timeout, PHONE_DEPLOY_TIMEOUT_SECONDS) : timeout;
 
   try {
     console.log(`[${timestamp}] CLAUDE Sending query to ${CLAUDE_API_URL}...`);
@@ -40,12 +50,14 @@ async function sendQuery(prompt, options = {}) {
     if (devicePrompt) {
       console.log(`[${timestamp}] CLAUDE Device prompt: ${devicePrompt.substring(0, 50)}...`);
     }
+    console.log(`[${timestamp}] CLAUDE Deploy intent: ${deployIntent}`);
+    console.log(`[${timestamp}] CLAUDE Timeout: ${effectiveTimeout}s`);
 
     const response = await axios.post(
       `${CLAUDE_API_URL}/ask`,
-      { prompt, callId, sessionKey, devicePrompt, sessionType, timeoutSeconds: timeout },
+      { prompt, callId, sessionKey, devicePrompt, sessionType, timeoutSeconds: effectiveTimeout },
       {
-        timeout: timeout * 1000,
+        timeout: effectiveTimeout * 1000,
         headers: buildClaudeApiHeaders({ 'Content-Type': 'application/json' })
       }
     );
@@ -87,7 +99,7 @@ async function sendQuery(prompt, options = {}) {
     }
 
     if (error.code === 'ETIMEDOUT' || error.code === 'ECONNABORTED') {
-      console.error(`[${timestamp}] CLAUDE Timeout after ${timeout} seconds`);
+      console.error(`[${timestamp}] CLAUDE Timeout after ${effectiveTimeout} seconds`);
       return {
         success: false,
         code: 'CLAUDE_TIMEOUT',

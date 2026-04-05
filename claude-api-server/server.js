@@ -26,6 +26,7 @@ const {
   validateRequiredFields,
   buildRepairPrompt,
 } = require('./structured');
+const { looksLikePhoneDeployRequest } = require('../lib/phone-deploy-intent');
 
 function loadEnvFile(envPath) {
   if (!fs.existsSync(envPath)) return;
@@ -60,9 +61,13 @@ const PHONE_CLAUDE_PERMISSION_MODE = process.env.PHONE_CLAUDE_PERMISSION_MODE ||
 const PHONE_HAIKU_CLAUDE_MODEL = process.env.PHONE_HAIKU_CLAUDE_MODEL || PHONE_CLAUDE_MODEL;
 const PHONE_SONNET_CLAUDE_MODEL = process.env.PHONE_SONNET_CLAUDE_MODEL || process.env.CLAUDE_MODEL || 'sonnet';
 const PHONE_OPUS_CLAUDE_MODEL = process.env.PHONE_OPUS_CLAUDE_MODEL || 'opus';
+const PHONE_DEPLOY_CLAUDE_MODEL = process.env.PHONE_DEPLOY_CLAUDE_MODEL || PHONE_SONNET_CLAUDE_MODEL;
 const PHONE_HAIKU_CLAUDE_PERMISSION_MODE = process.env.PHONE_HAIKU_CLAUDE_PERMISSION_MODE || PHONE_CLAUDE_PERMISSION_MODE;
 const PHONE_SONNET_CLAUDE_PERMISSION_MODE = process.env.PHONE_SONNET_CLAUDE_PERMISSION_MODE || PHONE_CLAUDE_PERMISSION_MODE;
 const PHONE_OPUS_CLAUDE_PERMISSION_MODE = process.env.PHONE_OPUS_CLAUDE_PERMISSION_MODE || PHONE_CLAUDE_PERMISSION_MODE;
+const PHONE_DEPLOY_CLAUDE_PERMISSION_MODE =
+  process.env.PHONE_DEPLOY_CLAUDE_PERMISSION_MODE || PHONE_SONNET_CLAUDE_PERMISSION_MODE;
+const PHONE_DEPLOY_TIMEOUT_SECONDS = parsePositiveInteger(process.env.PHONE_DEPLOY_TIMEOUT_SECONDS, 900);
 
 function parseListEnv(value) {
   return String(value || '')
@@ -81,11 +86,17 @@ const PHONE_CLAUDE_ALLOWED_TOOLS = parseListEnv(process.env.PHONE_CLAUDE_ALLOWED
 const PHONE_HAIKU_CLAUDE_ALLOWED_TOOLS = parseListEnv(process.env.PHONE_HAIKU_CLAUDE_ALLOWED_TOOLS || process.env.PHONE_CLAUDE_ALLOWED_TOOLS);
 const PHONE_SONNET_CLAUDE_ALLOWED_TOOLS = parseListEnv(process.env.PHONE_SONNET_CLAUDE_ALLOWED_TOOLS || process.env.PHONE_CLAUDE_ALLOWED_TOOLS);
 const PHONE_OPUS_CLAUDE_ALLOWED_TOOLS = parseListEnv(process.env.PHONE_OPUS_CLAUDE_ALLOWED_TOOLS || process.env.PHONE_CLAUDE_ALLOWED_TOOLS);
+const PHONE_DEPLOY_CLAUDE_ALLOWED_TOOLS = parseListEnv(
+  process.env.PHONE_DEPLOY_CLAUDE_ALLOWED_TOOLS || process.env.PHONE_SONNET_CLAUDE_ALLOWED_TOOLS || process.env.PHONE_CLAUDE_ALLOWED_TOOLS
+);
 const CLAUDE_TOOLS = parseListEnv(process.env.CLAUDE_TOOLS);
 const PHONE_CLAUDE_TOOLS = parseListEnv(process.env.PHONE_CLAUDE_TOOLS);
 const PHONE_HAIKU_CLAUDE_TOOLS = parseListEnv(process.env.PHONE_HAIKU_CLAUDE_TOOLS || process.env.PHONE_CLAUDE_TOOLS);
 const PHONE_SONNET_CLAUDE_TOOLS = parseListEnv(process.env.PHONE_SONNET_CLAUDE_TOOLS || process.env.PHONE_CLAUDE_TOOLS);
 const PHONE_OPUS_CLAUDE_TOOLS = parseListEnv(process.env.PHONE_OPUS_CLAUDE_TOOLS || process.env.PHONE_CLAUDE_TOOLS);
+const PHONE_DEPLOY_CLAUDE_TOOLS = parseListEnv(
+  process.env.PHONE_DEPLOY_CLAUDE_TOOLS || 'Read,Write,Edit,Glob,Grep,Bash,Skill'
+);
 
 function normalizeSessionType(sessionType) {
   switch (sessionType) {
@@ -96,13 +107,43 @@ function normalizeSessionType(sessionType) {
       return 'phone-sonnet';
     case 'phone-opus':
       return 'phone-opus';
+    case 'phone-deploy':
+      return 'phone-deploy';
     default:
       return 'default';
   }
 }
 
-function resolveClaudeProfile(sessionType) {
-  switch (normalizeSessionType(sessionType)) {
+function isPhoneSessionType(sessionType) {
+  return normalizeSessionType(sessionType).startsWith('phone-');
+}
+
+function resolveEffectiveSessionType(sessionType, prompt = '', devicePrompt = '') {
+  const normalized = normalizeSessionType(sessionType);
+
+  if (!isPhoneSessionType(normalized)) {
+    return normalized;
+  }
+
+  if (looksLikePhoneDeployRequest(prompt, devicePrompt)) {
+    return 'phone-deploy';
+  }
+
+  return normalized;
+}
+
+function resolveRequestTimeoutSeconds(sessionType, prompt = '', devicePrompt = '', requestedTimeoutSeconds = null) {
+  const requested = parsePositiveInteger(requestedTimeoutSeconds);
+
+  if (isPhoneSessionType(sessionType) && looksLikePhoneDeployRequest(prompt, devicePrompt)) {
+    return Math.max(requested || 0, PHONE_DEPLOY_TIMEOUT_SECONDS);
+  }
+
+  return requested;
+}
+
+function resolveClaudeProfile(sessionType, prompt = '', devicePrompt = '') {
+  switch (resolveEffectiveSessionType(sessionType, prompt, devicePrompt)) {
     case 'phone-haiku':
       return {
         sessionType: 'phone-haiku',
@@ -126,6 +167,14 @@ function resolveClaudeProfile(sessionType) {
         permissionMode: PHONE_OPUS_CLAUDE_PERMISSION_MODE,
         tools: PHONE_OPUS_CLAUDE_TOOLS,
         allowedTools: PHONE_OPUS_CLAUDE_ALLOWED_TOOLS,
+      };
+    case 'phone-deploy':
+      return {
+        sessionType: 'phone-deploy',
+        model: PHONE_DEPLOY_CLAUDE_MODEL,
+        permissionMode: PHONE_DEPLOY_CLAUDE_PERMISSION_MODE,
+        tools: PHONE_DEPLOY_CLAUDE_TOOLS,
+        allowedTools: PHONE_DEPLOY_CLAUDE_ALLOWED_TOOLS,
       };
     default:
       return {
@@ -452,11 +501,10 @@ function runClaudeOnce({
   callId,
   sessionKey,
   timestamp,
-  sessionType,
+  profile,
   timeoutSeconds = null
 }) {
   const startTime = Date.now();
-  const profile = resolveClaudeProfile(sessionType);
   const resolvedTimeoutSeconds = parsePositiveInteger(timeoutSeconds);
   const requestId = nextRequestId(callId);
   const resolvedSessionKey = resolveSessionKey(callId, sessionKey);
@@ -619,6 +667,21 @@ Example response:
 
 `;
 
+const PHONE_DEPLOY_CONTEXT = `[PHONE DEPLOY EXECUTION]
+This request explicitly asks you to deploy, ship, merge, publish, or republish app-platform work.
+
+Execution rules:
+- Loading a skill only reads instructions. It does not execute the workflow.
+- Do not say deployment started or completed unless you actually ran the required commands.
+- Use Bash for the real workflow steps.
+- For commit/push, use phone-publish instead of raw git commit/git push.
+- For PR merge, use phone-merge-pr instead of raw gh pr merge.
+- Treat the deploy as incomplete until GitHub/CI/workflow state confirms the step finished or you hit a concrete blocker.
+- If something blocks execution, state the exact blocker instead of claiming the deploy is in progress.
+[END PHONE DEPLOY EXECUTION]
+
+`;
+
 // Middleware
 app.use(express.json());
 
@@ -677,8 +740,9 @@ app.post('/ask', async (req, res) => {
   const { prompt, callId, sessionKey, devicePrompt, sessionType, timeoutSeconds } = req.body;
   const startTime = Date.now();
   const timestamp = new Date().toISOString();
-  const profile = resolveClaudeProfile(sessionType);
-  const resolvedTimeoutSeconds = parsePositiveInteger(timeoutSeconds);
+  const deployIntent = looksLikePhoneDeployRequest(prompt, devicePrompt);
+  const profile = resolveClaudeProfile(sessionType, prompt, devicePrompt);
+  const resolvedTimeoutSeconds = resolveRequestTimeoutSeconds(sessionType, prompt, devicePrompt, timeoutSeconds);
   const resolvedSessionKey = resolveSessionKey(callId, sessionKey);
 
   if (!prompt) {
@@ -695,6 +759,7 @@ app.post('/ask', async (req, res) => {
   console.log(`[${timestamp}] MODEL: ${profile.model}`);
   console.log(`[${timestamp}] PERMISSION MODE: ${profile.permissionMode}`);
   console.log(`[${timestamp}] SESSION TYPE: ${profile.sessionType}`);
+  console.log(`[${timestamp}] DEPLOY INTENT: ${deployIntent}`);
   console.log(`[${timestamp}] TOOLS: ${profile.tools.length > 0 ? profile.tools.join(',') : 'default'}`);
   console.log(`[${timestamp}] TIMEOUT: ${resolvedTimeoutSeconds || 'none'}s`);
   console.log(
@@ -716,6 +781,9 @@ app.post('/ask', async (req, res) => {
     }
 
     fullPrompt += VOICE_CONTEXT;
+    if (deployIntent) {
+      fullPrompt += PHONE_DEPLOY_CONTEXT;
+    }
     fullPrompt += prompt;
 
     const { code, stdout, stderr, duration_ms } = await runClaudeOnce({
@@ -723,7 +791,7 @@ app.post('/ask', async (req, res) => {
       callId,
       sessionKey: resolvedSessionKey,
       timestamp,
-      sessionType,
+      profile,
       timeoutSeconds: resolvedTimeoutSeconds
     });
 
@@ -809,8 +877,9 @@ app.post('/ask-structured', async (req, res) => {
   } = req.body || {};
 
   const timestamp = new Date().toISOString();
-  const profile = resolveClaudeProfile(sessionType);
-  const resolvedTimeoutSeconds = parsePositiveInteger(timeoutSeconds);
+  const deployIntent = looksLikePhoneDeployRequest(prompt, devicePrompt);
+  const profile = resolveClaudeProfile(sessionType, prompt, devicePrompt);
+  const resolvedTimeoutSeconds = resolveRequestTimeoutSeconds(sessionType, prompt, devicePrompt, timeoutSeconds);
   const resolvedSessionKey = resolveSessionKey(callId, sessionKey);
 
   if (!prompt) {
@@ -827,7 +896,7 @@ app.post('/ask-structured', async (req, res) => {
 
   let fullPrompt = buildStructuredPrompt({
     devicePrompt,
-    queryContext: (includeVoiceContext ? VOICE_CONTEXT : '') + queryContext,
+    queryContext: (includeVoiceContext ? VOICE_CONTEXT + (deployIntent ? PHONE_DEPLOY_CONTEXT : '') : '') + queryContext,
     userPrompt: prompt,
   });
 
@@ -835,6 +904,7 @@ app.post('/ask-structured', async (req, res) => {
   console.log(`[${timestamp}] MODEL: ${profile.model}`);
   console.log(`[${timestamp}] PERMISSION MODE: ${profile.permissionMode}`);
   console.log(`[${timestamp}] SESSION TYPE: ${profile.sessionType}`);
+  console.log(`[${timestamp}] DEPLOY INTENT: ${deployIntent}`);
   console.log(`[${timestamp}] TOOLS: ${profile.tools.length > 0 ? profile.tools.join(',') : 'default'}`);
   console.log(`[${timestamp}] TIMEOUT: ${resolvedTimeoutSeconds || 'none'}s`);
   console.log(
@@ -855,7 +925,7 @@ app.post('/ask-structured', async (req, res) => {
         callId,
         sessionKey: resolvedSessionKey,
         timestamp,
-        sessionType,
+        profile,
         timeoutSeconds: resolvedTimeoutSeconds
       });
       totalDuration += duration_ms;
