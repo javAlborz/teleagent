@@ -31,6 +31,8 @@ const HOLD_MUSIC_DIR = path.join(STATIC_AUDIO_DIR, 'hold-music');
 const HOLD_MUSIC_URL_PREFIX = 'http://127.0.0.1:3000/static/hold-music';
 const HOLD_MUSIC_FALLBACK_FILE = path.join(STATIC_AUDIO_DIR, 'hold-music.mp3');
 const HOLD_MUSIC_FALLBACK_URL = 'http://127.0.0.1:3000/static/hold-music.mp3';
+const LOCAL_HTTP_PORT = Number.parseInt(process.env.HTTP_PORT || '3000', 10) || 3000;
+const OUTBOUND_API_URL = `http://127.0.0.1:${LOCAL_HTTP_PORT}/api/outbound-call`;
 let nextHoldMusicFileIndex = 0;
 const CANCEL_ACKNOWLEDGEMENT = 'Stopped.';
 const SPOKEN_CANCEL_ENABLED = true;
@@ -122,6 +124,143 @@ function isSpokenCancelPhrase(transcript) {
   if (wordCount > 4) return false;
 
   return SPOKEN_CANCEL_PHRASES.has(normalized);
+}
+
+function trimWords(text, maxWords = 60) {
+  const words = String(text || '')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+
+  if (words.length <= maxWords) {
+    return words.join(' ');
+  }
+
+  return `${words.slice(0, maxWords).join(' ')}...`;
+}
+
+function detectCallbackRequest(transcript) {
+  const normalized = normalizeControlTranscript(transcript);
+  if (!normalized) return null;
+
+  const hasCallbackVerb = /\b(call|phone|ring)\s+me(?:\s+back)?\b/.test(normalized) ||
+    /\bnotify\s+me\s+by\s+call\b/.test(normalized);
+
+  if (!hasCallbackVerb) {
+    return null;
+  }
+
+  const wantsCompletionCallback = /\b(when|once|after)\b/.test(normalized) &&
+    /\b(done|finished|complete|completed|finishes|finish)\b/.test(normalized);
+  const wantsPostTaskCallback = /\b(afterward|afterwards|later)\b/.test(normalized) ||
+    /\bcall\s+me(?:\s+back)?\s+(afterward|afterwards|later)\b/.test(normalized) ||
+    /\bcall\s+me\s+back\s+after\b/.test(normalized);
+  const wantsDiscussionCallback = /\b(let s|lets|we can)\s+(discuss|talk)\b/.test(normalized) ||
+    /\b(talk about|talk through|discuss|go over)\b/.test(normalized);
+
+  if (!wantsCompletionCallback && !wantsPostTaskCallback && !wantsDiscussionCallback) {
+    return null;
+  }
+
+  return {
+    mode: wantsDiscussionCallback ? 'conversation' : 'announce',
+    normalizedTranscript: normalized,
+  };
+}
+
+async function queueRuntimeCallback({
+  target,
+  message,
+  mode = 'announce',
+  deviceName = null,
+  dialUri = null,
+  callUuid,
+  transcript,
+  reason,
+}) {
+  if (!target || !message) {
+    return {
+      queued: false,
+      reason: 'missing_target_or_message',
+    };
+  }
+
+  const headers = {
+    'Content-Type': 'application/json',
+  };
+  const outboundApiToken = String(process.env.OUTBOUND_API_TOKEN || '').trim();
+
+  if (outboundApiToken) {
+    headers.Authorization = `Bearer ${outboundApiToken}`;
+  }
+
+  const payload = {
+    to: String(target),
+    message: trimWords(message, 60),
+    mode,
+  };
+
+  if (deviceName) {
+    payload.device = deviceName;
+  }
+
+  if (dialUri) {
+    payload.dialUri = String(dialUri);
+  }
+
+  try {
+    const response = await fetch(OUTBOUND_API_URL, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(payload),
+    });
+    const data = await response.json().catch(() => ({}));
+
+    if (!response.ok || !data.success) {
+      logger.warn('Runtime callback queue failed', {
+        callUuid,
+        target,
+        mode,
+        reason,
+        transcript,
+        status: response.status,
+        error: data.error || data.message || response.statusText,
+      });
+      return {
+        queued: false,
+        status: response.status,
+        error: data.error || data.message || response.statusText,
+      };
+    }
+
+    logger.info('Runtime callback queued', {
+      callUuid,
+      callbackCallId: data.callId,
+      target,
+      mode,
+      deviceName: deviceName || null,
+      reason,
+      transcript,
+    });
+
+    return {
+      queued: true,
+      callId: data.callId || null,
+    };
+  } catch (error) {
+    logger.warn('Runtime callback request failed', {
+      callUuid,
+      target,
+      mode,
+      reason,
+      transcript,
+      error: error.message,
+    });
+    return {
+      queued: false,
+      error: error.message,
+    };
+  }
 }
 
 function isUtteranceTimeoutError(error) {
@@ -290,6 +429,8 @@ function extractVoiceLine(response) {
  * @param {string} [options.sessionKey=callUuid] - Stable Claude session key for resumable context
  * @param {number} [options.sessionEndPreserveSeconds=0] - Preserve Claude session after hangup for this many seconds
  * @param {string} [options.startupAnnouncement] - Optional message to play before the normal greeting
+ * @param {string} [options.callbackTarget] - Number or extension to call back if the user hangs up before the result is spoken
+ * @param {string} [options.callbackDialUri] - Last-seen SIP contact URI for immediate callbacks to the same handset
  * @param {Function} [options.onSessionEnded] - Callback invoked with end-session result
  * @returns {Promise<void>}
  */
@@ -307,6 +448,8 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
     sessionKey = callUuid,
     sessionEndPreserveSeconds = 0,
     startupAnnouncement = null,
+    callbackTarget = null,
+    callbackDialUri = null,
     onSessionEnded = null,
   } = options;
 
@@ -326,6 +469,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
   let dtmfHandler = null;
   let claudeInFlight = false;
   let cancelRequested = false;
+  let pendingCallbackRequest = null;
 
   // Track when call ends to prevent operations on dead endpoints
   const onDialogDestroy = () => {
@@ -654,6 +798,24 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
 
       logger.info('Transcribed', { callUuid, transcript });
 
+      const callbackRequest = detectCallbackRequest(transcript);
+      if (callbackRequest) {
+        if (callbackTarget) {
+          pendingCallbackRequest = callbackRequest;
+          logger.info('Runtime callback requested', {
+            callUuid,
+            target: callbackTarget,
+            mode: callbackRequest.mode,
+            transcript: callbackRequest.normalizedTranscript,
+          });
+        } else {
+          logger.warn('Runtime callback requested without callback target', {
+            callUuid,
+            transcript: callbackRequest.normalizedTranscript,
+          });
+        }
+      }
+
       // Handle empty transcription
       if (!transcript || transcript.trim().length < 2) {
         const clarifyUrl = await ttsService.generateSpeech(
@@ -740,13 +902,12 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
       // 4. Stop hold music
       await stopHoldMusic(holdMusicPlayback);
 
-      // Check if call ended during Claude processing
-      if (!callActive) {
-        logger.info('Call ended during Claude processing', { callUuid });
-        break;
-      }
-
       if (cancelRequested) {
+        if (!callActive) {
+          logger.info('Call ended after cancel during Claude processing', { callUuid });
+          break;
+        }
+
         logger.info('Claude work canceled', { callUuid, turn: turnCount });
         const canceledUrl = await ttsService.generateSpeech(CANCEL_ACKNOWLEDGEMENT, voiceId);
         if (callActive) await endpoint.play(canceledUrl);
@@ -760,11 +921,48 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
           error: claudeResult.error
         });
 
+        if (!callActive) {
+          if (pendingCallbackRequest && callbackTarget) {
+            await queueRuntimeCallback({
+              target: callbackTarget,
+              message: claudeResult.userMessage || 'I hit a problem finishing that request.',
+              mode: pendingCallbackRequest.mode,
+              deviceName: deviceConfig?.name || null,
+              dialUri: callbackDialUri,
+              callUuid,
+              transcript: pendingCallbackRequest.normalizedTranscript,
+              reason: 'call_ended_before_error_playback',
+            });
+          }
+
+          logger.info('Call ended during Claude processing', { callUuid });
+          break;
+        }
+
         const errorUrl = await ttsService.generateSpeech(
           claudeResult.userMessage || 'Sorry, something went wrong.',
           voiceId
         );
-        if (callActive) await endpoint.play(errorUrl);
+        try {
+          if (callActive) await endpoint.play(errorUrl);
+        } catch (error) {
+          if (!callActive && pendingCallbackRequest && callbackTarget) {
+            await queueRuntimeCallback({
+              target: callbackTarget,
+              message: claudeResult.userMessage || 'I hit a problem finishing that request.',
+              mode: pendingCallbackRequest.mode,
+              deviceName: deviceConfig?.name || null,
+              dialUri: callbackDialUri,
+              callUuid,
+              transcript: pendingCallbackRequest.normalizedTranscript,
+              reason: 'call_ended_during_error_playback',
+            });
+            break;
+          }
+
+          throw error;
+        }
+        pendingCallbackRequest = null;
         continue;
       }
 
@@ -774,8 +972,45 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
       const voiceLine = extractVoiceLine(claudeResult.response);
       logger.info('Voice line', { callUuid, voiceLine });
 
+      if (!callActive) {
+        if (pendingCallbackRequest && callbackTarget) {
+          await queueRuntimeCallback({
+            target: callbackTarget,
+            message: voiceLine,
+            mode: pendingCallbackRequest.mode,
+            deviceName: deviceConfig?.name || null,
+            dialUri: callbackDialUri,
+            callUuid,
+            transcript: pendingCallbackRequest.normalizedTranscript,
+            reason: 'call_ended_before_result_playback',
+          });
+        }
+
+        logger.info('Call ended during Claude processing', { callUuid });
+        break;
+      }
+
       const responseUrl = await ttsService.generateSpeech(voiceLine, voiceId);
-      if (callActive) await endpoint.play(responseUrl);
+      try {
+        if (callActive) await endpoint.play(responseUrl);
+      } catch (error) {
+        if (!callActive && pendingCallbackRequest && callbackTarget) {
+          await queueRuntimeCallback({
+            target: callbackTarget,
+            message: voiceLine,
+            mode: pendingCallbackRequest.mode,
+            deviceName: deviceConfig?.name || null,
+            dialUri: callbackDialUri,
+            callUuid,
+            transcript: pendingCallbackRequest.normalizedTranscript,
+            reason: 'call_ended_during_result_playback',
+          });
+          break;
+        }
+
+        throw error;
+      }
+      pendingCallbackRequest = null;
 
       logger.info('Turn complete', { callUuid, turn: turnCount });
     }
@@ -855,6 +1090,8 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
 module.exports = {
   runConversationLoop,
   extractVoiceLine,
+  detectCallbackRequest,
+  queueRuntimeCallback,
   isGoodbye,
   getRandomThinkingPhrase,
   getNextHoldMusicUrl,

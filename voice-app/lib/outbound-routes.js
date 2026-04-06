@@ -22,6 +22,49 @@ var claudeBridge = null;
 var ttsService = null;
 var wsPort = 3001;
 
+function getProvidedApiToken(req) {
+  const authHeader = req.get('authorization') || '';
+  const bearerMatch = authHeader.match(/^Bearer\s+(.+)$/i);
+
+  if (bearerMatch && bearerMatch[1]) {
+    return bearerMatch[1].trim();
+  }
+
+  return (req.get('x-api-key') || '').trim();
+}
+
+function isValidDialUri(dialUri) {
+  if (typeof dialUri !== 'string') return false;
+  return /^sip:[^@\s]+@[^>\s]+$/i.test(dialUri.trim());
+}
+
+function authorizeOutboundApi(req, res, next) {
+  const configuredToken = (process.env.OUTBOUND_API_TOKEN || '').trim();
+
+  if (!configuredToken) {
+    return next();
+  }
+
+  const providedToken = getProvidedApiToken(req);
+
+  if (providedToken && providedToken === configuredToken) {
+    return next();
+  }
+
+  logger.warn('Unauthorized outbound API request', {
+    method: req.method,
+    path: req.path,
+    hasAuthorizationHeader: !!req.get('authorization'),
+    hasApiKeyHeader: !!req.get('x-api-key')
+  });
+
+  res.set('WWW-Authenticate', 'Bearer');
+  return res.status(401).json({
+    success: false,
+    error: 'unauthorized'
+  });
+}
+
 /**
  * Validate phone number format
  */
@@ -86,6 +129,10 @@ function validateRequest(body) {
     }
   }
 
+  if (body.dialUri !== undefined && !isValidDialUri(body.dialUri)) {
+    return { valid: false, error: 'Field "dialUri" must be a valid SIP URI' };
+  }
+
   return { valid: true };
 }
 
@@ -102,7 +149,7 @@ function validateRequest(body) {
  *   - callerId: Caller ID (optional)
  *   - timeoutSeconds: Ring timeout (optional, default: 30)
  */
-router.post('/outbound-call', async function(req, res) {
+router.post('/outbound-call', authorizeOutboundApi, async function(req, res) {
   var startTime = Date.now();
 
   try {
@@ -130,6 +177,7 @@ router.post('/outbound-call', async function(req, res) {
     var callerId = req.body.callerId;
     var timeoutSeconds = req.body.timeoutSeconds || 30;
     var webhookUrl = req.body.webhookUrl;
+    var dialUri = req.body.dialUri || null;
 
     // Look up device configuration
     var deviceConfig = null;
@@ -195,6 +243,7 @@ router.post('/outbound-call', async function(req, res) {
     logger.info('Processing outbound call request', {
       callId: callId,
       to: to,
+      dialUri: dialUri || undefined,
       mode: mode,
       device: deviceConfig ? deviceConfig.name : 'default',
       messageLength: message.length,
@@ -217,6 +266,7 @@ router.post('/outbound-call', async function(req, res) {
 
         var result = await initiateOutboundCall(srf, mediaServer, {
           to: to,
+          dialUri: dialUri,
           message: message,
           callerId: callerId,
           timeoutSeconds: timeoutSeconds,
@@ -256,6 +306,7 @@ router.post('/outbound-call', async function(req, res) {
               deviceConfig: deviceConfig,
               initialContext: message,
               context: context,           // NEW: pass structured context
+              callbackTarget: to,
               skipGreeting: true,
               maxTurns: deviceConfig?.maxTurns
             });
@@ -307,7 +358,7 @@ router.post('/outbound-call', async function(req, res) {
 /**
  * GET /api/call/:callId
  */
-router.get('/call/:callId', function(req, res) {
+router.get('/call/:callId', authorizeOutboundApi, function(req, res) {
   var callId = req.params.callId;
   var session = getSession(callId);
 
@@ -328,7 +379,7 @@ router.get('/call/:callId', function(req, res) {
 /**
  * GET /api/calls
  */
-router.get('/calls', function(req, res) {
+router.get('/calls', authorizeOutboundApi, function(req, res) {
   var sessions = getAllSessions();
 
   res.json({
@@ -341,7 +392,7 @@ router.get('/calls', function(req, res) {
 /**
  * POST /api/call/:callId/hangup
  */
-router.post('/call/:callId/hangup', async function(req, res) {
+router.post('/call/:callId/hangup', authorizeOutboundApi, async function(req, res) {
   var callId = req.params.callId;
   var session = getSession(callId);
 

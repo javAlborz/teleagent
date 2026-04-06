@@ -174,8 +174,8 @@ The voice-app exposes these endpoints on port 3000:
 | POST | `/api/outbound-call` | Initiate an outbound call |
 | GET | `/api/call/:callId` | Get call status |
 | GET | `/api/calls` | List active calls |
-| POST | `/api/query` | Query a device programmatically |
 | GET | `/api/devices` | List configured devices |
+| GET | `/api/device/:identifier` | Get a specific configured device |
 
 See [Outbound API Reference](voice-app/README-OUTBOUND.md) for details.
 

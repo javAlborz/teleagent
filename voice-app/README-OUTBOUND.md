@@ -10,6 +10,22 @@ The outbound calling API allows your server to call phone numbers and deliver me
 - Automated notifications
 - Two-way conversations triggered by events
 
+## Authentication
+
+If `OUTBOUND_API_TOKEN` is configured, outbound control routes require either:
+
+- `Authorization: Bearer <token>`
+- `X-API-Key: <token>`
+
+Examples below use the bearer form.
+
+## Hermes Local PBX Note
+
+On Hermes, outbound calls to the local Asterisk trunk use `SIP_TRUNK_HOST=127.0.0.1`
+and must keep `SIP_TRUNK_TRANSPORT=udp`. Without the explicit UDP transport,
+callbacks to local extensions can fail even when the handset is otherwise
+registered and reachable.
+
 ## Endpoints
 
 ### POST /api/outbound-call
@@ -120,6 +136,7 @@ Plays the message and hangs up:
 
 ```bash
 curl -X POST http://localhost:3000/api/outbound-call \
+  -H "Authorization: Bearer $OUTBOUND_API_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "to": "+15551234567",
@@ -133,6 +150,7 @@ Plays the message, then allows back-and-forth conversation:
 
 ```bash
 curl -X POST http://localhost:3000/api/outbound-call \
+  -H "Authorization: Bearer $OUTBOUND_API_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "to": "+15551234567",
@@ -191,6 +209,7 @@ When a call fails, the `reason` field indicates why:
 
 ```bash
 curl -X POST http://localhost:3000/api/outbound-call \
+  -H "Authorization: Bearer $OUTBOUND_API_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "to": "+15551234567",
@@ -202,6 +221,7 @@ curl -X POST http://localhost:3000/api/outbound-call \
 
 ```bash
 curl -X POST http://localhost:3000/api/outbound-call \
+  -H "Authorization: Bearer $OUTBOUND_API_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "to": "+15551234567",
@@ -214,10 +234,12 @@ curl -X POST http://localhost:3000/api/outbound-call \
 
 ```bash
 # Get call status
-curl http://localhost:3000/api/call/abc123-uuid
+curl -H "Authorization: Bearer $OUTBOUND_API_TOKEN" \
+  http://localhost:3000/api/call/abc123-uuid
 
 # List all active calls
-curl http://localhost:3000/api/calls
+curl -H "Authorization: Bearer $OUTBOUND_API_TOKEN" \
+  http://localhost:3000/api/calls
 ```
 
 ## Integration Examples
@@ -229,73 +251,17 @@ rest_command:
   call_alert:
     url: "http://VOICE_SERVER:3000/api/outbound-call"
     method: POST
+    headers:
+      Authorization: "Bearer YOUR_OUTBOUND_API_TOKEN"
     content_type: "application/json"
     payload: '{"to": "+15551234567", "message": "{{ message }}"}'
 ```
 
-### n8n Workflow: Automated Alert System
+### Automation Note
 
-This example workflow queries a device for status, then calls you if there's a problem.
+`/api/query` is no longer part of `voice-app`.
 
-```
-┌──────────────┐     ┌──────────────┐     ┌──────────┐     ┌──────────────┐
-│   Trigger    │ ──▶ │ Query Device │ ──▶ │ If Alert │ ──▶ │  Call User   │
-│ (Schedule)   │     │ POST /query  │     │  Needed  │     │ POST /call   │
-└──────────────┘     └──────────────┘     └──────────┘     └──────────────┘
-```
-
-**Node 1: Trigger**
-- Use Schedule Trigger (e.g., every 5 minutes) or Manual Trigger for testing
-
-**Node 2: HTTP Request - Query Device**
-```
-Method: POST
-URL: http://YOUR_SERVER:3000/api/query
-Body (JSON):
-```
-```json
-{
-  "query": "Check the system health. Alert me if anything needs attention.",
-  "device": "Morpheus",
-  "format": "json",
-  "schema": {
-    "queryType": "alert_check",
-    "requiredFields": ["call_user", "reason"],
-    "fieldGuidance": {
-      "call_user": "Boolean - true if something needs attention",
-      "reason": "One sentence explaining the situation, under 30 words"
-    }
-  },
-  "timeout": 120
-}
-```
-
-**Node 3: If - Check Alert Condition**
-```
-Condition: {{ $json.structured.call_user }} equals true
-```
-
-**Node 4: HTTP Request - Make Call (True branch only)**
-```
-Method: POST
-URL: http://YOUR_SERVER:3000/api/outbound-call
-Body (JSON):
-```
-```json
-{
-  "to": "YOUR_EXTENSION",
-  "message": "Hey! {{ $json.structured.reason }}. Want details?",
-  "mode": "conversation",
-  "device": "Morpheus"
-}
-```
-
-**How it works:**
-1. Trigger fires (on schedule or manually)
-2. Queries your device with a structured schema request
-3. Device returns JSON with `call_user: true/false` and `reason`
-4. If `call_user` is true, initiates outbound call in conversation mode
-5. You answer and can ask follow-up questions
+Automation that wants to call you should invoke `/api/outbound-call` directly after making its own decision about whether a call is needed.
 
 ### Shell Script
 
@@ -305,6 +271,7 @@ PHONE="+15551234567"
 MESSAGE="Disk space critical on server1"
 
 curl -s -X POST http://localhost:3000/api/outbound-call \
+  -H "Authorization: Bearer $OUTBOUND_API_TOKEN" \
   -H "Content-Type: application/json" \
   -d "{\"to\": \"$PHONE\", \"message\": \"$MESSAGE\"}"
 ```

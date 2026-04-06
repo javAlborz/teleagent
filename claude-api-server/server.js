@@ -68,6 +68,7 @@ const PHONE_OPUS_CLAUDE_PERMISSION_MODE = process.env.PHONE_OPUS_CLAUDE_PERMISSI
 const PHONE_DEPLOY_CLAUDE_PERMISSION_MODE =
   process.env.PHONE_DEPLOY_CLAUDE_PERMISSION_MODE || PHONE_SONNET_CLAUDE_PERMISSION_MODE;
 const PHONE_DEPLOY_TIMEOUT_SECONDS = parsePositiveInteger(process.env.PHONE_DEPLOY_TIMEOUT_SECONDS, 900);
+const CLAUDE_LOG_SENSITIVE = /^(1|true|yes)$/i.test(process.env.CLAUDE_LOG_SENSITIVE || '');
 
 function parseListEnv(value) {
   return String(value || '')
@@ -79,6 +80,30 @@ function parseListEnv(value) {
 function parsePositiveInteger(value, fallback = null) {
   const parsed = Number.parseInt(value, 10);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function valuePresence(value) {
+  return value ? 'yes' : 'no';
+}
+
+function logTextSummary(label, text, limit = 100) {
+  const value = String(text || '');
+  if (CLAUDE_LOG_SENSITIVE) {
+    console.log(`${label}: "${value.substring(0, limit)}${value.length > limit ? '...' : ''}"`);
+    return;
+  }
+
+  console.log(`${label}: chars=${value.length}`);
+}
+
+function logSessionSummary(timestamp, {
+  callId,
+  sessionKey,
+  hasExistingSession
+}) {
+  console.log(
+    `[${timestamp}] SESSION: callLinked=${valuePresence(callId)} sessionKey=${valuePresence(sessionKey)} existing=${hasExistingSession ? 'yes' : 'no'}`
+  );
 }
 
 const CLAUDE_ALLOWED_TOOLS = parseListEnv(process.env.CLAUDE_ALLOWED_TOOLS);
@@ -352,9 +377,9 @@ function scheduleSessionExpiry(sessionKey, preserveForSeconds) {
   };
 }
 
-function nextRequestId(callId) {
+function nextRequestId() {
   activeRequestSequence += 1;
-  return `${callId || 'request'}:${activeRequestSequence}`;
+  return `request:${activeRequestSequence}`;
 }
 
 function getActiveRequestBucket(callId, create = false) {
@@ -506,7 +531,7 @@ function runClaudeOnce({
 }) {
   const startTime = Date.now();
   const resolvedTimeoutSeconds = parsePositiveInteger(timeoutSeconds);
-  const requestId = nextRequestId(callId);
+  const requestId = nextRequestId();
   const resolvedSessionKey = resolveSessionKey(callId, sessionKey);
 
   const args = [
@@ -528,11 +553,11 @@ function runClaudeOnce({
 
     if (sessions.has(resolvedSessionKey)) {
       args.push('--resume', resolvedSessionKey);
-      console.log(`[${timestamp}] Resuming session: ${resolvedSessionKey}`);
+      console.log(`[${timestamp}] Resuming existing session`);
     } else {
       args.push('--session-id', resolvedSessionKey);
       sessions.set(resolvedSessionKey, true);
-      console.log(`[${timestamp}] Starting new session: ${resolvedSessionKey}`);
+      console.log(`[${timestamp}] Starting new session`);
     }
   }
 
@@ -559,7 +584,7 @@ function runClaudeOnce({
 
     if (callId) {
       registerActiveRequest(callId, requestRecord);
-      console.log(`[${timestamp}] ACTIVE REQUEST STARTED: ${callId} -> ${requestId}`);
+      console.log(`[${timestamp}] ACTIVE REQUEST STARTED: requestId=${requestId} callLinked=yes`);
     }
 
     let stdout = '';
@@ -651,6 +676,12 @@ IMPORTANT: The VOICE_RESPONSE line is what the caller HEARS. Make it conversatio
 PHONE GIT SAFETY:
 - For repo commit/push requests, use the phone-publish Bash wrapper instead of raw git commit/git push commands.
 - For GitHub PR merge requests, use the phone-merge-pr Bash wrapper instead of raw gh pr merge.
+
+PHONE CALLBACK DELIVERY: When the caller requests callback delivery (phrases like "call me when done", "phone me when done", "ring me when this finishes"):
+1. Do the requested work first.
+2. If the caller stays on the line, answer normally on the current call.
+3. If the caller hangs up before you answer, the phone runtime will place the callback automatically.
+4. Do not invoke the Call skill yourself from a live phone call unless the user explicitly wants an additional separate callback even after hearing the current answer.
 
 SLACK DELIVERY: When the caller requests delivery to Slack (phrases like "send to Slack", "post to #channel", "message me when done"):
 1. Do the requested work (research, generate content, analyze, etc.)
@@ -755,17 +786,19 @@ app.post('/ask', async (req, res) => {
   // Check if we have an existing session for this call
   const existingSession = resolvedSessionKey ? sessions.get(resolvedSessionKey) : null;
 
-  console.log(`[${timestamp}] QUERY: "${prompt.substring(0, 100)}..."`);
+  logTextSummary(`[${timestamp}] QUERY`, prompt);
   console.log(`[${timestamp}] MODEL: ${profile.model}`);
   console.log(`[${timestamp}] PERMISSION MODE: ${profile.permissionMode}`);
   console.log(`[${timestamp}] SESSION TYPE: ${profile.sessionType}`);
   console.log(`[${timestamp}] DEPLOY INTENT: ${deployIntent}`);
   console.log(`[${timestamp}] TOOLS: ${profile.tools.length > 0 ? profile.tools.join(',') : 'default'}`);
   console.log(`[${timestamp}] TIMEOUT: ${resolvedTimeoutSeconds || 'none'}s`);
-  console.log(
-    `[${timestamp}] SESSION: callId=${callId || 'none'}, sessionKey=${resolvedSessionKey || 'none'}, existing=${existingSession || 'none'}`
-  );
-  console.log(`[${timestamp}] DEVICE PROMPT: ${devicePrompt ? 'Yes (' + devicePrompt.substring(0, 30) + '...)' : 'No'}`);
+  logSessionSummary(timestamp, {
+    callId,
+    sessionKey: resolvedSessionKey,
+    hasExistingSession: !!existingSession
+  });
+  console.log(`[${timestamp}] DEVICE PROMPT: ${valuePresence(devicePrompt)}`);
 
   try {
     /**
@@ -797,8 +830,8 @@ app.post('/ask', async (req, res) => {
 
     if (code !== 0) {
       console.error(`[${new Date().toISOString()}] ERROR: Claude CLI exited with code ${code}`);
-      console.error(`STDERR: ${stderr}`);
-      console.error(`STDOUT: ${stdout.substring(0, 500)}`);
+      logTextSummary('STDERR', stderr, 500);
+      logTextSummary('STDOUT', stdout, 500);
       const errorMsg = stderr || stdout || `Exit code ${code}`;
       return res.json({ success: false, error: `Claude CLI failed: ${errorMsg}`, duration_ms });
     }
@@ -807,12 +840,10 @@ app.post('/ask', async (req, res) => {
 
     if (sessionId && resolvedSessionKey) {
       sessions.set(resolvedSessionKey, sessionId);
-      console.log(
-        `[${new Date().toISOString()}] SESSION STORED: ${resolvedSessionKey} -> ${sessionId}`
-      );
+      console.log(`[${new Date().toISOString()}] SESSION STORED: sessionKey=yes sessionId=yes`);
     }
 
-    console.log(`[${new Date().toISOString()}] RESPONSE (${duration_ms}ms): "${response.substring(0, 100)}..."`);
+    logTextSummary(`[${new Date().toISOString()}] RESPONSE (${duration_ms}ms)`, response);
 
     res.json({ success: true, response, sessionId, duration_ms });
 
@@ -900,16 +931,18 @@ app.post('/ask-structured', async (req, res) => {
     userPrompt: prompt,
   });
 
-  console.log(`[${timestamp}] STRUCTURED QUERY: "${String(prompt).substring(0, 100)}..."`);
+  logTextSummary(`[${timestamp}] STRUCTURED QUERY`, prompt);
   console.log(`[${timestamp}] MODEL: ${profile.model}`);
   console.log(`[${timestamp}] PERMISSION MODE: ${profile.permissionMode}`);
   console.log(`[${timestamp}] SESSION TYPE: ${profile.sessionType}`);
   console.log(`[${timestamp}] DEPLOY INTENT: ${deployIntent}`);
   console.log(`[${timestamp}] TOOLS: ${profile.tools.length > 0 ? profile.tools.join(',') : 'default'}`);
   console.log(`[${timestamp}] TIMEOUT: ${resolvedTimeoutSeconds || 'none'}s`);
-  console.log(
-    `[${timestamp}] SESSION: callId=${callId || 'none'}, sessionKey=${resolvedSessionKey || 'none'}, existing=${resolvedSessionKey ? (sessions.has(resolvedSessionKey) ? 'yes' : 'no') : 'none'}`
-  );
+  logSessionSummary(timestamp, {
+    callId,
+    sessionKey: resolvedSessionKey,
+    hasExistingSession: resolvedSessionKey ? sessions.has(resolvedSessionKey) : false
+  });
 
   try {
     let lastRaw = '';
@@ -1042,7 +1075,7 @@ app.post('/cancel-session', (req, res) => {
   });
 
   console.log(
-    `[${timestamp}] SESSION CANCELED: callId=${callId} sessionKey=${resolvedSessionKey || 'none'} active=${result.active} canceled=${result.canceledCount} resetSession=${result.resetSession} reason=${reason}`
+    `[${timestamp}] SESSION CANCELED: callLinked=yes sessionKey=${valuePresence(resolvedSessionKey)} active=${result.active} canceled=${result.canceledCount} resetSession=${result.resetSession} reason=${reason}`
   );
 
   return res.json({
@@ -1074,7 +1107,7 @@ app.post('/end-session', (req, res) => {
   const expiry = scheduleSessionExpiry(resolvedSessionKey, preserveSeconds);
 
   console.log(
-    `[${timestamp}] SESSION ENDED: callId=${callId || 'none'} sessionKey=${resolvedSessionKey || 'none'} hadSession=${hadSession} preserved=${expiry.preserved} ttlSeconds=${expiry.ttlSeconds} expiresAt=${expiry.expiresAt || 'none'}`
+    `[${timestamp}] SESSION ENDED: callLinked=${valuePresence(callId)} sessionKey=${valuePresence(resolvedSessionKey)} hadSession=${hadSession} preserved=${expiry.preserved} ttlSeconds=${expiry.ttlSeconds} expiresAt=${expiry.expiresAt || 'none'}`
   );
 
   res.json({

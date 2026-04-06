@@ -152,6 +152,7 @@ HTTP wrapper for the outbound call API
 """
 
 import json
+import os
 import urllib.request
 import urllib.error
 from typing import Optional, Dict, Any
@@ -161,6 +162,7 @@ from typing import Optional, Dict, Any
 # ============================================================
 
 API_BASE_URL = "http://YOUR_SERVER:3000"
+API_TOKEN = os.getenv("OUTBOUND_API_TOKEN", "")
 DEFAULT_CALLER_ID = "9000"
 TIMEOUT_SECONDS = 30
 
@@ -289,6 +291,12 @@ def sanitize_message(message: str, max_words: int = 200) -> str:
 # API CALLS
 # ============================================================
 
+def _auth_headers() -> Dict[str, str]:
+    headers = {'Content-Type': 'application/json'}
+    if API_TOKEN:
+        headers['Authorization'] = f'Bearer {API_TOKEN}'
+    return headers
+
 def initiate_call(to: str, message: str, caller_id: str = DEFAULT_CALLER_ID,
                   mode: str = "announce", device: Optional[str] = None) -> Dict[str, Any]:
     """Initiate an outbound call via the Voice API."""
@@ -307,7 +315,7 @@ def initiate_call(to: str, message: str, caller_id: str = DEFAULT_CALLER_ID,
         req = urllib.request.Request(
             url,
             data=request_body,
-            headers={'Content-Type': 'application/json'},
+            headers=_auth_headers(),
             method='POST'
         )
 
@@ -338,7 +346,7 @@ def get_call_status(call_id: str) -> Dict[str, Any]:
     """Get the status of an existing call."""
     url = f"{API_BASE_URL}/api/call/{call_id}"
 
-    req = urllib.request.Request(url, method='GET')
+    req = urllib.request.Request(url, headers=_auth_headers(), method='GET')
     with urllib.request.urlopen(req, timeout=TIMEOUT_SECONDS) as response:
         return json.loads(response.read().decode('utf-8'))
 
@@ -346,7 +354,7 @@ def list_calls() -> Dict[str, Any]:
     """List all active calls."""
     url = f"{API_BASE_URL}/api/calls"
 
-    req = urllib.request.Request(url, method='GET')
+    req = urllib.request.Request(url, headers=_auth_headers(), method='GET')
     with urllib.request.urlopen(req, timeout=TIMEOUT_SECONDS) as response:
         return json.loads(response.read().decode('utf-8'))
 ```

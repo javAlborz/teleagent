@@ -13,6 +13,31 @@ const { v4: uuidv4 } = require('uuid');
 const logger = require('./logger');
 const ttsService = require('./tts-service');
 
+function buildSipUri({ to, dialUri, sipTrunkHost, sipTrunkTransport }) {
+  if (dialUri) {
+    return dialUri;
+  }
+
+  const isExternal = to.startsWith('+');
+  const phoneNumber = isExternal ? '9' + to.replace(/^\+1?/, '') : to;
+  const trimmedHost = String(sipTrunkHost || '').trim();
+  const normalizedHost = trimmedHost.toLowerCase();
+  const normalizedTransport = String(sipTrunkTransport || '').trim().toLowerCase();
+  const inferredTransport = normalizedTransport || (
+    normalizedHost === '127.0.0.1' ||
+    normalizedHost.startsWith('127.0.0.1:') ||
+    normalizedHost === 'localhost' ||
+    normalizedHost.startsWith('localhost:')
+      ? 'udp'
+      : ''
+  );
+  const hostWithTransport = /;transport=/i.test(trimmedHost)
+    ? trimmedHost
+    : `${trimmedHost}${inferredTransport ? `;transport=${inferredTransport}` : ''}`;
+
+  return `sip:${phoneNumber}@${hostWithTransport}`;
+}
+
 /**
  * Initiate an outbound call
  *
@@ -28,6 +53,7 @@ const ttsService = require('./tts-service');
 async function initiateOutboundCall(srf, mediaServer, options) {
   const {
     to,
+    dialUri,
     message,
     callerId,
     timeoutSeconds = 30,
@@ -55,9 +81,8 @@ async function initiateOutboundCall(srf, mediaServer, options) {
     // Format SIP URI for 3CX
     // Remove '+' from E.164 format for SIP URI
     // Internal extensions: dial as-is. External (E.164 with +): add 9 prefix for PSTN
-    const isExternal = to.startsWith('+');
-    const phoneNumber = isExternal ? '9' + to.replace(/^\+1?/, '') : to;
     const sipTrunkHost = process.env.SIP_TRUNK_HOST || '10.70.7.50';
+    const sipTrunkTransport = process.env.SIP_TRUNK_TRANSPORT || '';
     const externalIp = process.env.EXTERNAL_IP || '10.70.7.81';
     const defaultCallerId = callerId || process.env.DEFAULT_CALLER_ID || '+15551234567';
 
@@ -65,7 +90,12 @@ async function initiateOutboundCall(srf, mediaServer, options) {
     const sipAuthUsername = process.env.SIP_AUTH_USERNAME;
     const sipAuthPassword = process.env.SIP_AUTH_PASSWORD;
 
-    const sipUri = 'sip:' + phoneNumber + '@' + sipTrunkHost;
+    const sipUri = buildSipUri({
+      to,
+      dialUri,
+      sipTrunkHost,
+      sipTrunkTransport
+    });
 
     logger.info('Dialing SIP URI', {
       callId,
@@ -283,6 +313,7 @@ async function hangupCall(dialog, endpoint, callId) {
 }
 
 module.exports = {
+  buildSipUri,
   initiateOutboundCall: initiateOutboundCall,
   playMessage: playMessage,
   hangupCall: hangupCall

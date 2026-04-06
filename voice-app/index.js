@@ -1,6 +1,6 @@
 /**
  * Voice Interface Application
- * Main entry point - v9 with Multi-Extension + Query API Support
+ * Main entry point - v9 with Multi-Extension + Device API Support
  */
 
 require("dotenv").config();
@@ -32,10 +32,8 @@ var outboundModule = require("./lib/outbound-routes");
 var outboundRouter = outboundModule.router;
 var setupOutboundRoutes = outboundModule.setupRoutes;
 
-// Import query routes
-var queryModule = require("./lib/query-routes");
-var queryRouter = queryModule.router;
-var setupQueryRoutes = queryModule.setupRoutes;
+// Import device routes
+var deviceRouter = require("./lib/device-routes");
 
 // Load device registry first
 // deviceRegistry is a singleton, already instantiated
@@ -82,7 +80,7 @@ var isReady = false;
 // Log startup
 console.log("\n" + "=".repeat(64));
 console.log("          Voice Interface Application Starting                 ");
-console.log("       (with Multi-Extension + Query API Support)              ");
+console.log("       (with Multi-Extension + Device API Support)             ");
 console.log("=".repeat(64));
 console.log("\nConfiguration:");
 console.log("  - drachtio:    " + config.drachtio.host + ":" + config.drachtio.port);
@@ -212,13 +210,9 @@ function initializeServers() {
   httpServer.app.use("/api", outboundRouter);
   console.log("[" + new Date().toISOString() + "] OUTBOUND Calling API enabled");
 
-  // ========== QUERY API ROUTES ==========
-  setupQueryRoutes({
-    claudeBridge: claudeBridge
-  });
-
-  httpServer.app.use("/api", queryRouter);
-  console.log("[" + new Date().toISOString() + "] QUERY API enabled (/api/query, /api/devices)");
+  // ========== DEVICE API ROUTES ==========
+  httpServer.app.use("/api", deviceRouter);
+  console.log("[" + new Date().toISOString() + "] DEVICE API enabled (/api/devices, /api/device/:identifier)");
 
   // Finalize HTTP server
   httpServer.finalize();

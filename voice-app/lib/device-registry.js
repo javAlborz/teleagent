@@ -22,7 +22,10 @@ const fs = require('fs');
 const path = require('path');
 const logger = require('./logger');
 
-const CONFIG_PATH = path.join(__dirname, '../config/devices.json');
+const CONFIG_PATHS = [
+  '/app/config/devices.json',
+  path.join(__dirname, '../config/devices.json')
+];
 
 // Default device (Morpheus) - used when config file missing or no match found
 const MORPHEUS_DEFAULT = {
@@ -46,9 +49,11 @@ class DeviceRegistry {
    */
   load() {
     try {
-      if (!fs.existsSync(CONFIG_PATH)) {
+      const configPath = CONFIG_PATHS.find(fs.existsSync);
+
+      if (!configPath) {
         logger.warn('Device config not found, using Morpheus default only', {
-          path: CONFIG_PATH
+          searchedPaths: CONFIG_PATHS
         });
         this.devices = {
           [MORPHEUS_DEFAULT.extension]: MORPHEUS_DEFAULT
@@ -60,7 +65,7 @@ class DeviceRegistry {
         return;
       }
 
-      const configData = fs.readFileSync(CONFIG_PATH, 'utf8');
+      const configData = fs.readFileSync(configPath, 'utf8');
       const devicesJson = JSON.parse(configData);
 
       if (typeof devicesJson !== 'object') {
@@ -89,6 +94,7 @@ class DeviceRegistry {
 
       this.loaded = true;
       logger.info('Device registry loaded', {
+        configPath,
         deviceCount: Object.keys(this.devices).length,
         devices: Object.keys(this.devices)
       });

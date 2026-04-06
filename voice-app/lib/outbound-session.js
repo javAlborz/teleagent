@@ -43,10 +43,10 @@ class OutboundSession extends EventEmitter {
     this.turnCount = 0;
 
     // Register in active sessions
-    activeSessions.set(callId, this);
+    activeSessions.set(this.callId, this);
 
     logger.info('Outbound session created', {
-      callId,
+      callId: this.callId,
       to: this.to,
       mode: this.mode,
       state: this.state

@@ -31,6 +31,48 @@ function extractDialedExtension(req) {
   return null;
 }
 
+function extractContactUri(req) {
+  const contact = req.get('Contact') || '';
+  const bracketMatch = contact.match(/<\s*(sip:[^>]+)\s*>/i);
+  if (bracketMatch && bracketMatch[1]) {
+    return normalizeCallbackContactUri(bracketMatch[1]);
+  }
+
+  const inlineMatch = contact.match(/\b(sip:[^;>\s]+)/i);
+  if (inlineMatch && inlineMatch[1]) {
+    return normalizeCallbackContactUri(inlineMatch[1]);
+  }
+
+  return null;
+}
+
+function normalizeCallbackContactUri(contactUri) {
+  const uri = String(contactUri || '').trim();
+  if (!uri) return null;
+
+  const uriMatch = uri.match(/^sip:([^@]+)@([^;>]+)(.*)$/i);
+  if (!uriMatch) return null;
+
+  const user = uriMatch[1].toLowerCase();
+  const hostPort = uriMatch[2].toLowerCase();
+
+  // Inbound requests from Asterisk expose its own contact header on loopback.
+  // Using that as a callback target causes voice-app to call back into Asterisk
+  // itself instead of the handset.
+  if (
+    user === 'asterisk' ||
+    user === 'claude-phone' ||
+    hostPort === '127.0.0.1' ||
+    hostPort.startsWith('127.0.0.1:') ||
+    hostPort === 'localhost' ||
+    hostPort.startsWith('localhost:')
+  ) {
+    return null;
+  }
+
+  return uri;
+}
+
 
 /**
  * Strip video tracks from SDP (FreeSWITCH doesn't support H.261 and rejects with 488)
@@ -74,6 +116,7 @@ async function handleInvite(req, res, options) {
 
   const callerId = extractCallerId(req);
   const dialedExt = extractDialedExtension(req);
+  const callbackDialUri = extractContactUri(req);
   let sessionKey = null;
   let startupAnnouncement = null;
   let sessionEndPreserveSeconds = 0;
@@ -124,6 +167,9 @@ async function handleInvite(req, res, options) {
   }
 
   console.log('[' + new Date().toISOString() + '] CALL Incoming from: ' + callerId + ' to ext: ' + (dialedExt || 'unknown'));
+  if (callbackDialUri) {
+    console.log('[' + new Date().toISOString() + '] CALL Callback contact: ' + callbackDialUri);
+  }
 
   try {
     // Strip video from SDP to avoid FreeSWITCH 488 error with unsupported video codecs
@@ -161,6 +207,8 @@ async function handleInvite(req, res, options) {
       sessionKey,
       sessionEndPreserveSeconds,
       startupAnnouncement,
+      callbackTarget: callerId,
+      callbackDialUri,
       skipGreeting,
       onSessionEnded: async (endSessionResult) => {
         if (!endSessionResult?.hadSession || !endSessionResult?.preserved || !resumeCacheExtension) {
@@ -201,5 +249,7 @@ async function handleInvite(req, res, options) {
 module.exports = {
   handleInvite: handleInvite,
   extractCallerId: extractCallerId,
-  extractDialedExtension: extractDialedExtension
+  extractDialedExtension: extractDialedExtension,
+  extractContactUri,
+  normalizeCallbackContactUri,
 };

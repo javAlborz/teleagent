@@ -10,6 +10,12 @@ services:
     container_name: drachtio
     restart: unless-stopped
     network_mode: host
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp
     command: >
       drachtio
       --contact "sip:127.0.0.1:${DRACHTIO_SIP_PORT:-5060};transport=tcp,udp"
@@ -27,6 +33,12 @@ services:
     container_name: freeswitch
     restart: unless-stopped
     network_mode: host
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp
     entrypoint: /usr/local/bin/entrypoint-hermes-freeswitch.sh
     volumes:
       - ./freeswitch/entrypoint.sh:/usr/local/bin/entrypoint-hermes-freeswitch.sh:ro
@@ -48,10 +60,20 @@ services:
     # - 30000-30100: RTP Audio (changed from 20000-20100 to avoid conflict with 3CX SBC)
 
   voice-app:
-    build: ./voice-app
+    build:
+      context: .
+      dockerfile: voice-app/Dockerfile
     container_name: voice-app
     restart: unless-stopped
     network_mode: host
+    user: "1000:1000"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     env_file:
       - .env
     volumes:

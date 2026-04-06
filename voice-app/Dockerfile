@@ -1,16 +1,17 @@
 FROM node:20-slim
 
-WORKDIR /app
+WORKDIR /app/voice-app
 
 # Install dependencies first (better caching)
-COPY package*.json ./
+COPY voice-app/package*.json ./
 RUN npm install --production
 
-# Copy application code
-COPY . .
+# Copy application code and the repo-root helper lib expected by voice-app.
+COPY voice-app/ ./
+COPY lib /app/lib
 
 # Create audio directory
-RUN mkdir -p /app/audio
+RUN mkdir -p /app/voice-app/audio
 
 # HTTP API port
 EXPOSE 3000

@@ -11,6 +11,19 @@ const PHONE_DEPLOY_TIMEOUT_SECONDS = (() => {
   const parsed = Number.parseInt(process.env.PHONE_DEPLOY_TIMEOUT_SECONDS || '', 10);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : 900;
 })();
+const CLAUDE_LOG_SENSITIVE = /^(1|true|yes)$/i.test(process.env.CLAUDE_LOG_SENSITIVE || '');
+
+function summarizeText(text, limit = 100) {
+  const value = String(text || '');
+  if (CLAUDE_LOG_SENSITIVE) {
+    return `"${value.substring(0, limit)}${value.length > limit ? '...' : ''}"`;
+  }
+  return `chars=${value.length}`;
+}
+
+function valuePresence(value) {
+  return value ? 'yes' : 'no';
+}
 
 function buildFriendlyErrorMessage(code) {
   switch (code) {
@@ -41,15 +54,9 @@ async function sendQuery(prompt, options = {}) {
 
   try {
     console.log(`[${timestamp}] CLAUDE Sending query to ${CLAUDE_API_URL}...`);
-    if (callId) {
-      console.log(`[${timestamp}] CLAUDE Session: ${callId}`);
-    }
-    if (sessionKey && sessionKey !== callId) {
-      console.log(`[${timestamp}] CLAUDE Session key: ${sessionKey}`);
-    }
-    if (devicePrompt) {
-      console.log(`[${timestamp}] CLAUDE Device prompt: ${devicePrompt.substring(0, 50)}...`);
-    }
+    console.log(
+      `[${timestamp}] CLAUDE Query meta: prompt=${summarizeText(prompt)} callLinked=${valuePresence(callId)} sessionKey=${valuePresence(sessionKey && sessionKey !== callId ? sessionKey : '')} devicePrompt=${valuePresence(devicePrompt)}`
+    );
     console.log(`[${timestamp}] CLAUDE Deploy intent: ${deployIntent}`);
     console.log(`[${timestamp}] CLAUDE Timeout: ${effectiveTimeout}s`);
 
@@ -64,9 +71,7 @@ async function sendQuery(prompt, options = {}) {
 
     if (response.data.success) {
       console.log(`[${timestamp}] CLAUDE Response received (${response.data.duration_ms}ms)`);
-      if (response.data.sessionId) {
-        console.log(`[${timestamp}] CLAUDE Session ID: ${response.data.sessionId}`);
-      }
+      console.log(`[${timestamp}] CLAUDE Session updated: ${valuePresence(response.data.sessionId)}`);
 
       return {
         success: true,
@@ -163,7 +168,7 @@ async function cancelSession(callId, options = {}) {
     );
 
     console.log(
-      `[${timestamp}] CLAUDE Session cancel requested: ${callId} active=${response.data.active} canceled=${response.data.canceledCount}`
+      `[${timestamp}] CLAUDE Session cancel requested: callLinked=yes active=${response.data.active} canceled=${response.data.canceledCount}`
     );
     return response.data;
   } catch (error) {
@@ -202,7 +207,7 @@ async function endSession(callId, options = {}) {
       }
     );
     console.log(
-      `[${timestamp}] CLAUDE Session ended: ${callId} sessionKey=${sessionKey} preserved=${response.data.preserved}`
+      `[${timestamp}] CLAUDE Session ended: callLinked=yes sessionKey=${valuePresence(sessionKey)} preserved=${response.data.preserved}`
     );
     return response.data;
   } catch (error) {

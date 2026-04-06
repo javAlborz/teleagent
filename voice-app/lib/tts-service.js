@@ -22,7 +22,7 @@ const RESPONSE_FORMAT = process.env.TTS_RESPONSE_FORMAT || 'mp3';
 const TTS_TIMEOUT_MS = parseInt(process.env.TTS_TIMEOUT_MS || '30000', 10);
 
 // Audio output directory (set via setAudioDir)
-let audioDir = path.join(__dirname, '../audio-temp');
+let audioDir = process.env.AUDIO_DIR || path.join(__dirname, '../audio-temp');
 
 function normalizeBaseUrl(rawUrl) {
   const trimmed = (rawUrl || DEFAULT_TTS_BASE_URL).trim().replace(/\/+$/, '');
