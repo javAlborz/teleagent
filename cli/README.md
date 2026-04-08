@@ -7,13 +7,13 @@ Command-line interface for Claude Phone. Single-command setup and management.
 ### One-Line Install
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/theNetworkChuck/claude-phone/main/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/javAlborz/claude-phone/main/install.sh | bash
 ```
 
 ### Manual Install
 
 ```bash
-git clone https://github.com/theNetworkChuck/claude-phone.git
+git clone https://github.com/javAlborz/claude-phone.git
 cd claude-phone/cli
 npm install
 npm link
@@ -195,7 +195,7 @@ All configuration is stored in `~/.claude-phone/`:
 
 ```bash
 # Install
-curl -sSL https://raw.githubusercontent.com/theNetworkChuck/claude-phone/main/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/javAlborz/claude-phone/main/install.sh | bash
 
 # Setup - select "Voice Server"
 # Enter your Mac's IP when prompted for API server
@@ -209,7 +209,7 @@ claude-phone start
 
 ```bash
 # Install (if not already)
-curl -sSL https://raw.githubusercontent.com/theNetworkChuck/claude-phone/main/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/javAlborz/claude-phone/main/install.sh | bash
 
 # Start API server (no setup needed)
 claude-phone api-server

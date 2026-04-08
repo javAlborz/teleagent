@@ -6,7 +6,7 @@
 
 Deploy Claude Phone's voice-app (drachtio + FreeSWITCH) on a Raspberry Pi while claude-api-server runs on the user's Mac. This "split architecture" solves Docker Desktop networking issues on Mac (where `network_mode: host` gives the VM's IP instead of the Mac's LAN IP) and enables always-on voice capability. The Pi handles SIP/media, the Mac handles Claude Code CLI.
 
-**Related Issue:** [#6 - Raspberry Pi deployment with split architecture](https://github.com/theNetworkChuck/claude-phone/issues/6)
+**Related Issue:** Historical upstream issue #6 - Raspberry Pi deployment with split architecture
 
 ## User Stories
 

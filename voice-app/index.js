@@ -54,8 +54,8 @@ var config = {
     extension: process.env.SIP_EXTENSION || "9000",
     auth_id: process.env.SIP_AUTH_ID || "",
     password: process.env.SIP_AUTH_PASSWORD || "",
-    domain: process.env.SIP_DOMAIN || "hello.networkchuck.com",
-    registrar: process.env.SIP_REGISTRAR || "hello.networkchuck.com",
+    domain: process.env.SIP_DOMAIN || "sip.example.com",
+    registrar: process.env.SIP_REGISTRAR || "sip.example.com",
     registrar_port: parseInt(process.env.SIP_REGISTRAR_PORT) || 5060,
     expiry: parseInt(process.env.SIP_EXPIRY) || 3600
   },

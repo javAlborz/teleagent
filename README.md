@@ -6,6 +6,8 @@
 
 Voice interface for Claude Code via SIP/3CX. Call your AI, and your AI can call you.
 
+This repo is the maintained continuation for the Hermes phone stack.
+
 ## What is this?
 
 Claude Phone gives your Claude Code installation a phone number. You can:
@@ -35,7 +37,7 @@ Claude Phone gives your Claude Code installation a phone number. You can:
 ### 1. Install
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/theNetworkChuck/claude-phone/main/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/javAlborz/claude-phone/main/install.sh | bash
 ```
 
 The installer will:
