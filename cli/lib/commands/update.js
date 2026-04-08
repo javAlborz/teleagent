@@ -6,7 +6,7 @@ import inquirer from 'inquirer';
 import { execSync } from 'child_process';
 import { loadConfig, saveConfig, configExists } from '../config.js';
 
-const CANONICAL_GITHUB_REPO = 'javAlborz/claude-phone';
+const CANONICAL_GITHUB_REPO = 'javAlborz/teleagent';
 
 function buildGitHubRepoUrl(repoSlug = CANONICAL_GITHUB_REPO) {
   return `https://github.com/${repoSlug}`;

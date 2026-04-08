@@ -5,7 +5,7 @@ set -e
 # Usage: curl -sSL https://raw.githubusercontent.com/.../install.sh | bash
 
 INSTALL_DIR="$HOME/.claude-phone-cli"
-REPO_URL="https://github.com/javAlborz/claude-phone.git"
+REPO_URL="https://github.com/javAlborz/teleagent.git"
 
 echo "🎯 Claude Phone CLI Installer"
 echo ""

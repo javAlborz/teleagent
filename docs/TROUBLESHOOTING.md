@@ -281,7 +281,7 @@ cat ~/.claude-phone/api-server.log
 
 1. **Check the video tutorial:** [youtu.be/cT22fTzotYc](https://youtu.be/cT22fTzotYc) covers common setup issues
 2. **Run full diagnostics:** `claude-phone doctor`
-3. **Open an issue:** [github.com/javAlborz/claude-phone/issues](https://github.com/javAlborz/claude-phone/issues)
+3. **Open an issue:** [github.com/javAlborz/teleagent/issues](https://github.com/javAlborz/teleagent/issues)
 
 When opening an issue, include:
 - Output of `claude-phone doctor`
