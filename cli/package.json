@@ -1,7 +1,7 @@
 {
   "name": "claude-phone-cli",
   "version": "1.0.0",
-  "description": "Unified CLI installer for Claude Phone voice interface",
+  "description": "Unified CLI installer for Teleagent",
   "type": "module",
   "bin": {
     "claude-phone": "./bin/claude-phone.js"
