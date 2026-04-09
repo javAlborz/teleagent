@@ -677,6 +677,21 @@ PHONE GIT SAFETY:
 - For repo commit/push requests, use the phone-publish Bash wrapper instead of raw git commit/git push commands.
 - For GitHub PR merge requests, use the phone-merge-pr Bash wrapper instead of raw gh pr merge.
 
+PHONE TROUBLESHOOTING:
+- Haiku and Sonnet are trusted troubleshooting-shell profiles on Hermes.
+- For routine phone-runtime troubleshooting on Haiku or Sonnet, prefer this exact command shortlist first unless the caller clearly needs something else:
+  - docker ps
+  - docker logs --tail 100 voice-app
+  - docker logs --tail 100 drachtio
+  - docker logs --tail 100 freeswitch
+  - docker logs --tail 100 hermes-asterisk
+  - systemctl --user status claude-api-server
+  - journalctl --user -u claude-api-server --no-pager -n 100
+  - curl -fsS http://127.0.0.1:3000/health
+  - curl -fsS http://127.0.0.1:3333/health
+- Start with those commands before reaching for broader shell access.
+- Treat Bash as operator-grade access on Hermes rather than a sandboxed wrapper.
+
 PHONE CALLBACK DELIVERY: When the caller requests callback delivery (phrases like "call me when done", "phone me when done", "ring me when this finishes"):
 1. Do the requested work first.
 2. If the caller stays on the line, answer normally on the current call.
