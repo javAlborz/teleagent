@@ -78,6 +78,13 @@ function stringifyErrorData(data) {
   }
 }
 
+function formatEmptyAudioError(response) {
+  const backend = response?.headers?.['x-zeus-tts-backend'];
+  return backend
+    ? `TTS endpoint returned empty audio payload (backend=${backend})`
+    : 'TTS endpoint returned empty audio payload';
+}
+
 /**
  * Set the audio output directory
  * @param {string} dir - Absolute path to audio directory
@@ -145,14 +152,32 @@ async function generateSpeech(text, voiceId = DEFAULT_VOICE_ID) {
       timeout: TTS_TIMEOUT_MS
     });
 
+    const audioBuffer = Buffer.isBuffer(response.data)
+      ? response.data
+      : Buffer.from(response.data || '');
+    const fileSize = audioBuffer.length;
+
+    if (fileSize === 0) {
+      logger.error('TTS endpoint returned empty audio payload', {
+        latency: Date.now() - startTime,
+        textLength: text.length,
+        voiceId: selectedVoiceId,
+        model: MODEL_ID,
+        baseUrl,
+        backend: response.headers?.['x-zeus-tts-backend'],
+        requestedVoice: response.headers?.['x-zeus-tts-requested-voice'],
+        routedVoice: response.headers?.['x-zeus-tts-routed-voice']
+      });
+      throw new Error(formatEmptyAudioError(response));
+    }
+
     // Generate filename and save audio
     const filename = generateFilename(text);
     const filepath = path.join(audioDir, filename);
 
-    fs.writeFileSync(filepath, response.data);
+    fs.writeFileSync(filepath, audioBuffer);
 
     const latency = Date.now() - startTime;
-    const fileSize = response.data.length;
 
     logger.info('Speech generation successful', {
       filename,
@@ -262,9 +287,12 @@ async function getAvailableVoices() {
 setAudioDir(audioDir);
 
 // Setup periodic cleanup (every 30 minutes)
-setInterval(() => {
+const cleanupTimer = setInterval(() => {
   cleanupOldFiles();
 }, 30 * 60 * 1000);
+if (typeof cleanupTimer.unref === 'function') {
+  cleanupTimer.unref();
+}
 
 module.exports = {
   generateSpeech,
