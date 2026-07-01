@@ -1,10 +1,13 @@
-# Claude Phone
+# Teleagent
 
 Voice interface for Claude Code via SIP/3CX. Call your AI, and your AI can call you.
 
 ## Project Overview
 
-Claude Phone gives your Claude Code installation a phone number through 3CX PBX integration:
+Teleagent gives your Claude Code installation a phone number through 3CX PBX integration.
+It is the maintained continuation of the old Claude Phone project; the CLI
+command remains `claude-phone` for compatibility.
+
 - **Inbound**: Call an extension and talk to Claude - run commands, check status, ask questions
 - **Outbound**: Your server can call YOU with alerts, then have a conversation about what to do
 
@@ -52,7 +55,7 @@ Claude Phone gives your Claude Code installation a phone number through 3CX PBX 
 ## Directory Structure
 
 ```
-claude-phone/
+teleagent/
 ├── CLAUDE.md                 # This file
 ├── CONSTITUTION.md           # DevFlow 2.0 development principles
 ├── README.md                 # User-facing documentation
@@ -154,7 +157,7 @@ claude-phone/
 
 ```bash
 # One-line install
-curl -sSL https://raw.githubusercontent.com/theNetworkChuck/claude-phone/main/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/javAlborz/teleagent/main/install.sh | bash
 
 # Setup and run
 claude-phone setup    # Interactive configuration
