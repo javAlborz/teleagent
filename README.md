@@ -59,6 +59,14 @@ If you split the deployment:
 - On the voice host: `claude-phone setup` then `claude-phone start`
 - On the API host: `claude-phone api-server`
 
+### Hermes resource envelope
+
+The tracked Compose baseline keeps the voice runtime from starving the Hermes
+jumpbox. `voice-app` and FreeSWITCH are each limited to 1 GiB RAM and 2 CPUs;
+Drachtio is limited to 384 MiB RAM and 1 CPU. Each service also has a bounded
+swap allowance and PID ceiling. These are hard containment ceilings, not
+capacity targets; raise one only after measuring a legitimate call-path peak.
+
 ## Common Commands
 
 | Command | Description |
