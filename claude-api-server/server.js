@@ -1,15 +1,15 @@
 /**
- * Claude HTTP API Server
+ * Teleagent HTTP Agent Bridge
  *
- * HTTP server that wraps Claude Code CLI with session management
+ * HTTP server that wraps Claude Code and Codex CLIs with session management
  * Runs on the API server to handle voice interface queries
  *
  * Usage:
  *   node server.js
  *
  * Endpoints:
- *   POST /ask - Send a prompt to Claude (with optional callId for session)
- *   POST /cancel-session - Cancel active Claude work for a call
+ *   POST /ask - Send a prompt to an agent (with optional callId for session)
+ *   POST /cancel-session - Cancel active agent work for a call
  *   POST /end-session - Clean up session for a call
  *   GET /health - Health check
  */
@@ -27,6 +27,13 @@ const {
   buildRepairPrompt,
 } = require('./structured');
 const { looksLikePhoneDeployRequest } = require('../lib/phone-deploy-intent');
+const {
+  buildCodexArgs,
+  normalizeCodexApprovalPolicy,
+  normalizeCodexReasoningEffort,
+  normalizeCodexSandbox,
+  parseAgentStdout,
+} = require('./agent-cli');
 
 function loadEnvFile(envPath) {
   if (!fs.existsSync(envPath)) return;
@@ -45,7 +52,7 @@ function loadEnvFile(envPath) {
   }
 }
 
-// Load the project-level .env so the voice app and Claude bridge can share bind/auth settings.
+// Load the project-level .env so the voice app and agent bridge can share bind/auth settings.
 loadEnvFile(path.join(__dirname, '..', '.env'));
 
 const HOME = process.env.HOME || os.homedir() || '/root';
@@ -54,6 +61,8 @@ const PORT = process.env.PORT || 3333;
 const BIND_HOST = process.env.CLAUDE_API_BIND_HOST || '0.0.0.0';
 const CLAUDE_API_TOKEN = process.env.CLAUDE_API_TOKEN || '';
 const CLAUDE_WORKING_DIR = process.env.CLAUDE_WORKING_DIR || HOME;
+const CODEX_WORKING_DIR = process.env.CODEX_WORKING_DIR || CLAUDE_WORKING_DIR;
+const CODEX_COMMAND = process.env.CODEX_COMMAND || 'codex';
 const CLAUDE_MODEL = process.env.CLAUDE_MODEL || 'claude-sonnet-4-20250514';
 const CLAUDE_PERMISSION_MODE = process.env.CLAUDE_PERMISSION_MODE || 'bypassPermissions';
 const PHONE_CLAUDE_MODEL = process.env.PHONE_CLAUDE_MODEL || 'haiku';
@@ -67,6 +76,46 @@ const PHONE_SONNET_CLAUDE_PERMISSION_MODE = process.env.PHONE_SONNET_CLAUDE_PERM
 const PHONE_OPUS_CLAUDE_PERMISSION_MODE = process.env.PHONE_OPUS_CLAUDE_PERMISSION_MODE || PHONE_CLAUDE_PERMISSION_MODE;
 const PHONE_DEPLOY_CLAUDE_PERMISSION_MODE =
   process.env.PHONE_DEPLOY_CLAUDE_PERMISSION_MODE || PHONE_SONNET_CLAUDE_PERMISSION_MODE;
+const PHONE_CODEX_LUNA_MODEL = process.env.PHONE_CODEX_LUNA_MODEL || 'gpt-5.6-luna';
+const PHONE_CODEX_TERRA_MODEL = process.env.PHONE_CODEX_TERRA_MODEL || 'gpt-5.6-terra';
+const PHONE_CODEX_SOL_MODEL = process.env.PHONE_CODEX_SOL_MODEL || 'gpt-5.6-sol';
+const PHONE_CODEX_DEPLOY_MODEL = process.env.PHONE_CODEX_DEPLOY_MODEL || PHONE_CODEX_SOL_MODEL;
+const PHONE_CODEX_LUNA_REASONING_EFFORT = normalizeCodexReasoningEffort(
+  process.env.PHONE_CODEX_LUNA_REASONING_EFFORT,
+  'low'
+);
+const PHONE_CODEX_TERRA_REASONING_EFFORT = normalizeCodexReasoningEffort(
+  process.env.PHONE_CODEX_TERRA_REASONING_EFFORT,
+  'medium'
+);
+const PHONE_CODEX_SOL_REASONING_EFFORT = normalizeCodexReasoningEffort(
+  process.env.PHONE_CODEX_SOL_REASONING_EFFORT,
+  'high'
+);
+const PHONE_CODEX_DEPLOY_REASONING_EFFORT = normalizeCodexReasoningEffort(
+  process.env.PHONE_CODEX_DEPLOY_REASONING_EFFORT,
+  PHONE_CODEX_SOL_REASONING_EFFORT
+);
+const PHONE_CODEX_LUNA_SANDBOX = normalizeCodexSandbox(
+  process.env.PHONE_CODEX_LUNA_SANDBOX,
+  'read-only'
+);
+const PHONE_CODEX_TERRA_SANDBOX = normalizeCodexSandbox(
+  process.env.PHONE_CODEX_TERRA_SANDBOX,
+  'workspace-write'
+);
+const PHONE_CODEX_SOL_SANDBOX = normalizeCodexSandbox(
+  process.env.PHONE_CODEX_SOL_SANDBOX,
+  'danger-full-access'
+);
+const PHONE_CODEX_DEPLOY_SANDBOX = normalizeCodexSandbox(
+  process.env.PHONE_CODEX_DEPLOY_SANDBOX,
+  'danger-full-access'
+);
+const PHONE_CODEX_APPROVAL_POLICY = normalizeCodexApprovalPolicy(
+  process.env.PHONE_CODEX_APPROVAL_POLICY,
+  'never'
+);
 const PHONE_DEPLOY_TIMEOUT_SECONDS = parsePositiveInteger(process.env.PHONE_DEPLOY_TIMEOUT_SECONDS, 900);
 const CLAUDE_LOG_SENSITIVE = /^(1|true|yes)$/i.test(process.env.CLAUDE_LOG_SENSITIVE || '');
 
@@ -106,19 +155,35 @@ function logSessionSummary(timestamp, {
   );
 }
 
+function logAgentProfile(timestamp, profile) {
+  console.log(`[${timestamp}] PROVIDER: ${profile.provider}`);
+  console.log(`[${timestamp}] MODEL: ${profile.model}`);
+  console.log(`[${timestamp}] SESSION TYPE: ${profile.sessionType}`);
+
+  if (profile.provider === 'codex') {
+    console.log(`[${timestamp}] REASONING EFFORT: ${profile.reasoningEffort}`);
+    console.log(`[${timestamp}] SANDBOX: ${profile.sandbox}`);
+    console.log(`[${timestamp}] APPROVAL POLICY: ${profile.approvalPolicy}`);
+    return;
+  }
+
+  console.log(`[${timestamp}] PERMISSION MODE: ${profile.permissionMode}`);
+  console.log(`[${timestamp}] TOOLS: ${profile.tools.length > 0 ? profile.tools.join(',') : 'default'}`);
+}
+
 const CLAUDE_ALLOWED_TOOLS = parseListEnv(process.env.CLAUDE_ALLOWED_TOOLS);
 const PHONE_CLAUDE_ALLOWED_TOOLS = parseListEnv(process.env.PHONE_CLAUDE_ALLOWED_TOOLS);
-const PHONE_HAIKU_CLAUDE_ALLOWED_TOOLS = parseListEnv(process.env.PHONE_HAIKU_CLAUDE_ALLOWED_TOOLS || process.env.PHONE_CLAUDE_ALLOWED_TOOLS);
-const PHONE_SONNET_CLAUDE_ALLOWED_TOOLS = parseListEnv(process.env.PHONE_SONNET_CLAUDE_ALLOWED_TOOLS || process.env.PHONE_CLAUDE_ALLOWED_TOOLS);
-const PHONE_OPUS_CLAUDE_ALLOWED_TOOLS = parseListEnv(process.env.PHONE_OPUS_CLAUDE_ALLOWED_TOOLS || process.env.PHONE_CLAUDE_ALLOWED_TOOLS);
+const PHONE_HAIKU_CLAUDE_ALLOWED_TOOLS = parseListEnv(process.env.PHONE_HAIKU_CLAUDE_ALLOWED_TOOLS || PHONE_CLAUDE_ALLOWED_TOOLS.join(','));
+const PHONE_SONNET_CLAUDE_ALLOWED_TOOLS = parseListEnv(process.env.PHONE_SONNET_CLAUDE_ALLOWED_TOOLS || PHONE_CLAUDE_ALLOWED_TOOLS.join(','));
+const PHONE_OPUS_CLAUDE_ALLOWED_TOOLS = parseListEnv(process.env.PHONE_OPUS_CLAUDE_ALLOWED_TOOLS || PHONE_CLAUDE_ALLOWED_TOOLS.join(','));
 const PHONE_DEPLOY_CLAUDE_ALLOWED_TOOLS = parseListEnv(
   process.env.PHONE_DEPLOY_CLAUDE_ALLOWED_TOOLS || process.env.PHONE_SONNET_CLAUDE_ALLOWED_TOOLS || process.env.PHONE_CLAUDE_ALLOWED_TOOLS
 );
 const CLAUDE_TOOLS = parseListEnv(process.env.CLAUDE_TOOLS);
 const PHONE_CLAUDE_TOOLS = parseListEnv(process.env.PHONE_CLAUDE_TOOLS);
-const PHONE_HAIKU_CLAUDE_TOOLS = parseListEnv(process.env.PHONE_HAIKU_CLAUDE_TOOLS || process.env.PHONE_CLAUDE_TOOLS);
-const PHONE_SONNET_CLAUDE_TOOLS = parseListEnv(process.env.PHONE_SONNET_CLAUDE_TOOLS || process.env.PHONE_CLAUDE_TOOLS);
-const PHONE_OPUS_CLAUDE_TOOLS = parseListEnv(process.env.PHONE_OPUS_CLAUDE_TOOLS || process.env.PHONE_CLAUDE_TOOLS);
+const PHONE_HAIKU_CLAUDE_TOOLS = parseListEnv(process.env.PHONE_HAIKU_CLAUDE_TOOLS || PHONE_CLAUDE_TOOLS.join(','));
+const PHONE_SONNET_CLAUDE_TOOLS = parseListEnv(process.env.PHONE_SONNET_CLAUDE_TOOLS || PHONE_CLAUDE_TOOLS.join(','));
+const PHONE_OPUS_CLAUDE_TOOLS = parseListEnv(process.env.PHONE_OPUS_CLAUDE_TOOLS || PHONE_CLAUDE_TOOLS.join(','));
 const PHONE_DEPLOY_CLAUDE_TOOLS = parseListEnv(
   process.env.PHONE_DEPLOY_CLAUDE_TOOLS || 'Read,Write,Edit,Glob,Grep,Bash,Skill'
 );
@@ -134,6 +199,15 @@ function normalizeSessionType(sessionType) {
       return 'phone-opus';
     case 'phone-deploy':
       return 'phone-deploy';
+    case 'phone-codex':
+    case 'phone-codex-luna':
+      return 'phone-codex-luna';
+    case 'phone-codex-terra':
+      return 'phone-codex-terra';
+    case 'phone-codex-sol':
+      return 'phone-codex-sol';
+    case 'phone-codex-deploy':
+      return 'phone-codex-deploy';
     default:
       return 'default';
   }
@@ -151,7 +225,9 @@ function resolveEffectiveSessionType(sessionType, prompt = '', devicePrompt = ''
   }
 
   if (looksLikePhoneDeployRequest(prompt, devicePrompt)) {
-    return 'phone-deploy';
+    return normalized.startsWith('phone-codex-')
+      ? 'phone-codex-deploy'
+      : 'phone-deploy';
   }
 
   return normalized;
@@ -167,10 +243,11 @@ function resolveRequestTimeoutSeconds(sessionType, prompt = '', devicePrompt = '
   return requested;
 }
 
-function resolveClaudeProfile(sessionType, prompt = '', devicePrompt = '') {
+function resolveAgentProfile(sessionType, prompt = '', devicePrompt = '') {
   switch (resolveEffectiveSessionType(sessionType, prompt, devicePrompt)) {
     case 'phone-haiku':
       return {
+        provider: 'claude',
         sessionType: 'phone-haiku',
         model: PHONE_HAIKU_CLAUDE_MODEL,
         permissionMode: PHONE_HAIKU_CLAUDE_PERMISSION_MODE,
@@ -179,6 +256,7 @@ function resolveClaudeProfile(sessionType, prompt = '', devicePrompt = '') {
       };
     case 'phone-sonnet':
       return {
+        provider: 'claude',
         sessionType: 'phone-sonnet',
         model: PHONE_SONNET_CLAUDE_MODEL,
         permissionMode: PHONE_SONNET_CLAUDE_PERMISSION_MODE,
@@ -187,6 +265,7 @@ function resolveClaudeProfile(sessionType, prompt = '', devicePrompt = '') {
       };
     case 'phone-opus':
       return {
+        provider: 'claude',
         sessionType: 'phone-opus',
         model: PHONE_OPUS_CLAUDE_MODEL,
         permissionMode: PHONE_OPUS_CLAUDE_PERMISSION_MODE,
@@ -195,14 +274,60 @@ function resolveClaudeProfile(sessionType, prompt = '', devicePrompt = '') {
       };
     case 'phone-deploy':
       return {
+        provider: 'claude',
         sessionType: 'phone-deploy',
         model: PHONE_DEPLOY_CLAUDE_MODEL,
         permissionMode: PHONE_DEPLOY_CLAUDE_PERMISSION_MODE,
         tools: PHONE_DEPLOY_CLAUDE_TOOLS,
         allowedTools: PHONE_DEPLOY_CLAUDE_ALLOWED_TOOLS,
       };
+    case 'phone-codex-luna':
+      return {
+        provider: 'codex',
+        sessionType: 'phone-codex-luna',
+        model: PHONE_CODEX_LUNA_MODEL,
+        reasoningEffort: PHONE_CODEX_LUNA_REASONING_EFFORT,
+        sandbox: PHONE_CODEX_LUNA_SANDBOX,
+        approvalPolicy: PHONE_CODEX_APPROVAL_POLICY,
+        tools: [],
+        allowedTools: [],
+      };
+    case 'phone-codex-terra':
+      return {
+        provider: 'codex',
+        sessionType: 'phone-codex-terra',
+        model: PHONE_CODEX_TERRA_MODEL,
+        reasoningEffort: PHONE_CODEX_TERRA_REASONING_EFFORT,
+        sandbox: PHONE_CODEX_TERRA_SANDBOX,
+        approvalPolicy: PHONE_CODEX_APPROVAL_POLICY,
+        tools: [],
+        allowedTools: [],
+      };
+    case 'phone-codex-sol':
+      return {
+        provider: 'codex',
+        sessionType: 'phone-codex-sol',
+        model: PHONE_CODEX_SOL_MODEL,
+        reasoningEffort: PHONE_CODEX_SOL_REASONING_EFFORT,
+        sandbox: PHONE_CODEX_SOL_SANDBOX,
+        approvalPolicy: PHONE_CODEX_APPROVAL_POLICY,
+        tools: [],
+        allowedTools: [],
+      };
+    case 'phone-codex-deploy':
+      return {
+        provider: 'codex',
+        sessionType: 'phone-codex-deploy',
+        model: PHONE_CODEX_DEPLOY_MODEL,
+        reasoningEffort: PHONE_CODEX_DEPLOY_REASONING_EFFORT,
+        sandbox: PHONE_CODEX_DEPLOY_SANDBOX,
+        approvalPolicy: PHONE_CODEX_APPROVAL_POLICY,
+        tools: [],
+        allowedTools: [],
+      };
     default:
       return {
+        provider: 'claude',
         sessionType: 'default',
         model: CLAUDE_MODEL,
         permissionMode: CLAUDE_PERMISSION_MODE,
@@ -302,9 +427,13 @@ function buildClaudeEnvironment() {
 
 // Pre-build the environment once at startup
 const claudeEnv = buildClaudeEnvironment();
+const codexEnv = { ...claudeEnv };
+delete codexEnv.CLAUDECODE;
+delete codexEnv.CLAUDE_CODE_ENTRYPOINT;
 console.log('[STARTUP] Loaded environment with', Object.keys(claudeEnv).length, 'variables');
 console.log('[STARTUP] PATH includes:', claudeEnv.PATH.split(':').slice(0, 5).join(', '), '...');
 console.log('[STARTUP] Claude working directory:', CLAUDE_WORKING_DIR);
+console.log('[STARTUP] Codex working directory:', CODEX_WORKING_DIR);
 
 // Log which API keys are available (without showing values)
 const apiKeys = Object.keys(claudeEnv).filter(k =>
@@ -312,7 +441,7 @@ const apiKeys = Object.keys(claudeEnv).filter(k =>
 );
 console.log('[STARTUP] API keys loaded:', apiKeys.join(', '));
 
-// Session storage: sessionKey -> claudeSessionId
+// Session storage: sessionKey -> { provider, sessionId }
 const sessions = new Map();
 // Active request storage: callId -> Map(requestId -> requestRecord)
 const activeRequests = new Map();
@@ -322,6 +451,46 @@ let activeRequestSequence = 0;
 
 function resolveSessionKey(callId, sessionKey) {
   return sessionKey || callId || null;
+}
+
+function getSessionRecord(sessionKey) {
+  if (!sessionKey) return null;
+
+  const record = sessions.get(sessionKey);
+  if (!record) return null;
+
+  // Normalize records created by older in-memory bridge code during development.
+  if (record === true) {
+    return { provider: 'claude', sessionId: sessionKey };
+  }
+  if (typeof record === 'string') {
+    return { provider: 'claude', sessionId: record };
+  }
+  return record;
+}
+
+function getSessionIdForProvider(sessionKey, provider) {
+  const record = getSessionRecord(sessionKey);
+  if (!record) return null;
+
+  if (record.provider !== provider) {
+    deleteSessionState(sessionKey);
+    console.warn(
+      `[${new Date().toISOString()}] SESSION PROVIDER CHANGED: previous=${record.provider} next=${provider}; starting fresh`
+    );
+    return null;
+  }
+
+  return record.sessionId || null;
+}
+
+function storeSessionState(sessionKey, provider, sessionId) {
+  if (!sessionKey) return false;
+
+  const existing = getSessionRecord(sessionKey);
+  const effectiveSessionId = sessionId || existing?.sessionId || null;
+  sessions.set(sessionKey, { provider, sessionId: effectiveSessionId });
+  return !!effectiveSessionId;
 }
 
 function clearSessionExpiryTimer(sessionKey) {
@@ -493,46 +662,46 @@ function cancelActiveRequests(callId, {
   };
 }
 
-function parseClaudeStdout(stdout) {
-  // Claude Code CLI may output JSONL; when it does, extract the `result` message.
-  // Otherwise, fall back to raw stdout.
-  let response = '';
-  let sessionId = null;
-
-  try {
-    const lines = String(stdout || '').trim().split('\n');
-    for (const line of lines) {
-      try {
-        const parsed = JSON.parse(line);
-        if (parsed.type === 'result' && parsed.result) {
-          response = parsed.result;
-          sessionId = parsed.session_id;
-        }
-      } catch {
-        // Not JSONL; ignore.
-      }
-    }
-
-    if (!response) response = String(stdout || '').trim();
-  } catch {
-    response = String(stdout || '').trim();
-  }
-
-  return { response, sessionId };
-}
-
-function runClaudeOnce({
+function buildAgentInvocation({
   fullPrompt,
-  callId,
   sessionKey,
   timestamp,
   profile,
-  timeoutSeconds = null
 }) {
-  const startTime = Date.now();
-  const resolvedTimeoutSeconds = parsePositiveInteger(timeoutSeconds);
-  const requestId = nextRequestId();
-  const resolvedSessionKey = resolveSessionKey(callId, sessionKey);
+  const provider = profile.provider || 'claude';
+  const existingSessionId = getSessionIdForProvider(sessionKey, provider);
+
+  if (sessionKey) {
+    clearSessionExpiryTimer(sessionKey);
+  }
+
+  if (provider === 'codex') {
+    const args = buildCodexArgs({
+      model: profile.model,
+      reasoningEffort: profile.reasoningEffort,
+      sandbox: profile.sandbox,
+      approvalPolicy: profile.approvalPolicy,
+      workingDirectory: CODEX_WORKING_DIR,
+      sessionId: existingSessionId,
+    });
+
+    if (sessionKey && !existingSessionId) {
+      storeSessionState(sessionKey, provider, null);
+    }
+
+    console.log(
+      `[${timestamp}] ${existingSessionId ? 'Resuming' : 'Starting'} Codex session`
+    );
+
+    return {
+      command: CODEX_COMMAND,
+      args,
+      cwd: CODEX_WORKING_DIR,
+      env: codexEnv,
+      stdinInput: fullPrompt,
+      provider,
+    };
+  }
 
   const args = [
     '-p', fullPrompt,
@@ -548,32 +717,61 @@ function runClaudeOnce({
     args.push('--allowedTools', profile.allowedTools.join(','));
   }
 
-  if (resolvedSessionKey) {
-    clearSessionExpiryTimer(resolvedSessionKey);
-
-    if (sessions.has(resolvedSessionKey)) {
-      args.push('--resume', resolvedSessionKey);
-      console.log(`[${timestamp}] Resuming existing session`);
+  if (sessionKey) {
+    if (existingSessionId) {
+      args.push('--resume', existingSessionId);
+      console.log(`[${timestamp}] Resuming Claude session`);
     } else {
-      args.push('--session-id', resolvedSessionKey);
-      sessions.set(resolvedSessionKey, true);
-      console.log(`[${timestamp}] Starting new session`);
+      args.push('--session-id', sessionKey);
+      storeSessionState(sessionKey, provider, sessionKey);
+      console.log(`[${timestamp}] Starting Claude session`);
     }
   }
 
+  return {
+    command: 'claude',
+    args,
+    cwd: CLAUDE_WORKING_DIR,
+    env: claudeEnv,
+    stdinInput: '',
+    provider,
+  };
+}
+
+function runAgentOnce({
+  fullPrompt,
+  callId,
+  sessionKey,
+  timestamp,
+  profile,
+  timeoutSeconds = null
+}) {
+  const startTime = Date.now();
+  const resolvedTimeoutSeconds = parsePositiveInteger(timeoutSeconds);
+  const requestId = nextRequestId();
+  const resolvedSessionKey = resolveSessionKey(callId, sessionKey);
+  const invocation = buildAgentInvocation({
+    fullPrompt,
+    sessionKey: resolvedSessionKey,
+    timestamp,
+    profile,
+  });
+  const providerLabel = invocation.provider === 'codex' ? 'Codex' : 'Claude';
+
   return new Promise((resolve, reject) => {
-    const claude = spawn('claude', args, {
+    const agent = spawn(invocation.command, invocation.args, {
       stdio: ['pipe', 'pipe', 'pipe'],
       shell: false,
       detached: process.platform !== 'win32',
-      cwd: CLAUDE_WORKING_DIR,
-      env: claudeEnv
+      cwd: invocation.cwd,
+      env: invocation.env
     });
 
     const requestRecord = {
       requestId,
       callId,
-      child: claude,
+      child: agent,
+      provider: invocation.provider,
       detached: process.platform !== 'win32',
       state: 'running',
       reason: null,
@@ -591,9 +789,14 @@ function runClaudeOnce({
     let stderr = '';
     let settled = false;
 
-    claude.stdin.end();
-    claude.stdout.on('data', (data) => { stdout += data.toString(); });
-    claude.stderr.on('data', (data) => { stderr += data.toString(); });
+    agent.stdin.on('error', (error) => {
+      if (error.code !== 'EPIPE') {
+        console.warn(`[${new Date().toISOString()}] ${providerLabel} stdin error: ${error.message}`);
+      }
+    });
+    agent.stdin.end(invocation.stdinInput);
+    agent.stdout.on('data', (data) => { stdout += data.toString(); });
+    agent.stderr.on('data', (data) => { stderr += data.toString(); });
 
     function cleanup() {
       if (requestRecord.killTimer) {
@@ -623,19 +826,19 @@ function runClaudeOnce({
 
     if (resolvedTimeoutSeconds) {
       requestRecord.killTimer = setTimeout(() => {
-        console.error(`[${new Date().toISOString()}] CLAUDE TIMEOUT after ${resolvedTimeoutSeconds}s; terminating request`);
+        console.error(`[${new Date().toISOString()}] ${providerLabel.toUpperCase()} TIMEOUT after ${resolvedTimeoutSeconds}s; terminating request`);
         transitionActiveRequest(requestRecord, 'timed_out', `timeout_${resolvedTimeoutSeconds}s`);
       }, resolvedTimeoutSeconds * 1000);
     }
 
-    claude.on('error', (error) => {
+    agent.on('error', (error) => {
       settleWithError(error);
     });
 
-    claude.on('close', (code) => {
+    agent.on('close', (code) => {
       const duration_ms = Date.now() - startTime;
       if (requestRecord.state === 'timed_out') {
-        const error = new Error(`Claude request timed out after ${resolvedTimeoutSeconds} seconds`);
+        const error = new Error(`${providerLabel} request timed out after ${resolvedTimeoutSeconds} seconds`);
         error.code = 'CLAUDE_TIMEOUT';
         error.stdout = stdout;
         error.stderr = stderr;
@@ -643,7 +846,7 @@ function runClaudeOnce({
         return settleWithError(error);
       }
       if (requestRecord.state === 'canceled') {
-        const error = new Error('Claude request canceled');
+        const error = new Error(`${providerLabel} request canceled`);
         error.code = 'CLAUDE_CANCELED';
         error.reason = requestRecord.reason || 'cancel_session';
         error.stdout = stdout;
@@ -651,7 +854,13 @@ function runClaudeOnce({
         error.duration_ms = duration_ms;
         return settleWithError(error);
       }
-      settleWithSuccess({ code, stdout, stderr, duration_ms });
+      settleWithSuccess({
+        code,
+        stdout,
+        stderr,
+        duration_ms,
+        provider: invocation.provider,
+      });
     });
   });
 }
@@ -659,7 +868,7 @@ function runClaudeOnce({
 /**
  * Voice Context - Prepended to all voice queries
  *
- * This tells Claude how to handle voice-specific patterns:
+ * This tells the selected agent how to handle voice-specific patterns:
  * - Output VOICE_RESPONSE for TTS (conversational, 40 words max)
  * - Output COMPLETED for status logging (12 words max)
  * - For Slack delivery requests: do the work, send to Slack, then acknowledge
@@ -787,7 +996,7 @@ app.post('/ask', async (req, res) => {
   const startTime = Date.now();
   const timestamp = new Date().toISOString();
   const deployIntent = looksLikePhoneDeployRequest(prompt, devicePrompt);
-  const profile = resolveClaudeProfile(sessionType, prompt, devicePrompt);
+  const profile = resolveAgentProfile(sessionType, prompt, devicePrompt);
   const resolvedTimeoutSeconds = resolveRequestTimeoutSeconds(sessionType, prompt, devicePrompt, timeoutSeconds);
   const resolvedSessionKey = resolveSessionKey(callId, sessionKey);
 
@@ -802,11 +1011,8 @@ app.post('/ask', async (req, res) => {
   const existingSession = resolvedSessionKey ? sessions.get(resolvedSessionKey) : null;
 
   logTextSummary(`[${timestamp}] QUERY`, prompt);
-  console.log(`[${timestamp}] MODEL: ${profile.model}`);
-  console.log(`[${timestamp}] PERMISSION MODE: ${profile.permissionMode}`);
-  console.log(`[${timestamp}] SESSION TYPE: ${profile.sessionType}`);
+  logAgentProfile(timestamp, profile);
   console.log(`[${timestamp}] DEPLOY INTENT: ${deployIntent}`);
-  console.log(`[${timestamp}] TOOLS: ${profile.tools.length > 0 ? profile.tools.join(',') : 'default'}`);
   console.log(`[${timestamp}] TIMEOUT: ${resolvedTimeoutSeconds || 'none'}s`);
   logSessionSummary(timestamp, {
     callId,
@@ -834,7 +1040,7 @@ app.post('/ask', async (req, res) => {
     }
     fullPrompt += prompt;
 
-    const { code, stdout, stderr, duration_ms } = await runClaudeOnce({
+    const { code, stdout, stderr, duration_ms, provider } = await runAgentOnce({
       fullPrompt,
       callId,
       sessionKey: resolvedSessionKey,
@@ -842,25 +1048,34 @@ app.post('/ask', async (req, res) => {
       profile,
       timeoutSeconds: resolvedTimeoutSeconds
     });
+    const providerLabel = provider === 'codex' ? 'Codex' : 'Claude';
 
     if (code !== 0) {
-      console.error(`[${new Date().toISOString()}] ERROR: Claude CLI exited with code ${code}`);
+      console.error(`[${new Date().toISOString()}] ERROR: ${providerLabel} CLI exited with code ${code}`);
       logTextSummary('STDERR', stderr, 500);
       logTextSummary('STDOUT', stdout, 500);
-      const errorMsg = stderr || stdout || `Exit code ${code}`;
-      return res.json({ success: false, error: `Claude CLI failed: ${errorMsg}`, duration_ms });
+      const parsedFailure = parseAgentStdout(provider, stdout);
+      const errorMsg = parsedFailure.error || stderr || parsedFailure.response || `Exit code ${code}`;
+      return res.json({
+        success: false,
+        provider,
+        error: `${providerLabel} CLI failed: ${errorMsg}`,
+        duration_ms,
+      });
     }
 
-    const { response, sessionId } = parseClaudeStdout(stdout);
+    const { response, sessionId } = parseAgentStdout(provider, stdout);
 
     if (sessionId && resolvedSessionKey) {
-      sessions.set(resolvedSessionKey, sessionId);
-      console.log(`[${new Date().toISOString()}] SESSION STORED: sessionKey=yes sessionId=yes`);
+      storeSessionState(resolvedSessionKey, provider, sessionId);
+      console.log(`[${new Date().toISOString()}] SESSION STORED: provider=${provider} sessionKey=yes sessionId=yes`);
     }
+
+    const effectiveSessionId = sessionId || getSessionRecord(resolvedSessionKey)?.sessionId || null;
 
     logTextSummary(`[${new Date().toISOString()}] RESPONSE (${duration_ms}ms)`, response);
 
-    res.json({ success: true, response, sessionId, duration_ms });
+    res.json({ success: true, response, sessionId: effectiveSessionId, provider, duration_ms });
 
   } catch (error) {
     const duration_ms = Date.now() - startTime;
@@ -868,6 +1083,7 @@ app.post('/ask', async (req, res) => {
 
     const payload = {
       success: false,
+      provider: profile.provider,
       error: error.message,
       duration_ms
     };
@@ -924,7 +1140,7 @@ app.post('/ask-structured', async (req, res) => {
 
   const timestamp = new Date().toISOString();
   const deployIntent = looksLikePhoneDeployRequest(prompt, devicePrompt);
-  const profile = resolveClaudeProfile(sessionType, prompt, devicePrompt);
+  const profile = resolveAgentProfile(sessionType, prompt, devicePrompt);
   const resolvedTimeoutSeconds = resolveRequestTimeoutSeconds(sessionType, prompt, devicePrompt, timeoutSeconds);
   const resolvedSessionKey = resolveSessionKey(callId, sessionKey);
 
@@ -947,11 +1163,8 @@ app.post('/ask-structured', async (req, res) => {
   });
 
   logTextSummary(`[${timestamp}] STRUCTURED QUERY`, prompt);
-  console.log(`[${timestamp}] MODEL: ${profile.model}`);
-  console.log(`[${timestamp}] PERMISSION MODE: ${profile.permissionMode}`);
-  console.log(`[${timestamp}] SESSION TYPE: ${profile.sessionType}`);
+  logAgentProfile(timestamp, profile);
   console.log(`[${timestamp}] DEPLOY INTENT: ${deployIntent}`);
-  console.log(`[${timestamp}] TOOLS: ${profile.tools.length > 0 ? profile.tools.join(',') : 'default'}`);
   console.log(`[${timestamp}] TIMEOUT: ${resolvedTimeoutSeconds || 'none'}s`);
   logSessionSummary(timestamp, {
     callId,
@@ -968,7 +1181,7 @@ app.post('/ask-structured', async (req, res) => {
 
     for (let attempt = 0; attempt <= retries; attempt++) {
       attemptsMade = attempt + 1;
-      const { code, stdout, stderr, duration_ms } = await runClaudeOnce({
+      const { code, stdout, stderr, duration_ms, provider } = await runAgentOnce({
         fullPrompt,
         callId,
         sessionKey: resolvedSessionKey,
@@ -977,12 +1190,15 @@ app.post('/ask-structured', async (req, res) => {
         timeoutSeconds: resolvedTimeoutSeconds
       });
       totalDuration += duration_ms;
+      const providerLabel = provider === 'codex' ? 'Codex' : 'Claude';
 
       if (code !== 0) {
-        lastError = `Claude CLI failed: ${stderr}`;
-        lastRaw = String(stdout || '').trim();
+        const parsedFailure = parseAgentStdout(provider, stdout);
+        lastError = `${providerLabel} CLI failed: ${parsedFailure.error || stderr || parsedFailure.response || `exit code ${code}`}`;
+        lastRaw = parsedFailure.response || '';
         return res.status(502).json({
           success: false,
+          provider,
           error: lastError,
           raw_response: lastRaw,
           duration_ms: totalDuration,
@@ -990,10 +1206,12 @@ app.post('/ask-structured', async (req, res) => {
         });
       }
 
-      const { response, sessionId } = parseClaudeStdout(stdout);
+      const { response, sessionId } = parseAgentStdout(provider, stdout);
       lastRaw = response;
 
-      if (sessionId && resolvedSessionKey) sessions.set(resolvedSessionKey, sessionId);
+      if (sessionId && resolvedSessionKey) {
+        storeSessionState(resolvedSessionKey, provider, sessionId);
+      }
 
       const parsed = tryParseJsonFromText(response);
       if (!parsed.ok) {
@@ -1003,6 +1221,7 @@ app.post('/ask-structured', async (req, res) => {
         if (validation.ok) {
           return res.json({
             success: true,
+            provider,
             data: parsed.data,
             json_text: parsed.jsonText,
             raw_response: response,
@@ -1035,6 +1254,7 @@ app.post('/ask-structured', async (req, res) => {
 
     return res.status(422).json({
       success: false,
+      provider: profile.provider,
       error: lastError,
       raw_response: lastRaw,
       duration_ms: totalDuration,
@@ -1042,7 +1262,7 @@ app.post('/ask-structured', async (req, res) => {
     });
   } catch (error) {
     console.error(`[${timestamp}] ERROR:`, error.message);
-    const payload = { success: false, error: error.message };
+    const payload = { success: false, provider: profile.provider, error: error.message };
     if (error.code) {
       payload.code = error.code;
     }
@@ -1056,7 +1276,7 @@ app.post('/ask-structured', async (req, res) => {
 /**
  * POST /cancel-session
  *
- * Cancel active Claude work for a call without ending the call itself.
+ * Cancel active agent work for a call without ending the call itself.
  *
  * Request body:
  *   {
@@ -1144,6 +1364,7 @@ app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
     service: 'claude-api-server',
+    providers: ['claude', 'codex'],
     timestamp: new Date().toISOString()
   });
 });
@@ -1154,12 +1375,13 @@ app.get('/health', (req, res) => {
  */
 app.get('/', (req, res) => {
   res.json({
-    service: 'Claude HTTP API Server',
-    version: '1.0.0',
+    service: 'Teleagent HTTP Agent Bridge',
+    version: '1.1.0',
+    providers: ['claude', 'codex'],
     endpoints: {
-      'POST /ask': 'Send a prompt to Claude',
+      'POST /ask': 'Send a prompt to the selected agent',
       'POST /ask-structured': 'Send a prompt and return validated JSON (n8n)',
-      'POST /cancel-session': 'Cancel active Claude work for a call',
+      'POST /cancel-session': 'Cancel active agent work for a call',
       'POST /end-session': 'Clean up session state for a call',
       'GET /health': 'Health check'
     }
@@ -1169,12 +1391,12 @@ app.get('/', (req, res) => {
 // Start server
 app.listen(PORT, BIND_HOST, () => {
   console.log('='.repeat(64));
-  console.log('Claude HTTP API Server');
+  console.log('Teleagent HTTP Agent Bridge');
   console.log('='.repeat(64));
   console.log(`\nListening on: http://${BIND_HOST}:${PORT}`);
   console.log(`Health check: http://localhost:${PORT}/health`);
-  console.log(`Claude API auth: ${CLAUDE_API_TOKEN ? 'enabled' : 'disabled'}`);
-  console.log('\nReady to receive Claude queries from voice interface.\n');
+  console.log(`Agent API auth: ${CLAUDE_API_TOKEN ? 'enabled' : 'disabled'}`);
+  console.log('\nReady to receive Claude and Codex queries from voice interface.\n');
 });
 
 // Graceful shutdown

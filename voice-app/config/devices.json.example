@@ -19,5 +19,26 @@
     "voiceId": "af_bella",
     "sessionType": "phone-opus",
     "prompt": "You are a helpful AI assistant. Keep voice responses under 40 words."
+  },
+  "4": {
+    "name": "Codex Luna",
+    "extension": "4",
+    "voiceId": "af_bella",
+    "sessionType": "phone-codex-luna",
+    "prompt": "You are a helpful AI assistant. Keep voice responses under 40 words."
+  },
+  "5": {
+    "name": "Codex Terra",
+    "extension": "5",
+    "voiceId": "af_bella",
+    "sessionType": "phone-codex-terra",
+    "prompt": "You are a helpful AI assistant. Keep voice responses under 40 words."
+  },
+  "6": {
+    "name": "Codex Sol",
+    "extension": "6",
+    "voiceId": "af_bella",
+    "sessionType": "phone-codex-sol",
+    "prompt": "You are a helpful AI assistant. Keep voice responses under 40 words."
   }
 }

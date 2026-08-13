@@ -10,8 +10,8 @@
  * - authId: 3CX authentication ID for SIP REGISTER
  * - password: 3CX authentication password
  * - voiceId: TTS provider voice name or ID
- * - sessionType: Claude profile selector (e.g. phone-haiku)
- * - claudeTimeoutSeconds: Claude request timeout for this phone agent
+ * - sessionType: Agent profile selector (e.g. phone-haiku or phone-codex-luna)
+ * - claudeTimeoutSeconds: Legacy-named agent request timeout for this phone agent
  * - maxTurns: Maximum conversation turns for this phone agent
  * - resumeTargetExtension: Base extension whose most recent session should be resumed
  * - resumeTtlSeconds: How long completed sessions stay resumable after hangup

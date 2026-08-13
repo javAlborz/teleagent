@@ -1,11 +1,12 @@
 {
   "name": "claude-phone",
   "version": "1.0.0",
-  "description": "Voice interface for Claude Code over SIP",
+  "description": "Voice interface for Claude Code and OpenAI Codex over SIP",
   "private": true,
   "scripts": {
-    "test": "npm run test:cli && npm run test:voice-app",
+    "test": "npm run test:cli && npm run test:api-server && npm run test:voice-app",
     "test:cli": "cd cli && npm test",
+    "test:api-server": "cd claude-api-server && node --test test/**/*.test.js",
     "test:voice-app": "cd voice-app && node --test test/**/*.test.js",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",

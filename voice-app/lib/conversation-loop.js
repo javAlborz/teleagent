@@ -5,10 +5,10 @@
  * Features:
  * - VAD-based speech detection
  * - DTMF # key to end speech early
- * - DTMF * key to cancel in-flight Claude work
+ * - DTMF * key to cancel in-flight agent work
  * - Spoken cancel phrases during the thinking phase
  * - Whisper transcription
- * - Claude API integration
+ * - Claude/Codex agent API integration
  * - TTS response generation
  * - Turn-taking audio cues (beeps)
  * - Hold music during processing
@@ -48,7 +48,7 @@ const SPOKEN_CANCEL_PHRASES = new Set([
   'cancel requests please',
 ]);
 
-// Claude Code-style thinking phrases
+// Agent thinking phrases
 const THINKING_PHRASES = [
   "Pondering...",
   "Elucidating...",
@@ -356,7 +356,7 @@ async function watchForSpokenCancel({
 }
 
 /**
- * Extract voice-friendly line from Claude's response
+ * Extract a voice-friendly line from the agent response
  * Priority: VOICE_RESPONSE > CUSTOM COMPLETED > COMPLETED > first sentence
  */
 function extractVoiceLine(response) {
@@ -420,14 +420,14 @@ function extractVoiceLine(response) {
  * @param {Object} options - Configuration options
  * @param {Object} options.audioForkServer - WebSocket audio fork server
  * @param {Object} options.whisperClient - Whisper transcription client
- * @param {Object} options.claudeBridge - Claude API bridge
+ * @param {Object} options.claudeBridge - Claude/Codex API bridge
  * @param {Object} options.ttsService - TTS service
  * @param {number} options.wsPort - WebSocket port
  * @param {string} [options.initialContext] - Context for outbound calls (why we're calling)
  * @param {boolean} [options.skipGreeting=false] - Skip greeting (for outbound, greeting already played)
  * @param {number} [options.maxTurns=20] - Maximum conversation turns
- * @param {string} [options.sessionKey=callUuid] - Stable Claude session key for resumable context
- * @param {number} [options.sessionEndPreserveSeconds=0] - Preserve Claude session after hangup for this many seconds
+ * @param {string} [options.sessionKey=callUuid] - Stable provider session key for resumable context
+ * @param {number} [options.sessionEndPreserveSeconds=0] - Preserve the agent session after hangup for this many seconds
  * @param {string} [options.startupAnnouncement] - Optional message to play before the normal greeting
  * @param {string} [options.callbackTarget] - Number or extension to call back if the user hangs up before the result is spoken
  * @param {string} [options.callbackDialUri] - Last-seen SIP contact URI for immediate callbacks to the same handset
@@ -509,10 +509,10 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
       await endpoint.play(greetingUrl);
     }
 
-    // Prime Claude with context if this is an outbound call (NON-BLOCKING)
+    // Prime the agent with context if this is an outbound call (NON-BLOCKING)
     // Fire-and-forget: we don't use the response, just establishing session context
     if (initialContext && callActive) {
-      logger.info('Priming Claude with outbound context (non-blocking)', { callUuid });
+      logger.info('Priming agent with outbound context (non-blocking)', { callUuid });
       claudeBridge.query(
         `[SYSTEM CONTEXT - DO NOT REPEAT]: You just called the user to tell them: "${initialContext}". They have answered. Now listen to their response and help them.`,
         {
@@ -692,7 +692,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
       }
 
       if (digit === '*' && claudeInFlight && !cancelRequested) {
-        logger.info('DTMF * pressed - canceling active Claude work', { callUuid });
+        logger.info('DTMF * pressed - canceling active agent work', { callUuid });
         requestCancel('dtmf_cancel', 'dtmf').catch((error) => {
           logger.warn('DTMF cancel request failed', { callUuid, error: error.message });
         });
@@ -700,7 +700,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
       }
 
       if (digit === '*') {
-        logger.info('DTMF * pressed with no active Claude work', { callUuid });
+        logger.info('DTMF * pressed with no active agent work', { callUuid });
       }
     };
 
@@ -849,8 +849,8 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
       // 2. Start hold music in background
       const holdMusicPlayback = startHoldMusic();
 
-      // 3. Query Claude
-      logger.info('Querying Claude', { callUuid, sessionKey });
+      // 3. Query the selected agent
+      logger.info('Querying agent', { callUuid, sessionKey, sessionType });
       let claudeResult;
       let spokenCancelWatcher = null;
       const spokenCancelState = { stopped: false };
@@ -904,18 +904,18 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
 
       if (cancelRequested) {
         if (!callActive) {
-          logger.info('Call ended after cancel during Claude processing', { callUuid });
+          logger.info('Call ended after cancel during agent processing', { callUuid });
           break;
         }
 
-        logger.info('Claude work canceled', { callUuid, turn: turnCount });
+        logger.info('Agent work canceled', { callUuid, turn: turnCount });
         const canceledUrl = await ttsService.generateSpeech(CANCEL_ACKNOWLEDGEMENT, voiceId);
         if (callActive) await endpoint.play(canceledUrl);
         continue;
       }
 
       if (!claudeResult.success) {
-        logger.warn('Claude query failed', {
+        logger.warn('Agent query failed', {
           callUuid,
           code: claudeResult.code || 'CLAUDE_ERROR',
           error: claudeResult.error
@@ -935,7 +935,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
             });
           }
 
-          logger.info('Call ended during Claude processing', { callUuid });
+          logger.info('Call ended during agent processing', { callUuid });
           break;
         }
 
@@ -966,7 +966,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
         continue;
       }
 
-      logger.info('Claude responded', { callUuid });
+      logger.info('Agent responded', { callUuid, provider: claudeResult.provider || null });
 
       // 5. Extract and play voice line
       const voiceLine = extractVoiceLine(claudeResult.response);
@@ -986,7 +986,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
           });
         }
 
-        logger.info('Call ended during Claude processing', { callUuid });
+        logger.info('Call ended during agent processing', { callUuid });
         break;
       }
 
@@ -1062,7 +1062,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
       audioForkServer.cancelExpectation(callUuid);
     }
 
-    // End Claude session
+    // End the provider session
     try {
       const endSessionResult = await claudeBridge.endSession(callUuid, {
         sessionKey,

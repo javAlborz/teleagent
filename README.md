@@ -1,12 +1,12 @@
 # Teleagent
 
-Voice interface for Claude Code over SIP.
+Voice interface for Claude Code and OpenAI Codex over SIP.
 
 Teleagent is the maintained continuation of the old Claude Phone project for the Hermes phone stack. The CLI command remains `claude-phone` for compatibility.
 
 ## What It Does
 
-- Inbound calls: call an extension and talk to Claude
+- Inbound calls: call an extension and talk to Claude or Codex
 - Outbound calls: have your server call you with alerts or task results
 - Per-extension personalities: different names, voices, and prompts per device
 
@@ -15,7 +15,8 @@ Teleagent is the maintained continuation of the old Claude Phone project for the
 - 3CX cloud account or compatible SIP setup
 - OpenAI-compatible TTS endpoint
 - OpenAI-compatible STT endpoint
-- Claude Code CLI with an active subscription
+- Claude Code CLI with an active subscription for Claude profiles
+- Codex CLI with an active ChatGPT login for Codex profiles
 - macOS or Linux
 
 ## Quick Start
@@ -37,7 +38,7 @@ claude-phone setup
 The setup wizard supports:
 
 - `Voice Server`: voice services only
-- `API Server`: Claude bridge only
+- `API Server`: Claude/Codex bridge only
 - `Both`: all-in-one single-machine install
 
 ### 3. Start
@@ -50,9 +51,9 @@ claude-phone start
 
 | Mode | Best For | Runs |
 |------|----------|------|
-| `Both` | Single always-on Mac/Linux host | `voice-app` and `claude-api-server` |
+| `Both` | Single always-on Mac/Linux host | `voice-app` and the Claude/Codex bridge |
 | `Voice Server` | Pi or dedicated SIP/voice box | `voice-app` and supporting containers |
-| `API Server` | Separate machine with Claude Code | `claude-api-server` only |
+| `API Server` | Separate machine with the desired agent CLIs | `claude-api-server` only |
 
 If you split the deployment:
 
@@ -66,6 +67,8 @@ jumpbox. `voice-app` and FreeSWITCH are each limited to 1 GiB RAM and 2 CPUs;
 Drachtio is limited to 384 MiB RAM and 1 CPU. Each service also has a bounded
 swap allowance and PID ceiling. These are hard containment ceilings, not
 capacity targets; raise one only after measuring a legitimate call-path peak.
+The host-side agent bridge and all of its CLI descendants are separately capped
+by the tracked user unit at 6 GiB RAM, 1 GiB swap, 4 CPUs, and 1536 tasks.
 
 ## Common Commands
 
@@ -95,6 +98,17 @@ Example:
 - `9000`: general assistant
 - `9002`: monitoring bot
 
+The Hermes deployment provides paired fresh/resume profiles:
+
+| Fresh | Resume | Agent | Runtime boundary |
+| --- | --- | --- | --- |
+| `1` | `11` | Claude Haiku | Configured read/troubleshooting tools |
+| `2` | `22` | Claude Sonnet | Configured edit/troubleshooting tools |
+| `3` | `33` | Claude Opus | Operator-grade Claude tools |
+| `4` | `44` | Codex GPT-5.6 Luna | Read-only, low reasoning |
+| `5` | `55` | Codex GPT-5.6 Terra | Workspace-write, medium reasoning |
+| `6` | `66` | Codex GPT-5.6 Sol | Full access, high reasoning |
+
 ## API
 
 `voice-app` exposes these endpoints on port `3000`:
@@ -118,6 +132,18 @@ TTS_BASE_URL=http://127.0.0.1:18000/v1
 TTS_VOICE=af_bella
 STT_BASE_URL=http://127.0.0.1:18001/v1
 ```
+
+Codex phone profiles use the normal Codex CLI login for the service account:
+
+```bash
+codex login status
+```
+
+Their models, reasoning efforts, working directory, and sandboxes are set with
+the `PHONE_CODEX_*` variables documented in `.env.example`. The bridge runs
+phone requests with approval policy `never`; Luna/Terra/Sol capability is
+therefore determined by their explicit `read-only`, `workspace-write`, and
+`danger-full-access` sandbox settings.
 
 User configuration lives in `~/.claude-phone/config.json` with restricted permissions.
 

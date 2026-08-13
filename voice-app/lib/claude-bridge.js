@@ -1,6 +1,6 @@
 /**
- * Claude HTTP API Bridge
- * HTTP client for Claude API server with session management
+ * Teleagent HTTP Agent Bridge client
+ * HTTP client for the Claude/Codex API server with session management
  */
 
 const axios = require('axios');
@@ -53,12 +53,12 @@ async function sendQuery(prompt, options = {}) {
   const effectiveTimeout = deployIntent ? Math.max(timeout, PHONE_DEPLOY_TIMEOUT_SECONDS) : timeout;
 
   try {
-    console.log(`[${timestamp}] CLAUDE Sending query to ${CLAUDE_API_URL}...`);
+    console.log(`[${timestamp}] AGENT Sending query to ${CLAUDE_API_URL}...`);
     console.log(
-      `[${timestamp}] CLAUDE Query meta: prompt=${summarizeText(prompt)} callLinked=${valuePresence(callId)} sessionKey=${valuePresence(sessionKey && sessionKey !== callId ? sessionKey : '')} devicePrompt=${valuePresence(devicePrompt)}`
+      `[${timestamp}] AGENT Query meta: prompt=${summarizeText(prompt)} callLinked=${valuePresence(callId)} sessionKey=${valuePresence(sessionKey && sessionKey !== callId ? sessionKey : '')} devicePrompt=${valuePresence(devicePrompt)}`
     );
-    console.log(`[${timestamp}] CLAUDE Deploy intent: ${deployIntent}`);
-    console.log(`[${timestamp}] CLAUDE Timeout: ${effectiveTimeout}s`);
+    console.log(`[${timestamp}] AGENT Deploy intent: ${deployIntent}`);
+    console.log(`[${timestamp}] AGENT Timeout: ${effectiveTimeout}s`);
 
     const response = await axios.post(
       `${CLAUDE_API_URL}/ask`,
@@ -70,13 +70,14 @@ async function sendQuery(prompt, options = {}) {
     );
 
     if (response.data.success) {
-      console.log(`[${timestamp}] CLAUDE Response received (${response.data.duration_ms}ms)`);
-      console.log(`[${timestamp}] CLAUDE Session updated: ${valuePresence(response.data.sessionId)}`);
+      console.log(`[${timestamp}] AGENT Response received: provider=${response.data.provider || 'claude'} duration=${response.data.duration_ms}ms`);
+      console.log(`[${timestamp}] AGENT Session updated: ${valuePresence(response.data.sessionId)}`);
 
       return {
         success: true,
         response: response.data.response,
         sessionId: response.data.sessionId || null,
+        provider: response.data.provider || null,
         duration_ms: response.data.duration_ms || null,
       };
     }
@@ -85,7 +86,8 @@ async function sendQuery(prompt, options = {}) {
     return {
       success: false,
       code,
-      error: response.data.error || 'Claude API returned failure',
+      provider: response.data.provider || null,
+      error: response.data.error || 'Agent API returned failure',
       reason: response.data.reason || null,
       duration_ms: response.data.duration_ms || null,
       userMessage: buildFriendlyErrorMessage(code),
@@ -93,7 +95,7 @@ async function sendQuery(prompt, options = {}) {
 
   } catch (error) {
     if (error.code === 'ECONNREFUSED' || error.code === 'EHOSTUNREACH' || error.code === 'ENETUNREACH') {
-      console.warn(`[${timestamp}] CLAUDE API server unreachable (${error.code})`);
+      console.warn(`[${timestamp}] AGENT API server unreachable (${error.code})`);
       return {
         success: false,
         code: 'CLAUDE_API_UNAVAILABLE',
@@ -104,7 +106,7 @@ async function sendQuery(prompt, options = {}) {
     }
 
     if (error.code === 'ETIMEDOUT' || error.code === 'ECONNABORTED') {
-      console.error(`[${timestamp}] CLAUDE Timeout after ${effectiveTimeout} seconds`);
+      console.error(`[${timestamp}] AGENT Timeout after ${effectiveTimeout} seconds`);
       return {
         success: false,
         code: 'CLAUDE_TIMEOUT',
@@ -114,7 +116,7 @@ async function sendQuery(prompt, options = {}) {
       };
     }
 
-    console.error(`[${timestamp}] CLAUDE Error:`, error.message);
+    console.error(`[${timestamp}] AGENT Error:`, error.message);
     return {
       success: false,
       code: 'CLAUDE_ERROR',
@@ -126,14 +128,14 @@ async function sendQuery(prompt, options = {}) {
 }
 
 /**
- * Query Claude via HTTP API with session support
- * @param {string} prompt - The prompt/question to send to Claude
+ * Query the configured agent via HTTP API with session support
+ * @param {string} prompt - The prompt/question to send to the agent
  * @param {Object} options - Options including callId for session management
  * @param {string} options.callId - Call UUID for active request cancellation
- * @param {string} [options.sessionKey] - Stable Claude session UUID for resumable context
+ * @param {string} [options.sessionKey] - Stable agent session UUID for resumable context
  * @param {string} options.devicePrompt - Device-specific personality prompt
  * @param {number} options.timeout - Timeout in seconds (default: 30, AC27)
- * @returns {Promise<string>} Claude's response
+ * @returns {Promise<string>} Agent response
  */
 async function query(prompt, options = {}) {
   const result = await sendQuery(prompt, options);
@@ -168,11 +170,11 @@ async function cancelSession(callId, options = {}) {
     );
 
     console.log(
-      `[${timestamp}] CLAUDE Session cancel requested: callLinked=yes active=${response.data.active} canceled=${response.data.canceledCount}`
+      `[${timestamp}] AGENT Session cancel requested: callLinked=yes active=${response.data.active} canceled=${response.data.canceledCount}`
     );
     return response.data;
   } catch (error) {
-    console.warn(`[${timestamp}] CLAUDE Failed to cancel session: ${error.message}`);
+    console.warn(`[${timestamp}] AGENT Failed to cancel session: ${error.message}`);
     return {
       success: false,
       error: error.message,
@@ -181,10 +183,10 @@ async function cancelSession(callId, options = {}) {
 }
 
 /**
- * End a Claude session when a call ends
+ * End an agent session when a call ends
  * @param {string} callId - The call UUID to end the session for
  * @param {Object} options - Session end options
- * @param {string} [options.sessionKey] - Stable Claude session UUID
+ * @param {string} [options.sessionKey] - Stable agent session UUID
  * @param {number} [options.preserveForSeconds=0] - Keep session resumable for this many seconds
  */
 async function endSession(callId, options = {}) {
@@ -207,12 +209,12 @@ async function endSession(callId, options = {}) {
       }
     );
     console.log(
-      `[${timestamp}] CLAUDE Session ended: callLinked=yes sessionKey=${valuePresence(sessionKey)} preserved=${response.data.preserved}`
+      `[${timestamp}] AGENT Session ended: callLinked=yes sessionKey=${valuePresence(sessionKey)} preserved=${response.data.preserved}`
     );
     return response.data;
   } catch (error) {
     // Non-critical, just log
-    console.warn(`[${timestamp}] CLAUDE Failed to end session: ${error.message}`);
+    console.warn(`[${timestamp}] AGENT Failed to end session: ${error.message}`);
     return {
       success: false,
       error: error.message,
@@ -225,7 +227,7 @@ async function endSession(callId, options = {}) {
 }
 
 /**
- * Check if Claude API is available
+ * Check if the agent API is available
  * @returns {Promise<boolean>} True if API is reachable
  */
 async function isAvailable() {
