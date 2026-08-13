@@ -255,7 +255,7 @@ class OpenAIRealtimeClient extends EventEmitter {
         audio: {
           input,
           output: {
-            format: { type: 'audio/pcm' },
+            format: { type: 'audio/pcm', rate: PCM_SAMPLE_RATE },
             voice: this.voice,
           },
         },
