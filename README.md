@@ -114,6 +114,19 @@ The Hermes deployment provides paired fresh/resume profiles:
 | `6` | `66` | Codex GPT-5.6 Sol | Full access, high reasoning |
 | `7` | `77` | OpenAI Realtime conductor | Directs any Claude/Codex profile |
 
+Dial `9` from the authenticated owner handset to activate the global voice
+emergency stop. It immediately locks new phone-originated dispatch, cancels
+pending jobs, and terminates running phone-originated Claude/Codex process
+groups. The lock persists across service restarts and does not stop unrelated
+terminal or API sessions.
+
+Review and clear the lock locally on Hermes:
+
+```bash
+npm run voice-control -- status
+npm run voice-control -- unlock
+```
+
 Codex Luna and Terra cannot auto-escalate a deployment request. The bridge
 instructs the caller to dial `6`; only Sol may enter the privileged Codex deploy
 profile.
@@ -137,6 +150,9 @@ separate provider session. See [OpenAI Realtime Voice](docs/OPENAI-REALTIME.md).
 | `GET` | `/api/devices` | List devices |
 | `GET` | `/api/device/:identifier` | Get one device |
 | `GET` | `/api/realtime-health` | Check Realtime configuration and state storage |
+| `POST` | `/api/voice-control/stop` | Loopback-only global emergency stop |
+| `GET` | `/api/voice-control/status` | Read the local voice execution lock |
+| `POST` | `/api/voice-control/unlock` | Authenticated operator unlock |
 
 See [Outbound API Reference](voice-app/README-OUTBOUND.md).
 

@@ -32,9 +32,13 @@ test('agent bridge routes providers, sessions, errors, and privileged deploys', 
   const tempDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'teleagent-bridge-test-'));
   const fakeAgentPath = path.join(tempDirectory, 'fake-agent.js');
   const invocationLog = path.join(tempDirectory, 'invocations.jsonl');
+  const stubbornChildPidFile = path.join(tempDirectory, 'stubborn-child.pid');
+  const stubbornChildReadyFile = path.join(tempDirectory, 'stubborn-child.ready');
+  const voiceLockFile = path.join(tempDirectory, 'voice-execution.lock.json');
   const fakeAgentSource = `#!/usr/bin/env node
 'use strict';
 const fs = require('node:fs');
+const { spawn } = require('node:child_process');
 const args = process.argv.slice(2);
 let input = '';
 process.stdin.on('data', chunk => { input += chunk.toString(); });
@@ -59,7 +63,15 @@ process.stdin.on('end', () => {
     process.stdout.write(JSON.stringify({ type: 'result', result: 'claude-ok', session_id: sessionId }) + '\\n');
   };
 
-  if (prompt.includes('SLOW_TEST')) setTimeout(respond, 5000);
+  if (prompt.includes('STUBBORN_CHILD_TEST')) {
+    const child = spawn(process.execPath, ['-e', "const fs = require('node:fs'); process.on('SIGTERM', () => {}); fs.writeFileSync(process.env.FAKE_CHILD_READY_FILE, 'ready'); setInterval(() => {}, 1000);"], {
+      stdio: 'ignore',
+      env: process.env,
+    });
+    fs.writeFileSync(process.env.FAKE_CHILD_PID_FILE, String(child.pid));
+    setTimeout(respond, 5000);
+  }
+  else if (prompt.includes('SLOW_TEST')) setTimeout(respond, 5000);
   else respond();
 });
 `;
@@ -84,7 +96,10 @@ process.stdin.on('end', () => {
       PHONE_CODEX_TERRA_WORKING_DIR: tempDirectory,
       PHONE_CODEX_SOL_WORKING_DIR: tempDirectory,
       PHONE_CODEX_DEPLOY_WORKING_DIR: tempDirectory,
+      VOICE_EXECUTION_LOCK_FILE: voiceLockFile,
       FAKE_AGENT_LOG: invocationLog,
+      FAKE_CHILD_PID_FILE: stubbornChildPidFile,
+      FAKE_CHILD_READY_FILE: stubbornChildReadyFile,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -94,6 +109,13 @@ process.stdin.on('end', () => {
 
   t.after(() => {
     if (!server.killed) server.kill('SIGTERM');
+    if (fs.existsSync(stubbornChildPidFile)) {
+      try {
+        process.kill(Number.parseInt(fs.readFileSync(stubbornChildPidFile, 'utf8'), 10), 'SIGKILL');
+      } catch {
+        // The panic-stop escalation should already have removed it.
+      }
+    }
     fs.rmSync(tempDirectory, { recursive: true, force: true });
   });
 
@@ -248,6 +270,95 @@ process.stdin.on('end', () => {
     const canceledBody = await (await slowRequest).json();
     assert.equal(canceledBody.code, 'CLAUDE_CANCELED');
     assert.equal(canceledBody.agentCode, 'AGENT_CANCELED');
+  });
+
+  await t.test('panic stop kills all voice requests, persists the lock, and preserves non-phone API work', async () => {
+    const firstVoiceRequest = post('/ask', {
+      prompt: 'SLOW_TEST voice panic one',
+      sessionType: 'phone-codex-sol',
+      timeoutSeconds: 10,
+      callId: 'panic-call-one',
+      sessionKey: 'panic-session-one',
+    });
+    const secondVoiceRequest = post('/ask', {
+      prompt: 'SLOW_TEST voice panic two',
+      sessionType: 'phone-sonnet',
+      timeoutSeconds: 10,
+      sessionKey: 'panic-session-two',
+    });
+    const stubbornVoiceRequest = post('/ask', {
+      prompt: 'STUBBORN_CHILD_TEST voice panic child',
+      sessionType: 'phone-codex-sol',
+      timeoutSeconds: 10,
+      callId: 'panic-call-child',
+      sessionKey: 'panic-session-child',
+    });
+    await waitFor(() => {
+      if (!fs.existsSync(invocationLog)) return false;
+      const log = fs.readFileSync(invocationLog, 'utf8');
+      return log.includes('voice panic one') &&
+        log.includes('voice panic two') &&
+        log.includes('voice panic child') &&
+        fs.existsSync(stubbornChildPidFile) &&
+        fs.existsSync(stubbornChildReadyFile);
+    });
+
+    const stopped = await post(
+      '/voice-control/stop?source=asterisk_1001&reason=voice_panic_stop',
+      {},
+      false
+    );
+    assert.equal(stopped.status, 200);
+    const stoppedBody = await stopped.json();
+    assert.equal(stoppedBody.success, true);
+    assert.equal(stoppedBody.canceledCount, 3);
+    assert.ok(stoppedBody.clearedSessionCount >= 3);
+    assert.equal(stoppedBody.voiceExecution.locked, true);
+    assert.equal(fs.existsSync(voiceLockFile), true);
+
+    for (const pending of [firstVoiceRequest, secondVoiceRequest, stubbornVoiceRequest]) {
+      const body = await (await pending).json();
+      assert.equal(body.agentCode, 'AGENT_CANCELED');
+      assert.equal(body.reason, 'voice_panic_stop');
+    }
+
+    const stubbornChildPid = Number.parseInt(fs.readFileSync(stubbornChildPidFile, 'utf8'), 10);
+    await waitFor(() => {
+      try {
+        process.kill(stubbornChildPid, 0);
+        return false;
+      } catch (error) {
+        return error.code === 'ESRCH';
+      }
+    }, 5000);
+
+    const blocked = await post('/ask', {
+      prompt: 'Inspect after panic stop',
+      sessionType: 'phone-codex-luna',
+    });
+    assert.equal(blocked.status, 423);
+    const blockedBody = await blocked.json();
+    assert.equal(blockedBody.agentCode, 'AGENT_VOICE_EXECUTION_LOCKED');
+
+    const ordinaryApi = await post('/ask', {
+      prompt: 'Ordinary API work remains available',
+      sessionType: 'default',
+    });
+    assert.equal(ordinaryApi.status, 200);
+    assert.equal((await ordinaryApi.json()).success, true);
+
+    const unauthorizedUnlock = await post('/voice-control/unlock', {}, false);
+    assert.equal(unauthorizedUnlock.status, 401);
+    const unlocked = await post('/voice-control/unlock', { source: 'integration_test' });
+    assert.equal(unlocked.status, 200);
+    assert.equal((await unlocked.json()).voiceExecution.locked, false);
+
+    const restored = await post('/ask', {
+      prompt: 'Inspect after operator unlock',
+      sessionType: 'phone-codex-luna',
+    });
+    assert.equal(restored.status, 200);
+    assert.equal((await restored.json()).success, true);
   });
 
   assert.equal(server.exitCode, null, serverOutput);

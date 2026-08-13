@@ -20,6 +20,8 @@ var claudeBridge = require("./lib/claude-bridge");
 var ttsService = require("./lib/tts-service");
 var VoiceStateStore = require("./lib/voice-state-store").VoiceStateStore;
 var AgentJobBroker = require("./lib/agent-job-broker").AgentJobBroker;
+var VoiceExecutionControl = require("../lib/voice-execution-control").VoiceExecutionControl;
+var createVoiceControlRouter = require("./lib/voice-control-routes").createVoiceControlRouter;
 var getRealtimeApiKey = require("./lib/openai-realtime-client").getRealtimeApiKey;
 var queueRuntimeCallback = require("./lib/conversation-loop").queueRuntimeCallback;
 
@@ -69,7 +71,9 @@ var config = {
   ws_host: process.env.WS_HOST || "0.0.0.0",
   ws_port: parseInt(process.env.WS_PORT) || 3001,
   audio_dir: process.env.AUDIO_DIR || "/tmp/voice-audio",
-  voice_state_db_path: process.env.VOICE_STATE_DB_PATH || "/tmp/teleagent/voice-state.sqlite"
+  voice_state_db_path: process.env.VOICE_STATE_DB_PATH || "/tmp/teleagent/voice-state.sqlite",
+  voice_execution_lock_path: process.env.VOICE_APP_EXECUTION_LOCK_FILE ||
+    require("path").join(require("path").dirname(process.env.VOICE_STATE_DB_PATH || "/tmp/teleagent/voice-state.sqlite"), "voice-execution.lock.json")
 };
 
 // Initialize drachtio SRF
@@ -99,6 +103,7 @@ console.log("  - HTTP API:    " + config.http_host + ":" + config.http_port);
 console.log("  - WS Audio:    " + config.ws_host + ":" + config.ws_port);
 console.log("  - Audio Dir:   " + config.audio_dir);
 console.log("  - Voice State: " + config.voice_state_db_path);
+console.log("  - Voice Lock:  " + config.voice_execution_lock_path);
 console.log("  - Mix Type:    " + (process.env.AUDIO_FORK_MIXTYPE || "L") + " (capture direction)");
 console.log("\n[DEVICES] Loaded " + Object.keys(deviceRegistry.getAllDevices()).length + " device extensions");
 console.log("\nWaiting for connections...\n");
@@ -186,9 +191,11 @@ function initializeServers() {
   }
 
   voiceStateStore = new VoiceStateStore({ dbPath: config.voice_state_db_path });
+  var voiceExecutionControl = new VoiceExecutionControl({ lockFile: config.voice_execution_lock_path });
   agentJobBroker = new AgentJobBroker({
     stateStore: voiceStateStore,
     agentBridge: claudeBridge,
+    executionControl: voiceExecutionControl,
     callbackDispatcher: async function(job, thread) {
       if (!thread || !thread.callback_target) return;
       await queueRuntimeCallback({
@@ -244,12 +251,19 @@ function initializeServers() {
   httpServer.app.use("/api", deviceRouter);
   console.log("[" + new Date().toISOString() + "] DEVICE API enabled (/api/devices, /api/device/:identifier)");
 
+  httpServer.app.use("/api", createVoiceControlRouter({
+    jobBroker: agentJobBroker,
+    agentBridge: claudeBridge
+  }));
+  console.log("[" + new Date().toISOString() + "] VOICE CONTROL API enabled (/api/voice-control/*)");
+
   httpServer.app.get("/api/realtime-health", function(req, res) {
     var stateHealth = voiceStateStore.health();
     res.status(stateHealth.ok ? 200 : 503).json({
       status: stateHealth.ok ? "healthy" : "unhealthy",
       configured: !!getRealtimeApiKey(),
       model: process.env.OPENAI_REALTIME_MODEL || "gpt-realtime-2.1",
+      voiceExecution: agentJobBroker.getExecutionLock(),
       state: stateHealth
     });
   });

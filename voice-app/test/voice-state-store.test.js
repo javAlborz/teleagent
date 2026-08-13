@@ -103,6 +103,54 @@ test('job creation is idempotent and serializes one active job per profile', (t)
   assert.notEqual(next.job.id, created.job.id);
 });
 
+test('panic cancellation atomically stops every active job and rejects pending approvals', (t) => {
+  const { store } = withStore(t);
+  const thread = store.createThread({ callerId: '1001' });
+  const realtime = store.createRealtimeSession({
+    voiceThreadId: thread.id,
+    callId: 'panic-call',
+    model: 'gpt-realtime-2.1',
+  });
+
+  const queued = store.createJob({
+    voiceThreadId: thread.id,
+    realtimeSessionId: realtime.id,
+    toolCallId: 'queued-tool',
+    profile: 'codex-luna',
+    provider: 'codex',
+    request: 'Inspect services.',
+  }).job;
+  const running = store.createJob({
+    voiceThreadId: thread.id,
+    realtimeSessionId: realtime.id,
+    toolCallId: 'running-tool',
+    profile: 'codex-terra',
+    provider: 'codex',
+    request: 'Inspect all services.',
+  }).job;
+  store.markJobRunning(running.id);
+  const pending = store.createJob({
+    voiceThreadId: thread.id,
+    realtimeSessionId: realtime.id,
+    toolCallId: 'pending-tool',
+    profile: 'codex-sol',
+    provider: 'codex',
+    request: 'Restart a service.',
+    requiresApproval: true,
+  }).job;
+
+  assert.equal(store.listAllActiveJobs().length, 3);
+  const canceled = store.cancelAllActiveJobs('Dial 9 emergency stop');
+  assert.deepEqual(canceled.map((job) => job.id), [queued.id, running.id, pending.id]);
+  assert.ok(canceled.every((job) => job.status === 'canceled'));
+  assert.ok(canceled.every((job) => job.error === 'Dial 9 emergency stop'));
+  assert.equal(store.listAllActiveJobs().length, 0);
+  assert.equal(
+    store.db.prepare('SELECT status FROM approvals WHERE job_id = ?').get(pending.id).status,
+    'rejected'
+  );
+});
+
 test('approvals transition jobs from pending to queued and survive reopen', (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'teleagent-state-reopen-'));
   const dbPath = path.join(directory, 'voice.sqlite');

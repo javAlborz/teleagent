@@ -38,6 +38,9 @@ function buildFriendlyErrorMessage(code) {
     case 'AGENT_API_UNAVAILABLE':
     case 'CLAUDE_API_UNAVAILABLE':
       return "I'm having trouble connecting to my brain right now. The API server may be offline or unreachable. Please try again later.";
+    case 'AGENT_VOICE_EXECUTION_LOCKED':
+    case 'VOICE_EXECUTION_LOCKED':
+      return 'Voice-started agent work is locked after an emergency stop. An operator must unlock it locally before I can start another task.';
     default:
       return "I encountered an unexpected error. Please check that the API server is running claude-phone api-server and is on the same network.";
   }
@@ -218,6 +221,69 @@ async function cancelSession(callId, options = {}) {
   }
 }
 
+async function panicStop(options = {}) {
+  const timestamp = new Date().toISOString();
+  const {
+    reason = 'voice_panic_stop',
+    source = 'voice_app',
+  } = options;
+
+  try {
+    const response = await axios.post(
+      `${AGENT_API_URL}/voice-control/stop`,
+      { reason, source },
+      {
+        timeout: 5000,
+        headers: buildAgentApiHeaders({ 'Content-Type': 'application/json' }),
+      }
+    );
+    console.warn(
+      `[${timestamp}] AGENT Voice panic stop: success=${response.data.success} canceled=${response.data.canceledCount || 0}`
+    );
+    return response.data;
+  } catch (error) {
+    console.error(`[${timestamp}] AGENT Voice panic stop failed: ${error.message}`);
+    return {
+      success: false,
+      error: error.response?.data?.error || error.message,
+    };
+  }
+}
+
+async function getVoiceExecutionStatus() {
+  try {
+    const response = await axios.get(`${AGENT_API_URL}/voice-control/status`, {
+      timeout: 5000,
+      headers: buildAgentApiHeaders(),
+    });
+    return response.data;
+  } catch (error) {
+    return {
+      success: false,
+      error: error.response?.data?.error || error.message,
+    };
+  }
+}
+
+async function unlockVoiceExecution(source = 'operator') {
+  try {
+    const response = await axios.post(
+      `${AGENT_API_URL}/voice-control/unlock`,
+      { source },
+      {
+        timeout: 5000,
+        headers: buildAgentApiHeaders({ 'Content-Type': 'application/json' }),
+      }
+    );
+    return response.data;
+  } catch (error) {
+    return {
+      success: false,
+      error: error.response?.data?.error || error.message,
+    };
+  }
+}
+
 /**
  * End an agent session when a call ends
  * @param {string} callId - The call UUID to end the session for
@@ -282,6 +348,9 @@ module.exports = {
   query,
   queryDetailed,
   cancelSession,
+  panicStop,
+  getVoiceExecutionStatus,
+  unlockVoiceExecution,
   endSession,
   isAvailable
 };

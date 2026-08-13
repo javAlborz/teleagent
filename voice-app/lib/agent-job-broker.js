@@ -99,15 +99,19 @@ class AsyncMutex {
 }
 
 class AgentJobBroker extends EventEmitter {
-  constructor({ stateStore, agentBridge, callbackDispatcher = null } = {}) {
+  constructor({ stateStore, agentBridge, callbackDispatcher = null, executionControl = null } = {}) {
     super();
     if (!stateStore) throw new Error('AgentJobBroker requires stateStore');
     if (!agentBridge) throw new Error('AgentJobBroker requires agentBridge');
     this.stateStore = stateStore;
     this.agentBridge = agentBridge;
     this.callbackDispatcher = callbackDispatcher;
+    this.executionControl = executionControl;
     this.workspaceMutex = new AsyncMutex();
     this.activeExecutions = new Map();
+    const persistedLock = executionControl?.getStatus?.() || { locked: false };
+    this.executionLocked = Boolean(persistedLock.locked);
+    this.executionLockReason = persistedLock.locked ? persistedLock.reason : null;
   }
 
   _emitSafely(eventName, payload) {
@@ -144,6 +148,14 @@ class AgentJobBroker extends EventEmitter {
     freshSession = false,
     notificationMode = 'in_call',
   }) {
+    if (this.getExecutionLock().locked) {
+      return {
+        accepted: false,
+        code: 'VOICE_EXECUTION_LOCKED',
+        message: 'Voice-started agent work is locked after an emergency stop. An operator must unlock it locally.',
+      };
+    }
+
     const thread = this.stateStore.getThread(voiceThreadId);
     if (!thread) {
       return { accepted: false, code: 'VOICE_THREAD_NOT_FOUND', message: 'The voice thread no longer exists.' };
@@ -261,6 +273,14 @@ class AgentJobBroker extends EventEmitter {
   }
 
   approveNextJob(voiceThreadId) {
+    if (this.getExecutionLock().locked) {
+      return {
+        approved: false,
+        code: 'VOICE_EXECUTION_LOCKED',
+        message: 'Voice-started agent work is locked after an emergency stop.',
+      };
+    }
+
     const job = this.stateStore.approveNextJob(voiceThreadId);
     if (!job) {
       return { approved: false, code: 'NO_PENDING_APPROVAL', message: 'There is no task waiting for confirmation.' };
@@ -279,6 +299,7 @@ class AgentJobBroker extends EventEmitter {
   }
 
   async _execute(jobId) {
+    if (this.getExecutionLock().locked) return this.stateStore.getJob(jobId);
     const queuedJob = this.stateStore.getJob(jobId);
     if (!queuedJob || queuedJob.status !== 'queued') return queuedJob;
 
@@ -289,6 +310,7 @@ class AgentJobBroker extends EventEmitter {
   }
 
   async _runAgent(queuedJob) {
+    if (this.getExecutionLock().locked) return this.stateStore.getJob(queuedJob.id);
     const job = this.stateStore.markJobRunning(queuedJob.id);
     if (!job) return this.stateStore.getJob(queuedJob.id);
 
@@ -400,6 +422,102 @@ class AgentJobBroker extends EventEmitter {
     } catch (error) {
       this.emit('callback.error', { job, error });
     }
+  }
+
+  async panicStop(reason = 'Voice emergency stop', source = 'local_panic') {
+    this.executionLocked = true;
+    this.executionLockReason = String(reason || 'Voice emergency stop').slice(0, 1000);
+
+    const persistentLock = this.executionControl?.lock?.({
+      reason: this.executionLockReason,
+      source,
+    }) || {
+      locked: true,
+      persistent: false,
+      reason: this.executionLockReason,
+      error: 'No persistent execution control is configured',
+    };
+
+    const activeJobs = this.stateStore
+      .listAllActiveJobs()
+      .filter((job) => job.status === 'running');
+    const canceledJobs = this.stateStore.cancelAllActiveJobs(this.executionLockReason);
+    for (const job of canceledJobs) this._emitSafely('job.updated', job);
+
+    let bridgeResult;
+    try {
+      if (typeof this.agentBridge.panicStop === 'function') {
+        bridgeResult = await this.agentBridge.panicStop({
+          reason: this.executionLockReason,
+          source,
+        });
+      } else {
+        const bridgeCancellations = await Promise.allSettled(
+          activeJobs.map((job) => {
+            const session = this.stateStore.getAgentSession(job.voice_thread_id, job.profile);
+            return this.agentBridge.cancelSession(job.id, {
+              sessionKey: session?.bridge_session_key || job.id,
+              resetSession: false,
+              reason: this.executionLockReason,
+            });
+          })
+        );
+        bridgeResult = {
+          success: bridgeCancellations.every((result) => result.status === 'fulfilled'),
+          canceledCount: activeJobs.length,
+          failures: bridgeCancellations.filter((result) => result.status === 'rejected').length,
+        };
+      }
+    } catch (error) {
+      bridgeResult = { success: false, error: error.message };
+    }
+
+    return {
+      locked: true,
+      reason: this.executionLockReason,
+      canceledCount: canceledJobs.length,
+      runningCount: activeJobs.length,
+      persistent: Boolean(persistentLock.persistent),
+      persistentLock,
+      bridge: bridgeResult,
+      jobs: canceledJobs.map(voiceSafeJob),
+    };
+  }
+
+  setExecutionLocked(locked, reason = null) {
+    this.executionLocked = Boolean(locked);
+    this.executionLockReason = this.executionLocked ? String(reason || 'Voice execution locked') : null;
+    return {
+      locked: this.executionLocked,
+      reason: this.executionLockReason,
+    };
+  }
+
+  getExecutionLock() {
+    const persistedLock = this.executionControl?.getStatus?.();
+    if (persistedLock?.locked) {
+      this.executionLocked = true;
+      this.executionLockReason = persistedLock.reason || this.executionLockReason;
+    }
+    return {
+      locked: this.executionLocked,
+      reason: this.executionLockReason,
+      persistent: persistedLock ? Boolean(persistedLock.persistent) : false,
+      error: persistedLock?.error || null,
+    };
+  }
+
+  unlockExecution(source = 'operator') {
+    const result = this.executionControl?.unlock?.({ source }) || {
+      locked: false,
+      persistent: false,
+      wasLocked: this.executionLocked,
+    };
+    if (result.locked === false) {
+      this.executionLocked = false;
+      this.executionLockReason = null;
+    }
+    return result;
   }
 }
 

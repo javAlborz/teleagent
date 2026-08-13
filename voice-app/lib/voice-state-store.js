@@ -541,6 +541,14 @@ class VoiceStateStore {
     return rows.map(normalizeJob);
   }
 
+  listAllActiveJobs() {
+    return this.db.prepare(`
+      SELECT * FROM jobs
+      WHERE status IN ('awaiting_approval', 'queued', 'running')
+      ORDER BY created_at ASC
+    `).all().map(normalizeJob);
+  }
+
   markJobRunning(jobId) {
     const timestamp = nowIso();
     const result = this.db.prepare(`
@@ -585,6 +593,38 @@ class VoiceStateStore {
         WHERE id = ? AND status IN ('awaiting_approval', 'queued', 'running')
       `).run(String(reason).slice(0, 1000), timestamp, timestamp, jobId);
       return this.getJob(jobId);
+    });
+    return transaction();
+  }
+
+  cancelAllActiveJobs(reason = 'Voice emergency stop') {
+    const timestamp = nowIso();
+    const safeReason = String(reason || 'Voice emergency stop').slice(0, 1000);
+    const transaction = this.db.transaction(() => {
+      const jobs = this.db.prepare(`
+        SELECT * FROM jobs
+        WHERE status IN ('awaiting_approval', 'queued', 'running')
+        ORDER BY created_at ASC
+      `).all();
+
+      if (jobs.length === 0) return [];
+
+      this.db.prepare(`
+        UPDATE approvals
+        SET status = 'rejected', decided_at = ?
+        WHERE status = 'pending'
+          AND job_id IN (
+            SELECT id FROM jobs
+            WHERE status IN ('awaiting_approval', 'queued', 'running')
+          )
+      `).run(timestamp);
+      this.db.prepare(`
+        UPDATE jobs
+        SET status = 'canceled', error = ?, completed_at = ?, updated_at = ?
+        WHERE status IN ('awaiting_approval', 'queued', 'running')
+      `).run(safeReason, timestamp, timestamp);
+
+      return jobs.map((job) => this.getJob(job.id));
     });
     return transaction();
   }
