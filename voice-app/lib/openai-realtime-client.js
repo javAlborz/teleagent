@@ -234,8 +234,10 @@ class OpenAIRealtimeClient extends EventEmitter {
     const input = {
       format: { type: 'audio/pcm', rate: PCM_SAMPLE_RATE },
       turn_detection: {
-        type: 'semantic_vad',
-        eagerness: 'auto',
+        type: 'server_vad',
+        threshold: 0.5,
+        prefix_padding_ms: 300,
+        silence_duration_ms: 700,
         create_response: true,
         interrupt_response: true,
       },

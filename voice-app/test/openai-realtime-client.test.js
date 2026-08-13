@@ -64,14 +64,21 @@ async function createConnectedClient(overrides = {}) {
   return client;
 }
 
-test('Realtime session uses 24 kHz PCM, semantic VAD, voice, and bounded tools', async (t) => {
+test('Realtime session uses 24 kHz PCM, server VAD, voice, and bounded tools', async (t) => {
   const client = await createConnectedClient();
   t.after(() => client.close());
   const update = client.ws.sentEvents().find((event) => event.type === 'session.update');
 
   assert.equal(update.session.model, 'gpt-realtime-2.1');
   assert.equal(update.session.audio.input.format.rate, 24000);
-  assert.equal(update.session.audio.input.turn_detection.type, 'semantic_vad');
+  assert.deepEqual(update.session.audio.input.turn_detection, {
+    type: 'server_vad',
+    threshold: 0.5,
+    prefix_padding_ms: 300,
+    silence_duration_ms: 700,
+    create_response: true,
+    interrupt_response: true,
+  });
   assert.equal(update.session.audio.output.format.rate, 24000);
   assert.equal(update.session.audio.output.voice, 'marin');
   assert.deepEqual(
@@ -151,7 +158,7 @@ test('function calls execute app-owned tools and return matching call IDs', asyn
   assert.equal(calls.length, 1);
 });
 
-test('speech-start events support client-side playout truncation', async (t) => {
+test('speech boundary events track caller state and support client-side playout truncation', async (t) => {
   const client = await createConnectedClient();
   t.after(() => client.close());
   const speechStarted = once(client, 'speech_started');
@@ -163,6 +170,11 @@ test('speech-start events support client-side playout truncation', async (t) => 
   const truncate = client.ws.sentEvents().find((event) => event.type === 'conversation.item.truncate');
   assert.equal(truncate.item_id, 'item-audio');
   assert.equal(truncate.audio_end_ms, 812);
+
+  const speechStopped = once(client, 'speech_stopped');
+  client.ws.serverSend({ type: 'input_audio_buffer.speech_stopped', audio_end_ms: 920 });
+  await speechStopped;
+  assert.equal(client.userSpeaking, false);
 });
 
 test('tool schema exposes only the supplied profile enum', () => {

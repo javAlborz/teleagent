@@ -66,6 +66,12 @@ cancel an agent job. Teleagent stops FreeSWITCH playout and sends an OpenAI
 conversation truncation event so the server's conversation matches what the
 caller actually heard.
 
+Caller turns use OpenAI `server_vad`: speech starts at the configured `0.5`
+activation threshold, includes `300 ms` of prefix audio, and ends after `700 ms`
+of silence. OpenAI then commits the buffered turn and creates the next response
+automatically. The slightly longer-than-default end silence avoids cutting off
+brief pauses on narrowband phone audio while keeping replies responsive.
+
 Jobs can report completion in the active call, remain available for a resumed
 call, or request a Realtime callback. A callback reopens the exact voice thread
 only when its caller identity matches the outbound target.
