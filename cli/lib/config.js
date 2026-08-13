@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { normalizeAgentConfig } from './agents.js';
 
 function getDefaultApiConfig() {
   return {
@@ -16,6 +17,14 @@ function getDefaultApiConfig() {
       apiKey: 'not-needed',
       model: 'whisper-1',
       validated: false
+    },
+    realtime: {
+      enabled: false,
+      apiKey: '',
+      model: 'gpt-realtime-2.1',
+      voice: 'marin',
+      transcriptionModel: 'gpt-live-transcribe',
+      safetyIdentifierSalt: ''
     }
   };
 }
@@ -40,6 +49,11 @@ function migrateApiConfig(config) {
       ...(legacyStt.apiKey ? { apiKey: legacyStt.apiKey } : {}),
       ...(legacyStt.validated !== undefined ? { validated: legacyStt.validated } : {}),
       ...(api.stt || {})
+    },
+    realtime: {
+      ...defaults.realtime,
+      ...(api.realtime || {}),
+      enabled: api.realtime?.enabled ?? Boolean(api.realtime?.apiKey)
     }
   };
 
@@ -93,6 +107,10 @@ export async function loadConfig() {
   }
 
   migrateApiConfig(config);
+  config.agents = normalizeAgentConfig(config.agents, {
+    // Existing configurations historically implied Claude-only operation.
+    defaultProviders: ['claude']
+  });
 
   return config;
 }

@@ -9,6 +9,28 @@ const logger = require('./logger');
 const deviceRegistry = require('./device-registry');
 const { getHoldMusicEnabled } = require('./phone-agent-config');
 
+function publicDevice(device, { includeVoiceId = false } = {}) {
+  const isRealtime = device.voiceMode === 'openai-realtime';
+  return {
+    name: device.name,
+    extension: device.extension,
+    voiceMode: device.voiceMode || 'legacy',
+    modelProfile: isRealtime
+      ? (device.defaultAgentProfile || 'codex-terra')
+      : (device.sessionType || 'phone'),
+    defaultAgentProfile: device.defaultAgentProfile,
+    resumeTargetExtension: device.resumeTargetExtension,
+    voiceThreadTtlSeconds: device.voiceThreadTtlSeconds,
+    hasVoice: isRealtime || !!device.voiceId,
+    hasPrompt: !!device.prompt,
+    ...(includeVoiceId ? { voiceId: device.voiceId } : {}),
+    agentTimeoutSeconds: device.agentTimeoutSeconds ?? device.claudeTimeoutSeconds,
+    claudeTimeoutSeconds: device.claudeTimeoutSeconds,
+    holdMusicEnabled: isRealtime ? false : getHoldMusicEnabled(device),
+    maxTurns: device.maxTurns,
+  };
+}
+
 /**
  * GET /devices
  * List all registered devices
@@ -17,16 +39,7 @@ router.get('/devices', (req, res) => {
   try {
     const allDevices = deviceRegistry.getAll();
 
-    const deviceList = Object.values(allDevices).map(device => ({
-      name: device.name,
-      extension: device.extension,
-      modelProfile: device.sessionType || 'phone',
-      hasVoice: !!device.voiceId,
-      hasPrompt: !!device.prompt,
-      claudeTimeoutSeconds: device.claudeTimeoutSeconds,
-      holdMusicEnabled: getHoldMusicEnabled(device),
-      maxTurns: device.maxTurns
-    }));
+    const deviceList = Object.values(allDevices).map(device => publicDevice(device));
 
     res.json({
       success: true,
@@ -66,17 +79,7 @@ router.get('/device/:identifier', (req, res) => {
 
     res.json({
       success: true,
-      device: {
-        name: device.name,
-        extension: device.extension,
-        modelProfile: device.sessionType || 'phone',
-        hasVoice: !!device.voiceId,
-        hasPrompt: !!device.prompt,
-        voiceId: device.voiceId,
-        claudeTimeoutSeconds: device.claudeTimeoutSeconds,
-        holdMusicEnabled: getHoldMusicEnabled(device),
-        maxTurns: device.maxTurns
-      }
+      device: publicDevice(device, { includeVoiceId: true })
     });
   } catch (error) {
     logger.error('Get device error', {
@@ -93,3 +96,4 @@ router.get('/device/:identifier', (req, res) => {
 });
 
 module.exports = router;
+module.exports.publicDevice = publicDevice;

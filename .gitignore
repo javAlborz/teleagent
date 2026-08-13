@@ -1,6 +1,7 @@
 # Dependencies
 node_modules/
 package-lock.json
+!voice-app/package-lock.json
 
 # Environment files (contain secrets!)
 .env
@@ -11,6 +12,8 @@ package-lock.json
 voice-app/audio/*.mp3
 voice-app/audio/*.wav
 voice-app/static/hold-music/*
+voice-app/state/*
+!voice-app/state/.gitkeep
 claude-api-server/audio/
 
 # Logs

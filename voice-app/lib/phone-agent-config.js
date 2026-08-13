@@ -1,5 +1,5 @@
 const DEFAULT_MAX_TURNS = 20;
-const DEFAULT_CLAUDE_TIMEOUT_SECONDS = 30;
+const DEFAULT_AGENT_TIMEOUT_SECONDS = 30;
 const DEFAULT_HOLD_MUSIC_ENABLED = true;
 
 function parsePositiveInteger(value, fallback) {
@@ -11,12 +11,15 @@ function getMaxTurns(deviceConfig, fallback = DEFAULT_MAX_TURNS) {
   return parsePositiveInteger(deviceConfig?.maxTurns, parsePositiveInteger(fallback, DEFAULT_MAX_TURNS));
 }
 
-function getClaudeTimeoutSeconds(deviceConfig, fallback = DEFAULT_CLAUDE_TIMEOUT_SECONDS) {
+function getAgentTimeoutSeconds(deviceConfig, fallback = DEFAULT_AGENT_TIMEOUT_SECONDS) {
   return parsePositiveInteger(
-    deviceConfig?.claudeTimeoutSeconds,
-    parsePositiveInteger(fallback, DEFAULT_CLAUDE_TIMEOUT_SECONDS)
+    deviceConfig?.agentTimeoutSeconds ?? deviceConfig?.claudeTimeoutSeconds,
+    parsePositiveInteger(fallback, DEFAULT_AGENT_TIMEOUT_SECONDS)
   );
 }
+
+// Compatibility alias for callers that have not migrated to the provider-neutral name.
+const getClaudeTimeoutSeconds = getAgentTimeoutSeconds;
 
 function getHoldMusicEnabled(deviceConfig, fallback = DEFAULT_HOLD_MUSIC_ENABLED) {
   if (typeof deviceConfig?.holdMusicEnabled === 'boolean') {
@@ -28,9 +31,11 @@ function getHoldMusicEnabled(deviceConfig, fallback = DEFAULT_HOLD_MUSIC_ENABLED
 
 module.exports = {
   DEFAULT_MAX_TURNS,
-  DEFAULT_CLAUDE_TIMEOUT_SECONDS,
+  DEFAULT_AGENT_TIMEOUT_SECONDS,
+  DEFAULT_CLAUDE_TIMEOUT_SECONDS: DEFAULT_AGENT_TIMEOUT_SECONDS,
   DEFAULT_HOLD_MUSIC_ENABLED,
   getMaxTurns,
+  getAgentTimeoutSeconds,
   getClaudeTimeoutSeconds,
   getHoldMusicEnabled,
 };

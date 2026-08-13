@@ -1,10 +1,10 @@
 # Production Deployment Guide
 
-Guide for deploying Claude Phone in production environments.
+Guide for deploying Teleagent in production environments.
 
 ## Architecture Overview
 
-Claude Phone consists of three Docker containers and an optional API server:
+Teleagent consists of three Docker containers and an optional agent bridge:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -19,10 +19,14 @@ Claude Phone consists of three Docker containers and an optional API server:
                               ▼
               ┌───────────────────────────────┐
               │     claude-api-server         │
-              │     (Claude Code wrapper)     │
+              │   (Claude/Codex CLI bridge)   │
               │     Port 3333                 │
               └───────────────────────────────┘
 ```
+
+The legacy call path sends completed utterances to separate STT and TTS
+services. The OpenAI Realtime path streams 24 kHz PCM bidirectionally between
+FreeSWITCH and OpenAI and uses the bridge only for Claude/Codex agent jobs.
 
 ## Network Requirements
 
@@ -33,7 +37,7 @@ Claude Phone consists of three Docker containers and an optional API server:
 | 5060 | UDP/TCP | SIP signaling (drachtio) | Inbound |
 | 5070 | UDP/TCP | SIP signaling (if 3CX SBC present) | Inbound |
 | 3000 | TCP | Voice app HTTP API | Inbound (optional) |
-| 3333 | TCP | Claude API server | Internal |
+| 3333 | TCP | Agent API server | Internal |
 | 30000-30100 | UDP | RTP audio (FreeSWITCH) | Bidirectional |
 
 ### Firewall Rules
@@ -93,10 +97,17 @@ Key environment variables in the generated `.env`:
 | Variable | Purpose |
 |----------|---------|
 | `EXTERNAL_IP` | Server LAN IP for RTP routing |
-| `CLAUDE_API_URL` | URL to claude-api-server |
+| `AGENT_API_URL` | URL to claude-api-server (`CLAUDE_API_URL` is a compatibility alias) |
+| `AGENT_API_TOKEN` | Optional bearer token shared with the bridge |
 | `TTS_BASE_URL` | OpenAI-compatible TTS base URL |
 | `TTS_VOICE` | Default TTS voice name/id |
 | `STT_BASE_URL` | OpenAI-compatible Whisper base URL |
+| `OPENAI_REALTIME_API_KEY` | Required for OpenAI Realtime extensions and callbacks |
+| `OPENAI_REALTIME_MODEL` | Realtime speech-to-speech model; defaults to `gpt-realtime-2.1` |
+| `OPENAI_REALTIME_VOICE` | Realtime output voice; defaults to `marin` |
+| `OPENAI_REALTIME_TRANSCRIPTION_MODEL` | Text transcript model used for durable context |
+| `VOICE_STATE_DIR` | Host directory mounted read/write for durable Realtime state |
+| `VOICE_STATE_DB_PATH` | SQLite path inside `voice-app` |
 | `SIP_DOMAIN` | 3CX server FQDN |
 | `SIP_REGISTRAR` | SIP registrar address |
 
@@ -116,11 +127,11 @@ claude-phone setup    # Select "Voice Server"
 claude-phone start
 ```
 
-### API Server (Mac/Linux with Claude Code)
+### API Server (Mac/Linux with Claude Code and/or Codex)
 
 Requirements:
 - Node.js 18+
-- Claude Code CLI installed and authenticated
+- At least one configured and authenticated agent CLI
 - Network accessible from voice server
 
 ```bash
@@ -152,6 +163,9 @@ claude-phone doctor
 # Container health
 docker ps
 docker compose logs -f
+
+# Realtime readiness and durable-state health
+curl -fsS http://127.0.0.1:3000/api/realtime-health
 ```
 
 ### Log Locations
@@ -184,7 +198,7 @@ AUDIO RTP REPORTS ERROR: [Bind Error]
 Registration failed: 401 Unauthorized
 
 # API server unreachable
-Error connecting to Claude API
+Error connecting to agent API
 ```
 
 ## Security Considerations
@@ -192,13 +206,19 @@ Error connecting to Claude API
 ### API Keys
 
 - Config file has restricted permissions (chmod 600)
+- Keep `OPENAI_REALTIME_API_KEY` only in the server-side `.env`; it is never needed on a SIP handset or by agent children
+- Realtime audio is streamed and not written to the durable SQLite database
+- Realtime callbacks may reopen a voice thread only for the same caller identity
 - Never commit `~/.claude-phone/config.json` to version control
 - Use environment variables in CI/CD pipelines
 
 ### Network Security
 
 - Voice app API (port 3000) should not be publicly exposed without authentication
-- Claude API server (port 3333) should only be accessible from voice server
+- Agent API server (port 3333) should only be accessible from the voice server
+- Codex Luna/Terra deploy requests are denied; reserve the Sol extension for privileged work
+- Give Terra a narrow `PHONE_CODEX_TERRA_WORKING_DIR`; its `workspace-write` sandbox is rooted there
+- The bridge removes SIP, speech, and bridge-control secrets from Codex child environments. This reduces accidental inheritance but is not a host-level secret boundary when the service account can read the underlying files.
 - Consider VPN for split deployments across networks
 
 ### SIP Security
@@ -215,6 +235,16 @@ Error connecting to Claude API
 2. Check RTP ports (30000-30100) are open
 3. Ensure `network_mode: host` is set for voice-app
 4. Check FreeSWITCH logs for RTP errors
+
+### OpenAI Realtime Extension Returns 503
+
+1. Verify `OPENAI_REALTIME_API_KEY` is present in the `voice-app` environment
+2. Check `curl -fsS http://127.0.0.1:3000/api/realtime-health`
+3. Confirm outbound HTTPS/WSS access to `api.openai.com`
+4. Inspect `docker compose logs voice-app` for Realtime session errors
+
+The Realtime path does not depend on `TTS_BASE_URL` or `STT_BASE_URL`. An outage
+of those services affects the legacy extensions but not Realtime extensions.
 
 ### SIP Registration Fails
 

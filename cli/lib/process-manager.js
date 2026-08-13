@@ -58,9 +58,10 @@ export async function isServerRunning(pidPath = null) {
  * @param {string} serverPath - Path to claude-api-server directory
  * @param {number} port - Port to listen on
  * @param {string} [pidPath] - Optional PID file path (for testing)
+ * @param {object} [environment] - Additional environment for the agent bridge
  * @returns {Promise<number>} Process PID
  */
-export async function startServer(serverPath, port, pidPath = null) {
+export async function startServer(serverPath, port, pidPath = null, environment = {}) {
   pidPath = pidPath || getPidPath();
 
   // Check if already running
@@ -77,6 +78,7 @@ export async function startServer(serverPath, port, pidPath = null) {
       stdio: 'ignore',
       env: {
         ...process.env,
+        ...environment,
         PORT: port
       }
     });

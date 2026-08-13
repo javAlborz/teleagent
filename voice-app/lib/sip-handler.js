@@ -4,6 +4,8 @@
  */
 
 const { runConversationLoop } = require('./conversation-loop');
+const { runRealtimeConversation } = require('./realtime-conversation');
+const { getRealtimeApiKey } = require('./openai-realtime-client');
 const {
   getRecentSession,
   getResumeTtlSeconds,
@@ -122,6 +124,8 @@ async function handleInvite(req, res, options) {
   let sessionEndPreserveSeconds = 0;
   let resumeCacheExtension = dialedExt;
   let skipGreeting = false;
+  let realtimeResume = false;
+  let isRealtimeVoice = false;
 
   // Look up device config using deviceRegistry.get() (works with name OR extension)
   let deviceConfig = null;
@@ -136,10 +140,19 @@ async function handleInvite(req, res, options) {
   }
 
   const resumeTargetExtension = deviceConfig?.resumeTargetExtension;
-  if (resumeTargetExtension) {
+  const baseDeviceConfig = resumeTargetExtension
+    ? (deviceRegistry?.get(resumeTargetExtension) || deviceConfig)
+    : deviceConfig;
+  isRealtimeVoice = baseDeviceConfig?.voiceMode === 'openai-realtime';
+
+  if (isRealtimeVoice) {
+    deviceConfig = baseDeviceConfig;
+    realtimeResume = Boolean(resumeTargetExtension);
+    resumeCacheExtension = resumeTargetExtension || dialedExt;
+    startupAnnouncement = realtimeResume ? 'Resume requested.' : 'Fresh voice thread requested.';
+  } else if (resumeTargetExtension) {
     resumeCacheExtension = resumeTargetExtension;
 
-    const baseDeviceConfig = deviceRegistry?.get(resumeTargetExtension) || deviceConfig;
     if (baseDeviceConfig) {
       deviceConfig = baseDeviceConfig;
     }
@@ -164,6 +177,12 @@ async function handleInvite(req, res, options) {
     }
   } else {
     sessionEndPreserveSeconds = getResumeTtlSeconds(deviceConfig);
+  }
+
+  if (isRealtimeVoice && !getRealtimeApiKey()) {
+    console.error('[' + new Date().toISOString() + '] CALL OpenAI Realtime extension unavailable: OPENAI_REALTIME_API_KEY is missing');
+    try { res.send(503); } catch (e) {}
+    return { callerId, callUuid: null, unavailable: 'openai_realtime_not_configured' };
   }
 
   console.log('[' + new Date().toISOString() + '] CALL Incoming from: ' + callerId + ' to ext: ' + (dialedExt || 'unknown'));
@@ -196,42 +215,58 @@ async function handleInvite(req, res, options) {
       if (endpoint) endpoint.destroy().catch(function() {});
     });
 
-    await runConversationLoop(endpoint, dialog, callUuid, {
-      audioForkServer: options.audioForkServer,
-      whisperClient: options.whisperClient,
-      claudeBridge: options.claudeBridge,
-      ttsService: options.ttsService,
-      wsPort: options.wsPort,
-      deviceConfig: deviceConfig,
-      maxTurns: deviceConfig?.maxTurns,
-      sessionKey,
-      sessionEndPreserveSeconds,
-      startupAnnouncement,
-      callbackTarget: callerId,
-      callbackDialUri,
-      skipGreeting,
-      onSessionEnded: async (endSessionResult) => {
-        if (!endSessionResult?.hadSession || !endSessionResult?.preserved || !resumeCacheExtension) {
-          console.log(
-            '[' + new Date().toISOString() + '] CALL Session not cached for resume: ' +
-            'callUuid=' + callUuid +
-            ' sessionKey=' + sessionKey +
-            ' hadSession=' + !!endSessionResult?.hadSession +
-            ' preserved=' + !!endSessionResult?.preserved
-          );
-          return;
-        }
+    if (isRealtimeVoice) {
+      await runRealtimeConversation(endpoint, dialog, callUuid, {
+        audioForkServer: options.audioForkServer,
+        wsPort: options.wsPort,
+        stateStore: options.voiceStateStore,
+        jobBroker: options.agentJobBroker,
+        callerId,
+        callbackTarget: callerId,
+        callbackDialUri,
+        resume: realtimeResume,
+        startupAnnouncement,
+        defaultProfile: deviceConfig?.defaultAgentProfile || 'codex-terra',
+        resumeTtlSeconds: deviceConfig?.voiceThreadTtlSeconds || 86400,
+      });
+    } else {
+      await runConversationLoop(endpoint, dialog, callUuid, {
+        audioForkServer: options.audioForkServer,
+        whisperClient: options.whisperClient,
+        claudeBridge: options.claudeBridge,
+        ttsService: options.ttsService,
+        wsPort: options.wsPort,
+        deviceConfig: deviceConfig,
+        maxTurns: deviceConfig?.maxTurns,
+        sessionKey,
+        sessionEndPreserveSeconds,
+        startupAnnouncement,
+        callbackTarget: callerId,
+        callbackDialUri,
+        skipGreeting,
+        onSessionEnded: async (endSessionResult) => {
+          if (!endSessionResult?.hadSession || !endSessionResult?.preserved || !resumeCacheExtension) {
+            console.log(
+              '[' + new Date().toISOString() + '] CALL Session not cached for resume: ' +
+              'callUuid=' + callUuid +
+              ' sessionKey=' + sessionKey +
+              ' hadSession=' + !!endSessionResult?.hadSession +
+              ' preserved=' + !!endSessionResult?.preserved
+            );
+            return;
+          }
 
-        rememberRecentSession({
-          callerId,
-          extension: resumeCacheExtension,
-          sessionKey,
-          sessionType: deviceConfig?.sessionType || 'phone',
-          deviceName: deviceConfig?.name || 'Morpheus',
-          ttlSeconds: sessionEndPreserveSeconds,
-        });
-      }
-    });
+          rememberRecentSession({
+            callerId,
+            extension: resumeCacheExtension,
+            sessionKey,
+            sessionType: deviceConfig?.sessionType || 'phone',
+            deviceName: deviceConfig?.name || 'Morpheus',
+            ttlSeconds: sessionEndPreserveSeconds,
+          });
+        }
+      });
+    }
     try {
       if (!dialog.destroyed) {
         await dialog.destroy();

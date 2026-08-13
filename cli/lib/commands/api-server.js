@@ -5,6 +5,11 @@ import path from 'path';
 import { loadConfig, configExists } from '../config.js';
 import { getProjectRoot } from '../utils.js';
 import { savePid, removePid } from '../process-manager.js';
+import {
+  buildAgentServerEnvironment,
+  checkConfiguredAgentProviders,
+  createDefaultAgentConfig
+} from '../agents.js';
 
 /**
  * API Server command - Start claude-api-server for remote connections
@@ -13,12 +18,14 @@ import { savePid, removePid } from '../process-manager.js';
  * @returns {Promise<void>}
  */
 export async function apiServerCommand(options = {}) {
-  console.log(chalk.bold.cyan('\n🤖 Claude API Server\n'));
+  console.log(chalk.bold.cyan('\n🤖 Teleagent API Server\n'));
 
   // Load config to get port if not provided
   let port = options.port;
+  const config = configExists()
+    ? await loadConfig()
+    : { agents: createDefaultAgentConfig({ providers: ['claude'] }) };
   if (!port && configExists()) {
-    const config = await loadConfig();
     port = config.server?.claudeApiPort || 3333;
   }
   if (!port) {
@@ -26,7 +33,14 @@ export async function apiServerCommand(options = {}) {
   }
 
   console.log(chalk.gray(`Starting API server on port ${port}...`));
-  console.log(chalk.gray('This wraps Claude Code CLI for Pi connections.\n'));
+  console.log(chalk.gray('This wraps the configured Claude and/or Codex CLIs for voice-server connections.\n'));
+
+  const providerChecks = await checkConfiguredAgentProviders(config);
+  const providerFailure = providerChecks.find(result => !result.installed || !result.authenticated);
+  if (providerFailure) {
+    const label = providerFailure.provider === 'codex' ? 'Codex' : 'Claude';
+    throw new Error(`${label} provider is not ready: ${providerFailure.error || 'CLI unavailable'}`);
+  }
 
   const projectRoot = getProjectRoot();
   const serverPath = path.join(projectRoot, 'claude-api-server', 'server.js');
@@ -36,7 +50,7 @@ export async function apiServerCommand(options = {}) {
   try {
     const child = spawn('node', [serverPath], {
       env: {
-        ...process.env,
+        ...buildAgentServerEnvironment(config),
         PORT: port.toString()
       },
       stdio: 'inherit'

@@ -9,7 +9,7 @@ import { checkClaudeApiServer } from '../network.js';
  * @returns {Promise<void>}
  */
 export async function statusCommand() {
-  console.log(chalk.bold.cyan('\n📊 Claude Phone Status\n'));
+  console.log(chalk.bold.cyan('\n📊 Teleagent Status\n'));
 
   // Check if configured
   if (!configExists()) {
@@ -46,7 +46,7 @@ export async function statusCommand() {
  * @returns {Promise<void>}
  */
 async function showApiServerStatus(config, isPiSplit) {
-  console.log(chalk.bold('Claude API Server:'));
+  console.log(chalk.bold('Agent API Server:'));
 
   if (isPiSplit) {
     // Pi-split mode: Check remote API server

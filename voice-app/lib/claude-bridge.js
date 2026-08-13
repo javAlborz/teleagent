@@ -1,21 +1,23 @@
 /**
- * Claude HTTP API Bridge
- * HTTP client for Claude API server with session management
+ * Teleagent HTTP Agent Bridge client
+ * HTTP client for the Claude/Codex API server with session management
  */
 
 const axios = require('axios');
-const { CLAUDE_API_URL, buildClaudeApiHeaders } = require('./claude-api-config');
+const { AGENT_API_URL, buildAgentApiHeaders } = require('./claude-api-config');
 const { looksLikePhoneDeployRequest } = require('../../lib/phone-deploy-intent');
 
 const PHONE_DEPLOY_TIMEOUT_SECONDS = (() => {
   const parsed = Number.parseInt(process.env.PHONE_DEPLOY_TIMEOUT_SECONDS || '', 10);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : 900;
 })();
-const CLAUDE_LOG_SENSITIVE = /^(1|true|yes)$/i.test(process.env.CLAUDE_LOG_SENSITIVE || '');
+const AGENT_LOG_SENSITIVE = /^(1|true|yes)$/i.test(
+  process.env.AGENT_LOG_SENSITIVE || process.env.CLAUDE_LOG_SENSITIVE || ''
+);
 
 function summarizeText(text, limit = 100) {
   const value = String(text || '');
-  if (CLAUDE_LOG_SENSITIVE) {
+  if (AGENT_LOG_SENSITIVE) {
     return `"${value.substring(0, limit)}${value.length > limit ? '...' : ''}"`;
   }
   return `chars=${value.length}`;
@@ -27,10 +29,13 @@ function valuePresence(value) {
 
 function buildFriendlyErrorMessage(code) {
   switch (code) {
+    case 'AGENT_TIMEOUT':
     case 'CLAUDE_TIMEOUT':
       return `I'm sorry, that request took too long. This might mean the API server is slow or there's a network issue. Try asking something simpler, or check that claude-phone api-server is running.`;
+    case 'AGENT_CANCELED':
     case 'CLAUDE_CANCELED':
       return 'Okay, I stopped that request.';
+    case 'AGENT_API_UNAVAILABLE':
     case 'CLAUDE_API_UNAVAILABLE':
       return "I'm having trouble connecting to my brain right now. The API server may be offline or unreachable. Please try again later.";
     default:
@@ -42,6 +47,7 @@ async function sendQuery(prompt, options = {}) {
   const {
     callId,
     sessionKey = callId,
+    resumeSessionId = null,
     devicePrompt,
     timeout = 30,
     sessionType
@@ -53,50 +59,79 @@ async function sendQuery(prompt, options = {}) {
   const effectiveTimeout = deployIntent ? Math.max(timeout, PHONE_DEPLOY_TIMEOUT_SECONDS) : timeout;
 
   try {
-    console.log(`[${timestamp}] CLAUDE Sending query to ${CLAUDE_API_URL}...`);
+    console.log(`[${timestamp}] AGENT Sending query to ${AGENT_API_URL}...`);
     console.log(
-      `[${timestamp}] CLAUDE Query meta: prompt=${summarizeText(prompt)} callLinked=${valuePresence(callId)} sessionKey=${valuePresence(sessionKey && sessionKey !== callId ? sessionKey : '')} devicePrompt=${valuePresence(devicePrompt)}`
+      `[${timestamp}] AGENT Query meta: prompt=${summarizeText(prompt)} callLinked=${valuePresence(callId)} sessionKey=${valuePresence(sessionKey && sessionKey !== callId ? sessionKey : '')} devicePrompt=${valuePresence(devicePrompt)}`
     );
-    console.log(`[${timestamp}] CLAUDE Deploy intent: ${deployIntent}`);
-    console.log(`[${timestamp}] CLAUDE Timeout: ${effectiveTimeout}s`);
+    console.log(`[${timestamp}] AGENT Deploy intent: ${deployIntent}`);
+    console.log(`[${timestamp}] AGENT Timeout: ${effectiveTimeout}s`);
 
     const response = await axios.post(
-      `${CLAUDE_API_URL}/ask`,
-      { prompt, callId, sessionKey, devicePrompt, sessionType, timeoutSeconds: effectiveTimeout },
+      `${AGENT_API_URL}/ask`,
+      {
+        prompt,
+        callId,
+        sessionKey,
+        resumeSessionId,
+        devicePrompt,
+        sessionType,
+        timeoutSeconds: effectiveTimeout,
+      },
       {
         timeout: effectiveTimeout * 1000,
-        headers: buildClaudeApiHeaders({ 'Content-Type': 'application/json' })
+        headers: buildAgentApiHeaders({ 'Content-Type': 'application/json' })
       }
     );
 
     if (response.data.success) {
-      console.log(`[${timestamp}] CLAUDE Response received (${response.data.duration_ms}ms)`);
-      console.log(`[${timestamp}] CLAUDE Session updated: ${valuePresence(response.data.sessionId)}`);
+      console.log(`[${timestamp}] AGENT Response received: provider=${response.data.provider || 'claude'} duration=${response.data.duration_ms}ms`);
+      console.log(`[${timestamp}] AGENT Session updated: ${valuePresence(response.data.sessionId)}`);
 
       return {
         success: true,
         response: response.data.response,
         sessionId: response.data.sessionId || null,
+        provider: response.data.provider || null,
         duration_ms: response.data.duration_ms || null,
       };
     }
 
     const code = response.data.code || 'CLAUDE_ERROR';
+    const agentCode = response.data.agentCode || code.replace(/^CLAUDE_/, 'AGENT_');
     return {
       success: false,
       code,
-      error: response.data.error || 'Claude API returned failure',
+      agentCode,
+      provider: response.data.provider || null,
+      error: response.data.error || 'Agent API returned failure',
       reason: response.data.reason || null,
       duration_ms: response.data.duration_ms || null,
-      userMessage: buildFriendlyErrorMessage(code),
+      userMessage: response.data.userMessage || buildFriendlyErrorMessage(agentCode),
     };
 
   } catch (error) {
+    if (error.response?.data) {
+      const apiFailure = error.response.data;
+      const code = apiFailure.code || 'CLAUDE_ERROR';
+      const agentCode = apiFailure.agentCode || code.replace(/^CLAUDE_/, 'AGENT_');
+      return {
+        success: false,
+        code,
+        agentCode,
+        provider: apiFailure.provider || null,
+        error: apiFailure.error || error.message,
+        reason: apiFailure.reason || null,
+        duration_ms: apiFailure.duration_ms || null,
+        userMessage: apiFailure.userMessage || buildFriendlyErrorMessage(agentCode),
+      };
+    }
+
     if (error.code === 'ECONNREFUSED' || error.code === 'EHOSTUNREACH' || error.code === 'ENETUNREACH') {
-      console.warn(`[${timestamp}] CLAUDE API server unreachable (${error.code})`);
+      console.warn(`[${timestamp}] AGENT API server unreachable (${error.code})`);
       return {
         success: false,
         code: 'CLAUDE_API_UNAVAILABLE',
+        agentCode: 'AGENT_API_UNAVAILABLE',
         error: error.message,
         duration_ms: null,
         userMessage: buildFriendlyErrorMessage('CLAUDE_API_UNAVAILABLE'),
@@ -104,20 +139,22 @@ async function sendQuery(prompt, options = {}) {
     }
 
     if (error.code === 'ETIMEDOUT' || error.code === 'ECONNABORTED') {
-      console.error(`[${timestamp}] CLAUDE Timeout after ${effectiveTimeout} seconds`);
+      console.error(`[${timestamp}] AGENT Timeout after ${effectiveTimeout} seconds`);
       return {
         success: false,
         code: 'CLAUDE_TIMEOUT',
+        agentCode: 'AGENT_TIMEOUT',
         error: error.message,
         duration_ms: null,
         userMessage: buildFriendlyErrorMessage('CLAUDE_TIMEOUT'),
       };
     }
 
-    console.error(`[${timestamp}] CLAUDE Error:`, error.message);
+    console.error(`[${timestamp}] AGENT Error:`, error.message);
     return {
       success: false,
       code: 'CLAUDE_ERROR',
+      agentCode: 'AGENT_ERROR',
       error: error.message,
       duration_ms: null,
       userMessage: buildFriendlyErrorMessage('CLAUDE_ERROR'),
@@ -126,14 +163,15 @@ async function sendQuery(prompt, options = {}) {
 }
 
 /**
- * Query Claude via HTTP API with session support
- * @param {string} prompt - The prompt/question to send to Claude
+ * Query the configured agent via HTTP API with session support
+ * @param {string} prompt - The prompt/question to send to the agent
  * @param {Object} options - Options including callId for session management
  * @param {string} options.callId - Call UUID for active request cancellation
- * @param {string} [options.sessionKey] - Stable Claude session UUID for resumable context
+ * @param {string} [options.sessionKey] - Stable agent session UUID for resumable context
+ * @param {string} [options.resumeSessionId] - Durable provider session ID restored by the voice state store
  * @param {string} options.devicePrompt - Device-specific personality prompt
  * @param {number} options.timeout - Timeout in seconds (default: 30, AC27)
- * @returns {Promise<string>} Claude's response
+ * @returns {Promise<string>} Agent response
  */
 async function query(prompt, options = {}) {
   const result = await sendQuery(prompt, options);
@@ -159,20 +197,20 @@ async function cancelSession(callId, options = {}) {
 
   try {
     const response = await axios.post(
-      `${CLAUDE_API_URL}/cancel-session`,
+      `${AGENT_API_URL}/cancel-session`,
       { callId, sessionKey, resetSession, reason },
       {
         timeout: 5000,
-        headers: buildClaudeApiHeaders({ 'Content-Type': 'application/json' })
+        headers: buildAgentApiHeaders({ 'Content-Type': 'application/json' })
       }
     );
 
     console.log(
-      `[${timestamp}] CLAUDE Session cancel requested: callLinked=yes active=${response.data.active} canceled=${response.data.canceledCount}`
+      `[${timestamp}] AGENT Session cancel requested: callLinked=yes active=${response.data.active} canceled=${response.data.canceledCount}`
     );
     return response.data;
   } catch (error) {
-    console.warn(`[${timestamp}] CLAUDE Failed to cancel session: ${error.message}`);
+    console.warn(`[${timestamp}] AGENT Failed to cancel session: ${error.message}`);
     return {
       success: false,
       error: error.message,
@@ -181,10 +219,10 @@ async function cancelSession(callId, options = {}) {
 }
 
 /**
- * End a Claude session when a call ends
+ * End an agent session when a call ends
  * @param {string} callId - The call UUID to end the session for
  * @param {Object} options - Session end options
- * @param {string} [options.sessionKey] - Stable Claude session UUID
+ * @param {string} [options.sessionKey] - Stable agent session UUID
  * @param {number} [options.preserveForSeconds=0] - Keep session resumable for this many seconds
  */
 async function endSession(callId, options = {}) {
@@ -199,20 +237,20 @@ async function endSession(callId, options = {}) {
   
   try {
     const response = await axios.post(
-      `${CLAUDE_API_URL}/end-session`,
+      `${AGENT_API_URL}/end-session`,
       { callId, sessionKey, preserveForSeconds },
       { 
         timeout: 5000,
-        headers: buildClaudeApiHeaders({ 'Content-Type': 'application/json' })
+        headers: buildAgentApiHeaders({ 'Content-Type': 'application/json' })
       }
     );
     console.log(
-      `[${timestamp}] CLAUDE Session ended: callLinked=yes sessionKey=${valuePresence(sessionKey)} preserved=${response.data.preserved}`
+      `[${timestamp}] AGENT Session ended: callLinked=yes sessionKey=${valuePresence(sessionKey)} preserved=${response.data.preserved}`
     );
     return response.data;
   } catch (error) {
     // Non-critical, just log
-    console.warn(`[${timestamp}] CLAUDE Failed to end session: ${error.message}`);
+    console.warn(`[${timestamp}] AGENT Failed to end session: ${error.message}`);
     return {
       success: false,
       error: error.message,
@@ -225,14 +263,14 @@ async function endSession(callId, options = {}) {
 }
 
 /**
- * Check if Claude API is available
+ * Check if the agent API is available
  * @returns {Promise<boolean>} True if API is reachable
  */
 async function isAvailable() {
   try {
-    await axios.get(`${CLAUDE_API_URL}/health`, {
+    await axios.get(`${AGENT_API_URL}/health`, {
       timeout: 5000,
-      headers: buildClaudeApiHeaders()
+      headers: buildAgentApiHeaders()
     });
     return true;
   } catch {

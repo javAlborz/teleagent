@@ -1,14 +1,14 @@
 # Teleagent
 
-Voice interface for Claude Code via SIP/3CX. Call your AI, and your AI can call you.
+Voice interface for Claude Code and OpenAI Codex via SIP. Call your AI, and your AI can call you.
 
 ## Project Overview
 
-Teleagent gives your Claude Code installation a phone number through 3CX PBX integration.
+Teleagent gives Claude Code and Codex CLI profiles a phone interface through SIP/PBX integration.
 It is the maintained continuation of the old Claude Phone project; the CLI
 command remains `claude-phone` for compatibility.
 
-- **Inbound**: Call an extension and talk to Claude - run commands, check status, ask questions
+- **Inbound**: Call an extension and talk to Claude or Codex - run commands, check status, ask questions
 - **Outbound**: Your server can call YOU with alerts, then have a conversation about what to do
 
 ## Tech Stack
@@ -19,9 +19,9 @@ command remains `claude-phone` for compatibility.
 | SIP Server | drachtio-srf |
 | Media Server | FreeSWITCH (via drachtio-fsmrf) |
 | STT | OpenAI Whisper API |
-| TTS | ElevenLabs API |
-| AI Backend | Claude Code CLI (via HTTP wrapper) |
-| PBX | 3CX (any SIP-compatible works) |
+| TTS | OpenAI-compatible speech API |
+| AI Backend | Claude Code CLI and Codex CLI (via HTTP wrapper) |
+| PBX | Asterisk on Hermes; any compatible SIP PBX works |
 | Container | Docker Compose |
 
 ## Architecture
@@ -30,9 +30,9 @@ command remains `claude-phone` for compatibility.
 ┌─────────────────────────────────────────────────────────────┐
 │  Phone Call                                                  │
 │      │                                                       │
-│      ↓ Call extension 9000                                  │
+│      ↓ Call a configured agent extension                    │
 │  ┌─────────────┐                                            │
-│  │     3CX     │  ← PBX routes the call                    │
+│  │  SIP/PBX    │  ← PBX routes the call                    │
 │  └──────┬──────┘                                            │
 │         │ SIP                                               │
 │         ↓                                                    │
@@ -46,8 +46,8 @@ command remains `claude-phone` for compatibility.
 │                       │ HTTP                                │
 │                       ↓                                      │
 │  ┌─────────────────────────────────────────────────┐       │
-│  │   claude-api-server                              │       │
-│  │   Wraps Claude Code CLI with session management │       │
+│  │   claude-api-server (legacy service name)        │       │
+│  │   Wraps Claude and Codex with session management │       │
 │  └─────────────────────────────────────────────────┘       │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -132,18 +132,19 @@ teleagent/
 │   │   ├── outbound-handler.js   # Outbound call logic
 │   │   ├── outbound-routes.js    # Outbound API endpoints
 │   │   ├── outbound-session.js   # Outbound call sessions
-│   │   ├── query-routes.js   # Query API endpoints
 │   │   ├── registrar.js      # Single SIP registration
 │   │   ├── sip-handler.js    # Inbound call handling
-│   │   ├── tts-service.js    # ElevenLabs TTS
+│   │   ├── tts-service.js    # OpenAI-compatible TTS
 │   │   └── whisper-client.js # OpenAI Whisper STT
 │   ├── DEPLOYMENT.md         # Production deployment guide
 │   ├── README-OUTBOUND.md    # Outbound calling API docs
 │   └── API-QUERY-CONTRACT.md # Query API specification
 │
-├── claude-api-server/        # HTTP wrapper for Claude CLI
+├── claude-api-server/        # HTTP wrapper for Claude and Codex CLIs
 │   ├── package.json
 │   ├── server.js             # Express server
+│   ├── agent-cli.js          # Provider CLI args and JSONL parsing
+│   ├── test/                 # Agent bridge tests
 │   └── structured.js         # JSON validation helpers
 │
 ├── docs/
@@ -174,6 +175,7 @@ claude-phone doctor   # Health checks
 ```bash
 npm test              # All tests
 npm run test:cli      # CLI tests only
+npm run test:api-server # Agent bridge tests only
 npm run test:voice-app # Voice app tests only
 ```
 
@@ -204,15 +206,16 @@ npm run lint:fix      # Auto-fix issues
 | POST | `/api/outbound-call` | Initiate outbound call |
 | GET | `/api/call/:callId` | Get call status |
 | GET | `/api/calls` | List active calls |
-| POST | `/api/query` | Query device programmatically |
 | GET | `/api/devices` | List configured devices |
+| GET | `/api/device/:identifier` | Get one configured device |
 
-### Claude API Server (port 3333)
+### Agent API Bridge (port 3333)
 
 | Method | Endpoint | Purpose |
 |--------|----------|---------|
-| POST | `/ask` | Send prompt to Claude |
+| POST | `/ask` | Send a prompt to the selected Claude/Codex profile |
 | POST | `/ask-structured` | Send prompt, return JSON |
+| POST | `/cancel-session` | Cancel active agent work for a call |
 | POST | `/end-session` | Clean up session |
 | GET | `/health` | Health check |
 
@@ -221,8 +224,8 @@ npm run lint:fix      # Auto-fix issues
 1. **CommonJS for voice-app** - Compatibility with drachtio ecosystem
 2. **ES Modules for CLI** - Modern Node.js tooling
 3. **Host networking mode** - Required for FreeSWITCH RTP
-4. **Separate claude-api-server** - Runs where Claude Code CLI is installed
-5. **Session-per-call** - Each call gets Claude session for multi-turn context
+4. **Separate claude-api-server** - Legacy service name; runs where the selected agent CLIs are installed and authenticated
+5. **Session-per-call** - Each call gets a provider-specific session for multi-turn context
 6. **RTP ports 30000-30100** - Avoids conflict with 3CX SBC (uses 20000-20099)
 7. **Config in ~/.claude-phone** - User config separate from codebase
 
@@ -234,8 +237,10 @@ See `.env.example` for all variables. Key ones:
 |----------|---------|
 | `EXTERNAL_IP` | Server LAN IP for RTP routing |
 | `CLAUDE_API_URL` | URL to claude-api-server |
-| `ELEVENLABS_API_KEY` | TTS API key |
-| `OPENAI_API_KEY` | Whisper STT API key |
+| `TTS_BASE_URL` / `TTS_API_KEY` | OpenAI-compatible TTS endpoint and credential |
+| `STT_BASE_URL` / `STT_API_KEY` | OpenAI-compatible STT endpoint and credential |
+| `CODEX_WORKING_DIR` | Codex CLI workspace for phone profiles |
+| `PHONE_CODEX_*` | Codex model, effort, and sandbox profile settings |
 | `SIP_DOMAIN` | 3CX server FQDN |
 | `SIP_REGISTRAR` | SIP registrar address |
 

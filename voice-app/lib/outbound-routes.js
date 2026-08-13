@@ -11,6 +11,8 @@ const logger = require('./logger');
 const { OutboundSession, getSession, getAllSessions } = require('./outbound-session');
 const { initiateOutboundCall, playMessage, hangupCall } = require('./outbound-handler');
 const { runConversationLoop } = require('./conversation-loop');
+const { runRealtimeConversation } = require('./realtime-conversation');
+const { getRealtimeApiKey } = require('./openai-realtime-client');
 
 // Dependencies injected via setupRoutes()
 var srf = null;
@@ -20,6 +22,8 @@ var audioForkServer = null;
 var whisperClient = null;
 var claudeBridge = null;
 var ttsService = null;
+var voiceStateStore = null;
+var agentJobBroker = null;
 var wsPort = 3001;
 
 function getProvidedApiToken(req) {
@@ -107,8 +111,8 @@ function validateRequest(body) {
     return { valid: false, error: 'Field "callerId" must be a valid E.164 phone number if provided' };
   }
 
-  if (body.mode && !['announce', 'conversation'].includes(body.mode)) {
-    return { valid: false, error: 'Field "mode" must be either "announce" or "conversation"' };
+  if (body.mode && !['announce', 'conversation', 'realtime'].includes(body.mode)) {
+    return { valid: false, error: 'Field "mode" must be announce, conversation, or realtime' };
   }
 
   if (body.device !== undefined && typeof body.device !== 'string') {
@@ -133,6 +137,10 @@ function validateRequest(body) {
     return { valid: false, error: 'Field "dialUri" must be a valid SIP URI' };
   }
 
+  if (body.voiceThreadId !== undefined && !/^vt_[a-f0-9]{32}$/.test(body.voiceThreadId)) {
+    return { valid: false, error: 'Field "voiceThreadId" is invalid' };
+  }
+
   return { valid: true };
 }
 
@@ -144,7 +152,7 @@ function validateRequest(body) {
  *   - to: Phone number (required)
  *   - message: Initial message to play (required) - what the device SAYS
  *   - context: Background data for Claude (optional) - what the device KNOWS
- *   - mode: 'announce' or 'conversation' (default: announce)
+ *   - mode: 'announce', 'conversation', or 'realtime' (default: announce)
  *   - device: Device extension or name for voice/personality (optional)
  *   - callerId: Caller ID (optional)
  *   - timeoutSeconds: Ring timeout (optional, default: 30)
@@ -178,6 +186,7 @@ router.post('/outbound-call', authorizeOutboundApi, async function(req, res) {
     var timeoutSeconds = req.body.timeoutSeconds || 30;
     var webhookUrl = req.body.webhookUrl;
     var dialUri = req.body.dialUri || null;
+    var voiceThreadId = req.body.voiceThreadId || null;
 
     // Look up device configuration
     var deviceConfig = null;
@@ -224,6 +233,23 @@ router.post('/outbound-call', authorizeOutboundApi, async function(req, res) {
           success: false,
           error: 'service_unavailable',
           message: 'Conversation mode dependencies not ready'
+        });
+      }
+    }
+
+    if (mode === 'realtime') {
+      if (!audioForkServer || !voiceStateStore || !agentJobBroker || !getRealtimeApiKey()) {
+        logger.error('Realtime conversation dependencies not ready', {
+          audioForkServer: !!audioForkServer,
+          voiceStateStore: !!voiceStateStore,
+          agentJobBroker: !!agentJobBroker,
+          openaiConfigured: !!getRealtimeApiKey()
+        });
+
+        return res.status(503).json({
+          success: false,
+          error: 'service_unavailable',
+          message: 'OpenAI Realtime voice is not configured'
         });
       }
     }
@@ -280,7 +306,34 @@ router.post('/outbound-call', authorizeOutboundApi, async function(req, res) {
         session.setEndpoint(endpoint);
         session.transition('PLAYING');
 
-        // Play the initial message with device voice
+        if (mode === 'realtime') {
+          logger.info('Entering OpenAI Realtime callback mode', {
+            callId: callId,
+            voiceThreadId: voiceThreadId,
+            device: deviceConfig ? deviceConfig.name : 'default'
+          });
+          session.transition('CONVERSING');
+
+          await runRealtimeConversation(endpoint, dialog, callId, {
+            audioForkServer: audioForkServer,
+            wsPort: wsPort,
+            stateStore: voiceStateStore,
+            jobBroker: agentJobBroker,
+            callerId: to,
+            callbackTarget: to,
+            callbackDialUri: dialUri,
+            resume: true,
+            voiceThreadId: voiceThreadId,
+            initialMessage: message,
+            defaultProfile: deviceConfig?.defaultAgentProfile || 'codex-terra'
+          });
+
+          await hangupCall(dialog, endpoint, callId);
+          session.transition('COMPLETED', 'realtime_complete');
+          return;
+        }
+
+        // Legacy announce/conversation modes use the configured TTS service.
         var voiceId = (deviceConfig && deviceConfig.voiceId) ? deviceConfig.voiceId : null;
         await playMessage(endpoint, message, { voiceId: voiceId });
 
@@ -445,15 +498,19 @@ function setupRoutes(deps) {
   whisperClient = deps.whisperClient || null;
   claudeBridge = deps.claudeBridge || null;
   ttsService = deps.ttsService || null;
+  voiceStateStore = deps.voiceStateStore || null;
+  agentJobBroker = deps.agentJobBroker || null;
   wsPort = deps.wsPort || 3001;
 
   var conversationReady = !!(audioForkServer && whisperClient && claudeBridge && ttsService);
+  var realtimeReady = !!(audioForkServer && voiceStateStore && agentJobBroker && getRealtimeApiKey());
 
   logger.info('Outbound routes initialized', {
     srf: !!srf,
     mediaServer: !!mediaServer,
     deviceRegistry: !!deviceRegistry,
-    conversationMode: conversationReady ? 'enabled' : 'disabled'
+    conversationMode: conversationReady ? 'enabled' : 'disabled',
+    realtimeMode: realtimeReady ? 'enabled' : 'disabled'
   });
 }
 

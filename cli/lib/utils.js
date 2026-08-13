@@ -47,16 +47,26 @@ export function getLocalIP() {
 }
 
 /**
- * Check if Claude CLI is installed
+ * Check if a command is installed
+ * @param {string} command - Executable name
  * @returns {Promise<boolean>}
  */
-export async function isClaudeInstalled() {
+export async function isCommandInstalled(command) {
   return new Promise((resolve) => {
-    const check = spawn('which', ['claude']);
+    const check = spawn('which', [command]);
     check.on('close', (code) => {
       resolve(code === 0);
     });
+    check.on('error', () => resolve(false));
   });
+}
+
+export async function isClaudeInstalled() {
+  return isCommandInstalled('claude');
+}
+
+export async function isCodexInstalled() {
+  return isCommandInstalled('codex');
 }
 
 /**
