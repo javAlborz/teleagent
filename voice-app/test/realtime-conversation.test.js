@@ -121,7 +121,7 @@ test('Realtime conversation streams 24 kHz full-duplex audio and closes durable 
   assert.equal(result.resumed, false);
   assert.equal(fixture.audioForkServer.expected.options.sampleRate, 24000);
   assert.equal(fixture.audioForkServer.expected.options.bidirectionalStreaming, true);
-  assert.equal(fixture.endpoint.forkOptions.sampling, '24k');
+  assert.equal(fixture.endpoint.forkOptions.sampling, '24000');
   assert.equal(fixture.endpoint.forkOptions.bidirectionalAudio.streaming, 'true');
   assert.equal(fixture.endpoint.forkStopped, true);
   assert.equal(fixture.getRealtimeClient().options.apiKey, 'test-realtime-key');

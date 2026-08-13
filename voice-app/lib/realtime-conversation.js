@@ -136,7 +136,8 @@ async function runRealtimeConversation(endpoint, dialog, callUuid, {
     await endpoint.forkAudioStart({
       wsUrl,
       mixType: 'mono',
-      sampling: '24k',
+      // mod_audio_fork accepts numeric sample-rate tokens, not aliases such as "24k".
+      sampling: String(PCM_SAMPLE_RATE),
       metadata: {
         callUuid,
         mode: 'openai-realtime',
