@@ -4,6 +4,7 @@ import ora from 'ora';
 import { loadConfig, saveConfig, configExists } from '../../config.js';
 import { validateExtension, validateTtsVoice } from '../../validators.js';
 import { writeDockerConfig } from '../../docker.js';
+import { getAgentProfileChoices } from '../../agents.js';
 
 /**
  * Device add command - Add a new SIP device
@@ -19,9 +20,17 @@ export async function deviceAddCommand() {
   }
 
   const config = await loadConfig();
+  const profileChoices = getAgentProfileChoices(config);
 
   // Gather device information
   const answers = await inquirer.prompt([
+    {
+      type: 'list',
+      name: 'sessionType',
+      message: 'Agent profile:',
+      choices: profileChoices,
+      default: profileChoices[0]?.value
+    },
     {
       type: 'input',
       name: 'name',
@@ -110,6 +119,7 @@ export async function deviceAddCommand() {
     authId: answers.authId || answers.extension,
     password: answers.password,
     voiceId: answers.voiceId,
+    sessionType: answers.sessionType,
     prompt: answers.prompt || `You are ${answers.name}, a helpful AI assistant accessible via phone.`
   };
 

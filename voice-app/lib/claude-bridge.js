@@ -4,18 +4,20 @@
  */
 
 const axios = require('axios');
-const { CLAUDE_API_URL, buildClaudeApiHeaders } = require('./claude-api-config');
+const { AGENT_API_URL, buildAgentApiHeaders } = require('./claude-api-config');
 const { looksLikePhoneDeployRequest } = require('../../lib/phone-deploy-intent');
 
 const PHONE_DEPLOY_TIMEOUT_SECONDS = (() => {
   const parsed = Number.parseInt(process.env.PHONE_DEPLOY_TIMEOUT_SECONDS || '', 10);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : 900;
 })();
-const CLAUDE_LOG_SENSITIVE = /^(1|true|yes)$/i.test(process.env.CLAUDE_LOG_SENSITIVE || '');
+const AGENT_LOG_SENSITIVE = /^(1|true|yes)$/i.test(
+  process.env.AGENT_LOG_SENSITIVE || process.env.CLAUDE_LOG_SENSITIVE || ''
+);
 
 function summarizeText(text, limit = 100) {
   const value = String(text || '');
-  if (CLAUDE_LOG_SENSITIVE) {
+  if (AGENT_LOG_SENSITIVE) {
     return `"${value.substring(0, limit)}${value.length > limit ? '...' : ''}"`;
   }
   return `chars=${value.length}`;
@@ -27,10 +29,13 @@ function valuePresence(value) {
 
 function buildFriendlyErrorMessage(code) {
   switch (code) {
+    case 'AGENT_TIMEOUT':
     case 'CLAUDE_TIMEOUT':
       return `I'm sorry, that request took too long. This might mean the API server is slow or there's a network issue. Try asking something simpler, or check that claude-phone api-server is running.`;
+    case 'AGENT_CANCELED':
     case 'CLAUDE_CANCELED':
       return 'Okay, I stopped that request.';
+    case 'AGENT_API_UNAVAILABLE':
     case 'CLAUDE_API_UNAVAILABLE':
       return "I'm having trouble connecting to my brain right now. The API server may be offline or unreachable. Please try again later.";
     default:
@@ -53,7 +58,7 @@ async function sendQuery(prompt, options = {}) {
   const effectiveTimeout = deployIntent ? Math.max(timeout, PHONE_DEPLOY_TIMEOUT_SECONDS) : timeout;
 
   try {
-    console.log(`[${timestamp}] AGENT Sending query to ${CLAUDE_API_URL}...`);
+    console.log(`[${timestamp}] AGENT Sending query to ${AGENT_API_URL}...`);
     console.log(
       `[${timestamp}] AGENT Query meta: prompt=${summarizeText(prompt)} callLinked=${valuePresence(callId)} sessionKey=${valuePresence(sessionKey && sessionKey !== callId ? sessionKey : '')} devicePrompt=${valuePresence(devicePrompt)}`
     );
@@ -61,11 +66,11 @@ async function sendQuery(prompt, options = {}) {
     console.log(`[${timestamp}] AGENT Timeout: ${effectiveTimeout}s`);
 
     const response = await axios.post(
-      `${CLAUDE_API_URL}/ask`,
+      `${AGENT_API_URL}/ask`,
       { prompt, callId, sessionKey, devicePrompt, sessionType, timeoutSeconds: effectiveTimeout },
       {
         timeout: effectiveTimeout * 1000,
-        headers: buildClaudeApiHeaders({ 'Content-Type': 'application/json' })
+        headers: buildAgentApiHeaders({ 'Content-Type': 'application/json' })
       }
     );
 
@@ -83,22 +88,41 @@ async function sendQuery(prompt, options = {}) {
     }
 
     const code = response.data.code || 'CLAUDE_ERROR';
+    const agentCode = response.data.agentCode || code.replace(/^CLAUDE_/, 'AGENT_');
     return {
       success: false,
       code,
+      agentCode,
       provider: response.data.provider || null,
       error: response.data.error || 'Agent API returned failure',
       reason: response.data.reason || null,
       duration_ms: response.data.duration_ms || null,
-      userMessage: buildFriendlyErrorMessage(code),
+      userMessage: response.data.userMessage || buildFriendlyErrorMessage(agentCode),
     };
 
   } catch (error) {
+    if (error.response?.data) {
+      const apiFailure = error.response.data;
+      const code = apiFailure.code || 'CLAUDE_ERROR';
+      const agentCode = apiFailure.agentCode || code.replace(/^CLAUDE_/, 'AGENT_');
+      return {
+        success: false,
+        code,
+        agentCode,
+        provider: apiFailure.provider || null,
+        error: apiFailure.error || error.message,
+        reason: apiFailure.reason || null,
+        duration_ms: apiFailure.duration_ms || null,
+        userMessage: apiFailure.userMessage || buildFriendlyErrorMessage(agentCode),
+      };
+    }
+
     if (error.code === 'ECONNREFUSED' || error.code === 'EHOSTUNREACH' || error.code === 'ENETUNREACH') {
       console.warn(`[${timestamp}] AGENT API server unreachable (${error.code})`);
       return {
         success: false,
         code: 'CLAUDE_API_UNAVAILABLE',
+        agentCode: 'AGENT_API_UNAVAILABLE',
         error: error.message,
         duration_ms: null,
         userMessage: buildFriendlyErrorMessage('CLAUDE_API_UNAVAILABLE'),
@@ -110,6 +134,7 @@ async function sendQuery(prompt, options = {}) {
       return {
         success: false,
         code: 'CLAUDE_TIMEOUT',
+        agentCode: 'AGENT_TIMEOUT',
         error: error.message,
         duration_ms: null,
         userMessage: buildFriendlyErrorMessage('CLAUDE_TIMEOUT'),
@@ -120,6 +145,7 @@ async function sendQuery(prompt, options = {}) {
     return {
       success: false,
       code: 'CLAUDE_ERROR',
+      agentCode: 'AGENT_ERROR',
       error: error.message,
       duration_ms: null,
       userMessage: buildFriendlyErrorMessage('CLAUDE_ERROR'),
@@ -161,11 +187,11 @@ async function cancelSession(callId, options = {}) {
 
   try {
     const response = await axios.post(
-      `${CLAUDE_API_URL}/cancel-session`,
+      `${AGENT_API_URL}/cancel-session`,
       { callId, sessionKey, resetSession, reason },
       {
         timeout: 5000,
-        headers: buildClaudeApiHeaders({ 'Content-Type': 'application/json' })
+        headers: buildAgentApiHeaders({ 'Content-Type': 'application/json' })
       }
     );
 
@@ -201,11 +227,11 @@ async function endSession(callId, options = {}) {
   
   try {
     const response = await axios.post(
-      `${CLAUDE_API_URL}/end-session`,
+      `${AGENT_API_URL}/end-session`,
       { callId, sessionKey, preserveForSeconds },
       { 
         timeout: 5000,
-        headers: buildClaudeApiHeaders({ 'Content-Type': 'application/json' })
+        headers: buildAgentApiHeaders({ 'Content-Type': 'application/json' })
       }
     );
     console.log(
@@ -232,9 +258,9 @@ async function endSession(callId, options = {}) {
  */
 async function isAvailable() {
   try {
-    await axios.get(`${CLAUDE_API_URL}/health`, {
+    await axios.get(`${AGENT_API_URL}/health`, {
       timeout: 5000,
-      headers: buildClaudeApiHeaders()
+      headers: buildAgentApiHeaders()
     });
     return true;
   } catch {

@@ -188,7 +188,7 @@ claude-phone start
 
 ### TTS endpoint errors
 
-**Symptom:** Claude's responses aren't spoken, or voice sounds wrong.
+**Symptom:** Agent responses aren't spoken, or the voice sounds wrong.
 
 **Solutions:**
 1. Check the configured TTS endpoint is reachable
@@ -221,7 +221,7 @@ claude-phone logs freeswitch | tail -100
 curl http://<api-server-ip>:3333/health
 
 # Check configured API URL:
-grep '^CLAUDE_API_URL=' ~/.claude-phone/.env
+grep -E '^(AGENT_API_URL|CLAUDE_API_URL)=' ~/.claude-phone/.env
 ```
 
 **Solutions:**
@@ -240,10 +240,15 @@ grep '^CLAUDE_API_URL=' ~/.claude-phone/.env
    lsof -i :3333
    ```
 
-2. Verify Claude Code CLI works:
+2. Verify every configured agent CLI is installed and authenticated:
    ```bash
    claude --version
+   claude auth status
+   codex --version
+   codex login status
    ```
+
+   On a headless API host, authenticate Codex with `codex login --device-auth`.
 
 3. Check for Node.js errors in output
 

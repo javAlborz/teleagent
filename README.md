@@ -15,8 +15,7 @@ Teleagent is the maintained continuation of the old Claude Phone project for the
 - 3CX cloud account or compatible SIP setup
 - OpenAI-compatible TTS endpoint
 - OpenAI-compatible STT endpoint
-- Claude Code CLI with an active subscription for Claude profiles
-- Codex CLI with an active ChatGPT login for Codex profiles
+- At least one agent CLI: authenticated Claude Code, authenticated Codex, or both
 - macOS or Linux
 
 ## Quick Start
@@ -40,6 +39,11 @@ The setup wizard supports:
 - `Voice Server`: voice services only
 - `API Server`: Claude/Codex bridge only
 - `Both`: all-in-one single-machine install
+
+On API-hosting modes, setup also selects `Claude`, `Codex`, or both, records
+provider-specific working directories, and offers only the corresponding model
+profiles when a SIP device is created. Existing configs migrate as Claude-only
+until the provider selection is changed explicitly.
 
 ### 3. Start
 
@@ -109,6 +113,10 @@ The Hermes deployment provides paired fresh/resume profiles:
 | `5` | `55` | Codex GPT-5.6 Terra | Workspace-write, medium reasoning |
 | `6` | `66` | Codex GPT-5.6 Sol | Full access, high reasoning |
 
+Codex Luna and Terra cannot auto-escalate a deployment request. The bridge
+instructs the caller to dial `6`; only Sol may enter the privileged Codex deploy
+profile.
+
 ## API
 
 `voice-app` exposes these endpoints on port `3000`:
@@ -133,13 +141,29 @@ TTS_VOICE=af_bella
 STT_BASE_URL=http://127.0.0.1:18001/v1
 ```
 
-Codex phone profiles use the normal Codex CLI login for the service account:
+The voice app prefers the provider-neutral bridge names while accepting the
+legacy Claude names:
 
 ```bash
+AGENT_API_URL=http://127.0.0.1:3333
+AGENT_API_TOKEN=replace-with-random-token
+AGENT_PROVIDERS=claude,codex
+```
+
+Codex phone profiles use the normal Codex CLI login for the service account.
+Use device authorization when the API host is headless:
+
+```bash
+codex login
+# Headless alternative:
+codex login --device-auth
 codex login status
 ```
 
-Their models, reasoning efforts, working directory, and sandboxes are set with
+See the official [Codex authentication guide](https://learn.chatgpt.com/docs/auth)
+and [CLI command reference](https://learn.chatgpt.com/docs/developer-commands?surface=cli).
+
+Their models, reasoning efforts, profile-specific working directories, and sandboxes are set with
 the `PHONE_CODEX_*` variables documented in `.env.example`. The bridge runs
 phone requests with approval policy `never`; Luna/Terra/Sol capability is
 therefore determined by their explicit `read-only`, `workspace-write`, and

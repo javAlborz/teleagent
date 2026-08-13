@@ -1,10 +1,10 @@
 # Production Deployment Guide
 
-Guide for deploying Claude Phone in production environments.
+Guide for deploying Teleagent in production environments.
 
 ## Architecture Overview
 
-Claude Phone consists of three Docker containers and an optional API server:
+Teleagent consists of three Docker containers and an optional agent bridge:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -19,7 +19,7 @@ Claude Phone consists of three Docker containers and an optional API server:
                               ▼
               ┌───────────────────────────────┐
               │     claude-api-server         │
-              │     (Claude Code wrapper)     │
+              │   (Claude/Codex CLI bridge)   │
               │     Port 3333                 │
               └───────────────────────────────┘
 ```
@@ -33,7 +33,7 @@ Claude Phone consists of three Docker containers and an optional API server:
 | 5060 | UDP/TCP | SIP signaling (drachtio) | Inbound |
 | 5070 | UDP/TCP | SIP signaling (if 3CX SBC present) | Inbound |
 | 3000 | TCP | Voice app HTTP API | Inbound (optional) |
-| 3333 | TCP | Claude API server | Internal |
+| 3333 | TCP | Agent API server | Internal |
 | 30000-30100 | UDP | RTP audio (FreeSWITCH) | Bidirectional |
 
 ### Firewall Rules
@@ -93,7 +93,8 @@ Key environment variables in the generated `.env`:
 | Variable | Purpose |
 |----------|---------|
 | `EXTERNAL_IP` | Server LAN IP for RTP routing |
-| `CLAUDE_API_URL` | URL to claude-api-server |
+| `AGENT_API_URL` | URL to claude-api-server (`CLAUDE_API_URL` is a compatibility alias) |
+| `AGENT_API_TOKEN` | Optional bearer token shared with the bridge |
 | `TTS_BASE_URL` | OpenAI-compatible TTS base URL |
 | `TTS_VOICE` | Default TTS voice name/id |
 | `STT_BASE_URL` | OpenAI-compatible Whisper base URL |
@@ -116,11 +117,11 @@ claude-phone setup    # Select "Voice Server"
 claude-phone start
 ```
 
-### API Server (Mac/Linux with Claude Code)
+### API Server (Mac/Linux with Claude Code and/or Codex)
 
 Requirements:
 - Node.js 18+
-- Claude Code CLI installed and authenticated
+- At least one configured and authenticated agent CLI
 - Network accessible from voice server
 
 ```bash
@@ -184,7 +185,7 @@ AUDIO RTP REPORTS ERROR: [Bind Error]
 Registration failed: 401 Unauthorized
 
 # API server unreachable
-Error connecting to Claude API
+Error connecting to agent API
 ```
 
 ## Security Considerations
@@ -198,7 +199,10 @@ Error connecting to Claude API
 ### Network Security
 
 - Voice app API (port 3000) should not be publicly exposed without authentication
-- Claude API server (port 3333) should only be accessible from voice server
+- Agent API server (port 3333) should only be accessible from the voice server
+- Codex Luna/Terra deploy requests are denied; reserve the Sol extension for privileged work
+- Give Terra a narrow `PHONE_CODEX_TERRA_WORKING_DIR`; its `workspace-write` sandbox is rooted there
+- The bridge removes SIP, speech, and bridge-control secrets from Codex child environments. This reduces accidental inheritance but is not a host-level secret boundary when the service account can read the underlying files.
 - Consider VPN for split deployments across networks
 
 ### SIP Security

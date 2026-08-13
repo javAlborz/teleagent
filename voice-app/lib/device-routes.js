@@ -23,6 +23,7 @@ router.get('/devices', (req, res) => {
       modelProfile: device.sessionType || 'phone',
       hasVoice: !!device.voiceId,
       hasPrompt: !!device.prompt,
+      agentTimeoutSeconds: device.agentTimeoutSeconds ?? device.claudeTimeoutSeconds,
       claudeTimeoutSeconds: device.claudeTimeoutSeconds,
       holdMusicEnabled: getHoldMusicEnabled(device),
       maxTurns: device.maxTurns
@@ -73,6 +74,7 @@ router.get('/device/:identifier', (req, res) => {
         hasVoice: !!device.voiceId,
         hasPrompt: !!device.prompt,
         voiceId: device.voiceId,
+        agentTimeoutSeconds: device.agentTimeoutSeconds ?? device.claudeTimeoutSeconds,
         claudeTimeoutSeconds: device.claudeTimeoutSeconds,
         holdMusicEnabled: getHoldMusicEnabled(device),
         maxTurns: device.maxTurns

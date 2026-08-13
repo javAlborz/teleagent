@@ -19,6 +19,18 @@ const CODEX_REASONING_EFFORTS = new Set([
   'max',
   'ultra',
 ]);
+const CODEX_STRIPPED_ENV_KEYS = new Set([
+  'AGENT_API_TOKEN',
+  'CLAUDE_API_TOKEN',
+  'CLAUDECODE',
+  'CLAUDE_CODE_ENTRYPOINT',
+  'DRACHTIO_SECRET',
+  'FREESWITCH_SECRET',
+  'OUTBOUND_API_TOKEN',
+  'SIP_AUTH_PASSWORD',
+  'STT_API_KEY',
+  'TTS_API_KEY',
+]);
 
 function normalizeChoice(value, allowed, fallback) {
   const normalized = String(value || '').trim().toLowerCase();
@@ -74,6 +86,14 @@ function buildCodexArgs({
   // Read the prompt from stdin so spoken requests do not appear in argv.
   args.push('-');
   return args;
+}
+
+function buildCodexEnvironment(baseEnvironment = {}) {
+  const environment = { ...baseEnvironment };
+  for (const key of CODEX_STRIPPED_ENV_KEYS) {
+    delete environment[key];
+  }
+  return environment;
 }
 
 function parseClaudeStdout(stdout) {
@@ -143,6 +163,7 @@ function parseAgentStdout(provider, stdout) {
 
 module.exports = {
   buildCodexArgs,
+  buildCodexEnvironment,
   normalizeCodexApprovalPolicy,
   normalizeCodexReasoningEffort,
   normalizeCodexSandbox,

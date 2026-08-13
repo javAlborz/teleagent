@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { normalizeAgentConfig } from './agents.js';
 
 function getDefaultApiConfig() {
   return {
@@ -93,6 +94,10 @@ export async function loadConfig() {
   }
 
   migrateApiConfig(config);
+  config.agents = normalizeAgentConfig(config.agents, {
+    // Existing configurations historically implied Claude-only operation.
+    defaultProviders: ['claude']
+  });
 
   return config;
 }

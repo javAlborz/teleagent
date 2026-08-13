@@ -24,6 +24,11 @@ import { detect3cxSbc } from '../port-check.js';
 import { checkPiPrerequisites } from '../prerequisites.js';
 import { checkClaudeApiServer } from '../network.js';
 import { runPrereqChecks } from '../prereqs.js';
+import {
+  createDefaultAgentConfig,
+  getAgentProfileChoices,
+  normalizeAgentConfig
+} from '../agents.js';
 
 /**
  * Prompt for installation type
@@ -42,7 +47,7 @@ async function promptInstallationType(currentType = 'both') {
         value: 'voice-server'
       },
       {
-        name: 'API Server - Claude Code wrapper, minimal setup',
+        name: 'API Server - Claude/Codex agent bridge, minimal setup',
         value: 'api-server'
       },
       {
@@ -63,7 +68,7 @@ async function promptInstallationType(currentType = 'both') {
  * @returns {Promise<void>}
  */
 export async function setupCommand(options = {}) {
-  console.log(chalk.bold.cyan('\n🎯 Claude Phone Setup\n'));
+  console.log(chalk.bold.cyan('\n🎯 Teleagent Setup\n'));
 
   // Run minimal prerequisite check first (Node.js only)
   if (!options.skipPrereqs) {
@@ -240,25 +245,25 @@ async function setupInstallationType(installationType, existingConfig, isPi, opt
       console.log(chalk.bold.cyan('📋 API server instructions:\n'));
       console.log(chalk.gray('  On your API server, run:'));
       console.log(chalk.white(`    claude-phone api-server --port ${config.server.claudeApiPort}\n`));
-      console.log(chalk.gray('  This starts the Claude API wrapper that the Pi will connect to.\n'));
+      console.log(chalk.gray('  This starts the agent API bridge that the Pi will connect to.\n'));
       console.log(chalk.bold.cyan('📋 Pi-side next steps:\n'));
       console.log(chalk.gray('  1. Run "claude-phone start" to launch voice-app'));
       console.log(chalk.gray('  2. Call extension ' + config.devices[0].extension + ' from your phone'));
-      console.log(chalk.gray('  3. Start talking to Claude!\n'));
+      console.log(chalk.gray('  3. Start talking to your configured agent!\n'));
     } else {
       console.log(chalk.gray('Make sure your API server is running with:'));
       console.log(chalk.gray('  claude-phone api-server (on the API server machine)\n'));
       console.log(chalk.gray('Next steps:'));
       console.log(chalk.gray('  1. Run "claude-phone start" to launch voice services'));
       console.log(chalk.gray('  2. Call extension ' + config.devices[0].extension + ' from your phone'));
-      console.log(chalk.gray('  3. Start talking to Claude!\n'));
+      console.log(chalk.gray('  3. Start talking to your configured agent!\n'));
     }
   } else {
     // Both
     console.log(chalk.gray('Next steps:'));
     console.log(chalk.gray('  1. Run "claude-phone start" to launch all services'));
     console.log(chalk.gray('  2. Call extension ' + config.devices[0].extension + ' from your phone'));
-    console.log(chalk.gray('  3. Start talking to Claude!\n'));
+    console.log(chalk.gray('  3. Start talking to your configured agent!\n'));
   }
 }
 
@@ -269,6 +274,8 @@ async function setupInstallationType(installationType, existingConfig, isPi, opt
  */
 async function setupApiServer(config) {
   console.log(chalk.bold.cyan('\n🖥️  API Server Configuration\n'));
+
+  config = await setupAgentProviders(config);
 
   const answers = await inquirer.prompt([{
     type: 'input',
@@ -356,6 +363,9 @@ async function setupVoiceServer(config) {
   config.server = config.server || {};
   config.server.claudeApiPort = parseInt(apiServerAnswers.apiServerPort, 10);
 
+  // Record which profiles are available on the remote agent bridge.
+  config = await setupAgentProviders(config, { configureRuntime: false });
+
   // Step 3: API Keys (for TTS/STT)
   console.log(chalk.bold('\n📡 API Configuration'));
   config = await setupAPIKeys(config);
@@ -425,19 +435,23 @@ async function setupBoth(config) {
     config.deployment.mode = 'both';
   }
 
-  // Step 1: API Keys
+  // Step 1: Agent providers
+  console.log(chalk.bold('\n🤖 Agent Providers'));
+  config = await setupAgentProviders(config);
+
+  // Step 2: API Keys
   console.log(chalk.bold('\n📡 API Configuration'));
   config = await setupAPIKeys(config);
 
-  // Step 2: 3CX/SIP Configuration
+  // Step 3: 3CX/SIP Configuration
   console.log(chalk.bold('\n☎️  SIP Configuration'));
   config = await setupSIP(config);
 
-  // Step 3: Device Configuration
+  // Step 4: Device Configuration
   console.log(chalk.bold('\n🤖 Device Configuration'));
   config = await setupDevice(config);
 
-  // Step 4: Server Configuration
+  // Step 5: Server Configuration
   console.log(chalk.bold('\n⚙️  Server Configuration'));
   config = await setupServer(config);
 
@@ -580,7 +594,7 @@ async function setupPi(config) {
     {
       type: 'input',
       name: 'claudeApiPort',
-      message: 'Claude API server port:',
+      message: 'Agent API server port:',
       default: String(config.server?.claudeApiPort || 3333),
       validate: (input) => {
         const port = parseInt(input, 10);
@@ -597,6 +611,9 @@ async function setupPi(config) {
   config.deployment.pi.macIp = macIp;
   config.server = config.server || {};
   config.server.claudeApiPort = parseInt(claudeApiPort, 10);
+
+  // Record which profiles the remote agent bridge exposes.
+  config = await setupAgentProviders(config, { configureRuntime: false });
 
   // Now check connectivity on the specified port
   const reachSpinner = ora(`Checking API server at ${macIp}:${claudeApiPort}...`).start();
@@ -644,12 +661,105 @@ async function setupPi(config) {
   console.log(chalk.bold.cyan('📋 API server instructions:\n'));
   console.log(chalk.gray('  On your API server, run:'));
   console.log(chalk.white(`    claude-phone api-server --port ${config.server.claudeApiPort}\n`));
-  console.log(chalk.gray('  This starts the Claude API wrapper that the Pi will connect to.\n'));
+  console.log(chalk.gray('  This starts the agent API bridge that the Pi will connect to.\n'));
   console.log(chalk.bold.cyan('📋 Pi-side next steps:\n'));
   console.log(chalk.gray('  1. Run "claude-phone start" to launch voice-app'));
   console.log(chalk.gray('  2. Call extension ' + config.devices[0].extension + ' from your phone'));
-  console.log(chalk.gray('  3. Start talking to Claude!\n'));
+  console.log(chalk.gray('  3. Start talking to your configured agent!\n'));
 
+  return config;
+}
+
+/**
+ * Select the agent providers exposed by the local or remote bridge.
+ * @param {object} config - Current configuration
+ * @param {object} options - Provider setup options
+ * @returns {Promise<object>} Updated configuration
+ */
+async function setupAgentProviders(config, { configureRuntime = true } = {}) {
+  const agents = normalizeAgentConfig(config.agents, {
+    defaultProviders: config.agents ? config.agents.providers : ['claude', 'codex']
+  });
+  const { providers } = await inquirer.prompt([{
+    type: 'checkbox',
+    name: 'providers',
+    message: configureRuntime
+      ? 'Which agent CLIs should this bridge enable?'
+      : 'Which providers does the remote agent bridge expose?',
+    choices: [
+      { name: 'Claude Code (Haiku, Sonnet, Opus)', value: 'claude' },
+      { name: 'OpenAI Codex (GPT-5.6 Luna, Terra, Sol)', value: 'codex' }
+    ],
+    default: agents.providers,
+    validate: selected => selected.length > 0 || 'Select at least one provider'
+  }]);
+
+  agents.providers = providers;
+  if (!configureRuntime) {
+    config.agents = agents;
+    return config;
+  }
+
+  if (providers.includes('claude')) {
+    const claudeAnswers = await inquirer.prompt([
+      {
+        type: 'input',
+        name: 'command',
+        message: 'Claude CLI command:',
+        default: agents.claude.command,
+        validate: value => value.trim() !== '' || 'Command is required'
+      },
+      {
+        type: 'input',
+        name: 'workingDirectory',
+        message: 'Claude working directory:',
+        default: agents.claude.workingDirectory,
+        validate: value => path.isAbsolute(value) || 'Use an absolute path'
+      }
+    ]);
+    agents.claude = { ...agents.claude, ...claudeAnswers };
+  }
+
+  if (providers.includes('codex')) {
+    const codexAnswers = await inquirer.prompt([
+      {
+        type: 'input',
+        name: 'command',
+        message: 'Codex CLI command:',
+        default: agents.codex.command,
+        validate: value => value.trim() !== '' || 'Command is required'
+      },
+      {
+        type: 'input',
+        name: 'workingDirectory',
+        message: 'Codex default/inspection working directory:',
+        default: agents.codex.workingDirectory,
+        validate: value => path.isAbsolute(value) || 'Use an absolute path'
+      },
+      {
+        type: 'input',
+        name: 'terraWorkingDirectory',
+        message: 'Codex Terra writable workspace:',
+        default: agents.codex.terra.workingDirectory,
+        validate: value => path.isAbsolute(value) || 'Use an absolute path'
+      },
+      {
+        type: 'input',
+        name: 'solWorkingDirectory',
+        message: 'Codex Sol privileged working directory:',
+        default: agents.codex.sol.workingDirectory,
+        validate: value => path.isAbsolute(value) || 'Use an absolute path'
+      }
+    ]);
+
+    agents.codex.command = codexAnswers.command;
+    agents.codex.workingDirectory = codexAnswers.workingDirectory;
+    agents.codex.luna.workingDirectory = codexAnswers.workingDirectory;
+    agents.codex.terra.workingDirectory = codexAnswers.terraWorkingDirectory;
+    agents.codex.sol.workingDirectory = codexAnswers.solWorkingDirectory;
+  }
+
+  config.agents = agents;
   return config;
 }
 
@@ -667,7 +777,8 @@ function generateSecret() {
  */
 function createDefaultConfig() {
   return {
-    version: '1.0.0',
+    version: '1.1.0',
+    agents: createDefaultAgentConfig(),
     api: {
       tts: {
         baseUrl: 'http://127.0.0.1:18000/v1',
@@ -927,7 +1038,15 @@ async function setupDevice(config) {
   // Get first device or create new
   const existingDevice = config.devices.length > 0 ? config.devices[0] : null;
 
+  const profileChoices = getAgentProfileChoices(config);
   const answers = await inquirer.prompt([
+    {
+      type: 'list',
+      name: 'sessionType',
+      message: 'Agent profile:',
+      choices: profileChoices,
+      default: existingDevice?.sessionType || profileChoices[0]?.value
+    },
     {
       type: 'input',
       name: 'name',
@@ -1028,11 +1147,13 @@ async function setupDevice(config) {
   }
 
   const device = {
+    ...(existingDevice || {}),
     name: answers.name,
     extension: answers.extension,
     authId: answers.authId,
     password: answers.password,
     voiceId: answers.voiceId,
+    sessionType: answers.sessionType,
     prompt: answers.prompt
   };
 
@@ -1073,7 +1194,7 @@ async function setupServer(config) {
     {
       type: 'input',
       name: 'claudeApiPort',
-      message: 'Claude API server port:',
+      message: 'Agent API server port:',
       default: config.server.claudeApiPort,
       validate: (input) => {
         const port = parseInt(input, 10);

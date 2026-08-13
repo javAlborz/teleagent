@@ -1,6 +1,6 @@
-# Claude Phone CLI
+# Teleagent CLI
 
-Command-line interface for Claude Phone. Single-command setup and management.
+Command-line interface for Teleagent. The executable remains `claude-phone` for compatibility.
 
 ## Installation
 
@@ -45,9 +45,12 @@ Select this when setting up a Raspberry Pi or dedicated voice box that connects 
 
 ### API Server
 
-Select this when setting up the Claude API wrapper on a machine with Claude Code CLI.
+Select this when setting up the agent API bridge on a machine with Claude Code,
+OpenAI Codex, or both.
 
 **What it asks for:**
+- Enabled providers (`Claude`, `Codex`, or both)
+- Provider commands and working directories
 - API server port (default: 3333)
 
 **What `claude-phone start` does:**
@@ -148,8 +151,38 @@ All configuration is stored in `~/.claude-phone/`:
 
 ```json
 {
-  "version": "1.0.0",
+  "version": "1.1.0",
   "installationType": "both",
+  "agents": {
+    "providers": ["claude", "codex"],
+    "claude": {
+      "command": "claude",
+      "workingDirectory": "/home/example"
+    },
+    "codex": {
+      "command": "codex",
+      "workingDirectory": "/home/example",
+      "approvalPolicy": "never",
+      "luna": {
+        "model": "gpt-5.6-luna",
+        "reasoningEffort": "low",
+        "sandbox": "read-only",
+        "workingDirectory": "/home/example"
+      },
+      "terra": {
+        "model": "gpt-5.6-terra",
+        "reasoningEffort": "medium",
+        "sandbox": "workspace-write",
+        "workingDirectory": "/home/example/phone"
+      },
+      "sol": {
+        "model": "gpt-5.6-sol",
+        "reasoningEffort": "high",
+        "sandbox": "danger-full-access",
+        "workingDirectory": "/home/example"
+      }
+    }
+  },
   "api": {
     "tts": {
       "baseUrl": "http://127.0.0.1:18000/v1",
@@ -181,6 +214,7 @@ All configuration is stored in `~/.claude-phone/`:
     "authId": "9000",
     "password": "***",
     "voiceId": "af_bella",
+    "sessionType": "phone-codex-terra",
     "prompt": "You are Morpheus..."
   }],
   "deployment": {
@@ -211,8 +245,11 @@ claude-phone start
 # Install (if not already)
 curl -sSL https://raw.githubusercontent.com/javAlborz/teleagent/main/install.sh | bash
 
-# Start API server (no setup needed)
-claude-phone api-server
+# Configure the API host and select its providers
+claude-phone setup
+
+# Start the agent bridge
+claude-phone start
 
 # Or on a custom port
 claude-phone api-server --port 4000
@@ -222,7 +259,11 @@ claude-phone api-server --port 4000
 
 - **Node.js 18+** - Required for CLI
 - **Docker** - Required for Voice Server or Both modes
-- **Claude Code CLI** - Required for API Server or Both modes
+- **At least one authenticated agent CLI** - Claude Code, OpenAI Codex, or both, for API Server or Both modes
+
+`claude-phone doctor` checks only configured providers. For Codex it verifies
+both `codex --version` and `codex login status` and gives the device-auth command
+when a headless host needs authentication.
 
 ## Development
 

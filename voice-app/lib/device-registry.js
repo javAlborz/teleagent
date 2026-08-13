@@ -11,7 +11,8 @@
  * - password: 3CX authentication password
  * - voiceId: TTS provider voice name or ID
  * - sessionType: Agent profile selector (e.g. phone-haiku or phone-codex-luna)
- * - claudeTimeoutSeconds: Legacy-named agent request timeout for this phone agent
+ * - agentTimeoutSeconds: Agent request timeout for this phone agent
+ * - claudeTimeoutSeconds: Legacy compatibility alias for agentTimeoutSeconds
  * - maxTurns: Maximum conversation turns for this phone agent
  * - resumeTargetExtension: Base extension whose most recent session should be resumed
  * - resumeTtlSeconds: How long completed sessions stay resumable after hangup

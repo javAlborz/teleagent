@@ -149,6 +149,7 @@ test('docker compose generation', async (t) => {
     const envFile = generateEnvFile(config);
 
     // Should use Mac API URL instead of localhost
+    assert.ok(envFile.includes('AGENT_API_URL=http://192.168.1.100:3333'));
     assert.ok(envFile.includes('CLAUDE_API_URL=http://192.168.1.100:3333'),
       'Should use Mac API URL for pi-split mode');
     assert.ok(!envFile.includes('CLAUDE_API_URL=http://localhost:'),
@@ -190,6 +191,7 @@ test('docker compose generation', async (t) => {
     const envFile = generateEnvFile(config);
 
     // Should use localhost for standard mode
+    assert.ok(envFile.includes('AGENT_API_URL=http://localhost:3333'));
     assert.ok(envFile.includes('CLAUDE_API_URL=http://localhost:3333'),
       'Should use localhost for standard mode');
     assert.ok(envFile.includes('TTS_BASE_URL=http://127.0.0.1:18000/v1'));
@@ -281,5 +283,32 @@ test('docker compose generation', async (t) => {
 
     assert.ok(!envFile.includes('CLAUDE_API_URL=http://localhost:'),
       'voice-server mode should NOT use localhost when apiServerIp is set');
+  });
+
+  await t.test('generates Codex profile settings and independent workspaces', () => {
+    const config = {
+      server: { externalIp: '192.168.1.50', httpPort: 3000, claudeApiPort: 3333 },
+      sip: { domain: '3cx.local', registrar: '192.168.1.10' },
+      devices: [{ extension: '9000', authId: 'user123', password: 'pass123', voiceId: 'alb' }],
+      api: { tts: {}, stt: {} },
+      secrets: { drachtio: 'drachtio-secret', freeswitch: 'fs-secret' },
+      agents: {
+        providers: ['codex'],
+        codex: {
+          command: 'codex',
+          workingDirectory: '/srv/read',
+          approvalPolicy: 'never',
+          luna: { model: 'gpt-5.6-luna', reasoningEffort: 'low', sandbox: 'read-only', workingDirectory: '/srv/read' },
+          terra: { model: 'gpt-5.6-terra', reasoningEffort: 'medium', sandbox: 'workspace-write', workingDirectory: '/srv/phone' },
+          sol: { model: 'gpt-5.6-sol', reasoningEffort: 'high', sandbox: 'danger-full-access', workingDirectory: '/srv/admin' }
+        }
+      }
+    };
+
+    const envFile = generateEnvFile(config);
+    assert.ok(envFile.includes('AGENT_PROVIDERS=codex'));
+    assert.ok(envFile.includes('PHONE_CODEX_LUNA_WORKING_DIR=/srv/read'));
+    assert.ok(envFile.includes('PHONE_CODEX_TERRA_WORKING_DIR=/srv/phone'));
+    assert.ok(envFile.includes('PHONE_CODEX_SOL_WORKING_DIR=/srv/admin'));
   });
 });

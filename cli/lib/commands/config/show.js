@@ -27,7 +27,7 @@ function redactValue(value) {
  * @returns {Promise<void>}
  */
 export async function configShowCommand() {
-  console.log(chalk.bold.cyan('\n⚙️  Claude Phone Configuration\n'));
+  console.log(chalk.bold.cyan('\n⚙️  Teleagent Configuration\n'));
 
   // Check if configured
   if (!configExists()) {
@@ -56,7 +56,8 @@ export async function configShowCommand() {
   console.log(chalk.bold('\nServer:'));
   console.log(chalk.gray(`  External IP: ${config.server.externalIp}`));
   console.log(chalk.gray(`  Voice App Port: ${config.server.httpPort}`));
-  console.log(chalk.gray(`  Claude API Port: ${config.server.claudeApiPort}`));
+  console.log(chalk.gray(`  Agent API Port: ${config.server.claudeApiPort}`));
+  console.log(chalk.gray(`  Agent Providers: ${(config.agents?.providers || ['claude']).join(', ')}`));
 
   // Devices
   console.log(chalk.bold('\nDevices:'));

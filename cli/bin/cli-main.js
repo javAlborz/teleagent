@@ -22,7 +22,7 @@ const program = new Command();
 
 program
   .name('claude-phone')
-  .description('Voice interface for Claude Code via SIP - Call your AI, and your AI can call you')
+  .description('Voice interface for Claude Code and OpenAI Codex via SIP')
   .version('1.0.0');
 
 program
@@ -40,7 +40,7 @@ program
 
 program
   .command('start')
-  .description('Start all services (Docker containers + claude-api-server)')
+  .description('Start all services (Docker containers + agent API bridge)')
   .action(async () => {
     try {
       await startCommand();
@@ -88,7 +88,7 @@ program
 
 program
   .command('api-server')
-  .description('Start Claude API server for Pi remote connections')
+  .description('Start the Claude/Codex API bridge for remote voice servers')
   .option('-p, --port <port>', 'Port to listen on', '3333')
   .action(async (options) => {
     try {

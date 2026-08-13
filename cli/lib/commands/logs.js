@@ -59,7 +59,7 @@ export async function logsCommand(service = null) {
     // API server logs
     const pidPath = getPidPath();
     if (!fs.existsSync(pidPath)) {
-      console.log(chalk.yellow('⚠ Claude API server not running'));
+      console.log(chalk.yellow('⚠ Agent API server not running'));
       console.log(chalk.gray('  Run "claude-phone start" first\n'));
       if (service === 'api-server') {
         process.exit(1);
@@ -107,7 +107,7 @@ function tailDockerLogs(dockerComposePath) {
  * @param {object} config - Configuration object
  */
 function tailAPIServerLogs(config) {
-  console.log(chalk.gray('Watching Claude API server output...\n'));
+  console.log(chalk.gray('Watching agent API server output...\n'));
 
   // Since the server runs detached, we can't easily tail its logs
   // Instead, we'll monitor its health endpoint

@@ -122,13 +122,13 @@ export async function uninstallCommand() {
   console.log(chalk.bold.cyan('\n🧹 Removing Claude Phone...\n'));
 
   // Step 1: Stop services
-  let spinner = ora('Stopping Claude API server...').start();
+  let spinner = ora('Stopping agent API server...').start();
   try {
     if (await isServerRunning()) {
       await stopServer();
-      spinner.succeed('Claude API server stopped');
+      spinner.succeed('Agent API server stopped');
     } else {
-      spinner.info('Claude API server not running');
+      spinner.info('Agent API server not running');
     }
   } catch (error) {
     spinner.warn(`Could not stop server: ${error.message}`);

@@ -9,7 +9,7 @@ import { stopServer, isServerRunning } from '../process-manager.js';
  * @returns {Promise<void>}
  */
 export async function stopCommand() {
-  console.log(chalk.bold.cyan('\n⏹️  Stopping Claude Phone\n'));
+  console.log(chalk.bold.cyan('\n⏹️  Stopping Teleagent\n'));
 
   // Check if configured
   if (!configExists()) {
@@ -45,13 +45,13 @@ export async function stopCommand() {
  * @returns {Promise<void>}
  */
 async function stopApiServer() {
-  const spinner = ora('Stopping Claude API server...').start();
+  const spinner = ora('Stopping agent API server...').start();
   try {
     if (await isServerRunning()) {
       await stopServer();
-      spinner.succeed('Claude API server stopped');
+      spinner.succeed('Agent API server stopped');
     } else {
-      spinner.info('Claude API server not running');
+      spinner.info('Agent API server not running');
     }
   } catch (error) {
     spinner.fail(`Failed to stop server: ${error.message}`);
@@ -78,13 +78,13 @@ async function stopVoiceServer() {
  */
 async function stopBoth() {
   // Stop claude-api-server
-  const spinner = ora('Stopping Claude API server...').start();
+  const spinner = ora('Stopping agent API server...').start();
   try {
     if (await isServerRunning()) {
       await stopServer();
-      spinner.succeed('Claude API server stopped');
+      spinner.succeed('Agent API server stopped');
     } else {
-      spinner.info('Claude API server not running');
+      spinner.info('Agent API server not running');
     }
   } catch (error) {
     spinner.fail(`Failed to stop server: ${error.message}`);

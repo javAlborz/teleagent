@@ -29,11 +29,16 @@ const {
 const { looksLikePhoneDeployRequest } = require('../lib/phone-deploy-intent');
 const {
   buildCodexArgs,
+  buildCodexEnvironment,
   normalizeCodexApprovalPolicy,
   normalizeCodexReasoningEffort,
   normalizeCodexSandbox,
   parseAgentStdout,
 } = require('./agent-cli');
+const {
+  getDeploymentAuthorization,
+  resolveEffectiveSessionType: resolveProfileSessionType,
+} = require('./agent-profiles');
 
 function loadEnvFile(envPath) {
   if (!fs.existsSync(envPath)) return;
@@ -58,10 +63,11 @@ loadEnvFile(path.join(__dirname, '..', '.env'));
 const HOME = process.env.HOME || os.homedir() || '/root';
 const app = express();
 const PORT = process.env.PORT || 3333;
-const BIND_HOST = process.env.CLAUDE_API_BIND_HOST || '0.0.0.0';
-const CLAUDE_API_TOKEN = process.env.CLAUDE_API_TOKEN || '';
+const BIND_HOST = process.env.AGENT_API_BIND_HOST || process.env.CLAUDE_API_BIND_HOST || '0.0.0.0';
+const AGENT_API_TOKEN = process.env.AGENT_API_TOKEN || process.env.CLAUDE_API_TOKEN || '';
 const CLAUDE_WORKING_DIR = process.env.CLAUDE_WORKING_DIR || HOME;
 const CODEX_WORKING_DIR = process.env.CODEX_WORKING_DIR || CLAUDE_WORKING_DIR;
+const CLAUDE_COMMAND = process.env.CLAUDE_COMMAND || 'claude';
 const CODEX_COMMAND = process.env.CODEX_COMMAND || 'codex';
 const CLAUDE_MODEL = process.env.CLAUDE_MODEL || 'claude-sonnet-4-20250514';
 const CLAUDE_PERMISSION_MODE = process.env.CLAUDE_PERMISSION_MODE || 'bypassPermissions';
@@ -80,6 +86,11 @@ const PHONE_CODEX_LUNA_MODEL = process.env.PHONE_CODEX_LUNA_MODEL || 'gpt-5.6-lu
 const PHONE_CODEX_TERRA_MODEL = process.env.PHONE_CODEX_TERRA_MODEL || 'gpt-5.6-terra';
 const PHONE_CODEX_SOL_MODEL = process.env.PHONE_CODEX_SOL_MODEL || 'gpt-5.6-sol';
 const PHONE_CODEX_DEPLOY_MODEL = process.env.PHONE_CODEX_DEPLOY_MODEL || PHONE_CODEX_SOL_MODEL;
+const PHONE_CODEX_LUNA_WORKING_DIR = process.env.PHONE_CODEX_LUNA_WORKING_DIR || CODEX_WORKING_DIR;
+const PHONE_CODEX_TERRA_WORKING_DIR = process.env.PHONE_CODEX_TERRA_WORKING_DIR || CODEX_WORKING_DIR;
+const PHONE_CODEX_SOL_WORKING_DIR = process.env.PHONE_CODEX_SOL_WORKING_DIR || CODEX_WORKING_DIR;
+const PHONE_CODEX_DEPLOY_WORKING_DIR =
+  process.env.PHONE_CODEX_DEPLOY_WORKING_DIR || PHONE_CODEX_SOL_WORKING_DIR;
 const PHONE_CODEX_LUNA_REASONING_EFFORT = normalizeCodexReasoningEffort(
   process.env.PHONE_CODEX_LUNA_REASONING_EFFORT,
   'low'
@@ -117,7 +128,9 @@ const PHONE_CODEX_APPROVAL_POLICY = normalizeCodexApprovalPolicy(
   'never'
 );
 const PHONE_DEPLOY_TIMEOUT_SECONDS = parsePositiveInteger(process.env.PHONE_DEPLOY_TIMEOUT_SECONDS, 900);
-const CLAUDE_LOG_SENSITIVE = /^(1|true|yes)$/i.test(process.env.CLAUDE_LOG_SENSITIVE || '');
+const AGENT_LOG_SENSITIVE = /^(1|true|yes)$/i.test(
+  process.env.AGENT_LOG_SENSITIVE || process.env.CLAUDE_LOG_SENSITIVE || ''
+);
 
 function parseListEnv(value) {
   return String(value || '')
@@ -131,13 +144,26 @@ function parsePositiveInteger(value, fallback = null) {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function toAgentErrorCode(legacyCode) {
+  switch (legacyCode) {
+    case 'CLAUDE_TIMEOUT':
+      return 'AGENT_TIMEOUT';
+    case 'CLAUDE_CANCELED':
+      return 'AGENT_CANCELED';
+    case 'CLAUDE_API_UNAVAILABLE':
+      return 'AGENT_API_UNAVAILABLE';
+    default:
+      return legacyCode ? legacyCode.replace(/^CLAUDE_/, 'AGENT_') : null;
+  }
+}
+
 function valuePresence(value) {
   return value ? 'yes' : 'no';
 }
 
 function logTextSummary(label, text, limit = 100) {
   const value = String(text || '');
-  if (CLAUDE_LOG_SENSITIVE) {
+  if (AGENT_LOG_SENSITIVE) {
     console.log(`${label}: "${value.substring(0, limit)}${value.length > limit ? '...' : ''}"`);
     return;
   }
@@ -164,6 +190,7 @@ function logAgentProfile(timestamp, profile) {
     console.log(`[${timestamp}] REASONING EFFORT: ${profile.reasoningEffort}`);
     console.log(`[${timestamp}] SANDBOX: ${profile.sandbox}`);
     console.log(`[${timestamp}] APPROVAL POLICY: ${profile.approvalPolicy}`);
+    console.log(`[${timestamp}] WORKING DIRECTORY: ${profile.workingDirectory || CODEX_WORKING_DIR}`);
     return;
   }
 
@@ -187,6 +214,11 @@ const PHONE_OPUS_CLAUDE_TOOLS = parseListEnv(process.env.PHONE_OPUS_CLAUDE_TOOLS
 const PHONE_DEPLOY_CLAUDE_TOOLS = parseListEnv(
   process.env.PHONE_DEPLOY_CLAUDE_TOOLS || 'Read,Write,Edit,Glob,Grep,Bash,Skill'
 );
+const ENABLED_AGENT_PROVIDERS = (() => {
+  const requested = parseListEnv(process.env.AGENT_PROVIDERS).map(provider => provider.toLowerCase());
+  const enabled = ['claude', 'codex'].filter(provider => requested.includes(provider));
+  return enabled.length > 0 ? enabled : ['claude', 'codex'];
+})();
 
 function normalizeSessionType(sessionType) {
   switch (sessionType) {
@@ -218,19 +250,7 @@ function isPhoneSessionType(sessionType) {
 }
 
 function resolveEffectiveSessionType(sessionType, prompt = '', devicePrompt = '') {
-  const normalized = normalizeSessionType(sessionType);
-
-  if (!isPhoneSessionType(normalized)) {
-    return normalized;
-  }
-
-  if (looksLikePhoneDeployRequest(prompt, devicePrompt)) {
-    return normalized.startsWith('phone-codex-')
-      ? 'phone-codex-deploy'
-      : 'phone-deploy';
-  }
-
-  return normalized;
+  return resolveProfileSessionType(sessionType, prompt, devicePrompt);
 }
 
 function resolveRequestTimeoutSeconds(sessionType, prompt = '', devicePrompt = '', requestedTimeoutSeconds = null) {
@@ -291,6 +311,7 @@ function resolveAgentProfile(sessionType, prompt = '', devicePrompt = '') {
         approvalPolicy: PHONE_CODEX_APPROVAL_POLICY,
         tools: [],
         allowedTools: [],
+        workingDirectory: PHONE_CODEX_LUNA_WORKING_DIR,
       };
     case 'phone-codex-terra':
       return {
@@ -302,6 +323,7 @@ function resolveAgentProfile(sessionType, prompt = '', devicePrompt = '') {
         approvalPolicy: PHONE_CODEX_APPROVAL_POLICY,
         tools: [],
         allowedTools: [],
+        workingDirectory: PHONE_CODEX_TERRA_WORKING_DIR,
       };
     case 'phone-codex-sol':
       return {
@@ -313,6 +335,7 @@ function resolveAgentProfile(sessionType, prompt = '', devicePrompt = '') {
         approvalPolicy: PHONE_CODEX_APPROVAL_POLICY,
         tools: [],
         allowedTools: [],
+        workingDirectory: PHONE_CODEX_SOL_WORKING_DIR,
       };
     case 'phone-codex-deploy':
       return {
@@ -324,8 +347,12 @@ function resolveAgentProfile(sessionType, prompt = '', devicePrompt = '') {
         approvalPolicy: PHONE_CODEX_APPROVAL_POLICY,
         tools: [],
         allowedTools: [],
+        workingDirectory: PHONE_CODEX_DEPLOY_WORKING_DIR,
       };
     default:
+      if (!ENABLED_AGENT_PROVIDERS.includes('claude') && ENABLED_AGENT_PROVIDERS.includes('codex')) {
+        return resolveAgentProfile('phone-codex-luna');
+      }
       return {
         provider: 'claude',
         sessionType: 'default',
@@ -427,9 +454,7 @@ function buildClaudeEnvironment() {
 
 // Pre-build the environment once at startup
 const claudeEnv = buildClaudeEnvironment();
-const codexEnv = { ...claudeEnv };
-delete codexEnv.CLAUDECODE;
-delete codexEnv.CLAUDE_CODE_ENTRYPOINT;
+const codexEnv = buildCodexEnvironment(claudeEnv);
 console.log('[STARTUP] Loaded environment with', Object.keys(claudeEnv).length, 'variables');
 console.log('[STARTUP] PATH includes:', claudeEnv.PATH.split(':').slice(0, 5).join(', '), '...');
 console.log('[STARTUP] Claude working directory:', CLAUDE_WORKING_DIR);
@@ -676,12 +701,13 @@ function buildAgentInvocation({
   }
 
   if (provider === 'codex') {
+    const workingDirectory = profile.workingDirectory || CODEX_WORKING_DIR;
     const args = buildCodexArgs({
       model: profile.model,
       reasoningEffort: profile.reasoningEffort,
       sandbox: profile.sandbox,
       approvalPolicy: profile.approvalPolicy,
-      workingDirectory: CODEX_WORKING_DIR,
+      workingDirectory,
       sessionId: existingSessionId,
     });
 
@@ -696,7 +722,7 @@ function buildAgentInvocation({
     return {
       command: CODEX_COMMAND,
       args,
-      cwd: CODEX_WORKING_DIR,
+      cwd: workingDirectory,
       env: codexEnv,
       stdinInput: fullPrompt,
       provider,
@@ -729,7 +755,7 @@ function buildAgentInvocation({
   }
 
   return {
-    command: 'claude',
+    command: CLAUDE_COMMAND,
     args,
     cwd: CLAUDE_WORKING_DIR,
     env: claudeEnv,
@@ -948,7 +974,7 @@ app.use((req, res, next) => {
 });
 
 app.use((req, res, next) => {
-  if (!CLAUDE_API_TOKEN || req.path === '/' || req.path === '/health') {
+  if (!AGENT_API_TOKEN || req.path === '/' || req.path === '/health') {
     return next();
   }
 
@@ -956,7 +982,7 @@ app.use((req, res, next) => {
   const bearerMatch = authHeader.match(/^Bearer\s+(.+)$/i);
   const providedToken = bearerMatch ? bearerMatch[1].trim() : (req.get('x-api-key') || '').trim();
 
-  if (providedToken && providedToken === CLAUDE_API_TOKEN) {
+  if (providedToken && providedToken === AGENT_API_TOKEN) {
     return next();
   }
 
@@ -1004,6 +1030,28 @@ app.post('/ask', async (req, res) => {
     return res.status(400).json({
       success: false,
       error: 'Missing prompt in request body'
+    });
+  }
+
+  if (!ENABLED_AGENT_PROVIDERS.includes(profile.provider)) {
+    return res.status(503).json({
+      success: false,
+      provider: profile.provider,
+      code: 'AGENT_PROVIDER_DISABLED',
+      agentCode: 'AGENT_PROVIDER_DISABLED',
+      error: `${profile.provider} is not enabled on this agent bridge`,
+    });
+  }
+
+  const deploymentAuthorization = getDeploymentAuthorization(sessionType, prompt, devicePrompt);
+  if (!deploymentAuthorization.allowed) {
+    return res.status(403).json({
+      success: false,
+      provider: profile.provider,
+      code: deploymentAuthorization.code,
+      agentCode: deploymentAuthorization.agentCode,
+      error: 'Privileged Codex profile required',
+      userMessage: deploymentAuthorization.message,
     });
   }
 
@@ -1059,6 +1107,8 @@ app.post('/ask', async (req, res) => {
       return res.json({
         success: false,
         provider,
+        code: 'AGENT_CLI_FAILED',
+        agentCode: 'AGENT_CLI_FAILED',
         error: `${providerLabel} CLI failed: ${errorMsg}`,
         duration_ms,
       });
@@ -1090,6 +1140,7 @@ app.post('/ask', async (req, res) => {
 
     if (error.code) {
       payload.code = error.code;
+      payload.agentCode = toAgentErrorCode(error.code);
     }
     if (error.reason) {
       payload.reason = error.reason;
@@ -1148,6 +1199,28 @@ app.post('/ask-structured', async (req, res) => {
     return res.status(400).json({ success: false, error: 'Missing prompt in request body' });
   }
 
+  if (!ENABLED_AGENT_PROVIDERS.includes(profile.provider)) {
+    return res.status(503).json({
+      success: false,
+      provider: profile.provider,
+      code: 'AGENT_PROVIDER_DISABLED',
+      agentCode: 'AGENT_PROVIDER_DISABLED',
+      error: `${profile.provider} is not enabled on this agent bridge`,
+    });
+  }
+
+  const deploymentAuthorization = getDeploymentAuthorization(sessionType, prompt, devicePrompt);
+  if (!deploymentAuthorization.allowed) {
+    return res.status(403).json({
+      success: false,
+      provider: profile.provider,
+      code: deploymentAuthorization.code,
+      agentCode: deploymentAuthorization.agentCode,
+      error: 'Privileged Codex profile required',
+      userMessage: deploymentAuthorization.message,
+    });
+  }
+
   const queryContext = buildQueryContext({
     queryType: schema.queryType,
     requiredFields: schema.requiredFields,
@@ -1199,6 +1272,8 @@ app.post('/ask-structured', async (req, res) => {
         return res.status(502).json({
           success: false,
           provider,
+          code: 'AGENT_CLI_FAILED',
+          agentCode: 'AGENT_CLI_FAILED',
           error: lastError,
           raw_response: lastRaw,
           duration_ms: totalDuration,
@@ -1265,6 +1340,7 @@ app.post('/ask-structured', async (req, res) => {
     const payload = { success: false, provider: profile.provider, error: error.message };
     if (error.code) {
       payload.code = error.code;
+      payload.agentCode = toAgentErrorCode(error.code);
     }
     if (error.reason) {
       payload.reason = error.reason;
@@ -1364,7 +1440,7 @@ app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
     service: 'claude-api-server',
-    providers: ['claude', 'codex'],
+    providers: ENABLED_AGENT_PROVIDERS,
     timestamp: new Date().toISOString()
   });
 });
@@ -1377,7 +1453,7 @@ app.get('/', (req, res) => {
   res.json({
     service: 'Teleagent HTTP Agent Bridge',
     version: '1.1.0',
-    providers: ['claude', 'codex'],
+    providers: ENABLED_AGENT_PROVIDERS,
     endpoints: {
       'POST /ask': 'Send a prompt to the selected agent',
       'POST /ask-structured': 'Send a prompt and return validated JSON (n8n)',
@@ -1395,7 +1471,8 @@ app.listen(PORT, BIND_HOST, () => {
   console.log('='.repeat(64));
   console.log(`\nListening on: http://${BIND_HOST}:${PORT}`);
   console.log(`Health check: http://localhost:${PORT}/health`);
-  console.log(`Agent API auth: ${CLAUDE_API_TOKEN ? 'enabled' : 'disabled'}`);
+  console.log(`Agent API auth: ${AGENT_API_TOKEN ? 'enabled' : 'disabled'}`);
+  console.log(`Enabled providers: ${ENABLED_AGENT_PROVIDERS.join(', ')}`);
   console.log('\nReady to receive Claude and Codex queries from voice interface.\n');
 });
 

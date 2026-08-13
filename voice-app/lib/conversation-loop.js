@@ -18,7 +18,7 @@ const logger = require('./logger');
 const fs = require('fs');
 const path = require('path');
 const {
-  getClaudeTimeoutSeconds,
+  getAgentTimeoutSeconds,
   getHoldMusicEnabled,
   getMaxTurns,
 } = require('./phone-agent-config');
@@ -457,7 +457,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
   const devicePrompt = deviceConfig?.prompt || null;
   const sessionType = deviceConfig?.sessionType || 'phone';
   const voiceId = deviceConfig?.voiceId || null;  // null = use default Morpheus voice
-  const claudeTimeoutSeconds = getClaudeTimeoutSeconds(deviceConfig);
+  const agentTimeoutSeconds = getAgentTimeoutSeconds(deviceConfig);
   const holdMusicEnabled = getHoldMusicEnabled(deviceConfig);
   const resolvedMaxTurns = getMaxTurns(deviceConfig, maxTurns);
   const holdMusicUrl = holdMusicEnabled ? getNextHoldMusicUrl() : null;
@@ -521,7 +521,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
           devicePrompt: devicePrompt,
           isSystemPrime: true,
           sessionType,
-          timeout: claudeTimeoutSeconds
+          timeout: agentTimeoutSeconds
         }
       ).catch(err => logger.warn('Prime query failed', { callUuid, error: err.message }));
     }
@@ -730,7 +730,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
         callUuid,
         turn: turnCount,
         maxTurns: resolvedMaxTurns,
-        claudeTimeoutSeconds
+        agentTimeoutSeconds
       });
 
       // Check if call is still active
@@ -887,7 +887,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
             sessionKey,
             devicePrompt: devicePrompt,
             sessionType,
-            timeout: claudeTimeoutSeconds
+            timeout: agentTimeoutSeconds
           }
         );
       } finally {
@@ -917,7 +917,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
       if (!claudeResult.success) {
         logger.warn('Agent query failed', {
           callUuid,
-          code: claudeResult.code || 'CLAUDE_ERROR',
+          code: claudeResult.agentCode || claudeResult.code || 'AGENT_ERROR',
           error: claudeResult.error
         });
 

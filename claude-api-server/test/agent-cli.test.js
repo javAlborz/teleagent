@@ -4,6 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
   buildCodexArgs,
+  buildCodexEnvironment,
   normalizeCodexApprovalPolicy,
   normalizeCodexReasoningEffort,
   normalizeCodexSandbox,
@@ -11,6 +12,28 @@ const {
   parseClaudeStdout,
   parseCodexStdout,
 } = require('../agent-cli');
+
+test('buildCodexEnvironment strips phone service secrets but preserves Codex auth', () => {
+  const environment = buildCodexEnvironment({
+    PATH: '/usr/bin',
+    OPENAI_API_KEY: 'codex-auth',
+    CLAUDE_API_TOKEN: 'bridge-secret',
+    AGENT_API_TOKEN: 'neutral-bridge-secret',
+    OUTBOUND_API_TOKEN: 'outbound-secret',
+    DRACHTIO_SECRET: 'drachtio-secret',
+    FREESWITCH_SECRET: 'freeswitch-secret',
+    SIP_AUTH_PASSWORD: 'sip-secret',
+    TTS_API_KEY: 'tts-secret',
+    STT_API_KEY: 'stt-secret',
+    CLAUDECODE: '1',
+    CLAUDE_CODE_ENTRYPOINT: 'cli',
+  });
+
+  assert.deepEqual(environment, {
+    PATH: '/usr/bin',
+    OPENAI_API_KEY: 'codex-auth',
+  });
+});
 
 test('buildCodexArgs creates a bounded non-interactive invocation', () => {
   assert.deepEqual(

@@ -5,16 +5,46 @@ import path from 'path';
 import { loadConfig, configExists, getInstallationType } from '../config.js';
 import { checkDocker, writeDockerConfig, startContainers } from '../docker.js';
 import { startServer, isServerRunning } from '../process-manager.js';
-import { isClaudeInstalled, sleep } from '../utils.js';
+import { sleep } from '../utils.js';
 import { checkClaudeApiServer } from '../network.js';
 import { runPrereqChecks } from '../prereqs.js';
+import {
+  buildAgentServerEnvironment,
+  checkConfiguredAgentProviders
+} from '../agents.js';
+
+async function ensureAgentProvidersReady(config) {
+  const results = await checkConfiguredAgentProviders(config);
+  let ready = true;
+
+  for (const result of results) {
+    const label = result.provider === 'codex' ? 'Codex' : 'Claude';
+    if (!result.installed) {
+      ready = false;
+      console.log(chalk.red(`✗ ${label} CLI is not installed`));
+      console.log(chalk.gray(
+        result.provider === 'codex'
+          ? '  Install Codex, then run "codex login"\n'
+          : '  Install Claude Code and authenticate it\n'
+      ));
+    } else if (!result.authenticated) {
+      ready = false;
+      console.log(chalk.red(`✗ ${label} CLI is not authenticated`));
+      console.log(chalk.gray(`  ${result.error}\n`));
+    } else {
+      console.log(chalk.green(`✓ ${label} CLI ready (${result.version})`));
+    }
+  }
+
+  return ready;
+}
 
 /**
  * Start command - Launch all services
  * @returns {Promise<void>}
  */
 export async function startCommand() {
-  console.log(chalk.bold.cyan('\n🚀 Starting Claude Phone\n'));
+  console.log(chalk.bold.cyan('\n🚀 Starting Teleagent\n'));
 
   // Check if configured
   if (!configExists()) {
@@ -62,15 +92,14 @@ export async function startCommand() {
  * @returns {Promise<void>}
  */
 async function startApiServer(config) {
-  // Check Claude CLI
-  if (!(await isClaudeInstalled())) {
-    console.log(chalk.yellow('⚠️  Claude CLI not found'));
-    console.log(chalk.gray('  Install from: https://claude.com/download\n'));
+  if (!(await ensureAgentProvidersReady(config))) {
+    console.log(chalk.red('\n✗ One or more configured agent providers are unavailable\n'));
+    process.exit(1);
   }
 
   // Verify path exists
   if (!fs.existsSync(config.paths.claudeApiServer)) {
-    console.log(chalk.red(`✗ Claude API server not found at: ${config.paths.claudeApiServer}`));
+    console.log(chalk.red(`✗ Agent API server not found at: ${config.paths.claudeApiServer}`));
     console.log(chalk.gray('  Update paths in configuration\n'));
     process.exit(1);
   }
@@ -84,14 +113,19 @@ async function startApiServer(config) {
     process.exit(1);
   }
 
-  // Start claude-api-server
-  const spinner = ora('Starting Claude API server...').start();
+  // Start the compatibility-named claude-api-server process.
+  const spinner = ora('Starting agent API server...').start();
   try {
     if (await isServerRunning()) {
-      spinner.warn('Claude API server already running');
+      spinner.warn('Agent API server already running');
     } else {
-      await startServer(config.paths.claudeApiServer, config.server.claudeApiPort);
-      spinner.succeed(`Claude API server started on port ${config.server.claudeApiPort}`);
+      await startServer(
+        config.paths.claudeApiServer,
+        config.server.claudeApiPort,
+        null,
+        buildAgentServerEnvironment(config)
+      );
+      spinner.succeed(`Agent API server started on port ${config.server.claudeApiPort}`);
     }
   } catch (error) {
     spinner.fail(`Failed to start server: ${error.message}`);
@@ -101,7 +135,7 @@ async function startApiServer(config) {
   // Success
   console.log(chalk.bold.green('\n✓ API server running!\n'));
   console.log(chalk.gray('Service:'));
-  console.log(chalk.gray(`  • Claude API server: http://localhost:${config.server.claudeApiPort}\n`));
+  console.log(chalk.gray(`  • Agent API server: http://localhost:${config.server.claudeApiPort}\n`));
   console.log(chalk.gray('Voice servers can connect to this API server.\n'));
 }
 
@@ -220,7 +254,7 @@ async function startBoth(config, isPiMode) {
 
   // Only check claude-api-server path in standard mode (not Pi mode)
   if (!isPiMode && !fs.existsSync(config.paths.claudeApiServer)) {
-    console.log(chalk.red(`✗ Claude API server not found at: ${config.paths.claudeApiServer}`));
+    console.log(chalk.red(`✗ Agent API server not found at: ${config.paths.claudeApiServer}`));
     console.log(chalk.gray('  Update paths in configuration\n'));
     process.exit(1);
   }
@@ -236,10 +270,10 @@ async function startBoth(config, isPiMode) {
     }
   }
 
-  // Check Claude CLI only in standard mode (Pi mode connects to API server instead)
-  if (!isPiMode && !(await isClaudeInstalled())) {
-    console.log(chalk.yellow('⚠️  Claude CLI not found'));
-    console.log(chalk.gray('  Install from: https://claude.com/download\n'));
+  // Check only providers configured on this local bridge.
+  if (!isPiMode && !(await ensureAgentProvidersReady(config))) {
+    console.log(chalk.red('\n✗ One or more configured agent providers are unavailable\n'));
+    process.exit(1);
   }
 
   // In Pi mode, verify API server is reachable
@@ -312,15 +346,20 @@ async function startBoth(config, isPiMode) {
   await sleep(3000);
   spinner.succeed('Containers initialized');
 
-  // Start claude-api-server (only in standard mode - Pi mode uses remote API server)
+  // Start the agent bridge (only in standard mode - Pi mode uses a remote bridge).
   if (!isPiMode) {
-    spinner.start('Starting Claude API server...');
+    spinner.start('Starting agent API server...');
     try {
       if (await isServerRunning()) {
-        spinner.warn('Claude API server already running');
+        spinner.warn('Agent API server already running');
       } else {
-        await startServer(config.paths.claudeApiServer, config.server.claudeApiPort);
-        spinner.succeed(`Claude API server started on port ${config.server.claudeApiPort}`);
+        await startServer(
+          config.paths.claudeApiServer,
+          config.server.claudeApiPort,
+          null,
+          buildAgentServerEnvironment(config)
+        );
+        spinner.succeed(`Agent API server started on port ${config.server.claudeApiPort}`);
       }
     } catch (error) {
       spinner.fail(`Failed to start server: ${error.message}`);
@@ -335,7 +374,7 @@ async function startBoth(config, isPiMode) {
   if (isPiMode) {
     console.log(chalk.gray(`  • API server: http://${config.deployment.pi.macIp}:${config.server.claudeApiPort}`));
   } else {
-    console.log(chalk.gray(`  • Claude API server: http://localhost:${config.server.claudeApiPort}`));
+    console.log(chalk.gray(`  • Agent API server: http://localhost:${config.server.claudeApiPort}`));
   }
   console.log(chalk.gray(`  • Voice app API: http://localhost:${config.server.httpPort}\n`));
   console.log(chalk.gray('Ready to receive calls on:'));
