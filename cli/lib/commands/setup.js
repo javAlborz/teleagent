@@ -796,7 +796,7 @@ function createDefaultConfig() {
       realtime: {
         enabled: false,
         apiKey: '',
-        model: 'gpt-realtime-2.1',
+        model: 'gpt-realtime-2.1-mini',
         voice: 'marin',
         transcriptionModel: 'gpt-live-transcribe',
         safetyIdentifierSalt: generateSecret()
@@ -981,7 +981,7 @@ async function setupAPIKeys(config) {
       type: 'input',
       name: 'model',
       message: 'OpenAI Realtime model:',
-      default: currentRealtime.model || 'gpt-realtime-2.1',
+      default: currentRealtime.model || 'gpt-realtime-2.1-mini',
       validate: input => input.trim() !== '' || 'Model is required'
     },
     {

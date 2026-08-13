@@ -5,7 +5,7 @@ const { URL } = require('node:url');
 const WebSocket = require('ws');
 
 const DEFAULT_BASE_URL = 'wss://api.openai.com/v1/realtime';
-const DEFAULT_MODEL = 'gpt-realtime-2.1';
+const DEFAULT_MODEL = 'gpt-realtime-2.1-mini';
 const DEFAULT_VOICE = 'marin';
 const PCM_SAMPLE_RATE = 24000;
 

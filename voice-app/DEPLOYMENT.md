@@ -103,7 +103,7 @@ Key environment variables in the generated `.env`:
 | `TTS_VOICE` | Default TTS voice name/id |
 | `STT_BASE_URL` | OpenAI-compatible Whisper base URL |
 | `OPENAI_REALTIME_API_KEY` | Required for OpenAI Realtime extensions and callbacks |
-| `OPENAI_REALTIME_MODEL` | Realtime speech-to-speech model; defaults to `gpt-realtime-2.1` |
+| `OPENAI_REALTIME_MODEL` | Realtime speech-to-speech model; defaults to `gpt-realtime-2.1-mini` |
 | `OPENAI_REALTIME_VOICE` | Realtime output voice; defaults to `marin` |
 | `OPENAI_REALTIME_TRANSCRIPTION_MODEL` | Text transcript model used for durable context |
 | `VOICE_STATE_DIR` | Host directory mounted read/write for durable Realtime state |

@@ -21,7 +21,7 @@ function getDefaultApiConfig() {
     realtime: {
       enabled: false,
       apiKey: '',
-      model: 'gpt-realtime-2.1',
+      model: 'gpt-realtime-2.1-mini',
       voice: 'marin',
       transcriptionModel: 'gpt-live-transcribe',
       safetyIdentifierSalt: ''

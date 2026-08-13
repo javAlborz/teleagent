@@ -56,7 +56,7 @@ test('config module', async (t) => {
     assert.strictEqual(config.api.tts.defaultVoice, 'legacy-voice');
     assert.strictEqual(config.api.stt.apiKey, 'legacy-openai-key');
     assert.strictEqual(config.api.realtime.enabled, false);
-    assert.strictEqual(config.api.realtime.model, 'gpt-realtime-2.1');
+    assert.strictEqual(config.api.realtime.model, 'gpt-realtime-2.1-mini');
     assert.deepStrictEqual(config.agents.providers, ['claude']);
     assert.strictEqual(config.agents.codex.luna.model, 'gpt-5.6-luna');
   });

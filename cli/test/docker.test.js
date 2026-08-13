@@ -197,7 +197,7 @@ test('docker compose generation', async (t) => {
     assert.ok(envFile.includes('TTS_BASE_URL=http://127.0.0.1:18000/v1'));
     assert.ok(envFile.includes('STT_BASE_URL=http://127.0.0.1:18001/v1'));
     assert.ok(envFile.includes('OPENAI_REALTIME_API_KEY='));
-    assert.ok(envFile.includes('OPENAI_REALTIME_MODEL=gpt-realtime-2.1'));
+    assert.ok(envFile.includes('OPENAI_REALTIME_MODEL=gpt-realtime-2.1-mini'));
     assert.ok(envFile.includes('VOICE_STATE_DB_PATH=/app/state/voice-state.sqlite'));
     assert.ok(envFile.includes('SIP_AUTH_PASSWORD=pass123'));
   });
@@ -327,7 +327,7 @@ test('docker compose generation', async (t) => {
         realtime: {
           enabled: true,
           apiKey: 'test-openai-key',
-          model: 'gpt-realtime-2.1',
+          model: 'gpt-realtime-2.1-mini',
           voice: 'marin',
           transcriptionModel: 'gpt-live-transcribe',
           safetyIdentifierSalt: 'test-salt'

@@ -80,7 +80,7 @@ only when its caller identity matches the outbound target.
 
 ```bash
 OPENAI_REALTIME_API_KEY=sk-...
-OPENAI_REALTIME_MODEL=gpt-realtime-2.1
+OPENAI_REALTIME_MODEL=gpt-realtime-2.1-mini
 OPENAI_REALTIME_VOICE=marin
 OPENAI_REALTIME_TRANSCRIPTION_MODEL=gpt-live-transcribe
 OPENAI_SAFETY_IDENTIFIER_SALT=replace-with-random-secret

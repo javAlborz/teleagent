@@ -170,7 +170,7 @@ Native Realtime voice is configured independently:
 
 ```bash
 OPENAI_REALTIME_API_KEY=sk-...
-OPENAI_REALTIME_MODEL=gpt-realtime-2.1
+OPENAI_REALTIME_MODEL=gpt-realtime-2.1-mini
 OPENAI_REALTIME_VOICE=marin
 VOICE_STATE_DIR=./voice-app/state
 VOICE_STATE_DB_PATH=/app/state/voice-state.sqlite

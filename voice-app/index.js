@@ -262,7 +262,7 @@ function initializeServers() {
     res.status(stateHealth.ok ? 200 : 503).json({
       status: stateHealth.ok ? "healthy" : "unhealthy",
       configured: !!getRealtimeApiKey(),
-      model: process.env.OPENAI_REALTIME_MODEL || "gpt-realtime-2.1",
+      model: process.env.OPENAI_REALTIME_MODEL || "gpt-realtime-2.1-mini",
       voiceExecution: agentJobBroker.getExecutionLock(),
       state: stateHealth
     });

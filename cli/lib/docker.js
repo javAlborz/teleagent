@@ -195,7 +195,7 @@ export function generateEnvFile(config) {
   const realtimeConfig = config.api?.realtime || {};
   const realtimeEnabled = realtimeConfig.enabled ?? Boolean(realtimeConfig.apiKey);
   const realtimeApiKey = realtimeEnabled ? (realtimeConfig.apiKey || '') : '';
-  const realtimeModel = realtimeConfig.model || 'gpt-realtime-2.1';
+  const realtimeModel = realtimeConfig.model || 'gpt-realtime-2.1-mini';
   const realtimeVoice = realtimeConfig.voice || 'marin';
   const realtimeTranscriptionModel = realtimeConfig.transcriptionModel || 'gpt-live-transcribe';
   const safetyIdentifierSalt = realtimeConfig.safetyIdentifierSalt || crypto

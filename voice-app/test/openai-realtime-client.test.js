@@ -69,7 +69,7 @@ test('Realtime session uses 24 kHz PCM, server VAD, voice, and bounded tools', a
   t.after(() => client.close());
   const update = client.ws.sentEvents().find((event) => event.type === 'session.update');
 
-  assert.equal(update.session.model, 'gpt-realtime-2.1');
+  assert.equal(update.session.model, 'gpt-realtime-2.1-mini');
   assert.equal(update.session.audio.input.format.rate, 24000);
   assert.deepEqual(update.session.audio.input.turn_detection, {
     type: 'server_vad',
