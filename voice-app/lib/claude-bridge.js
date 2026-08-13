@@ -47,6 +47,7 @@ async function sendQuery(prompt, options = {}) {
   const {
     callId,
     sessionKey = callId,
+    resumeSessionId = null,
     devicePrompt,
     timeout = 30,
     sessionType
@@ -67,7 +68,15 @@ async function sendQuery(prompt, options = {}) {
 
     const response = await axios.post(
       `${AGENT_API_URL}/ask`,
-      { prompt, callId, sessionKey, devicePrompt, sessionType, timeoutSeconds: effectiveTimeout },
+      {
+        prompt,
+        callId,
+        sessionKey,
+        resumeSessionId,
+        devicePrompt,
+        sessionType,
+        timeoutSeconds: effectiveTimeout,
+      },
       {
         timeout: effectiveTimeout * 1000,
         headers: buildAgentApiHeaders({ 'Content-Type': 'application/json' })
@@ -159,6 +168,7 @@ async function sendQuery(prompt, options = {}) {
  * @param {Object} options - Options including callId for session management
  * @param {string} options.callId - Call UUID for active request cancellation
  * @param {string} [options.sessionKey] - Stable agent session UUID for resumable context
+ * @param {string} [options.resumeSessionId] - Durable provider session ID restored by the voice state store
  * @param {string} options.devicePrompt - Device-specific personality prompt
  * @param {number} options.timeout - Timeout in seconds (default: 30, AC27)
  * @returns {Promise<string>} Agent response

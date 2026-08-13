@@ -448,6 +448,8 @@ function buildClaudeEnvironment() {
   // CRITICAL: Remove ANTHROPIC_API_KEY so Claude CLI uses subscription auth
   // If ANTHROPIC_API_KEY is set (even to placeholder), CLI tries API auth instead
   delete env.ANTHROPIC_API_KEY;
+  delete env.OPENAI_REALTIME_API_KEY;
+  delete env.OPENAI_SAFETY_IDENTIFIER_SALT;
 
   return env;
 }
@@ -476,6 +478,13 @@ let activeRequestSequence = 0;
 
 function resolveSessionKey(callId, sessionKey) {
   return sessionKey || callId || null;
+}
+
+function normalizeResumeSessionId(sessionId) {
+  const value = String(sessionId || '').trim();
+  if (!value) return null;
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value)) return null;
+  return value;
 }
 
 function getSessionRecord(sessionKey) {
@@ -690,11 +699,17 @@ function cancelActiveRequests(callId, {
 function buildAgentInvocation({
   fullPrompt,
   sessionKey,
+  resumeSessionId = null,
   timestamp,
   profile,
 }) {
   const provider = profile.provider || 'claude';
-  const existingSessionId = getSessionIdForProvider(sessionKey, provider);
+  const restoredSessionId = normalizeResumeSessionId(resumeSessionId);
+  const existingSessionId = restoredSessionId || getSessionIdForProvider(sessionKey, provider);
+
+  if (restoredSessionId && sessionKey) {
+    storeSessionState(sessionKey, provider, restoredSessionId);
+  }
 
   if (sessionKey) {
     clearSessionExpiryTimer(sessionKey);
@@ -768,6 +783,7 @@ function runAgentOnce({
   fullPrompt,
   callId,
   sessionKey,
+  resumeSessionId = null,
   timestamp,
   profile,
   timeoutSeconds = null
@@ -779,6 +795,7 @@ function runAgentOnce({
   const invocation = buildAgentInvocation({
     fullPrompt,
     sessionKey: resolvedSessionKey,
+    resumeSessionId,
     timestamp,
     profile,
   });
@@ -1018,7 +1035,15 @@ app.use((req, res, next) => {
  *   - This allows each device (NAS, Proxmox, etc.) to have its own identity and skills
  */
 app.post('/ask', async (req, res) => {
-  const { prompt, callId, sessionKey, devicePrompt, sessionType, timeoutSeconds } = req.body;
+  const {
+    prompt,
+    callId,
+    sessionKey,
+    resumeSessionId,
+    devicePrompt,
+    sessionType,
+    timeoutSeconds,
+  } = req.body;
   const startTime = Date.now();
   const timestamp = new Date().toISOString();
   const deployIntent = looksLikePhoneDeployRequest(prompt, devicePrompt);
@@ -1092,6 +1117,7 @@ app.post('/ask', async (req, res) => {
       fullPrompt,
       callId,
       sessionKey: resolvedSessionKey,
+      resumeSessionId,
       timestamp,
       profile,
       timeoutSeconds: resolvedTimeoutSeconds

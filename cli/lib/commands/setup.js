@@ -792,6 +792,14 @@ function createDefaultConfig() {
         apiKey: 'not-needed',
         model: 'whisper-1',
         validated: false
+      },
+      realtime: {
+        enabled: false,
+        apiKey: '',
+        model: 'gpt-realtime-2.1',
+        voice: 'marin',
+        transcriptionModel: 'gpt-live-transcribe',
+        safetyIdentifierSalt: generateSecret()
       }
     },
     sip: {
@@ -944,6 +952,63 @@ async function setupAPIKeys(config) {
     sttSpinner.succeed('STT endpoint validated');
     config.api.stt = { ...config.api.stt, baseUrl: sttBaseUrl, validated: true };
   }
+
+  const currentRealtime = config.api.realtime || {};
+  const { enableRealtime } = await inquirer.prompt([{
+    type: 'confirm',
+    name: 'enableRealtime',
+    message: 'Enable OpenAI native full-duplex Realtime voice?',
+    default: currentRealtime.enabled ?? Boolean(currentRealtime.apiKey)
+  }]);
+
+  if (!enableRealtime) {
+    config.api.realtime = { ...currentRealtime, enabled: false };
+    return config;
+  }
+
+  const realtimeAnswers = await inquirer.prompt([
+    {
+      type: 'password',
+      name: 'apiKey',
+      message: currentRealtime.apiKey
+        ? 'OpenAI API key (leave blank to keep the saved key):'
+        : 'OpenAI API key:',
+      validate: input => input.trim() !== '' || currentRealtime.apiKey
+        ? true
+        : 'An OpenAI API key is required'
+    },
+    {
+      type: 'input',
+      name: 'model',
+      message: 'OpenAI Realtime model:',
+      default: currentRealtime.model || 'gpt-realtime-2.1',
+      validate: input => input.trim() !== '' || 'Model is required'
+    },
+    {
+      type: 'input',
+      name: 'voice',
+      message: 'OpenAI Realtime voice:',
+      default: currentRealtime.voice || 'marin',
+      validate: input => input.trim() !== '' || 'Voice is required'
+    },
+    {
+      type: 'input',
+      name: 'transcriptionModel',
+      message: 'Realtime input transcription model:',
+      default: currentRealtime.transcriptionModel || 'gpt-live-transcribe',
+      validate: input => input.trim() !== '' || 'Transcription model is required'
+    }
+  ]);
+
+  config.api.realtime = {
+    ...currentRealtime,
+    enabled: true,
+    apiKey: realtimeAnswers.apiKey.trim() || currentRealtime.apiKey,
+    model: realtimeAnswers.model.trim(),
+    voice: realtimeAnswers.voice.trim(),
+    transcriptionModel: realtimeAnswers.transcriptionModel.trim(),
+    safetyIdentifierSalt: currentRealtime.safetyIdentifierSalt || generateSecret()
+  };
 
   return config;
 }

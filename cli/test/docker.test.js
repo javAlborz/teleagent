@@ -196,6 +196,9 @@ test('docker compose generation', async (t) => {
       'Should use localhost for standard mode');
     assert.ok(envFile.includes('TTS_BASE_URL=http://127.0.0.1:18000/v1'));
     assert.ok(envFile.includes('STT_BASE_URL=http://127.0.0.1:18001/v1'));
+    assert.ok(envFile.includes('OPENAI_REALTIME_API_KEY='));
+    assert.ok(envFile.includes('OPENAI_REALTIME_MODEL=gpt-realtime-2.1'));
+    assert.ok(envFile.includes('VOICE_STATE_DB_PATH=/app/state/voice-state.sqlite'));
     assert.ok(envFile.includes('SIP_AUTH_PASSWORD=pass123'));
   });
 
@@ -310,5 +313,34 @@ test('docker compose generation', async (t) => {
     assert.ok(envFile.includes('PHONE_CODEX_LUNA_WORKING_DIR=/srv/read'));
     assert.ok(envFile.includes('PHONE_CODEX_TERRA_WORKING_DIR=/srv/phone'));
     assert.ok(envFile.includes('PHONE_CODEX_SOL_WORKING_DIR=/srv/admin'));
+  });
+
+  await t.test('generates enabled Realtime settings and a durable state mount', () => {
+    const config = {
+      server: { externalIp: '192.168.1.50', httpPort: 3000, claudeApiPort: 3333 },
+      sip: { domain: '3cx.local', registrar: '192.168.1.10' },
+      devices: [{ extension: '9000', authId: 'user123', password: 'pass123', voiceId: 'alb' }],
+      paths: { voiceApp: '/srv/teleagent/voice-app' },
+      api: {
+        tts: {},
+        stt: {},
+        realtime: {
+          enabled: true,
+          apiKey: 'test-openai-key',
+          model: 'gpt-realtime-2.1',
+          voice: 'marin',
+          transcriptionModel: 'gpt-live-transcribe',
+          safetyIdentifierSalt: 'test-salt'
+        }
+      },
+      secrets: { drachtio: 'drachtio-secret', freeswitch: 'fs-secret' }
+    };
+
+    const envFile = generateEnvFile(config);
+    const compose = generateDockerCompose(config);
+    assert.ok(envFile.includes('OPENAI_REALTIME_API_KEY=test-openai-key'));
+    assert.ok(envFile.includes('OPENAI_REALTIME_VOICE=marin'));
+    assert.ok(envFile.includes('OPENAI_SAFETY_IDENTIFIER_SALT=test-salt'));
+    assert.ok(compose.includes('/srv/teleagent/voice-app/state:/app/state'));
   });
 });

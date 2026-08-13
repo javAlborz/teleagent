@@ -18,6 +18,10 @@ var extractCallerId = sipHandler.extractCallerId;
 var whisperClient = require("./lib/whisper-client");
 var claudeBridge = require("./lib/claude-bridge");
 var ttsService = require("./lib/tts-service");
+var VoiceStateStore = require("./lib/voice-state-store").VoiceStateStore;
+var AgentJobBroker = require("./lib/agent-job-broker").AgentJobBroker;
+var getRealtimeApiKey = require("./lib/openai-realtime-client").getRealtimeApiKey;
+var queueRuntimeCallback = require("./lib/conversation-loop").queueRuntimeCallback;
 
 // Multi-extension support
 var deviceRegistry = require("./lib/device-registry");
@@ -64,7 +68,8 @@ var config = {
   http_port: parseInt(process.env.HTTP_PORT) || 3000,
   ws_host: process.env.WS_HOST || "0.0.0.0",
   ws_port: parseInt(process.env.WS_PORT) || 3001,
-  audio_dir: process.env.AUDIO_DIR || "/tmp/voice-audio"
+  audio_dir: process.env.AUDIO_DIR || "/tmp/voice-audio",
+  voice_state_db_path: process.env.VOICE_STATE_DB_PATH || "/tmp/teleagent/voice-state.sqlite"
 };
 
 // Initialize drachtio SRF
@@ -76,6 +81,8 @@ var registrar = null;
 var drachtioConnected = false;
 var freeswitchConnected = false;
 var isReady = false;
+var voiceStateStore = null;
+var agentJobBroker = null;
 
 // Log startup
 console.log("\n" + "=".repeat(64));
@@ -91,6 +98,7 @@ console.log("  - External IP: " + config.external_ip);
 console.log("  - HTTP API:    " + config.http_host + ":" + config.http_port);
 console.log("  - WS Audio:    " + config.ws_host + ":" + config.ws_port);
 console.log("  - Audio Dir:   " + config.audio_dir);
+console.log("  - Voice State: " + config.voice_state_db_path);
 console.log("  - Mix Type:    " + (process.env.AUDIO_FORK_MIXTYPE || "L") + " (capture direction)");
 console.log("\n[DEVICES] Loaded " + Object.keys(deviceRegistry.getAllDevices()).length + " device extensions");
 console.log("\nWaiting for connections...\n");
@@ -177,6 +185,26 @@ function initializeServers() {
     fs.mkdirSync(config.audio_dir, { recursive: true });
   }
 
+  voiceStateStore = new VoiceStateStore({ dbPath: config.voice_state_db_path });
+  agentJobBroker = new AgentJobBroker({
+    stateStore: voiceStateStore,
+    agentBridge: claudeBridge,
+    callbackDispatcher: async function(job, thread) {
+      if (!thread || !thread.callback_target) return;
+      await queueRuntimeCallback({
+        target: thread.callback_target,
+        dialUri: thread.callback_dial_uri,
+        message: job.voice_result || job.error || "Your agent task finished.",
+        mode: "realtime",
+        deviceName: "OpenAI Realtime",
+        callUuid: job.id,
+        transcript: job.request,
+        reason: "realtime_agent_job_complete",
+        voiceThreadId: job.voice_thread_id
+      });
+    }
+  });
+
   // HTTP server for TTS audio
   httpServer = createHttpServer(config.audio_dir, config.http_port, config.http_host);
   console.log("[" + new Date().toISOString() + "] HTTP Server started on " + config.http_host + ":" + config.http_port);
@@ -204,6 +232,8 @@ function initializeServers() {
     whisperClient: whisperClient,
     claudeBridge: claudeBridge,
     ttsService: ttsService,
+    voiceStateStore: voiceStateStore,
+    agentJobBroker: agentJobBroker,
     wsPort: config.ws_port
   });
 
@@ -213,6 +243,16 @@ function initializeServers() {
   // ========== DEVICE API ROUTES ==========
   httpServer.app.use("/api", deviceRouter);
   console.log("[" + new Date().toISOString() + "] DEVICE API enabled (/api/devices, /api/device/:identifier)");
+
+  httpServer.app.get("/api/realtime-health", function(req, res) {
+    var stateHealth = voiceStateStore.health();
+    res.status(stateHealth.ok ? 200 : 503).json({
+      status: stateHealth.ok ? "healthy" : "unhealthy",
+      configured: !!getRealtimeApiKey(),
+      model: process.env.OPENAI_REALTIME_MODEL || "gpt-realtime-2.1",
+      state: stateHealth
+    });
+  });
 
   // Finalize HTTP server
   httpServer.finalize();
@@ -242,6 +282,8 @@ function checkReadyState() {
         whisperClient: whisperClient,
         claudeBridge: claudeBridge,
         ttsService: ttsService,
+        voiceStateStore: voiceStateStore,
+        agentJobBroker: agentJobBroker,
         wsPort: config.ws_port,
         externalIp: config.external_ip
       }).catch(function(err) {
@@ -260,6 +302,7 @@ function shutdown(signal) {
   if (registrar) registrar.stop();
   if (httpServer) httpServer.close();
   if (audioForkServer) audioForkServer.stop();
+  if (voiceStateStore) voiceStateStore.close();
   if (mediaServer) mediaServer.disconnect();
   srf.disconnect();
   setTimeout(function() { process.exit(0); }, 1000);

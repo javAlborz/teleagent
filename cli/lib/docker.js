@@ -108,9 +108,7 @@ export function generateDockerCompose(config) {
   const freeswitchImage = 'drachtio/drachtio-freeswitch-mrf:latest';
   const platformLine = isPiMode ? '\n    platform: linux/arm64' : '';
 
-  return `version: '3.8'
-
-# CRITICAL: All containers must use network_mode: host
+  return `# CRITICAL: All containers must use network_mode: host
 # Docker bridge networking causes FreeSWITCH to advertise internal IPs
 # in SDP, making RTP unreachable from external callers.
 
@@ -152,6 +150,7 @@ services:
     volumes:
       - ${config.paths.voiceApp}/audio:/app/audio
       - \${DEVICE_CONFIG_DIR:-${config.paths.voiceApp}/config}:/app/config:ro
+      - ${config.paths.voiceApp}/state:/app/state
     depends_on:
       - drachtio
       - freeswitch
@@ -193,12 +192,21 @@ export function generateEnvFile(config) {
   const sttApiKey = sttConfig.apiKey || 'not-needed';
   const ttsModel = ttsConfig.model || 'kokoro';
   const sttModel = sttConfig.model || 'whisper-1';
+  const realtimeConfig = config.api?.realtime || {};
+  const realtimeEnabled = realtimeConfig.enabled ?? Boolean(realtimeConfig.apiKey);
+  const realtimeApiKey = realtimeEnabled ? (realtimeConfig.apiKey || '') : '';
+  const realtimeModel = realtimeConfig.model || 'gpt-realtime-2.1';
+  const realtimeVoice = realtimeConfig.voice || 'marin';
+  const realtimeTranscriptionModel = realtimeConfig.transcriptionModel || 'gpt-live-transcribe';
+  const safetyIdentifierSalt = realtimeConfig.safetyIdentifierSalt || crypto
+    .createHash('sha256')
+    .update(`openai-safety:${config.secrets.drachtio}`)
+    .digest('hex');
   const primaryDevice = config.devices?.[0] || {};
   const defaultVoice = primaryDevice.voiceId || ttsConfig.defaultVoice || 'af_bella';
   const agentEnvironment = buildAgentServerEnvironment(config, {});
-  const deviceConfigDir = config.paths?.voiceApp
-    ? `${config.paths.voiceApp}/config`
-    : './voice-app/config';
+  const voiceAppPath = config.paths?.voiceApp || './voice-app';
+  const deviceConfigDir = `${voiceAppPath}/config`;
 
   const lines = [
     '# ====================================',
@@ -262,6 +270,15 @@ export function generateEnvFile(config) {
     `PHONE_CODEX_DEPLOY_SANDBOX=${agentEnvironment.PHONE_CODEX_DEPLOY_SANDBOX}`,
     `PHONE_CODEX_DEPLOY_WORKING_DIR=${agentEnvironment.PHONE_CODEX_DEPLOY_WORKING_DIR}`,
     '',
+    '# OpenAI Realtime Voice Conductor',
+    `OPENAI_REALTIME_API_KEY=${realtimeApiKey}`,
+    `OPENAI_REALTIME_MODEL=${realtimeModel}`,
+    `OPENAI_REALTIME_VOICE=${realtimeVoice}`,
+    `OPENAI_REALTIME_TRANSCRIPTION_MODEL=${realtimeTranscriptionModel}`,
+    `OPENAI_SAFETY_IDENTIFIER_SALT=${safetyIdentifierSalt}`,
+    `VOICE_STATE_DIR=${voiceAppPath}/state`,
+    'VOICE_STATE_DB_PATH=/app/state/voice-state.sqlite',
+    '',
     '# OpenAI-compatible TTS',
     `TTS_BASE_URL=${ttsBaseUrl}`,
     `TTS_API_KEY=${ttsApiKey}`,
@@ -299,6 +316,7 @@ export async function writeDockerConfig(config) {
   const dockerComposeContent = generateDockerCompose(config);
   const envContent = generateEnvFile(config);
 
+  await fs.promises.mkdir(`${config.paths.voiceApp}/state`, { recursive: true, mode: 0o700 });
   await fs.promises.writeFile(dockerComposePath, dockerComposeContent, { mode: 0o644 });
   await fs.promises.writeFile(envPath, envContent, { mode: 0o600 });
 }

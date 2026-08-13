@@ -17,6 +17,8 @@ test('buildCodexEnvironment strips phone service secrets but preserves Codex aut
   const environment = buildCodexEnvironment({
     PATH: '/usr/bin',
     OPENAI_API_KEY: 'codex-auth',
+    OPENAI_REALTIME_API_KEY: 'voice-secret',
+    OPENAI_SAFETY_IDENTIFIER_SALT: 'voice-salt',
     CLAUDE_API_TOKEN: 'bridge-secret',
     AGENT_API_TOKEN: 'neutral-bridge-secret',
     OUTBOUND_API_TOKEN: 'outbound-secret',

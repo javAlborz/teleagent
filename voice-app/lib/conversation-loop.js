@@ -177,6 +177,7 @@ async function queueRuntimeCallback({
   callUuid,
   transcript,
   reason,
+  voiceThreadId = null,
 }) {
   if (!target || !message) {
     return {
@@ -206,6 +207,10 @@ async function queueRuntimeCallback({
 
   if (dialUri) {
     payload.dialUri = String(dialUri);
+  }
+
+  if (voiceThreadId) {
+    payload.voiceThreadId = String(voiceThreadId);
   }
 
   try {

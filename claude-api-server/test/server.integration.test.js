@@ -165,6 +165,32 @@ process.stdin.on('end', () => {
     assert.equal(switchedBody.response, 'claude-ok');
   });
 
+  await t.test('durable provider session IDs restore after an in-memory bridge miss', async () => {
+    const codex = await post('/ask', {
+      prompt: 'Continue durable Codex work',
+      sessionType: 'phone-codex-terra',
+      sessionKey: 'new-codex-bridge-key',
+      resumeSessionId: 'persisted-codex-thread',
+    });
+    assert.equal((await codex.json()).response, 'resumed');
+
+    const claude = await post('/ask', {
+      prompt: 'Continue durable Claude work',
+      sessionType: 'phone-sonnet',
+      sessionKey: 'new-claude-bridge-key',
+      resumeSessionId: 'persisted-claude-thread',
+    });
+    assert.equal((await claude.json()).provider, 'claude');
+
+    const invocations = fs.readFileSync(invocationLog, 'utf8').trim().split('\n').map(JSON.parse);
+    const codexInvocation = invocations.find(entry => entry.prompt.includes('Continue durable Codex work'));
+    assert.ok(codexInvocation.args.includes('resume'));
+    assert.ok(codexInvocation.args.includes('persisted-codex-thread'));
+    const claudeInvocation = invocations.find(entry => entry.prompt.includes('Continue durable Claude work'));
+    assert.ok(claudeInvocation.args.includes('--resume'));
+    assert.ok(claudeInvocation.args.includes('persisted-claude-thread'));
+  });
+
   await t.test('structured Codex responses are validated', async () => {
     const response = await post('/ask-structured', {
       prompt: 'STRUCTURED_TEST',

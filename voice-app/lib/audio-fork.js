@@ -37,6 +37,7 @@ class AudioForkSession extends EventEmitter {
     ws,
     callUuid,
     sampleRate = 16000,
+    bidirectionalStreaming = false,
     endSilenceMs = 1500,
     minSpeechMs = 350,
     maxUtteranceMs = 120000
@@ -45,6 +46,7 @@ class AudioForkSession extends EventEmitter {
     this.ws = ws;
     this.callUuid = callUuid;
     this.sampleRate = sampleRate;
+    this.bidirectionalStreaming = Boolean(bidirectionalStreaming);
 
     this.endSilenceMs = endSilenceMs;
     this.minSpeechMs = minSpeechMs;
@@ -63,12 +65,14 @@ class AudioForkSession extends EventEmitter {
     this._speechBytes = 0;
     this._silenceMs = 0;
 
+    this._playout = null;
+
     // DEBUG: Track message counts
     this._messageCount = 0;
     this._binaryCount = 0;
     this._lastLogTime = Date.now();
 
-    ws.on('message', (data) => this._onMessage(data));
+    ws.on('message', (data, isBinary) => this._onMessage(data, isBinary));
     ws.on('close', () => {
       audioDebugLog('[AUDIO-DEBUG] WebSocket CLOSED for ' + callUuid + '. Total messages: ' + this._messageCount + ', binary: ' + this._binaryCount);
       this.emit('close');
@@ -86,6 +90,56 @@ class AudioForkSession extends EventEmitter {
     this.captureEnabled = Boolean(enabled);
     audioDebugLog('[AUDIO-DEBUG] setCaptureEnabled: ' + was + ' -> ' + this.captureEnabled + ' for ' + this.callUuid);
     if (!this.captureEnabled) this._resetUtterance();
+  }
+
+  sendAudio(audio, { sampleRate = 24000, itemId = null } = {}) {
+    const buffer = Buffer.from(audio || []);
+    if (buffer.length === 0 || this.ws.readyState !== WebSocket.OPEN) return false;
+    if (Number(this.ws.bufferedAmount || 0) > 2 * 1024 * 1024) {
+      this.emit('playout_backpressure', { bufferedAmount: this.ws.bufferedAmount });
+      return false;
+    }
+
+    if (!this._playout || (itemId && this._playout.itemId !== itemId)) {
+      this._playout = {
+        itemId,
+        sampleRate,
+        bytes: 0,
+        startedAt: Date.now(),
+      };
+    }
+    this._playout.bytes += buffer.length;
+
+    if (this.bidirectionalStreaming) {
+      this.ws.send(buffer, { binary: true });
+    } else {
+      this.ws.send(JSON.stringify({
+        type: 'playAudio',
+        data: {
+          audioContentType: 'raw',
+          sampleRate,
+          audioContent: buffer.toString('base64'),
+        },
+      }));
+    }
+    return true;
+  }
+
+  stopPlayback() {
+    const playout = this._playout;
+    if (this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({ type: 'killAudio' }));
+    }
+    this._playout = null;
+
+    if (!playout) return null;
+    const totalAudioMs = (playout.bytes / 2 / playout.sampleRate) * 1000;
+    const elapsedMs = Math.max(0, Date.now() - playout.startedAt);
+    return {
+      itemId: playout.itemId,
+      audioEndMs: Math.min(totalAudioMs, elapsedMs),
+      totalAudioMs,
+    };
   }
 
   _chunkDurationMs(byteLen) {
@@ -193,13 +247,14 @@ class AudioForkSession extends EventEmitter {
     return stats.maxAbs >= maxThreshold || stats.rms >= rmsThreshold;
   }
 
-  _onMessage(data) {
+  _onMessage(data, isBinary) {
     this._messageCount++;
 
-    if (typeof data === 'string') {
-      audioDebugLog('[AUDIO-DEBUG] Received STRING message #' + this._messageCount + ': ' + data.substring(0, 200));
+    if (typeof data === 'string' || isBinary === false) {
+      const text = Buffer.isBuffer(data) ? data.toString('utf8') : data;
+      audioDebugLog('[AUDIO-DEBUG] Received STRING message #' + this._messageCount + ': ' + text.substring(0, 200));
       try {
-        const meta = JSON.parse(data);
+        const meta = JSON.parse(text);
         this.emit('metadata', meta);
         if (meta && meta.sampleRate && Number.isFinite(Number(meta.sampleRate))) {
           this.sampleRate = Number(meta.sampleRate);
@@ -207,7 +262,7 @@ class AudioForkSession extends EventEmitter {
           audioDebugLog('[AUDIO-DEBUG] Updated sampleRate to ' + this.sampleRate);
         }
       } catch {
-        this.emit('metadata', data);
+        this.emit('metadata', text);
       }
       return;
     }
@@ -218,6 +273,7 @@ class AudioForkSession extends EventEmitter {
     }
 
     this._binaryCount++;
+    this.emit('audio', data);
 
     // Log periodically (every 50 chunks or every 5 seconds)
     const now = Date.now();
@@ -333,7 +389,11 @@ class AudioForkServer extends EventEmitter {
           audioDebugLog('[AUDIO-DEBUG] No pending expectation for ' + callUuid + ', creating session anyway');
         }
 
-        const session = new AudioForkSession({ ws, callUuid });
+        const session = new AudioForkSession({
+          ws,
+          callUuid,
+          ...(pending?.sessionOptions || {}),
+        });
         this._sessions.set(callUuid, session);
         session.on('close', () => this._sessions.delete(callUuid));
         session.on('error', () => this._sessions.delete(callUuid));
@@ -351,7 +411,11 @@ class AudioForkServer extends EventEmitter {
       }
 
       clearTimeout(pending.timeout);
-      const session = new AudioForkSession({ ws, callUuid: pending.callUuid });
+      const session = new AudioForkSession({
+        ws,
+        callUuid: pending.callUuid,
+        ...(pending.sessionOptions || {}),
+      });
       this._sessions.set(pending.callUuid, session);
       session.on('close', () => this._sessions.delete(pending.callUuid));
       session.on('error', () => this._sessions.delete(pending.callUuid));
@@ -389,7 +453,11 @@ class AudioForkServer extends EventEmitter {
     return false;
   }
 
-  expectSession(callUuid, { timeoutMs = 5000 } = {}) {
+  expectSession(callUuid, {
+    timeoutMs = 5000,
+    sampleRate = 16000,
+    bidirectionalStreaming = false,
+  } = {}) {
     audioDebugLog('[AUDIO-DEBUG] expectSession called for ' + callUuid + ', timeoutMs=' + timeoutMs);
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
@@ -399,7 +467,13 @@ class AudioForkServer extends EventEmitter {
         reject(new Error('Timed out waiting for WebSocket audio session (' + timeoutMs + 'ms) for call ' + callUuid));
       }, timeoutMs);
 
-      this._pending.push({ callUuid, resolve, reject, timeout });
+      this._pending.push({
+        callUuid,
+        resolve,
+        reject,
+        timeout,
+        sessionOptions: { sampleRate, bidirectionalStreaming },
+      });
     });
   }
 

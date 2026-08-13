@@ -40,5 +40,20 @@
     "voiceId": "af_bella",
     "sessionType": "phone-codex-sol",
     "prompt": "You are a helpful AI assistant. Keep voice responses under 40 words."
+  },
+  "7": {
+    "name": "OpenAI Realtime",
+    "extension": "7",
+    "voiceMode": "openai-realtime",
+    "defaultAgentProfile": "codex-terra",
+    "voiceThreadTtlSeconds": 86400
+  },
+  "77": {
+    "name": "OpenAI Realtime Resume",
+    "extension": "77",
+    "voiceMode": "openai-realtime",
+    "defaultAgentProfile": "codex-terra",
+    "resumeTargetExtension": "7",
+    "voiceThreadTtlSeconds": 86400
   }
 }

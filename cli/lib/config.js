@@ -17,6 +17,14 @@ function getDefaultApiConfig() {
       apiKey: 'not-needed',
       model: 'whisper-1',
       validated: false
+    },
+    realtime: {
+      enabled: false,
+      apiKey: '',
+      model: 'gpt-realtime-2.1',
+      voice: 'marin',
+      transcriptionModel: 'gpt-live-transcribe',
+      safetyIdentifierSalt: ''
     }
   };
 }
@@ -41,6 +49,11 @@ function migrateApiConfig(config) {
       ...(legacyStt.apiKey ? { apiKey: legacyStt.apiKey } : {}),
       ...(legacyStt.validated !== undefined ? { validated: legacyStt.validated } : {}),
       ...(api.stt || {})
+    },
+    realtime: {
+      ...defaults.realtime,
+      ...(api.realtime || {}),
+      enabled: api.realtime?.enabled ?? Boolean(api.realtime?.apiKey)
     }
   };
 

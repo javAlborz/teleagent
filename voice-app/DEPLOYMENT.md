@@ -24,6 +24,10 @@ Teleagent consists of three Docker containers and an optional agent bridge:
               └───────────────────────────────┘
 ```
 
+The legacy call path sends completed utterances to separate STT and TTS
+services. The OpenAI Realtime path streams 24 kHz PCM bidirectionally between
+FreeSWITCH and OpenAI and uses the bridge only for Claude/Codex agent jobs.
+
 ## Network Requirements
 
 ### Ports
@@ -98,6 +102,12 @@ Key environment variables in the generated `.env`:
 | `TTS_BASE_URL` | OpenAI-compatible TTS base URL |
 | `TTS_VOICE` | Default TTS voice name/id |
 | `STT_BASE_URL` | OpenAI-compatible Whisper base URL |
+| `OPENAI_REALTIME_API_KEY` | Required for OpenAI Realtime extensions and callbacks |
+| `OPENAI_REALTIME_MODEL` | Realtime speech-to-speech model; defaults to `gpt-realtime-2.1` |
+| `OPENAI_REALTIME_VOICE` | Realtime output voice; defaults to `marin` |
+| `OPENAI_REALTIME_TRANSCRIPTION_MODEL` | Text transcript model used for durable context |
+| `VOICE_STATE_DIR` | Host directory mounted read/write for durable Realtime state |
+| `VOICE_STATE_DB_PATH` | SQLite path inside `voice-app` |
 | `SIP_DOMAIN` | 3CX server FQDN |
 | `SIP_REGISTRAR` | SIP registrar address |
 
@@ -153,6 +163,9 @@ claude-phone doctor
 # Container health
 docker ps
 docker compose logs -f
+
+# Realtime readiness and durable-state health
+curl -fsS http://127.0.0.1:3000/api/realtime-health
 ```
 
 ### Log Locations
@@ -193,6 +206,9 @@ Error connecting to agent API
 ### API Keys
 
 - Config file has restricted permissions (chmod 600)
+- Keep `OPENAI_REALTIME_API_KEY` only in the server-side `.env`; it is never needed on a SIP handset or by agent children
+- Realtime audio is streamed and not written to the durable SQLite database
+- Realtime callbacks may reopen a voice thread only for the same caller identity
 - Never commit `~/.claude-phone/config.json` to version control
 - Use environment variables in CI/CD pipelines
 
@@ -219,6 +235,16 @@ Error connecting to agent API
 2. Check RTP ports (30000-30100) are open
 3. Ensure `network_mode: host` is set for voice-app
 4. Check FreeSWITCH logs for RTP errors
+
+### OpenAI Realtime Extension Returns 503
+
+1. Verify `OPENAI_REALTIME_API_KEY` is present in the `voice-app` environment
+2. Check `curl -fsS http://127.0.0.1:3000/api/realtime-health`
+3. Confirm outbound HTTPS/WSS access to `api.openai.com`
+4. Inspect `docker compose logs voice-app` for Realtime session errors
+
+The Realtime path does not depend on `TTS_BASE_URL` or `STT_BASE_URL`. An outage
+of those services affects the legacy extensions but not Realtime extensions.
 
 ### SIP Registration Fails
 

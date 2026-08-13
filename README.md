@@ -13,8 +13,8 @@ Teleagent is the maintained continuation of the old Claude Phone project for the
 ## Requirements
 
 - 3CX cloud account or compatible SIP setup
-- OpenAI-compatible TTS endpoint
-- OpenAI-compatible STT endpoint
+- For legacy extensions: OpenAI-compatible TTS and STT endpoints
+- For native full-duplex voice: an OpenAI API key with Realtime API access
 - At least one agent CLI: authenticated Claude Code, authenticated Codex, or both
 - macOS or Linux
 
@@ -112,10 +112,18 @@ The Hermes deployment provides paired fresh/resume profiles:
 | `4` | `44` | Codex GPT-5.6 Luna | Read-only, low reasoning |
 | `5` | `55` | Codex GPT-5.6 Terra | Workspace-write, medium reasoning |
 | `6` | `66` | Codex GPT-5.6 Sol | Full access, high reasoning |
+| `7` | `77` | OpenAI Realtime conductor | Directs any Claude/Codex profile |
 
 Codex Luna and Terra cannot auto-escalate a deployment request. The bridge
 instructs the caller to dial `6`; only Sol may enter the privileged Codex deploy
 profile.
+
+Extensions `7` and `77` use OpenAI's native speech-to-speech Realtime API.
+They do not call the separately hosted TTS or STT services, so they remain
+usable while Zeus speech services are unavailable. `7` creates a fresh durable
+voice thread; `77` restores the most recent thread for the same caller. Within
+that thread, Claude Haiku/Sonnet/Opus and Codex Luna/Terra/Sol each keep a
+separate provider session. See [OpenAI Realtime Voice](docs/OPENAI-REALTIME.md).
 
 ## API
 
@@ -128,6 +136,7 @@ profile.
 | `GET` | `/api/calls` | List active calls |
 | `GET` | `/api/devices` | List devices |
 | `GET` | `/api/device/:identifier` | Get one device |
+| `GET` | `/api/realtime-health` | Check Realtime configuration and state storage |
 
 See [Outbound API Reference](voice-app/README-OUTBOUND.md).
 
@@ -139,6 +148,16 @@ Speech services are configured through `.env`:
 TTS_BASE_URL=http://127.0.0.1:18000/v1
 TTS_VOICE=af_bella
 STT_BASE_URL=http://127.0.0.1:18001/v1
+```
+
+Native Realtime voice is configured independently:
+
+```bash
+OPENAI_REALTIME_API_KEY=sk-...
+OPENAI_REALTIME_MODEL=gpt-realtime-2.1
+OPENAI_REALTIME_VOICE=marin
+VOICE_STATE_DIR=./voice-app/state
+VOICE_STATE_DB_PATH=/app/state/voice-state.sqlite
 ```
 
 The voice app prefers the provider-neutral bridge names while accepting the
@@ -203,6 +222,7 @@ npm run lint
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
 - [Outbound API](voice-app/README-OUTBOUND.md)
 - [Deployment](voice-app/DEPLOYMENT.md)
+- [OpenAI Realtime Voice](docs/OPENAI-REALTIME.md)
 - [Claude Code Skill](docs/CLAUDE-CODE-SKILL.md)
 
 ## License

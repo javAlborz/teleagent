@@ -39,6 +39,7 @@ export async function configShowCommand() {
   const config = await loadConfig();
   const ttsConfig = config.api?.tts || {};
   const sttConfig = config.api?.stt || {};
+  const realtimeConfig = config.api?.realtime || {};
 
   console.log(chalk.bold('Speech Endpoints:'));
   console.log(chalk.gray(`  TTS Endpoint: ${ttsConfig.baseUrl || '[not set]'}`));
@@ -46,6 +47,10 @@ export async function configShowCommand() {
   console.log(chalk.gray(`  TTS API Key: ${redactValue(ttsConfig.apiKey)}`));
   console.log(chalk.gray(`  STT Endpoint: ${sttConfig.baseUrl || '[not set]'}`));
   console.log(chalk.gray(`  STT API Key: ${redactValue(sttConfig.apiKey)}`));
+  console.log(chalk.gray(`  OpenAI Realtime: ${realtimeConfig.enabled ? 'enabled' : 'disabled'}`));
+  console.log(chalk.gray(`  Realtime Model: ${realtimeConfig.model || '[not set]'}`));
+  console.log(chalk.gray(`  Realtime Voice: ${realtimeConfig.voice || '[not set]'}`));
+  console.log(chalk.gray(`  OpenAI API Key: ${redactValue(realtimeConfig.apiKey)}`));
 
   // 3CX Configuration
   console.log(chalk.bold('\n3CX Configuration:'));

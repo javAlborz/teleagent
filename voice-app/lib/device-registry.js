@@ -16,6 +16,9 @@
  * - maxTurns: Maximum conversation turns for this phone agent
  * - resumeTargetExtension: Base extension whose most recent session should be resumed
  * - resumeTtlSeconds: How long completed sessions stay resumable after hangup
+ * - voiceMode: Set to openai-realtime for native full-duplex voice
+ * - defaultAgentProfile: Initial Claude/Codex target for a Realtime voice thread
+ * - voiceThreadTtlSeconds: How long extension 77 can resume a durable voice thread
  * - prompt: System prompt that defines device personality
  */
 
