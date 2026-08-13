@@ -179,3 +179,73 @@ test('listener failures cannot turn a completed job into a failed job', async (t
   assert.match(event.error.message, /disconnected voice listener/);
   assert.equal(stateStore.getJob(accepted.job_id).status, 'completed');
 });
+
+test('panic stop locks dispatch, cancels all jobs, and requires an explicit unlock', async (t) => {
+  const bridgeStops = [];
+  const bridge = {
+    queryDetailed() {
+      return new Promise(() => {});
+    },
+    async cancelSession() {
+      return { success: true, canceledCount: 1 };
+    },
+    async panicStop(options) {
+      bridgeStops.push(options);
+      return { success: true, canceledCount: 1 };
+    },
+  };
+  const { broker, realtime, stateStore, thread } = createFixture(t, bridge);
+  const running = once(broker, 'job.updated');
+  const active = await broker.startAgentTask({
+    voiceThreadId: thread.id,
+    realtimeSessionId: realtime.id,
+    toolCallId: 'panic-running',
+    profile: 'codex-luna',
+    request: 'Inspect every service log.',
+  });
+  await running;
+  const pending = await broker.startAgentTask({
+    voiceThreadId: thread.id,
+    realtimeSessionId: realtime.id,
+    toolCallId: 'panic-pending',
+    profile: 'codex-sol',
+    request: 'Restart the service.',
+  });
+
+  const stopped = await broker.panicStop('Dial 9 emergency stop', 'asterisk_1001');
+  assert.equal(stopped.locked, true);
+  assert.equal(stopped.canceledCount, 2);
+  assert.equal(stopped.runningCount, 1);
+  assert.equal(stopped.bridge.success, true);
+  assert.deepEqual(bridgeStops, [{ reason: 'Dial 9 emergency stop', source: 'asterisk_1001' }]);
+  assert.equal(stateStore.getJob(active.job_id).status, 'canceled');
+  assert.equal(stateStore.getJob(pending.job_id).status, 'canceled');
+
+  const blocked = await broker.startAgentTask({
+    voiceThreadId: thread.id,
+    realtimeSessionId: realtime.id,
+    toolCallId: 'panic-blocked',
+    profile: 'codex-luna',
+    request: 'Inspect the README.',
+  });
+  assert.equal(blocked.accepted, false);
+  assert.equal(blocked.code, 'VOICE_EXECUTION_LOCKED');
+
+  broker.setExecutionLocked(false);
+  broker.agentBridge.queryDetailed = async () => ({
+    success: true,
+    response: 'Done',
+    sessionId: 'restored-session',
+  });
+  const completion = once(broker, 'job.completed');
+  const restored = await broker.startAgentTask({
+    voiceThreadId: thread.id,
+    realtimeSessionId: realtime.id,
+    toolCallId: 'panic-restored',
+    profile: 'codex-luna',
+    request: 'Read the README.',
+  });
+  const [completed] = await completion;
+  assert.equal(restored.accepted, true);
+  assert.equal(completed.status, 'completed');
+});

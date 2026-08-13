@@ -39,6 +39,10 @@ const {
   getDeploymentAuthorization,
   resolveEffectiveSessionType: resolveProfileSessionType,
 } = require('./agent-profiles');
+const {
+  VoiceExecutionControl,
+  cleanLabel,
+} = require('../lib/voice-execution-control');
 
 function loadEnvFile(envPath) {
   if (!fs.existsSync(envPath)) return;
@@ -65,6 +69,9 @@ const app = express();
 const PORT = process.env.PORT || 3333;
 const BIND_HOST = process.env.AGENT_API_BIND_HOST || process.env.CLAUDE_API_BIND_HOST || '0.0.0.0';
 const AGENT_API_TOKEN = process.env.AGENT_API_TOKEN || process.env.CLAUDE_API_TOKEN || '';
+const VOICE_EXECUTION_LOCK_FILE = process.env.VOICE_EXECUTION_LOCK_FILE ||
+  path.join(__dirname, '..', 'voice-app', 'state', 'voice-execution.lock.json');
+const voiceExecutionControl = new VoiceExecutionControl({ lockFile: VOICE_EXECUTION_LOCK_FILE });
 const CLAUDE_WORKING_DIR = process.env.CLAUDE_WORKING_DIR || HOME;
 const CODEX_WORKING_DIR = process.env.CODEX_WORKING_DIR || CLAUDE_WORKING_DIR;
 const CLAUDE_COMMAND = process.env.CLAUDE_COMMAND || 'claude';
@@ -247,6 +254,30 @@ function normalizeSessionType(sessionType) {
 
 function isPhoneSessionType(sessionType) {
   return normalizeSessionType(sessionType).startsWith('phone-');
+}
+
+function voiceExecutionLockedPayload(status = voiceExecutionControl.getStatus()) {
+  return {
+    success: false,
+    code: 'VOICE_EXECUTION_LOCKED',
+    agentCode: 'AGENT_VOICE_EXECUTION_LOCKED',
+    error: 'Voice-originated agent execution is locked',
+    userMessage: 'Voice-started agent work is locked after an emergency stop. An operator must unlock it locally before I can start another task.',
+    voiceExecution: status,
+  };
+}
+
+function assertVoiceExecutionAllowed(profile) {
+  if (!isPhoneSessionType(profile?.sessionType)) return;
+
+  const status = voiceExecutionControl.getStatus();
+  if (!status.locked) return;
+
+  const error = new Error('Voice-originated agent execution is locked');
+  error.code = 'VOICE_EXECUTION_LOCKED';
+  error.agentCode = 'AGENT_VOICE_EXECUTION_LOCKED';
+  error.voiceExecution = status;
+  throw error;
 }
 
 function resolveEffectiveSessionType(sessionType, prompt = '', devicePrompt = '') {
@@ -470,6 +501,8 @@ console.log('[STARTUP] API keys loaded:', apiKeys.join(', '));
 
 // Session storage: sessionKey -> { provider, sessionId }
 const sessions = new Map();
+// Session keys created by phone profiles. These are cleared by the panic stop.
+const voiceSessionKeys = new Set();
 // Active request storage: callId -> Map(requestId -> requestRecord)
 const activeRequests = new Map();
 // Deferred session expiry timers: sessionKey -> Timeout
@@ -540,6 +573,7 @@ function deleteSessionState(sessionKey) {
   if (!sessionKey) return false;
 
   clearSessionExpiryTimer(sessionKey);
+  voiceSessionKeys.delete(sessionKey);
   return sessions.delete(sessionKey);
 }
 
@@ -565,6 +599,7 @@ function scheduleSessionExpiry(sessionKey, preserveForSeconds) {
     sessionKey,
     setTimeout(() => {
       const deleted = sessions.delete(sessionKey);
+      voiceSessionKeys.delete(sessionKey);
       sessionExpiryTimers.delete(sessionKey);
       console.log(
         `[${new Date().toISOString()}] SESSION EXPIRED: sessionKey=${sessionKey}, deleted=${deleted}`
@@ -637,7 +672,7 @@ function killChildProcess(record, signal) {
   }
 }
 
-function transitionActiveRequest(record, state, reason) {
+function transitionActiveRequest(record, state, reason, { force = false } = {}) {
   if (!record || record.state !== 'running') {
     return false;
   }
@@ -652,6 +687,11 @@ function transitionActiveRequest(record, state, reason) {
 
   killChildProcess(record, 'SIGTERM');
 
+  if (force) {
+    killChildProcess(record, 'SIGKILL');
+    return true;
+  }
+
   if (record.forceKillTimer) {
     clearTimeout(record.forceKillTimer);
   }
@@ -660,7 +700,11 @@ function transitionActiveRequest(record, state, reason) {
     if (record.state === state) {
       killChildProcess(record, 'SIGKILL');
     }
+    record.forceKillTimer = null;
   }, 2000);
+  if (typeof record.forceKillTimer.unref === 'function') {
+    record.forceKillTimer.unref();
+  }
 
   return true;
 }
@@ -693,6 +737,36 @@ function cancelActiveRequests(callId, {
     canceledCount,
     requestIds,
     resetSession,
+  };
+}
+
+function cancelAllVoiceRequests({ reason = 'voice_panic_stop' } = {}) {
+  const requestIds = [];
+  const callIds = new Set();
+  let canceledCount = 0;
+
+  for (const [callId, bucket] of activeRequests.entries()) {
+    for (const record of bucket.values()) {
+      if (!record.voiceOrigin) continue;
+      if (transitionActiveRequest(record, 'canceled', reason, { force: true })) {
+        canceledCount += 1;
+        requestIds.push(record.requestId);
+        callIds.add(callId);
+      }
+    }
+  }
+
+  let clearedSessionCount = 0;
+  for (const sessionKey of [...voiceSessionKeys]) {
+    if (deleteSessionState(sessionKey)) clearedSessionCount += 1;
+  }
+
+  return {
+    active: canceledCount > 0,
+    canceledCount,
+    requestIds,
+    callIds: [...callIds],
+    clearedSessionCount,
   };
 }
 
@@ -791,7 +865,15 @@ function runAgentOnce({
   const startTime = Date.now();
   const resolvedTimeoutSeconds = parsePositiveInteger(timeoutSeconds);
   const requestId = nextRequestId();
+  const requestScopeKey = callId || requestId;
   const resolvedSessionKey = resolveSessionKey(callId, sessionKey);
+  const voiceOrigin = isPhoneSessionType(profile?.sessionType);
+
+  assertVoiceExecutionAllowed(profile);
+  if (voiceOrigin && resolvedSessionKey) {
+    voiceSessionKeys.add(resolvedSessionKey);
+  }
+
   const invocation = buildAgentInvocation({
     fullPrompt,
     sessionKey: resolvedSessionKey,
@@ -815,6 +897,7 @@ function runAgentOnce({
       callId,
       child: agent,
       provider: invocation.provider,
+      voiceOrigin,
       detached: process.platform !== 'win32',
       state: 'running',
       reason: null,
@@ -823,10 +906,8 @@ function runAgentOnce({
       startedAt: startTime,
     };
 
-    if (callId) {
-      registerActiveRequest(callId, requestRecord);
-      console.log(`[${timestamp}] ACTIVE REQUEST STARTED: requestId=${requestId} callLinked=yes`);
-    }
+    registerActiveRequest(requestScopeKey, requestRecord);
+    console.log(`[${timestamp}] ACTIVE REQUEST STARTED: requestId=${requestId} callLinked=${callId ? 'yes' : 'no'}`);
 
     let stdout = '';
     let stderr = '';
@@ -846,11 +927,11 @@ function runAgentOnce({
         clearTimeout(requestRecord.killTimer);
         requestRecord.killTimer = null;
       }
-      if (requestRecord.forceKillTimer) {
+      if (requestRecord.forceKillTimer && requestRecord.state === 'running') {
         clearTimeout(requestRecord.forceKillTimer);
         requestRecord.forceKillTimer = null;
       }
-      clearActiveRequest(callId, requestId);
+      clearActiveRequest(requestScopeKey, requestId);
     }
 
     function settleWithError(error) {
@@ -990,16 +1071,33 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use((req, res, next) => {
-  if (!AGENT_API_TOKEN || req.path === '/' || req.path === '/health') {
-    return next();
-  }
+function isLoopbackAddress(address) {
+  const value = String(address || '').toLowerCase();
+  return value === '127.0.0.1' || value === '::1' || value === '::ffff:127.0.0.1';
+}
 
+function isLoopbackRequest(req) {
+  return isLoopbackAddress(req.socket?.remoteAddress);
+}
+
+function hasValidApiToken(req) {
+  if (!AGENT_API_TOKEN) return false;
   const authHeader = req.get('authorization') || '';
   const bearerMatch = authHeader.match(/^Bearer\s+(.+)$/i);
   const providedToken = bearerMatch ? bearerMatch[1].trim() : (req.get('x-api-key') || '').trim();
+  return providedToken === AGENT_API_TOKEN;
+}
 
-  if (providedToken && providedToken === AGENT_API_TOKEN) {
+app.use((req, res, next) => {
+  const localPanicStop = req.method === 'POST' &&
+    req.path === '/voice-control/stop' &&
+    isLoopbackRequest(req);
+
+  if (!AGENT_API_TOKEN || req.path === '/' || req.path === '/health' || localPanicStop) {
+    return next();
+  }
+
+  if (hasValidApiToken(req)) {
     return next();
   }
 
@@ -1056,6 +1154,11 @@ app.post('/ask', async (req, res) => {
       success: false,
       error: 'Missing prompt in request body'
     });
+  }
+
+  const voiceExecutionStatus = voiceExecutionControl.getStatus();
+  if (isPhoneSessionType(profile.sessionType) && voiceExecutionStatus.locked) {
+    return res.status(423).json(voiceExecutionLockedPayload(voiceExecutionStatus));
   }
 
   if (!ENABLED_AGENT_PROVIDERS.includes(profile.provider)) {
@@ -1172,7 +1275,14 @@ app.post('/ask', async (req, res) => {
       payload.reason = error.reason;
     }
 
-    res.json(payload);
+    if (error.code === 'VOICE_EXECUTION_LOCKED') {
+      payload.agentCode = error.agentCode || 'AGENT_VOICE_EXECUTION_LOCKED';
+      payload.userMessage = voiceExecutionLockedPayload(error.voiceExecution).userMessage;
+      payload.voiceExecution = error.voiceExecution;
+      return res.status(423).json(payload);
+    }
+
+    return res.json(payload);
   }
 });
 
@@ -1223,6 +1333,11 @@ app.post('/ask-structured', async (req, res) => {
 
   if (!prompt) {
     return res.status(400).json({ success: false, error: 'Missing prompt in request body' });
+  }
+
+  const voiceExecutionStatus = voiceExecutionControl.getStatus();
+  if (isPhoneSessionType(profile.sessionType) && voiceExecutionStatus.locked) {
+    return res.status(423).json(voiceExecutionLockedPayload(voiceExecutionStatus));
   }
 
   if (!ENABLED_AGENT_PROVIDERS.includes(profile.provider)) {
@@ -1371,6 +1486,12 @@ app.post('/ask-structured', async (req, res) => {
     if (error.reason) {
       payload.reason = error.reason;
     }
+    if (error.code === 'VOICE_EXECUTION_LOCKED') {
+      payload.agentCode = error.agentCode || 'AGENT_VOICE_EXECUTION_LOCKED';
+      payload.userMessage = voiceExecutionLockedPayload(error.voiceExecution).userMessage;
+      payload.voiceExecution = error.voiceExecution;
+      return res.status(423).json(payload);
+    }
     return res.status(500).json(payload);
   }
 });
@@ -1424,6 +1545,61 @@ app.post('/cancel-session', (req, res) => {
 });
 
 /**
+ * POST /voice-control/stop
+ *
+ * Fail-closed emergency stop for every phone-originated agent request. Asterisk
+ * may call this endpoint without the bearer token only over loopback. The stop
+ * is persistent and idempotent; it does not affect ordinary terminal/API work.
+ */
+app.post('/voice-control/stop', (req, res) => {
+  const timestamp = new Date().toISOString();
+  const source = cleanLabel(req.body?.source || req.query?.source, 'loopback_panic');
+  const reason = cleanLabel(req.body?.reason || req.query?.reason, 'voice_panic_stop');
+  const lock = voiceExecutionControl.lock({ reason, source });
+  const cancellation = cancelAllVoiceRequests({ reason });
+  const success = lock.locked && lock.persistent;
+
+  console.warn(
+    `[${timestamp}] VOICE PANIC STOP: source=${source} persistent=${lock.persistent} canceled=${cancellation.canceledCount} sessionsCleared=${cancellation.clearedSessionCount}`
+  );
+
+  if (String(req.query?.response || '').toLowerCase() === 'plain') {
+    return res.status(success ? 200 : 503).type('text/plain').send(success ? 'STOPPED' : 'PARTIAL');
+  }
+
+  return res.status(success ? 200 : 503).json({
+    success,
+    voiceExecution: lock,
+    ...cancellation,
+  });
+});
+
+app.get('/voice-control/status', (req, res) => {
+  const status = voiceExecutionControl.getStatus();
+  return res.status(status.error ? 503 : 200).json({
+    success: !status.error,
+    voiceExecution: status,
+  });
+});
+
+app.post('/voice-control/unlock', (req, res) => {
+  if (!hasValidApiToken(req)) {
+    return res.status(401).json({ success: false, error: 'unauthorized' });
+  }
+
+  const source = cleanLabel(req.body?.source || req.query?.source, 'operator');
+  const result = voiceExecutionControl.unlock({ source });
+  const success = result.locked === false;
+  console.warn(
+    `[${new Date().toISOString()}] VOICE EXECUTION UNLOCK: source=${source} success=${success} wasLocked=${result.wasLocked}`
+  );
+  return res.status(success ? 200 : 503).json({
+    success,
+    voiceExecution: result,
+  });
+});
+
+/**
  * POST /end-session
  *
  * Clean up session when a call ends
@@ -1467,6 +1643,7 @@ app.get('/health', (req, res) => {
     status: 'ok',
     service: 'claude-api-server',
     providers: ENABLED_AGENT_PROVIDERS,
+    voiceExecution: voiceExecutionControl.getStatus(),
     timestamp: new Date().toISOString()
   });
 });
@@ -1484,6 +1661,9 @@ app.get('/', (req, res) => {
       'POST /ask': 'Send a prompt to the selected agent',
       'POST /ask-structured': 'Send a prompt and return validated JSON (n8n)',
       'POST /cancel-session': 'Cancel active agent work for a call',
+      'POST /voice-control/stop': 'Lock and terminate all phone-originated agent work',
+      'GET /voice-control/status': 'Get the persistent phone execution lock state',
+      'POST /voice-control/unlock': 'Unlock phone-originated execution with API authentication',
       'POST /end-session': 'Clean up session state for a call',
       'GET /health': 'Health check'
     }

@@ -108,6 +108,9 @@ Key environment variables in the generated `.env`:
 | `OPENAI_REALTIME_TRANSCRIPTION_MODEL` | Text transcript model used for durable context |
 | `VOICE_STATE_DIR` | Host directory mounted read/write for durable Realtime state |
 | `VOICE_STATE_DB_PATH` | SQLite path inside `voice-app` |
+| `VOICE_APP_EXECUTION_LOCK_FILE` | Optional in-container emergency-stop lock path; defaults beside the SQLite state |
+| `VOICE_EXECUTION_LOCK_FILE` | Optional host bridge lock path; defaults to `voice-app/state/voice-execution.lock.json` |
+| `VOICE_CONTROL_TOKEN` | Optional dedicated bearer token for operator unlock; falls back to outbound/agent API tokens |
 | `SIP_DOMAIN` | 3CX server FQDN |
 | `SIP_REGISTRAR` | SIP registrar address |
 
@@ -166,6 +169,10 @@ docker compose logs -f
 
 # Realtime readiness and durable-state health
 curl -fsS http://127.0.0.1:3000/api/realtime-health
+
+# Emergency-stop status and authenticated operator unlock
+npm run voice-control -- status
+npm run voice-control -- unlock
 ```
 
 ### Log Locations
@@ -217,6 +224,9 @@ Error connecting to agent API
 - Voice app API (port 3000) should not be publicly exposed without authentication
 - Agent API server (port 3333) should only be accessible from the voice server
 - Codex Luna/Terra deploy requests are denied; reserve the Sol extension for privileged work
+- Dial `9` from the authenticated owner handset to persistently lock all new
+  phone-originated dispatch and terminate every tracked phone-originated agent
+  process group. Unlock only from the local operator CLI after reviewing logs.
 - Give Terra a narrow `PHONE_CODEX_TERRA_WORKING_DIR`; its `workspace-write` sandbox is rooted there
 - The bridge removes SIP, speech, and bridge-control secrets from Codex child environments. This reduces accidental inheritance but is not a host-level secret boundary when the service account can read the underlying files.
 - Consider VPN for split deployments across networks

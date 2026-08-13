@@ -216,6 +216,9 @@ npm run lint:fix      # Auto-fix issues
 | POST | `/ask` | Send a prompt to the selected Claude/Codex profile |
 | POST | `/ask-structured` | Send prompt, return JSON |
 | POST | `/cancel-session` | Cancel active agent work for a call |
+| POST | `/voice-control/stop` | Lock and terminate all phone-originated work |
+| GET | `/voice-control/status` | Read the persistent phone execution lock |
+| POST | `/voice-control/unlock` | Authenticated operator unlock |
 | POST | `/end-session` | Clean up session |
 | GET | `/health` | Health check |
 
