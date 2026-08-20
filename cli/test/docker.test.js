@@ -22,7 +22,7 @@ test('docker compose generation', async (t) => {
     const compose = generateDockerCompose(config);
 
     // Should use default port 5060 in drachtio command
-    assert.ok(compose.includes('--contact "sip:*:5060;transport=tcp,udp"'),
+    assert.ok(compose.includes('--contact "sip:*:5060;transport=${DRACHTIO_SIP_TRANSPORT:-udp}"'),
       'Should use port 5060 by default');
   });
 
@@ -50,7 +50,7 @@ test('docker compose generation', async (t) => {
     const compose = generateDockerCompose(config);
 
     // Should use port 5070 when specified in config
-    assert.ok(compose.includes('--contact "sip:*:5070;transport=tcp,udp"'),
+    assert.ok(compose.includes('--contact "sip:*:5070;transport=${DRACHTIO_SIP_TRANSPORT:-udp}"'),
       'Should use port 5070 when Pi config specifies it');
   });
 
@@ -77,7 +77,7 @@ test('docker compose generation', async (t) => {
 
     const compose = generateDockerCompose(config);
 
-    assert.ok(compose.includes('--contact "sip:*:5060;transport=tcp,udp"'),
+    assert.ok(compose.includes('--contact "sip:*:5060;transport=${DRACHTIO_SIP_TRANSPORT:-udp}"'),
       'Should use port 5060 when explicitly specified');
   });
 
@@ -198,6 +198,9 @@ test('docker compose generation', async (t) => {
     assert.ok(envFile.includes('STT_BASE_URL=http://127.0.0.1:18001/v1'));
     assert.ok(envFile.includes('OPENAI_REALTIME_API_KEY='));
     assert.ok(envFile.includes('OPENAI_REALTIME_MODEL=gpt-realtime-2.1-mini'));
+    assert.ok(envFile.includes('DRACHTIO_SIP_TRANSPORT=udp'));
+    assert.ok(envFile.includes('OPENAI_REALTIME_HARD_MAX_SPOKEN_WORDS=90'));
+    assert.ok(envFile.includes('OPENAI_REALTIME_CONTEXT_TOKEN_LIMIT=16000'));
     assert.ok(envFile.includes('VOICE_STATE_DB_PATH=/app/state/voice-state.sqlite'));
     assert.ok(envFile.includes('SIP_AUTH_PASSWORD=pass123'));
   });

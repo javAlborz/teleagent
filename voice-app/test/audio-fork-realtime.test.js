@@ -64,6 +64,23 @@ test('streaming bidirectional playout sends raw PCM binary and killAudio flushes
   assert.deepEqual(JSON.parse(ws.sent[1].data), { type: 'killAudio' });
 });
 
+test('completed playout is not killed after all source audio has drained', () => {
+  const ws = new FakeSocket();
+  const session = new AudioForkSession({
+    ws,
+    callUuid: 'call-playout-complete',
+    sampleRate: 24000,
+    bidirectionalStreaming: true,
+  });
+  const audio = Buffer.alloc(2400, 1);
+  session.sendAudio(audio, { sampleRate: 24000, itemId: 'item-complete' });
+  assert.equal(session.markPlaybackComplete('item-complete'), true);
+  session._playout.startedAt -= 200;
+
+  assert.equal(session.stopPlayback(), null);
+  assert.equal(ws.sent.length, 1);
+});
+
 test('legacy non-streaming bidirectional playout remains JSON base64', () => {
   const ws = new FakeSocket();
   const session = new AudioForkSession({ ws, callUuid: 'call-legacy' });

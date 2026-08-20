@@ -15,6 +15,7 @@
  */
 
 const express = require('express');
+const crypto = require('crypto');
 const { spawn } = require('child_process');
 const fs = require('fs');
 const os = require('os');
@@ -43,6 +44,13 @@ const {
   VoiceExecutionControl,
   cleanLabel,
 } = require('../lib/voice-execution-control');
+const {
+  RISK_LEVELS,
+  classifyVoiceOperation,
+  requestHash,
+} = require('../lib/voice-operation-risk');
+const { OperatorInspector, parseRoots } = require('./operator-inspector');
+const { TmuxAgentController } = require('./tmux-agent-controller');
 
 function loadEnvFile(envPath) {
   if (!fs.existsSync(envPath)) return;
@@ -72,6 +80,11 @@ const AGENT_API_TOKEN = process.env.AGENT_API_TOKEN || process.env.CLAUDE_API_TO
 const VOICE_EXECUTION_LOCK_FILE = process.env.VOICE_EXECUTION_LOCK_FILE ||
   path.join(__dirname, '..', 'voice-app', 'state', 'voice-execution.lock.json');
 const voiceExecutionControl = new VoiceExecutionControl({ lockFile: VOICE_EXECUTION_LOCK_FILE });
+const operatorInspector = new OperatorInspector({
+  allowedRoots: parseRoots(process.env.VOICE_INSPECTION_ROOTS, HOME),
+  home: HOME,
+});
+const tmuxAgentController = new TmuxAgentController({ inspector: operatorInspector });
 const CLAUDE_WORKING_DIR = process.env.CLAUDE_WORKING_DIR || HOME;
 const CODEX_WORKING_DIR = process.env.CODEX_WORKING_DIR || CLAUDE_WORKING_DIR;
 const CLAUDE_COMMAND = process.env.CLAUDE_COMMAND || 'claude';
@@ -278,6 +291,93 @@ function assertVoiceExecutionAllowed(profile) {
   error.agentCode = 'AGENT_VOICE_EXECUTION_LOCKED';
   error.voiceExecution = status;
   throw error;
+}
+
+function safeEqual(left, right) {
+  const leftBuffer = Buffer.from(String(left || ''));
+  const rightBuffer = Buffer.from(String(right || ''));
+  return leftBuffer.length === rightBuffer.length && crypto.timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function validateVoiceAuthorization({ profile, prompt, authorization }) {
+  const classification = classifyVoiceOperation(prompt);
+  const voiceOrigin = isPhoneSessionType(profile?.sessionType);
+  if (!voiceOrigin || classification.level === RISK_LEVELS.READ_ONLY) {
+    return { allowed: true, classification, authorization: null, voiceOrigin };
+  }
+
+  const approvedAt = Date.parse(authorization?.approved_at || '');
+  const ageMs = Date.now() - approvedAt;
+  const valid = authorization?.approved === true &&
+    /^job_[A-Za-z0-9]+$/.test(String(authorization?.job_id || '')) &&
+    authorization?.method === 'dtmf-pound' &&
+    safeEqual(authorization?.request_sha256, requestHash(prompt)) &&
+    Number.isFinite(approvedAt) &&
+    ageMs >= -60000 &&
+    ageMs <= 15 * 60000;
+
+  if (!valid) {
+    return {
+      allowed: false,
+      classification,
+      authorization: null,
+      code: 'VOICE_APPROVAL_REQUIRED',
+      userMessage: 'That operation needs a job-specific approval. Call extension 7, review the spoken scope, and press pound to approve it.',
+    };
+  }
+
+  return { allowed: true, classification, authorization, voiceOrigin };
+}
+
+function validateTargetSessionAuthorization({ operationId, target, message, sessionFingerprint, authorization }) {
+  const approvedAt = Date.parse(authorization?.approved_at || '');
+  const ageMs = Date.now() - approvedAt;
+  const allowed = authorization?.approved === true &&
+    /^job_[A-Za-z0-9]+$/.test(String(operationId || '')) &&
+    authorization?.job_id === operationId &&
+    authorization?.method === 'dtmf-pound' &&
+    safeEqual(authorization?.request_sha256, requestHash(message)) &&
+    safeEqual(authorization?.target, String(target || '')) &&
+    safeEqual(authorization?.target_session_fingerprint, String(sessionFingerprint || '')) &&
+    Number.isFinite(approvedAt) &&
+    ageMs >= -60000 &&
+    ageMs <= 15 * 60000;
+  return {
+    allowed,
+    code: allowed ? null : 'VOICE_APPROVAL_REQUIRED',
+  };
+}
+
+function buildVoiceAuthorizationContext(validation) {
+  if (!validation?.voiceOrigin) return '';
+  if (!validation.authorization) {
+    return `[VOICE READ-ONLY EXECUTION BOUNDARY]\n` +
+      `This request is classified read-only. Do not edit files, execute state-changing commands, send messages, deploy, publish, restart services, or use sudo.\n` +
+      `If the requested answer requires a mutation, stop and say that a new extension-7 approval is required.\n` +
+      `[END VOICE READ-ONLY EXECUTION BOUNDARY]\n\n`;
+  }
+  return `[VOICE OPERATION AUTHORIZATION]\n` +
+    `Job: ${validation.authorization.job_id}\n` +
+    `Approved by: DTMF pound\n` +
+    `Risk: ${validation.classification.level}\n` +
+    `Scope: ${String(validation.authorization.scope || '').slice(0, 1000)}\n` +
+    `Do not expand this scope. If materially different work is required, stop and request a new approval.\n` +
+    `[END VOICE OPERATION AUTHORIZATION]\n\n`;
+}
+
+function applyVoiceExecutionBoundary(profile, validation) {
+  if (!validation?.voiceOrigin || validation.classification?.level !== RISK_LEVELS.READ_ONLY) {
+    return profile;
+  }
+  if (profile.provider === 'codex') {
+    return { ...profile, sandbox: 'read-only' };
+  }
+  const readOnlyTools = new Set(['Read', 'Glob', 'Grep', 'WebFetch', 'WebSearch', 'Skill']);
+  return {
+    ...profile,
+    tools: profile.tools.filter((tool) => readOnlyTools.has(tool)),
+    allowedTools: profile.allowedTools.filter((tool) => readOnlyTools.has(tool)),
+  };
 }
 
 function resolveEffectiveSessionType(sessionType, prompt = '', devicePrompt = '') {
@@ -685,12 +785,23 @@ function transitionActiveRequest(record, state, reason, { force = false } = {}) 
     record.killTimer = null;
   }
 
+  if (typeof record.cancel === 'function') {
+    try {
+      record.cancel(reason, { force });
+    } catch (error) {
+      console.warn(`[${new Date().toISOString()}] Active request cancellation callback failed: ${error.message}`);
+    }
+  }
+
   killChildProcess(record, 'SIGTERM');
 
   if (force) {
     killChildProcess(record, 'SIGKILL');
     return true;
   }
+
+
+  if (!record.child) return true;
 
   if (record.forceKillTimer) {
     clearTimeout(record.forceKillTimer);
@@ -1107,6 +1218,121 @@ app.use((req, res, next) => {
   });
 });
 
+app.post('/operator/inspect', async (req, res) => {
+  const action = String(req.body?.action || '').trim();
+  const args = req.body?.args && typeof req.body.args === 'object' ? req.body.args : {};
+  try {
+    const result = await operatorInspector.execute(action, args);
+    return res.json({ success: true, action, result });
+  } catch (error) {
+    const code = error.code || 'OPERATOR_INSPECTION_FAILED';
+    const status = ['PATH_OUTSIDE_ROOTS', 'SENSITIVE_PATH'].includes(code) ? 403 : 400;
+    return res.status(status).json({ success: false, code, error: error.message });
+  }
+});
+
+app.post('/operator/session-message/prepare', async (req, res) => {
+  const voiceExecution = voiceExecutionControl.getStatus();
+  if (voiceExecution.locked) {
+    return res.status(423).json(voiceExecutionLockedPayload(voiceExecution));
+  }
+  try {
+    const result = await tmuxAgentController.prepare({ target: req.body?.target });
+    if (!ENABLED_AGENT_PROVIDERS.includes(result.provider)) {
+      return res.status(503).json({
+        success: false,
+        code: 'AGENT_PROVIDER_DISABLED',
+        error: `${result.provider} is not enabled on this agent bridge`,
+      });
+    }
+    return res.json({ success: true, result });
+  } catch (error) {
+    const code = error.code || 'TARGET_SESSION_PREPARE_FAILED';
+    const status = ['TMUX_TARGET_NOT_FOUND', 'AGENT_SESSION_NOT_FOUND', 'SESSION_HISTORY_UNRESOLVED']
+      .includes(code) ? 404 : 400;
+    return res.status(status).json({ success: false, code, error: error.message });
+  }
+});
+
+app.post('/operator/session-message', async (req, res) => {
+  const voiceExecution = voiceExecutionControl.getStatus();
+  if (voiceExecution.locked) {
+    return res.status(423).json(voiceExecutionLockedPayload(voiceExecution));
+  }
+
+  const operationId = String(req.body?.operationId || '').trim();
+  const target = req.body?.target;
+  const message = String(req.body?.message || '').trim();
+  const sessionFingerprint = String(req.body?.sessionFingerprint || '').trim();
+  const authorization = req.body?.authorization || null;
+  const timeoutSeconds = Math.max(
+    30,
+    Math.min(Number.parseInt(req.body?.timeoutSeconds, 10) || 1800, 3600)
+  );
+  if (!operationId || operationId.length > 200 || /[\u0000-\u001F\u007F]/.test(operationId)) {
+    return res.status(400).json({
+      success: false,
+      code: 'OPERATION_ID_REQUIRED',
+      error: 'A valid operationId is required.',
+    });
+  }
+  const approval = validateTargetSessionAuthorization({
+    operationId,
+    target,
+    message,
+    sessionFingerprint,
+    authorization,
+  });
+  if (!approval.allowed) {
+    return res.status(403).json({
+      success: false,
+      code: approval.code,
+      agentCode: approval.code,
+      error: 'Job-specific DTMF approval is required for target-session delivery.',
+      userMessage: 'Review the exact tmux target and message, then press pound to approve it.',
+    });
+  }
+
+  const requestId = nextRequestId();
+  const abortController = new globalThis.AbortController();
+  const requestRecord = {
+    requestId,
+    callId: operationId,
+    child: null,
+    provider: null,
+    voiceOrigin: true,
+    detached: false,
+    state: 'running',
+    reason: null,
+    killTimer: null,
+    forceKillTimer: null,
+    startedAt: Date.now(),
+    cancel: () => abortController.abort(),
+  };
+  registerActiveRequest(operationId, requestRecord);
+
+  try {
+    const result = await tmuxAgentController.send({
+      target,
+      message,
+      sessionFingerprint,
+      timeoutMs: timeoutSeconds * 1000,
+      signal: abortController.signal,
+    });
+    requestRecord.provider = result.provider;
+    return res.json({ success: true, result });
+  } catch (error) {
+    const code = error.code || 'TARGET_SESSION_MESSAGE_FAILED';
+    const status = ['TARGET_SESSION_CHANGED', 'TARGET_MESSAGE_CANCELED', 'TARGET_SESSION_LOG_CHANGED']
+      .includes(code) ? 409
+      : (['TARGET_IDLE_TIMEOUT', 'TARGET_DELIVERY_TIMEOUT', 'TARGET_RESPONSE_TIMEOUT'].includes(code) ? 504
+        : (['TMUX_TARGET_NOT_FOUND', 'AGENT_SESSION_NOT_FOUND', 'SESSION_HISTORY_UNRESOLVED'].includes(code) ? 404 : 400));
+    return res.status(status).json({ success: false, code, agentCode: code, error: error.message });
+  } finally {
+    clearActiveRequest(operationId, requestId);
+  }
+});
+
 /**
  * POST /ask
  *
@@ -1141,6 +1367,7 @@ app.post('/ask', async (req, res) => {
     devicePrompt,
     sessionType,
     timeoutSeconds,
+    authorization,
   } = req.body;
   const startTime = Date.now();
   const timestamp = new Date().toISOString();
@@ -1183,11 +1410,25 @@ app.post('/ask', async (req, res) => {
     });
   }
 
+  const voiceAuthorization = validateVoiceAuthorization({ profile, prompt, authorization });
+  if (!voiceAuthorization.allowed) {
+    return res.status(403).json({
+      success: false,
+      provider: profile.provider,
+      code: voiceAuthorization.code,
+      agentCode: voiceAuthorization.code,
+      error: 'Job-specific DTMF approval required',
+      userMessage: voiceAuthorization.userMessage,
+      risk: voiceAuthorization.classification,
+    });
+  }
+  const executionProfile = applyVoiceExecutionBoundary(profile, voiceAuthorization);
+
   // Check if we have an existing session for this call
   const existingSession = resolvedSessionKey ? sessions.get(resolvedSessionKey) : null;
 
   logTextSummary(`[${timestamp}] QUERY`, prompt);
-  logAgentProfile(timestamp, profile);
+  logAgentProfile(timestamp, executionProfile);
   console.log(`[${timestamp}] DEPLOY INTENT: ${deployIntent}`);
   console.log(`[${timestamp}] TIMEOUT: ${resolvedTimeoutSeconds || 'none'}s`);
   logSessionSummary(timestamp, {
@@ -1211,6 +1452,7 @@ app.post('/ask', async (req, res) => {
     }
 
     fullPrompt += VOICE_CONTEXT;
+    fullPrompt += buildVoiceAuthorizationContext(voiceAuthorization);
     if (deployIntent) {
       fullPrompt += PHONE_DEPLOY_CONTEXT;
     }
@@ -1222,7 +1464,7 @@ app.post('/ask', async (req, res) => {
       sessionKey: resolvedSessionKey,
       resumeSessionId,
       timestamp,
-      profile,
+      profile: executionProfile,
       timeoutSeconds: resolvedTimeoutSeconds
     });
     const providerLabel = provider === 'codex' ? 'Codex' : 'Claude';
@@ -1323,6 +1565,7 @@ app.post('/ask-structured', async (req, res) => {
     schema = {},
     includeVoiceContext = false,
     maxRetries = 1,
+    authorization,
   } = req.body || {};
 
   const timestamp = new Date().toISOString();
@@ -1362,6 +1605,20 @@ app.post('/ask-structured', async (req, res) => {
     });
   }
 
+  const voiceAuthorization = validateVoiceAuthorization({ profile, prompt, authorization });
+  if (!voiceAuthorization.allowed) {
+    return res.status(403).json({
+      success: false,
+      provider: profile.provider,
+      code: voiceAuthorization.code,
+      agentCode: voiceAuthorization.code,
+      error: 'Job-specific DTMF approval required',
+      userMessage: voiceAuthorization.userMessage,
+      risk: voiceAuthorization.classification,
+    });
+  }
+  const executionProfile = applyVoiceExecutionBoundary(profile, voiceAuthorization);
+
   const queryContext = buildQueryContext({
     queryType: schema.queryType,
     requiredFields: schema.requiredFields,
@@ -1372,12 +1629,15 @@ app.post('/ask-structured', async (req, res) => {
 
   let fullPrompt = buildStructuredPrompt({
     devicePrompt,
-    queryContext: (includeVoiceContext ? VOICE_CONTEXT + (deployIntent ? PHONE_DEPLOY_CONTEXT : '') : '') + queryContext,
+    queryContext: (includeVoiceContext ? VOICE_CONTEXT : '') +
+      buildVoiceAuthorizationContext(voiceAuthorization) +
+      (includeVoiceContext && deployIntent ? PHONE_DEPLOY_CONTEXT : '') +
+      queryContext,
     userPrompt: prompt,
   });
 
   logTextSummary(`[${timestamp}] STRUCTURED QUERY`, prompt);
-  logAgentProfile(timestamp, profile);
+  logAgentProfile(timestamp, executionProfile);
   console.log(`[${timestamp}] DEPLOY INTENT: ${deployIntent}`);
   console.log(`[${timestamp}] TIMEOUT: ${resolvedTimeoutSeconds || 'none'}s`);
   logSessionSummary(timestamp, {
@@ -1400,7 +1660,7 @@ app.post('/ask-structured', async (req, res) => {
         callId,
         sessionKey: resolvedSessionKey,
         timestamp,
-        profile,
+        profile: executionProfile,
         timeoutSeconds: resolvedTimeoutSeconds
       });
       totalDuration += duration_ms;
@@ -1463,7 +1723,8 @@ app.post('/ask-structured', async (req, res) => {
 
       fullPrompt = buildStructuredPrompt({
         devicePrompt,
-        queryContext: includeVoiceContext ? VOICE_CONTEXT : '',
+        queryContext: (includeVoiceContext ? VOICE_CONTEXT : '') +
+          buildVoiceAuthorizationContext(voiceAuthorization),
         userPrompt: repairPrompt,
       });
     }
@@ -1660,6 +1921,8 @@ app.get('/', (req, res) => {
     endpoints: {
       'POST /ask': 'Send a prompt to the selected agent',
       'POST /ask-structured': 'Send a prompt and return validated JSON (n8n)',
+      'POST /operator/session-message/prepare': 'Resolve and fingerprint an exact tmux-attached provider session',
+      'POST /operator/session-message': 'Deliver an approved message to that exact tmux-attached provider session',
       'POST /cancel-session': 'Cancel active agent work for a call',
       'POST /voice-control/stop': 'Lock and terminate all phone-originated agent work',
       'GET /voice-control/status': 'Get the persistent phone execution lock state',

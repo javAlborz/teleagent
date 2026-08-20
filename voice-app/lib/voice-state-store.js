@@ -30,6 +30,10 @@ function serialize(value) {
   return JSON.stringify(value);
 }
 
+function normalizePreferenceKey(key) {
+  return String(key || '').trim().toLowerCase().replaceAll(/[^a-z0-9_.-]+/g, '_').slice(0, 80);
+}
+
 function normalizeThread(row) {
   if (!row) return null;
   return {
@@ -44,7 +48,10 @@ function normalizeJob(row) {
     ...row,
     freshSession: Boolean(row.fresh_session),
     requiresApproval: Boolean(row.requires_approval),
+    riskReasons: parseJson(row.risk_reasons_json, []),
     fullResult: parseJson(row.result_json, null),
+    jobKind: row.job_kind || 'managed_agent',
+    operation: parseJson(row.operation_json, null),
   };
 }
 
@@ -67,6 +74,7 @@ class VoiceStateStore {
     }
 
     this._migrate();
+    this.recoverInterruptedRealtimeSessions();
     this.recoverInterruptedJobs();
     if (dbPath !== ':memory:') fs.chmodSync(dbPath, 0o600);
   }
@@ -125,6 +133,8 @@ class VoiceStateStore {
         profile TEXT NOT NULL,
         provider TEXT NOT NULL,
         request TEXT NOT NULL,
+        job_kind TEXT NOT NULL DEFAULT 'managed_agent',
+        operation_json TEXT,
         fresh_session INTEGER NOT NULL DEFAULT 0,
         requires_approval INTEGER NOT NULL DEFAULT 0,
         notification_mode TEXT NOT NULL DEFAULT 'in_call',
@@ -153,6 +163,53 @@ class VoiceStateStore {
         decided_at TEXT
       );
 
+      CREATE TABLE IF NOT EXISTS operator_preferences (
+        caller_id TEXT NOT NULL,
+        preference_key TEXT NOT NULL,
+        value_json TEXT NOT NULL,
+        source_text TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (caller_id, preference_key)
+      );
+
+      CREATE TABLE IF NOT EXISTS operation_audit (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        event_id TEXT NOT NULL UNIQUE,
+        voice_thread_id TEXT REFERENCES voice_threads(id) ON DELETE SET NULL,
+        realtime_session_id TEXT REFERENCES realtime_sessions(id) ON DELETE SET NULL,
+        job_id TEXT REFERENCES jobs(id) ON DELETE SET NULL,
+        caller_id TEXT NOT NULL,
+        action TEXT NOT NULL,
+        risk_level TEXT NOT NULL,
+        profile TEXT,
+        request_hash TEXT,
+        scope_text TEXT,
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS operation_audit_thread_idx
+        ON operation_audit(voice_thread_id, id DESC);
+      CREATE INDEX IF NOT EXISTS operation_audit_job_idx
+        ON operation_audit(job_id, id ASC);
+
+      CREATE TABLE IF NOT EXISTS realtime_usage (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        event_key TEXT NOT NULL UNIQUE,
+        voice_thread_id TEXT NOT NULL REFERENCES voice_threads(id) ON DELETE CASCADE,
+        realtime_session_id TEXT NOT NULL REFERENCES realtime_sessions(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL,
+        model TEXT,
+        usage_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS realtime_usage_thread_idx
+        ON realtime_usage(voice_thread_id, id ASC);
+      CREATE INDEX IF NOT EXISTS realtime_usage_session_idx
+        ON realtime_usage(realtime_session_id, id ASC);
+
       CREATE TABLE IF NOT EXISTS voice_events (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         voice_thread_id TEXT NOT NULL REFERENCES voice_threads(id) ON DELETE CASCADE,
@@ -165,7 +222,66 @@ class VoiceStateStore {
 
       CREATE INDEX IF NOT EXISTS voice_events_thread_idx
         ON voice_events(voice_thread_id, id DESC);
+
+      CREATE TRIGGER IF NOT EXISTS operation_audit_append_only_update
+      BEFORE UPDATE ON operation_audit
+      BEGIN
+        SELECT RAISE(ABORT, 'operation_audit is append-only');
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS operation_audit_append_only_delete
+      BEFORE DELETE ON operation_audit
+      BEGIN
+        SELECT RAISE(ABORT, 'operation_audit is append-only');
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS voice_events_append_only_update
+      BEFORE UPDATE ON voice_events
+      BEGIN
+        SELECT RAISE(ABORT, 'voice_events is append-only');
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS voice_events_append_only_delete
+      BEFORE DELETE ON voice_events
+      BEGIN
+        SELECT RAISE(ABORT, 'voice_events is append-only');
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS realtime_usage_append_only_update
+      BEFORE UPDATE ON realtime_usage
+      BEGIN
+        SELECT RAISE(ABORT, 'realtime_usage is append-only');
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS realtime_usage_append_only_delete
+      BEFORE DELETE ON realtime_usage
+      BEGIN
+        SELECT RAISE(ABORT, 'realtime_usage is append-only');
+      END;
     `);
+
+    this._addColumnIfMissing('voice_threads', 'focused_approval_job_id', 'TEXT');
+    this._addColumnIfMissing('jobs', 'risk_level', "TEXT NOT NULL DEFAULT 'read_only'");
+    this._addColumnIfMissing('jobs', 'job_kind', "TEXT NOT NULL DEFAULT 'managed_agent'");
+    this._addColumnIfMissing('jobs', 'operation_json', 'TEXT');
+    this._addColumnIfMissing('jobs', 'risk_reasons_json', "TEXT NOT NULL DEFAULT '[]'");
+    this._addColumnIfMissing('jobs', 'request_hash', 'TEXT');
+    this._addColumnIfMissing('jobs', 'approval_summary', 'TEXT');
+    this._addColumnIfMissing('jobs', 'approved_at', 'TEXT');
+    this._addColumnIfMissing('jobs', 'approval_method', 'TEXT');
+    this._addColumnIfMissing('approvals', 'method', 'TEXT');
+    this._addColumnIfMissing('approvals', 'decided_by', 'TEXT');
+    this._addColumnIfMissing('approvals', 'decision_metadata_json', "TEXT NOT NULL DEFAULT '{}'");
+  }
+
+  _addColumnIfMissing(table, column, definition) {
+    if (!/^[a-z_]+$/i.test(table) || !/^[a-z_]+$/i.test(column)) {
+      throw new Error('Invalid migration identifier');
+    }
+    const columns = this.db.prepare(`PRAGMA table_info(${table})`).all();
+    if (!columns.some((entry) => entry.name === column)) {
+      this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+    }
   }
 
   health() {
@@ -190,6 +306,53 @@ class VoiceStateStore {
           updated_at = ?
       WHERE status IN ('queued', 'running')
     `).run(timestamp, timestamp).changes;
+  }
+
+  recoverInterruptedRealtimeSessions() {
+    const sessions = this.db.prepare(`
+      SELECT realtime_sessions.*, voice_threads.caller_id
+      FROM realtime_sessions
+      JOIN voice_threads ON voice_threads.id = realtime_sessions.voice_thread_id
+      WHERE realtime_sessions.status IN ('connecting', 'connected')
+    `).all();
+    if (sessions.length === 0) return 0;
+
+    const timestamp = nowIso();
+    const error = 'Voice service restarted before the Realtime call closed.';
+    const recover = this.db.transaction(() => {
+      const updateSession = this.db.prepare(`
+        UPDATE realtime_sessions
+        SET status = 'failed', error = ?, closed_at = ?, updated_at = ?
+        WHERE id = ? AND status IN ('connecting', 'connected')
+      `);
+      const closeThread = this.db.prepare(`
+        UPDATE voice_threads
+        SET status = 'idle', closed_at = ?, updated_at = ?
+        WHERE id = ?
+      `);
+
+      for (const session of sessions) {
+        updateSession.run(error, timestamp, timestamp, session.id);
+        this.appendAuditEvent({
+          voiceThreadId: session.voice_thread_id,
+          realtimeSessionId: session.id,
+          callerId: session.caller_id,
+          action: 'realtime_session_recovered',
+          riskLevel: 'read_only',
+          scopeText: `call=${session.call_id}`,
+          metadata: {
+            previous_status: session.status,
+            model: session.model,
+            reason: 'voice_service_restart',
+          },
+        });
+      }
+      for (const threadId of new Set(sessions.map((session) => session.voice_thread_id))) {
+        closeThread.run(timestamp, timestamp, threadId);
+      }
+    });
+    recover();
+    return sessions.length;
   }
 
   createThread({
@@ -363,17 +526,6 @@ class VoiceStateStore {
       ) VALUES (?, ?, ?, ?, ?, ?)
     `).run(voiceThreadId, realtimeSessionId, role, kind, clipped, timestamp);
 
-    this.db.prepare(`
-      DELETE FROM voice_events
-      WHERE voice_thread_id = ?
-        AND id NOT IN (
-          SELECT id FROM voice_events
-          WHERE voice_thread_id = ?
-          ORDER BY id DESC
-          LIMIT 100
-        )
-    `).run(voiceThreadId, voiceThreadId);
-
     this._refreshSummary(voiceThreadId);
     return result.lastInsertRowid;
   }
@@ -398,7 +550,7 @@ class VoiceStateStore {
   }
 
   listRecentEvents(threadId, limit = 12) {
-    const safeLimit = Math.max(1, Math.min(Number.parseInt(limit, 10) || 12, 100));
+    const safeLimit = Math.max(1, Math.min(Number.parseInt(limit, 10) || 12, 500));
     return this.db.prepare(`
       SELECT id, role, kind, content, created_at
       FROM voice_events
@@ -408,10 +560,228 @@ class VoiceStateStore {
     `).all(threadId, safeLimit).reverse();
   }
 
+  listCallerEvents(callerId, { limit = 20, role = null } = {}) {
+    const safeLimit = Math.max(1, Math.min(Number.parseInt(limit, 10) || 20, 200));
+    const rows = role
+      ? this.db.prepare(`
+          SELECT e.id, e.voice_thread_id, e.realtime_session_id, e.role, e.kind, e.content, e.created_at
+          FROM voice_events e
+          JOIN voice_threads t ON t.id = e.voice_thread_id
+          WHERE t.caller_id = ? AND e.role = ?
+          ORDER BY e.id DESC
+          LIMIT ?
+        `).all(String(callerId || 'unknown'), role, safeLimit)
+      : this.db.prepare(`
+          SELECT e.id, e.voice_thread_id, e.realtime_session_id, e.role, e.kind, e.content, e.created_at
+          FROM voice_events e
+          JOIN voice_threads t ON t.id = e.voice_thread_id
+          WHERE t.caller_id = ?
+          ORDER BY e.id DESC
+          LIMIT ?
+        `).all(String(callerId || 'unknown'), safeLimit);
+    return rows.reverse();
+  }
+
+  getLatestUserEvent(threadId) {
+    return this.db.prepare(`
+      SELECT id, role, kind, content, created_at
+      FROM voice_events
+      WHERE voice_thread_id = ? AND role = 'user' AND kind = 'transcript'
+      ORDER BY id DESC
+      LIMIT 1
+    `).get(threadId) || null;
+  }
+
+  setPreference({ callerId, key, value, sourceText = null }) {
+    const preferenceKey = normalizePreferenceKey(key);
+    if (!preferenceKey) throw new Error('Preference key is required');
+    const timestamp = nowIso();
+    this.db.prepare(`
+      INSERT INTO operator_preferences (
+        caller_id, preference_key, value_json, source_text, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(caller_id, preference_key) DO UPDATE SET
+        value_json = excluded.value_json,
+        source_text = excluded.source_text,
+        updated_at = excluded.updated_at
+    `).run(
+      String(callerId || 'unknown'),
+      preferenceKey,
+      serialize(value) || 'null',
+      sourceText ? String(sourceText).slice(0, 1000) : null,
+      timestamp,
+      timestamp
+    );
+    return this.getPreference(callerId, preferenceKey);
+  }
+
+  getPreference(callerId, key) {
+    const row = this.db.prepare(`
+      SELECT * FROM operator_preferences WHERE caller_id = ? AND preference_key = ?
+    `).get(String(callerId || 'unknown'), normalizePreferenceKey(key));
+    return row ? { ...row, value: parseJson(row.value_json, null) } : null;
+  }
+
+  listPreferences(callerId) {
+    return this.db.prepare(`
+      SELECT * FROM operator_preferences WHERE caller_id = ? ORDER BY preference_key
+    `).all(String(callerId || 'unknown')).map((row) => ({
+      ...row,
+      value: parseJson(row.value_json, null),
+    }));
+  }
+
+  deletePreference(callerId, key) {
+    return this.db.prepare(`
+      DELETE FROM operator_preferences WHERE caller_id = ? AND preference_key = ?
+    `).run(String(callerId || 'unknown'), normalizePreferenceKey(key)).changes > 0;
+  }
+
+  appendAuditEvent({
+    voiceThreadId = null,
+    realtimeSessionId = null,
+    jobId = null,
+    callerId = 'unknown',
+    action,
+    riskLevel = 'read_only',
+    profile = null,
+    requestHash = null,
+    scopeText = null,
+    metadata = {},
+  }) {
+    const eventId = makeId('audit');
+    const createdAt = nowIso();
+    this.db.prepare(`
+      INSERT INTO operation_audit (
+        event_id, voice_thread_id, realtime_session_id, job_id, caller_id,
+        action, risk_level, profile, request_hash, scope_text, metadata_json, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      eventId,
+      voiceThreadId,
+      realtimeSessionId,
+      jobId,
+      String(callerId || 'unknown'),
+      String(action || 'unknown'),
+      String(riskLevel || 'read_only'),
+      profile,
+      requestHash,
+      scopeText ? String(scopeText).slice(0, 4000) : null,
+      serialize(metadata) || '{}',
+      createdAt
+    );
+    return { event_id: eventId, created_at: createdAt };
+  }
+
+  listAuditEvents({ threadId = null, jobId = null, limit = 100 } = {}) {
+    const safeLimit = Math.max(1, Math.min(Number.parseInt(limit, 10) || 100, 1000));
+    let rows;
+    if (jobId) {
+      rows = this.db.prepare('SELECT * FROM operation_audit WHERE job_id = ? ORDER BY id LIMIT ?').all(jobId, safeLimit);
+    } else if (threadId) {
+      rows = this.db.prepare('SELECT * FROM operation_audit WHERE voice_thread_id = ? ORDER BY id DESC LIMIT ?').all(threadId, safeLimit).reverse();
+    } else {
+      rows = this.db.prepare('SELECT * FROM operation_audit ORDER BY id DESC LIMIT ?').all(safeLimit).reverse();
+    }
+    return rows.map((row) => ({ ...row, metadata: parseJson(row.metadata_json, {}) }));
+  }
+
+  recordRealtimeUsage({
+    eventKey,
+    voiceThreadId,
+    realtimeSessionId,
+    kind,
+    model = null,
+    usage,
+  }) {
+    if (!eventKey || !usage || typeof usage !== 'object') return false;
+    return this.db.prepare(`
+      INSERT OR IGNORE INTO realtime_usage (
+        event_key, voice_thread_id, realtime_session_id, kind, model, usage_json, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      String(eventKey).slice(0, 240),
+      voiceThreadId,
+      realtimeSessionId,
+      String(kind || 'response').slice(0, 40),
+      model ? String(model).slice(0, 120) : null,
+      serialize(usage) || '{}',
+      nowIso()
+    ).changes > 0;
+  }
+
+  getRealtimeUsageSummary({ threadId = null, sessionId = null } = {}) {
+    const rows = sessionId
+      ? this.db.prepare('SELECT kind, model, usage_json FROM realtime_usage WHERE realtime_session_id = ? ORDER BY id').all(sessionId)
+      : this.db.prepare('SELECT kind, model, usage_json FROM realtime_usage WHERE voice_thread_id = ? ORDER BY id').all(threadId);
+    const summary = {
+      records: rows.length,
+      response_count: 0,
+      transcription_count: 0,
+      total_tokens: 0,
+      input_tokens: 0,
+      output_tokens: 0,
+      input_text_tokens: 0,
+      input_audio_tokens: 0,
+      cached_input_tokens: 0,
+      cached_text_tokens: 0,
+      cached_audio_tokens: 0,
+      output_text_tokens: 0,
+      output_audio_tokens: 0,
+      models: [],
+    };
+    const models = new Set();
+    const add = (field, value) => {
+      const number = Number(value);
+      if (Number.isFinite(number)) summary[field] += number;
+    };
+    for (const row of rows) {
+      const usage = parseJson(row.usage_json, {});
+      if (row.kind === 'transcription') summary.transcription_count += 1;
+      else summary.response_count += 1;
+      if (row.model) models.add(row.model);
+      add('total_tokens', usage.total_tokens);
+      add('input_tokens', usage.input_tokens);
+      add('output_tokens', usage.output_tokens);
+      add('input_text_tokens', usage.input_token_details?.text_tokens);
+      add('input_audio_tokens', usage.input_token_details?.audio_tokens);
+      add('cached_input_tokens', usage.input_token_details?.cached_tokens);
+      add('cached_text_tokens', usage.input_token_details?.cached_tokens_details?.text_tokens);
+      add('cached_audio_tokens', usage.input_token_details?.cached_tokens_details?.audio_tokens);
+      add('output_text_tokens', usage.output_token_details?.text_tokens);
+      add('output_audio_tokens', usage.output_token_details?.audio_tokens);
+    }
+    summary.models = [...models];
+    return summary;
+  }
+
   getAgentSession(threadId, profile) {
     return this.db.prepare(`
       SELECT * FROM agent_sessions WHERE voice_thread_id = ? AND profile = ?
     `).get(threadId, profile) || null;
+  }
+
+  listAgentSessions(threadId) {
+    return this.db.prepare(`
+      SELECT
+        s.profile,
+        s.provider,
+        s.bridge_session_key,
+        s.provider_session_id,
+        s.created_at,
+        s.updated_at,
+        j.id AS latest_job_id,
+        j.status AS latest_job_status,
+        j.voice_result AS latest_voice_result
+      FROM agent_sessions s
+      LEFT JOIN jobs j ON j.id = (
+        SELECT id FROM jobs
+        WHERE voice_thread_id = s.voice_thread_id AND profile = s.profile
+        ORDER BY created_at DESC LIMIT 1
+      )
+      WHERE s.voice_thread_id = ?
+      ORDER BY s.profile
+    `).all(threadId);
   }
 
   upsertAgentSession({
@@ -457,9 +827,15 @@ class VoiceStateStore {
     profile,
     provider,
     request,
+    jobKind = 'managed_agent',
+    operation = null,
     freshSession = false,
     requiresApproval = false,
     notificationMode = 'in_call',
+    riskLevel = 'read_only',
+    riskReasons = [],
+    requestHash = null,
+    approvalSummary = null,
   }) {
     const transaction = this.db.transaction(() => {
       const duplicate = this.db.prepare(`
@@ -480,15 +856,33 @@ class VoiceStateStore {
         return { created: false, duplicate: false, busy: true, job: normalizeJob(busy) };
       }
 
+      if (requiresApproval) {
+        const focused = this.db.prepare(`
+          SELECT * FROM jobs
+          WHERE voice_thread_id = ? AND status = 'awaiting_approval'
+          ORDER BY created_at ASC LIMIT 1
+        `).get(voiceThreadId);
+        if (focused) {
+          return {
+            created: false,
+            duplicate: false,
+            busy: false,
+            approvalBusy: true,
+            job: normalizeJob(focused),
+          };
+        }
+      }
+
       const id = makeId('job');
       const timestamp = nowIso();
       const status = requiresApproval ? 'awaiting_approval' : 'queued';
       this.db.prepare(`
         INSERT INTO jobs (
           id, voice_thread_id, realtime_session_id, tool_call_id, profile,
-          provider, request, fresh_session, requires_approval, notification_mode,
-          status, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          provider, request, job_kind, operation_json, fresh_session, requires_approval, notification_mode,
+          status, risk_level, risk_reasons_json, request_hash, approval_summary,
+          created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         id,
         voiceThreadId,
@@ -497,10 +891,16 @@ class VoiceStateStore {
         profile,
         provider,
         String(request || '').trim(),
+        String(jobKind || 'managed_agent'),
+        serialize(operation),
         freshSession ? 1 : 0,
         requiresApproval ? 1 : 0,
         notificationMode,
         status,
+        riskLevel,
+        serialize(riskReasons) || '[]',
+        requestHash,
+        approvalSummary,
         timestamp,
         timestamp
       );
@@ -509,7 +909,10 @@ class VoiceStateStore {
         this.db.prepare(`
           INSERT INTO approvals (id, job_id, action, status, requested_at)
           VALUES (?, ?, ?, 'pending', ?)
-        `).run(makeId('approval'), id, String(request || '').trim().slice(0, 1000), timestamp);
+        `).run(makeId('approval'), id, String(approvalSummary || request || '').trim().slice(0, 1000), timestamp);
+        this.db.prepare(`
+          UPDATE voice_threads SET focused_approval_job_id = ?, updated_at = ? WHERE id = ?
+        `).run(id, timestamp, voiceThreadId);
       }
 
       return { created: true, duplicate: false, busy: false, job: this.getJob(id) };
@@ -592,6 +995,11 @@ class VoiceStateStore {
         SET status = 'canceled', error = ?, completed_at = ?, updated_at = ?
         WHERE id = ? AND status IN ('awaiting_approval', 'queued', 'running')
       `).run(String(reason).slice(0, 1000), timestamp, timestamp, jobId);
+      this.db.prepare(`
+        UPDATE voice_threads
+        SET focused_approval_job_id = NULL, updated_at = ?
+        WHERE focused_approval_job_id = ?
+      `).run(timestamp, jobId);
       return this.getJob(jobId);
     });
     return transaction();
@@ -623,34 +1031,54 @@ class VoiceStateStore {
         SET status = 'canceled', error = ?, completed_at = ?, updated_at = ?
         WHERE status IN ('awaiting_approval', 'queued', 'running')
       `).run(safeReason, timestamp, timestamp);
+      this.db.prepare(`
+        UPDATE voice_threads SET focused_approval_job_id = NULL, updated_at = ?
+        WHERE focused_approval_job_id IS NOT NULL
+      `).run(timestamp);
 
       return jobs.map((job) => this.getJob(job.id));
     });
     return transaction();
   }
 
-  approveNextJob(threadId) {
+  approveFocusedJob(threadId, {
+    method = 'dtmf-pound',
+    decidedBy = 'caller',
+    metadata = {},
+  } = {}) {
     const transaction = this.db.transaction(() => {
       const job = this.db.prepare(`
-        SELECT * FROM jobs
-        WHERE voice_thread_id = ? AND status = 'awaiting_approval'
-        ORDER BY created_at ASC
+        SELECT j.* FROM jobs j
+        JOIN voice_threads t ON t.id = j.voice_thread_id
+        WHERE j.voice_thread_id = ?
+          AND j.status = 'awaiting_approval'
+          AND (t.focused_approval_job_id = j.id OR t.focused_approval_job_id IS NULL)
+        ORDER BY CASE WHEN t.focused_approval_job_id = j.id THEN 0 ELSE 1 END, j.created_at ASC
         LIMIT 1
       `).get(threadId);
       if (!job) return null;
 
       const timestamp = nowIso();
       this.db.prepare(`
-        UPDATE approvals SET status = 'approved', decided_at = ?
+        UPDATE approvals
+        SET status = 'approved', decided_at = ?, method = ?, decided_by = ?, decision_metadata_json = ?
         WHERE job_id = ? AND status = 'pending'
-      `).run(timestamp, job.id);
+      `).run(timestamp, method, decidedBy, serialize(metadata) || '{}', job.id);
       this.db.prepare(`
-        UPDATE jobs SET status = 'queued', updated_at = ?
+        UPDATE jobs
+        SET status = 'queued', approved_at = ?, approval_method = ?, updated_at = ?
         WHERE id = ? AND status = 'awaiting_approval'
-      `).run(timestamp, job.id);
+      `).run(timestamp, method, timestamp, job.id);
+      this.db.prepare(`
+        UPDATE voice_threads SET focused_approval_job_id = NULL, updated_at = ? WHERE id = ?
+      `).run(timestamp, threadId);
       return this.getJob(job.id);
     });
     return transaction();
+  }
+
+  approveNextJob(threadId) {
+    return this.approveFocusedJob(threadId);
   }
 
   getFocusedJob(threadId) {
@@ -675,18 +1103,15 @@ class VoiceStateStore {
     return {
       thread: {
         id: thread.id,
+        callerId: thread.caller_id,
         selectedProfile: thread.selected_profile,
         summary: thread.summary,
         updatedAt: thread.updated_at,
       },
-      agentSessions: this.db.prepare(`
-        SELECT profile, provider, bridge_session_key, provider_session_id, updated_at
-        FROM agent_sessions
-        WHERE voice_thread_id = ?
-        ORDER BY profile
-      `).all(threadId),
+      agentSessions: this.listAgentSessions(threadId),
       jobs: this.listJobs(threadId, { limit: 8 }),
-      events: this.listRecentEvents(threadId, 10),
+      events: this.listRecentEvents(threadId, 16),
+      preferences: this.listPreferences(thread.caller_id),
     };
   }
 }

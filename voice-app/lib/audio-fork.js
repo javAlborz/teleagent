@@ -106,6 +106,7 @@ class AudioForkSession extends EventEmitter {
         sampleRate,
         bytes: 0,
         startedAt: Date.now(),
+        sourceComplete: false,
       };
     }
     this._playout.bytes += buffer.length;
@@ -125,21 +126,41 @@ class AudioForkSession extends EventEmitter {
     return true;
   }
 
+  markPlaybackComplete(itemId = null) {
+    if (!this._playout) return false;
+    if (itemId && this._playout.itemId && itemId !== this._playout.itemId) return false;
+    this._playout.sourceComplete = true;
+    return true;
+  }
+
   stopPlayback() {
     const playout = this._playout;
-    if (this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({ type: 'killAudio' }));
-    }
-    this._playout = null;
-
     if (!playout) return null;
     const totalAudioMs = (playout.bytes / 2 / playout.sampleRate) * 1000;
     const elapsedMs = Math.max(0, Date.now() - playout.startedAt);
+    this._playout = null;
+    if (playout.sourceComplete && elapsedMs >= totalAudioMs + 100) return null;
+    if (this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({ type: 'killAudio' }));
+    }
     return {
       itemId: playout.itemId,
       audioEndMs: Math.min(totalAudioMs, elapsedMs),
       totalAudioMs,
+      interrupted: true,
     };
+  }
+
+  close(code = 1000, reason = 'call ended') {
+    this.captureEnabled = false;
+    this._playout = null;
+    this._resetUtterance();
+    if (typeof this.ws?.close !== 'function') return false;
+    if (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING) {
+      this.ws.close(code, reason);
+      return true;
+    }
+    return false;
   }
 
   _chunkDurationMs(byteLen) {
@@ -433,10 +454,14 @@ class AudioForkServer extends EventEmitter {
 
   stop() {
     if (!this.wss) return;
+    for (const pending of this._pending.splice(0)) {
+      clearTimeout(pending.timeout);
+      pending.reject(new Error(`Audio fork server stopped before call ${pending.callUuid} connected`));
+    }
+    for (const session of this._sessions.values()) session.close(1001, 'audio fork server stopping');
+    this._sessions.clear();
     this.wss.close();
     this.wss = null;
-    this._pending = [];
-    this._sessions.clear();
   }
 
   /**

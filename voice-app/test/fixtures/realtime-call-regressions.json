@@ -1,0 +1,38 @@
+[
+  {
+    "id": "wait-without-chatter",
+    "utterance": "Just stay quiet until the result is done.",
+    "quiet_wait": true,
+    "goodbye": false
+  },
+  {
+    "id": "plain-status-question",
+    "utterance": "Is the Terra job done yet?",
+    "quiet_wait": false,
+    "goodbye": false
+  },
+  {
+    "id": "definitive-goodbye",
+    "utterance": "That's all, goodbye for now.",
+    "quiet_wait": false,
+    "goodbye": true
+  },
+  {
+    "id": "hangup-capability-question",
+    "utterance": "Can you hang up when the task is done?",
+    "quiet_wait": false,
+    "goodbye": false
+  },
+  {
+    "id": "explicit-hangup",
+    "utterance": "Please end the call.",
+    "quiet_wait": false,
+    "goodbye": true
+  },
+  {
+    "id": "unclear-domain-term",
+    "utterance": "Can you inspect the thing on Zeus?",
+    "quiet_wait": false,
+    "goodbye": false
+  }
+]

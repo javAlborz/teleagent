@@ -9,6 +9,7 @@
     "test:api-server": "cd claude-api-server && node --test test/**/*.test.js",
     "test:voice-app": "cd voice-app && node --test test/**/*.test.js",
     "voice-control": "node scripts/voice-execution-control.js",
+    "voice-history": "node scripts/voice-history.js",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "lint:voice-app": "eslint voice-app/",

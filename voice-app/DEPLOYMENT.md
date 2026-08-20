@@ -102,10 +102,21 @@ Key environment variables in the generated `.env`:
 | `TTS_BASE_URL` | OpenAI-compatible TTS base URL |
 | `TTS_VOICE` | Default TTS voice name/id |
 | `STT_BASE_URL` | OpenAI-compatible Whisper base URL |
+| `DRACHTIO_SIP_TRANSPORT` | Contact transport for the local Asterisk trunk; Hermes defaults to `udp` |
 | `OPENAI_REALTIME_API_KEY` | Required for OpenAI Realtime extensions and callbacks |
 | `OPENAI_REALTIME_MODEL` | Realtime speech-to-speech model; defaults to `gpt-realtime-2.1-mini` |
 | `OPENAI_REALTIME_VOICE` | Realtime output voice; defaults to `marin` |
 | `OPENAI_REALTIME_TRANSCRIPTION_MODEL` | Text transcript model used for durable context |
+| `OPENAI_REALTIME_TRANSCRIPTION_PROMPT` | Stable domain guidance for telephony transcription |
+| `OPENAI_REALTIME_TRANSCRIPTION_KEYWORDS` | Comma-separated static vocabulary; live tmux/conversation names are added at call start |
+| `OPENAI_REALTIME_TRANSCRIPTION_LANGUAGES` | Comma-separated expected language codes |
+| `OPENAI_REALTIME_TRANSCRIPTION_DELAY` | Transcription latency/quality tradeoff; `medium` is the default |
+| `OPENAI_REALTIME_MAX_SPOKEN_WORDS` | Advisory spoken-response target recorded with limiter telemetry |
+| `OPENAI_REALTIME_HARD_MAX_SPOKEN_WORDS` | Sentence-boundary cutoff; punctuation-free output has an absolute cutoff at twice this value |
+| `OPENAI_REALTIME_RESPONSE_DEBOUNCE_MS` | Delay used to coalesce adjacent final transcript fragments; defaults to 350 ms |
+| `OPENAI_REALTIME_CONTEXT_TOKEN_LIMIT` | Post-instruction Realtime context target before retention truncation |
+| `OPENAI_REALTIME_CONTEXT_RETENTION_RATIO` | Fraction retained when long-call context is truncated |
+| `VOICE_INSPECTION_ROOTS` | Host roots available to authenticated bounded read-only inspection |
 | `VOICE_STATE_DIR` | Host directory mounted read/write for durable Realtime state |
 | `VOICE_STATE_DB_PATH` | SQLite path inside `voice-app` |
 | `VOICE_APP_EXECUTION_LOCK_FILE` | Optional in-container emergency-stop lock path; defaults beside the SQLite state |
@@ -173,6 +184,9 @@ curl -fsS http://127.0.0.1:3000/api/realtime-health
 # Emergency-stop status and authenticated operator unlock
 npm run voice-control -- status
 npm run voice-control -- unlock
+
+# Exact text transcript, jobs, authorization audit, and measured usage
+npm run voice-history -- --limit 500
 ```
 
 ### Log Locations
@@ -215,6 +229,7 @@ Error connecting to agent API
 - Config file has restricted permissions (chmod 600)
 - Keep `OPENAI_REALTIME_API_KEY` only in the server-side `.env`; it is never needed on a SIP handset or by agent children
 - Realtime audio is streamed and not written to the durable SQLite database
+- Transcript, authorization audit, and Realtime usage rows are append-only; exported files use mode `0600`
 - Realtime callbacks may reopen a voice thread only for the same caller identity
 - Never commit `~/.claude-phone/config.json` to version control
 - Use environment variables in CI/CD pipelines
@@ -224,6 +239,13 @@ Error connecting to agent API
 - Voice app API (port 3000) should not be publicly exposed without authentication
 - Agent API server (port 3333) should only be accessible from the voice server
 - Codex Luna/Terra deploy requests are denied; reserve the Sol extension for privileged work
+- Non-read-only `phone-*` bridge requests require a fresh, request-hash-bound
+  extension-7 authorization produced only after the caller presses `#`.
+- Existing tmux delivery additionally binds approval to a stable pane ID and
+  provider-log fingerprint. Voice cannot cancel a job; the owner must press
+  `*`, while `9` remains the global emergency stop.
+- The Realtime model has bounded read-only inspection tools, not arbitrary
+  shell or HTTP access. Credential paths and secret-like filenames are denied.
 - Dial `9` from the authenticated owner handset to persistently lock all new
   phone-originated dispatch and terminate every tracked phone-originated agent
   process group. Unlock only from the local operator CLI after reviewing logs.

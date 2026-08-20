@@ -53,7 +53,8 @@ async function sendQuery(prompt, options = {}) {
     resumeSessionId = null,
     devicePrompt,
     timeout = 30,
-    sessionType
+    sessionType,
+    authorization = null,
   } = options;
   const timestamp = new Date().toISOString();
   const deployIntent =
@@ -79,6 +80,7 @@ async function sendQuery(prompt, options = {}) {
         devicePrompt,
         sessionType,
         timeoutSeconds: effectiveTimeout,
+        authorization,
       },
       {
         timeout: effectiveTimeout * 1000,
@@ -284,6 +286,87 @@ async function unlockVoiceExecution(source = 'operator') {
   }
 }
 
+async function inspectOperator(action, args = {}) {
+  try {
+    const response = await axios.post(
+      `${AGENT_API_URL}/operator/inspect`,
+      { action, args },
+      {
+        timeout: 10000,
+        headers: buildAgentApiHeaders({ 'Content-Type': 'application/json' }),
+      }
+    );
+    return response.data;
+  } catch (error) {
+    return {
+      success: false,
+      code: error.response?.data?.code || 'OPERATOR_INSPECTION_FAILED',
+      error: error.response?.data?.error || error.message,
+    };
+  }
+}
+
+async function prepareAgentSessionMessage(target) {
+  try {
+    const response = await axios.post(
+      `${AGENT_API_URL}/operator/session-message/prepare`,
+      { target },
+      {
+        timeout: 10000,
+        headers: buildAgentApiHeaders({ 'Content-Type': 'application/json' }),
+      }
+    );
+    return response.data;
+  } catch (error) {
+    return {
+      success: false,
+      code: error.response?.data?.code || 'TARGET_SESSION_PREPARE_FAILED',
+      error: error.response?.data?.error || error.message,
+      userMessage: error.response?.data?.userMessage || null,
+    };
+  }
+}
+
+async function sendAgentSessionMessage({
+  operationId,
+  target,
+  message,
+  sessionFingerprint,
+  timeoutSeconds = 1800,
+  authorization = null,
+} = {}) {
+  const safeTimeoutSeconds = Math.max(30, Math.min(Number.parseInt(timeoutSeconds, 10) || 1800, 3600));
+  try {
+    const response = await axios.post(
+      `${AGENT_API_URL}/operator/session-message`,
+      {
+        operationId,
+        target,
+        message,
+        sessionFingerprint,
+        timeoutSeconds: safeTimeoutSeconds,
+        authorization,
+      },
+      {
+        timeout: (safeTimeoutSeconds + 10) * 1000,
+        headers: buildAgentApiHeaders({ 'Content-Type': 'application/json' }),
+      }
+    );
+    return response.data;
+  } catch (error) {
+    return {
+      success: false,
+      code: error.response?.data?.code || (
+        ['ETIMEDOUT', 'ECONNABORTED'].includes(error.code)
+          ? 'TARGET_RESPONSE_TIMEOUT'
+          : 'TARGET_SESSION_MESSAGE_FAILED'
+      ),
+      error: error.response?.data?.error || error.message,
+      userMessage: error.response?.data?.userMessage || null,
+    };
+  }
+}
+
 /**
  * End an agent session when a call ends
  * @param {string} callId - The call UUID to end the session for
@@ -351,6 +434,9 @@ module.exports = {
   panicStop,
   getVoiceExecutionStatus,
   unlockVoiceExecution,
+  inspectOperator,
+  prepareAgentSessionMessage,
+  sendAgentSessionMessage,
   endSession,
   isAvailable
 };

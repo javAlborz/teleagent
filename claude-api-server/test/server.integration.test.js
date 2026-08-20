@@ -7,6 +7,19 @@ const os = require('node:os');
 const path = require('node:path');
 const net = require('node:net');
 const { spawn } = require('node:child_process');
+const { requestHash } = require('../../lib/voice-operation-risk');
+
+function voiceApproval(prompt, overrides = {}) {
+  return {
+    approved: true,
+    job_id: 'job_integration123',
+    method: 'dtmf-pound',
+    approved_at: new Date().toISOString(),
+    request_sha256: requestHash(prompt),
+    scope: prompt,
+    ...overrides,
+  };
+}
 
 async function reservePort() {
   return new Promise((resolve, reject) => {
@@ -96,6 +109,7 @@ process.stdin.on('end', () => {
       PHONE_CODEX_TERRA_WORKING_DIR: tempDirectory,
       PHONE_CODEX_SOL_WORKING_DIR: tempDirectory,
       PHONE_CODEX_DEPLOY_WORKING_DIR: tempDirectory,
+      VOICE_INSPECTION_ROOTS: tempDirectory,
       VOICE_EXECUTION_LOCK_FILE: voiceLockFile,
       FAKE_AGENT_LOG: invocationLog,
       FAKE_CHILD_PID_FILE: stubbornChildPidFile,
@@ -144,9 +158,65 @@ process.stdin.on('end', () => {
 
     const unauthorized = await post('/ask', { prompt: 'hello' }, false);
     assert.equal(unauthorized.status, 401);
+
+    const unauthorizedTarget = await post(
+      '/operator/session-message/prepare',
+      { target: 'main:phone' },
+      false
+    );
+    assert.equal(unauthorizedTarget.status, 401);
+
+    const invalidTarget = await post('/operator/session-message/prepare', { target: 'not a target' });
+    assert.equal(invalidTarget.status, 400);
+    assert.equal((await invalidTarget.json()).code, 'EXACT_TMUX_TARGET_REQUIRED');
+
+    const unapprovedDelivery = await post('/operator/session-message', {
+      operationId: 'job_integration123',
+      target: 'main:phone',
+      message: 'Inspect status.',
+      sessionFingerprint: 'untrusted',
+    });
+    assert.equal(unapprovedDelivery.status, 403);
+    assert.equal((await unapprovedDelivery.json()).code, 'VOICE_APPROVAL_REQUIRED');
+
+    const missingTarget = '%999999999';
+    const boundMessage = 'Inspect a deliberately missing pane.';
+    const wrongTargetApproval = await post('/operator/session-message', {
+      operationId: 'job_integration123',
+      target: missingTarget,
+      message: boundMessage,
+      sessionFingerprint: 'missing-pane-fingerprint',
+      authorization: voiceApproval(boundMessage, {
+        target: '%1',
+        target_session_fingerprint: 'missing-pane-fingerprint',
+      }),
+    });
+    assert.equal(wrongTargetApproval.status, 403);
+
+    const boundApproval = await post('/operator/session-message', {
+      operationId: 'job_integration123',
+      target: missingTarget,
+      message: boundMessage,
+      sessionFingerprint: 'missing-pane-fingerprint',
+      authorization: voiceApproval(boundMessage, {
+        target: missingTarget,
+        target_session_fingerprint: 'missing-pane-fingerprint',
+      }),
+    });
+    assert.notEqual(boundApproval.status, 403);
+    assert.notEqual((await boundApproval.json()).code, 'VOICE_APPROVAL_REQUIRED');
+
+    const inspection = await post('/operator/inspect', {
+      action: 'list_directory',
+      args: { path: tempDirectory },
+    });
+    assert.equal(inspection.status, 200);
+    const inspected = await inspection.json();
+    assert.equal(inspected.success, true);
+    assert.ok(inspected.result.entries.some((entry) => entry.name === 'fake-agent.js'));
   });
 
-  await t.test('Luna, Terra, and Sol use their configured model boundaries', async () => {
+  await t.test('all Codex models remain selectable while read-only phone prompts force read-only execution', async () => {
     for (const sessionType of ['phone-codex-luna', 'phone-codex-terra', 'phone-codex-sol']) {
       const response = await post('/ask', { prompt: 'Inspect the workspace', sessionType });
       assert.equal(response.status, 200);
@@ -157,9 +227,32 @@ process.stdin.on('end', () => {
     assert.ok(invocations[0].args.includes('gpt-5.6-luna'));
     assert.ok(invocations[0].args.includes('read-only'));
     assert.ok(invocations[1].args.includes('gpt-5.6-terra'));
-    assert.ok(invocations[1].args.includes('workspace-write'));
+    assert.ok(invocations[1].args.includes('read-only'));
     assert.ok(invocations[2].args.includes('gpt-5.6-sol'));
-    assert.ok(invocations[2].args.includes('danger-full-access'));
+    assert.ok(invocations[2].args.includes('read-only'));
+  });
+
+  await t.test('Claude read-only phone prompts remove mutation-capable tools until scoped approval', async () => {
+    const readPrompt = 'Inspect the phone repository.';
+    const read = await post('/ask', { prompt: readPrompt, sessionType: 'phone-opus' });
+    assert.equal(read.status, 200);
+    const readInvocation = fs.readFileSync(invocationLog, 'utf8').trim().split('\n').map(JSON.parse)
+      .findLast(entry => entry.prompt.includes(readPrompt));
+    const readTools = readInvocation.args[readInvocation.args.indexOf('--tools') + 1];
+    assert.doesNotMatch(readTools, /Bash|Write|Edit|Task/);
+
+    const writePrompt = 'Implement the approved phone change.';
+    const write = await post('/ask', {
+      prompt: writePrompt,
+      sessionType: 'phone-opus',
+      authorization: voiceApproval(writePrompt),
+    });
+    assert.equal(write.status, 200);
+    const writeInvocation = fs.readFileSync(invocationLog, 'utf8').trim().split('\n').map(JSON.parse)
+      .findLast(entry => entry.prompt.includes(writePrompt));
+    const writeTools = writeInvocation.args[writeInvocation.args.indexOf('--tools') + 1];
+    assert.match(writeTools, /Bash/);
+    assert.match(writeTools, /Write/);
   });
 
   await t.test('Codex sessions resume and provider switches start a fresh provider session', async () => {
@@ -238,12 +331,50 @@ process.stdin.on('end', () => {
     const after = fs.readFileSync(invocationLog, 'utf8').trim().split('\n').length;
     assert.equal(after, before);
 
+    const deployPrompt = 'Deploy the app-platform preview';
     const allowed = await post('/ask', {
-      prompt: 'Deploy the app-platform preview',
+      prompt: deployPrompt,
       sessionType: 'phone-codex-sol',
+      authorization: voiceApproval(deployPrompt),
     });
     assert.equal(allowed.status, 200);
     assert.equal((await allowed.json()).provider, 'codex');
+    const deployInvocation = fs.readFileSync(invocationLog, 'utf8').trim().split('\n').map(JSON.parse)
+      .findLast(entry => entry.prompt.includes(deployPrompt));
+    assert.ok(deployInvocation.args.includes('danger-full-access'));
+  });
+
+  await t.test('phone mutations require a fresh request-bound pound authorization', async () => {
+    const prompt = 'Restart the voice service.';
+    const missing = await post('/ask', { prompt, sessionType: 'phone-codex-sol' });
+    assert.equal(missing.status, 403);
+    assert.equal((await missing.json()).agentCode, 'VOICE_APPROVAL_REQUIRED');
+
+    const mismatched = await post('/ask', {
+      prompt,
+      sessionType: 'phone-codex-sol',
+      authorization: voiceApproval('Restart a different service.'),
+    });
+    assert.equal(mismatched.status, 403);
+    assert.equal((await mismatched.json()).agentCode, 'VOICE_APPROVAL_REQUIRED');
+
+    const expired = await post('/ask', {
+      prompt,
+      sessionType: 'phone-codex-sol',
+      authorization: voiceApproval(prompt, { approved_at: '2020-01-01T00:00:00.000Z' }),
+    });
+    assert.equal(expired.status, 403);
+
+    const allowed = await post('/ask', {
+      prompt,
+      sessionType: 'phone-codex-sol',
+      authorization: voiceApproval(prompt),
+    });
+    assert.equal(allowed.status, 200);
+    assert.equal((await allowed.json()).provider, 'codex');
+    const mutationInvocation = fs.readFileSync(invocationLog, 'utf8').trim().split('\n').map(JSON.parse)
+      .findLast(entry => entry.prompt.includes(prompt));
+    assert.ok(mutationInvocation.args.includes('danger-full-access'));
   });
 
   await t.test('timeouts and explicit cancellation expose neutral and legacy codes', async () => {

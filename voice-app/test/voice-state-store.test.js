@@ -210,3 +210,186 @@ test('rolling text context is retained without raw audio', (t) => {
     0
   );
 });
+
+test('exact transcript history and operation audit remain append-only beyond the prompt window', (t) => {
+  const { store } = withStore(t);
+  const thread = store.createThread({ callerId: '1001' });
+  for (let index = 1; index <= 137; index += 1) {
+    store.appendEvent({
+      voiceThreadId: thread.id,
+      role: index % 2 ? 'user' : 'assistant',
+      kind: 'transcript',
+      content: `exact turn ${index}`,
+    });
+  }
+  store.appendAuditEvent({
+    voiceThreadId: thread.id,
+    callerId: '1001',
+    action: 'history_test',
+    riskLevel: 'read_only',
+    scopeText: 'append-only verification',
+  });
+
+  assert.equal(store.db.prepare('SELECT COUNT(*) AS count FROM voice_events').get().count, 137);
+  const recent = store.listRecentEvents(thread.id, 500);
+  assert.equal(recent[0].content, 'exact turn 1');
+  assert.equal(recent.at(-1).content, 'exact turn 137');
+  assert.throws(
+    () => store.db.prepare('UPDATE voice_events SET content = ? WHERE id = ?').run('changed', recent[0].id),
+    /append-only/
+  );
+  assert.throws(
+    () => store.db.prepare('DELETE FROM operation_audit').run(),
+    /append-only/
+  );
+});
+
+test('one focused approval is bound to pound and records the decision metadata', (t) => {
+  const { store } = withStore(t);
+  const thread = store.createThread({ callerId: '1001' });
+  const realtime = store.createRealtimeSession({
+    voiceThreadId: thread.id,
+    callId: 'approval-focus-call',
+    model: 'gpt-realtime-2.1-mini',
+  });
+  const first = store.createJob({
+    voiceThreadId: thread.id,
+    realtimeSessionId: realtime.id,
+    toolCallId: 'first-approval',
+    profile: 'codex-sol',
+    provider: 'codex',
+    request: 'Deploy preview one.',
+    requiresApproval: true,
+    riskLevel: 'high',
+    requestHash: 'hash-one',
+    approvalSummary: 'Deploy preview one.',
+  });
+  const second = store.createJob({
+    voiceThreadId: thread.id,
+    realtimeSessionId: realtime.id,
+    toolCallId: 'second-approval',
+    profile: 'claude-opus',
+    provider: 'claude',
+    request: 'Deploy preview two.',
+    requiresApproval: true,
+    riskLevel: 'high',
+  });
+  assert.equal(first.job.status, 'awaiting_approval');
+  assert.equal(second.approvalBusy, true);
+  assert.equal(second.job.id, first.job.id);
+  assert.equal(store.getThread(thread.id).focused_approval_job_id, first.job.id);
+
+  const approved = store.approveFocusedJob(thread.id, {
+    method: 'dtmf-pound',
+    decidedBy: 'caller',
+    metadata: { source: 'sip_dtmf' },
+  });
+  assert.equal(approved.id, first.job.id);
+  assert.equal(approved.status, 'queued');
+  assert.equal(approved.approval_method, 'dtmf-pound');
+  assert.ok(approved.approved_at);
+  assert.equal(store.getThread(thread.id).focused_approval_job_id, null);
+  const decision = store.db.prepare('SELECT * FROM approvals WHERE job_id = ?').get(first.job.id);
+  assert.equal(decision.status, 'approved');
+  assert.equal(decision.method, 'dtmf-pound');
+  assert.equal(decision.decided_by, 'caller');
+  assert.deepEqual(JSON.parse(decision.decision_metadata_json), { source: 'sip_dtmf' });
+});
+
+test('caller preferences are durable, normalized, and included in resume context', (t) => {
+  const { store } = withStore(t);
+  const thread = store.createThread({ callerId: '1001' });
+  store.setPreference({
+    callerId: '1001',
+    key: 'Speech Style',
+    value: 'succinct and minimal',
+    sourceText: 'I prefer succinct responses.',
+  });
+  assert.equal(store.getPreference('1001', 'Speech Style').preference_key, 'speech_style');
+  assert.equal(store.getResumeContext(thread.id).preferences[0].value, 'succinct and minimal');
+  assert.equal(store.deletePreference('1001', 'Speech Style'), true);
+  assert.deepEqual(store.listPreferences('1001'), []);
+});
+
+test('Realtime usage is deduplicated and summarized without claiming a budget balance', (t) => {
+  const { store } = withStore(t);
+  const thread = store.createThread({ callerId: '1001' });
+  const realtime = store.createRealtimeSession({
+    voiceThreadId: thread.id,
+    callId: 'usage-call',
+    model: 'gpt-realtime-2.1-mini',
+  });
+  const record = {
+    eventKey: 'response:one',
+    voiceThreadId: thread.id,
+    realtimeSessionId: realtime.id,
+    kind: 'response',
+    model: 'gpt-realtime-2.1-mini',
+    usage: {
+      total_tokens: 40,
+      input_tokens: 30,
+      output_tokens: 10,
+      input_token_details: {
+        text_tokens: 12,
+        audio_tokens: 18,
+        cached_tokens: 9,
+        cached_tokens_details: { text_tokens: 7, audio_tokens: 2 },
+      },
+      output_token_details: { text_tokens: 4, audio_tokens: 6 },
+    },
+  };
+  assert.equal(store.recordRealtimeUsage(record), true);
+  assert.equal(store.recordRealtimeUsage(record), false);
+  store.recordRealtimeUsage({
+    ...record,
+    eventKey: 'transcription:one',
+    kind: 'transcription',
+    model: 'gpt-live-transcribe',
+    usage: { total_tokens: 6, input_tokens: 4, output_tokens: 2 },
+  });
+  assert.deepEqual(store.getRealtimeUsageSummary({ threadId: thread.id }), {
+    records: 2,
+    response_count: 1,
+    transcription_count: 1,
+    total_tokens: 46,
+    input_tokens: 34,
+    output_tokens: 12,
+    input_text_tokens: 12,
+    input_audio_tokens: 18,
+    cached_input_tokens: 9,
+    cached_text_tokens: 7,
+    cached_audio_tokens: 2,
+    output_text_tokens: 4,
+    output_audio_tokens: 6,
+    models: ['gpt-realtime-2.1-mini', 'gpt-live-transcribe'],
+  });
+});
+
+test('stale Realtime sessions and their threads are recovered after a voice-service restart', (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'teleagent-realtime-recovery-'));
+  const dbPath = path.join(directory, 'voice.sqlite');
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+
+  let store = new VoiceStateStore({ dbPath });
+  const thread = store.createThread({ callerId: '1001' });
+  const session = store.createRealtimeSession({
+    voiceThreadId: thread.id,
+    callId: 'stale-call',
+    model: 'gpt-realtime-2.1-mini',
+  });
+  store.markRealtimeSessionConnected(session.id, 'openai-stale-session');
+  store.close();
+
+  store = new VoiceStateStore({ dbPath });
+  t.after(() => store.close());
+  const recovered = store.getRealtimeSession(session.id);
+  assert.equal(recovered.status, 'failed');
+  assert.ok(recovered.closed_at);
+  assert.match(recovered.error, /restarted/i);
+  assert.equal(store.getThread(thread.id).status, 'idle');
+  assert.ok(
+    store.listAuditEvents({ threadId: thread.id }).some((event) => (
+      event.action === 'realtime_session_recovered'
+    ))
+  );
+});

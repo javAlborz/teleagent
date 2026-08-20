@@ -120,7 +120,7 @@ services:
     network_mode: host
     command: >
       drachtio
-      --contact "sip:*:${drachtioPort};transport=tcp,udp"
+      --contact "sip:*:${drachtioPort};transport=\${DRACHTIO_SIP_TRANSPORT:-udp}"
       --secret \${DRACHTIO_SECRET}
       --port 9022
       --loglevel info
@@ -198,6 +198,15 @@ export function generateEnvFile(config) {
   const realtimeModel = realtimeConfig.model || 'gpt-realtime-2.1-mini';
   const realtimeVoice = realtimeConfig.voice || 'marin';
   const realtimeTranscriptionModel = realtimeConfig.transcriptionModel || 'gpt-live-transcribe';
+  const realtimeTranscriptionPrompt = realtimeConfig.transcriptionPrompt ||
+    'A private operator call about Teleagent on the phone through Linphone, Hermes, a homelab, repositories, the main tmux session, windows, panes, Claude Code, Codex, Kubernetes, and infrastructure.';
+  const realtimeTranscriptionKeywords = Array.isArray(realtimeConfig.transcriptionKeywords)
+    ? realtimeConfig.transcriptionKeywords.join(',')
+    : (realtimeConfig.transcriptionKeywords || 'Hermes,Teleagent,homelab,tmux,Claude Code,Codex,Haiku,Sonnet,Opus,Luna,Terra,Sol,Kubernetes,phone,Linphone,main,window,pane,phone-infra,FreeSWITCH,drachtio');
+  const realtimeMaxSpokenWords = realtimeConfig.maxSpokenWords || 45;
+  const realtimeHardMaxSpokenWords = realtimeConfig.hardMaxSpokenWords || 90;
+  const realtimeContextTokenLimit = realtimeConfig.contextTokenLimit || 16000;
+  const realtimeContextRetentionRatio = realtimeConfig.contextRetentionRatio || 0.8;
   const safetyIdentifierSalt = realtimeConfig.safetyIdentifierSalt || crypto
     .createHash('sha256')
     .update(`openai-safety:${config.secrets.drachtio}`)
@@ -227,6 +236,7 @@ export function generateEnvFile(config) {
     `DRACHTIO_SECRET=${config.secrets.drachtio}`,
     // SIP port for Contact header (5070 when 3CX SBC is present, 5060 otherwise)
     `DRACHTIO_SIP_PORT=${config.deployment?.pi?.drachtioPort || 5060}`,
+    'DRACHTIO_SIP_TRANSPORT=udp',
     '',
     '# FreeSWITCH Configuration',
     'FREESWITCH_HOST=127.0.0.1',
@@ -275,6 +285,14 @@ export function generateEnvFile(config) {
     `OPENAI_REALTIME_MODEL=${realtimeModel}`,
     `OPENAI_REALTIME_VOICE=${realtimeVoice}`,
     `OPENAI_REALTIME_TRANSCRIPTION_MODEL=${realtimeTranscriptionModel}`,
+    `OPENAI_REALTIME_TRANSCRIPTION_PROMPT=${realtimeTranscriptionPrompt}`,
+    `OPENAI_REALTIME_TRANSCRIPTION_KEYWORDS=${realtimeTranscriptionKeywords}`,
+    'OPENAI_REALTIME_TRANSCRIPTION_LANGUAGES=en',
+    'OPENAI_REALTIME_TRANSCRIPTION_DELAY=medium',
+    `OPENAI_REALTIME_MAX_SPOKEN_WORDS=${realtimeMaxSpokenWords}`,
+    `OPENAI_REALTIME_HARD_MAX_SPOKEN_WORDS=${realtimeHardMaxSpokenWords}`,
+    `OPENAI_REALTIME_CONTEXT_TOKEN_LIMIT=${realtimeContextTokenLimit}`,
+    `OPENAI_REALTIME_CONTEXT_RETENTION_RATIO=${realtimeContextRetentionRatio}`,
     `OPENAI_SAFETY_IDENTIFIER_SALT=${safetyIdentifierSalt}`,
     `VOICE_STATE_DIR=${voiceAppPath}/state`,
     'VOICE_STATE_DB_PATH=/app/state/voice-state.sqlite',

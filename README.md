@@ -138,6 +138,41 @@ voice thread; `77` restores the most recent thread for the same caller. Within
 that thread, Claude Haiku/Sonnet/Opus and Codex Luna/Terra/Sol each keep a
 separate provider session. See [OpenAI Realtime Voice](docs/OPENAI-REALTIME.md).
 
+The Realtime conductor can route automatically by capability, hand work
+between profiles, inspect bounded filesystem/Git/tmux/runtime state, read exact
+phone history or redacted numbered chunks from a pane-attached Codex/Claude
+provider session, retain explicit preferences, report measured token
+usage, fetch current weather, and actually hang up. Accepted background work
+uses one acknowledgement tone and stays quiet until an authoritative result.
+Tmux inspection returns sessions, windows, and panes hierarchically, maps
+node-wrapped Claude/Codex descendants to the owning pane, and never treats TUI
+placeholder text as provider history. It also returns a stable pane ID; later
+history reads and writes use that identity rather than a window index that may
+move.
+
+An existing tmux-attached Claude or Codex conversation is a separate namespace
+from the six Teleagent-managed profile sessions. Ask for “all runtime sessions”
+to see both. To direct an existing conversation, name its exact target (for
+example, `main:phone`) and the exact message. Teleagent fingerprints the bound
+provider log before approval, reads the target and message once, waits for `#`,
+waits for any pre-existing target task to become idle, pastes through a private
+tmux buffer, and reports completion only after the same provider log contains
+both the exact user message and a final assistant reply.
+If `*` races with completion, the verified completion wins; if delivery occurred
+before interruption, Teleagent says so explicitly rather than claiming the
+message never went out. Voice requests to cancel only prompt for `*`. Dial `9`
+to interrupt every voice-originated task and persistently lock further
+execution.
+
+Any voice-originated mutation—including deploy, publish, restart, and sudo—must
+be created through `7/77`. The app speaks the exact focused scope; `#` approves
+that job and `*` cancels it. The authenticated bridge independently verifies a
+fresh job/request hash before starting a non-read-only `phone-*` request.
+Consequently, direct profile extensions `1` through `6` remain useful for
+read-only conversations but cannot bypass the scoped Realtime approval flow.
+The bridge also forces every read-only Codex job into `read-only` and removes
+Claude mutation tools even when Opus or Sol was named explicitly.
+
 ## API
 
 `voice-app` exposes these endpoints on port `3000`:
@@ -172,9 +207,21 @@ Native Realtime voice is configured independently:
 OPENAI_REALTIME_API_KEY=sk-...
 OPENAI_REALTIME_MODEL=gpt-realtime-2.1-mini
 OPENAI_REALTIME_VOICE=marin
+OPENAI_REALTIME_TRANSCRIPTION_MODEL=gpt-live-transcribe
+OPENAI_REALTIME_TRANSCRIPTION_DELAY=medium
+OPENAI_REALTIME_MAX_SPOKEN_WORDS=35
+OPENAI_REALTIME_HARD_MAX_SPOKEN_WORDS=60
+OPENAI_REALTIME_RESPONSE_DEBOUNCE_MS=350
+OPENAI_REALTIME_CONTEXT_TOKEN_LIMIT=16000
+OPENAI_REALTIME_CONTEXT_RETENTION_RATIO=0.8
+VOICE_INSPECTION_ROOTS=/home/alborz/phone,/home/alborz/dev,/home/alborz/dev2,/home/alborz/ufst
 VOICE_STATE_DIR=./voice-app/state
 VOICE_STATE_DB_PATH=/app/state/voice-state.sqlite
 ```
+
+Keep the local Drachtio Contact transport aligned with the Asterisk trunk. The
+Hermes default is `DRACHTIO_SIP_TRANSPORT=udp`; this ensures app-originated BYE
+requests use the same transport as the UDP-only local trunk.
 
 The voice app prefers the provider-neutral bridge names while accepting the
 legacy Claude names:
@@ -211,6 +258,8 @@ Useful commands:
 ```bash
 claude-phone config show
 claude-phone config path
+npm run voice-history -- --limit 500
+npm run voice-control -- status
 ```
 
 ## Troubleshooting
