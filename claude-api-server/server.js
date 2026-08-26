@@ -44,6 +44,7 @@ const {
 const {
   VoiceExecutionControl,
   cleanLabel,
+  compensateIncoherentVoiceUnlock,
 } = require('../lib/voice-execution-control');
 const {
   RISK_LEVELS,
@@ -63,6 +64,9 @@ const {
   ExecutorTaskStore,
   ExecutorTaskStoreError,
 } = require('./executor-task-store');
+const {
+  normalizeControllerStateConfiguration,
+} = require('./controller-state-configuration');
 const {
   ExecutorTaskDispatcher,
   captureProcessExecution,
@@ -197,10 +201,18 @@ const EXPECTED_PRIVILEGED_ACTION_SOCKET_PATH = '/run/teleagent-privileged-action
 const PRIVILEGED_ACTION_SOCKET_PATH = String(
   process.env.PRIVILEGED_ACTION_PROXY_SOCKET_PATH || ''
 ).trim();
-const VOICE_EXECUTION_LOCK_FILE = process.env.VOICE_EXECUTION_LOCK_FILE ||
-  path.join(__dirname, '..', 'voice-app', 'state', 'voice-execution.lock.json');
-const EXECUTOR_TASK_DB_PATH = process.env.EXECUTOR_TASK_DB_PATH ||
-  path.join(HOME, '.local', 'state', 'teleagent', 'executor-tasks.sqlite');
+const controllerState = normalizeControllerStateConfiguration(process.env, {
+  legacyHome: HOME,
+  legacyLockPath: path.join(
+    __dirname,
+    '..',
+    'voice-app',
+    'state',
+    'voice-execution.lock.json'
+  ),
+});
+const VOICE_EXECUTION_LOCK_FILE = controllerState.lockPath;
+const EXECUTOR_TASK_DB_PATH = controllerState.databasePath;
 const EXECUTOR_TASK_LEASE_MS = parsePositiveInteger(process.env.EXECUTOR_TASK_LEASE_MS, 15000);
 const EXECUTOR_TASK_HEARTBEAT_MS = parsePositiveInteger(process.env.EXECUTOR_TASK_HEARTBEAT_MS, 5000);
 const EXECUTOR_TASK_POLL_MS = parsePositiveInteger(process.env.EXECUTOR_TASK_POLL_MS, 250);
@@ -233,10 +245,22 @@ const workerSessionProxy = workerSessionProxyConfig.enabled
       timeoutMs: workerSessionProxyConfig.timeoutMs,
     })
   : null;
-const voiceExecutionControl = new VoiceExecutionControl({ lockFile: VOICE_EXECUTION_LOCK_FILE });
+const voiceExecutionControl = new VoiceExecutionControl({
+  lockFile: VOICE_EXECUTION_LOCK_FILE,
+  strictPersistentState: controllerState.enforced,
+  expectedUid: typeof process.geteuid === 'function' ? process.geteuid() : null,
+  expectedGid: typeof process.getegid === 'function' ? process.getegid() : null,
+});
 const executorTaskStore = new ExecutorTaskStore({
   dbPath: EXECUTOR_TASK_DB_PATH,
   defaultLeaseMs: EXECUTOR_TASK_LEASE_MS,
+  strictOwnership: controllerState.enforced,
+  assertStorageOpen: controllerState.storage
+    ? () => controllerState.storage.assertOpen()
+    : () => {},
+  admitNewWork: controllerState.storage
+    ? () => controllerState.storage.assertNewWork()
+    : () => {},
 });
 let approvalVerifier;
 try {
@@ -3177,7 +3201,8 @@ function executorStoreErrorResponse(error) {
   if (error instanceof ExecutorTaskStoreError) {
     const status = error.code === 'TASK_NOT_FOUND' ? 404
       : (error.code === 'IDEMPOTENCY_CONFLICT' ? 409
-        : (error.code === 'EXECUTION_PANIC_LOCKED' ? 423 : 400));
+        : (error.code === 'EXECUTION_PANIC_LOCKED' ? 423
+          : (error.code === 'EXECUTOR_STATE_CAPACITY_EXHAUSTED' ? 507 : 400)));
     return {
       status,
       payload: {
@@ -3614,21 +3639,48 @@ async function performVoiceUnlock({ source }) {
     // fails, synchronous /ask and new durable submissions remain fail-closed.
     voiceExecution = voiceExecutionControl.unlock({ source });
   } catch (error) {
-    if (workerSessionProxyConfig.enabled && workerSessionProxy) {
-      await workerSessionProxy.panic({
-        reason: 'controller_unlock_local_failure',
-        source: 'controller_unlock_rollback',
-      }).catch(() => {});
+    const compensation = await compensateIncoherentVoiceUnlock({
+      source,
+      voiceExecution,
+      executor,
+      workerSessions,
+      voiceExecutionControl,
+      executorTaskStore,
+      workerSessionEnabled: workerSessionProxyConfig.enabled,
+      workerSessionProxy,
+      cause: error,
+    });
+    if (workerSessionProxyConfig.enabled) {
       workerSessionBoundaryStatus = Object.freeze({
         ready: false,
-        code: 'WORKER_SESSION_PANIC_LOCKED',
+        code: compensation.workerBoundaryCode || 'WORKER_SESSION_PANIC_UNCONFIRMED',
         checkedAt: new Date().toISOString(),
       });
     }
-    throw error;
+    return compensation;
+  }
+  if (voiceExecution.locked !== false || executor.panic.locked !== false) {
+    const compensation = await compensateIncoherentVoiceUnlock({
+      source,
+      voiceExecution,
+      executor,
+      workerSessions,
+      voiceExecutionControl,
+      executorTaskStore,
+      workerSessionEnabled: workerSessionProxyConfig.enabled,
+      workerSessionProxy,
+    });
+    if (workerSessionProxyConfig.enabled) {
+      workerSessionBoundaryStatus = Object.freeze({
+        ready: false,
+        code: compensation.workerBoundaryCode || 'WORKER_SESSION_PANIC_UNCONFIRMED',
+        checkedAt: new Date().toISOString(),
+      });
+    }
+    return compensation;
   }
   return {
-    success: voiceExecution.locked === false && executor.panic.locked === false,
+    success: true,
     voiceExecution,
     executor,
     workerSessions,
@@ -4159,13 +4211,27 @@ app.post('/voice-control/session/end', handleEndSession);
 function controllerHealthSnapshot() {
   let executor;
   let executorReady = false;
+  let stateStorage = {
+    enforced: controllerState.enforced,
+    admitted: !controllerState.enforced,
+  };
   const voiceExecution = voiceExecutionControl.getStatus();
   try {
+    if (controllerState.storage) {
+      const storage = controllerState.storage.inspect();
+      stateStorage = {
+        enforced: true,
+        admitted: storage.admitted,
+        capacityBytes: storage.capacityBytes.toString(),
+        freeBytes: storage.freeBytes.toString(),
+        requiredFreeBytes: storage.requiredFreeBytes.toString(),
+      };
+    }
     const storeHealth = executorTaskStore.health();
     const dispatcher = executorTaskDispatcher.status();
     executorReady = Boolean(
       storeHealth.ok && storeHealth.panic?.locked !== true &&
-      dispatcher.running && dispatcher.acceptingClaims
+      dispatcher.running && dispatcher.acceptingClaims && stateStorage.admitted
     );
     executor = {
       ok: storeHealth.ok,
@@ -4175,6 +4241,11 @@ function controllerHealthSnapshot() {
     };
   } catch (error) {
     executor = { ok: false, error: error.message };
+    stateStorage = {
+      enforced: controllerState.enforced,
+      admitted: false,
+      error: error.code || 'state_boundary_unavailable',
+    };
   }
   const workerReady = Boolean(
     agentWorkerConfig.enabled && workerSessionProxyConfig.enabled &&
@@ -4220,6 +4291,7 @@ function controllerHealthSnapshot() {
         code: workerSessionBoundaryStatus.code,
         checkedAt: workerSessionBoundaryStatus.checkedAt,
       },
+      stateStorage,
       executor,
       timestamp: new Date().toISOString(),
     },

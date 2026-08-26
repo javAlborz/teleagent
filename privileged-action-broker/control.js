@@ -2,18 +2,14 @@
 'use strict';
 
 const fs = require('node:fs');
-const path = require('node:path');
 const { probeUnixSocket } = require('./server');
 const { PrivilegedActionStore } = require('./store');
+const {
+  normalizePrivilegedStateConfiguration,
+} = require('./state-configuration');
 
 const BROKER_SOCKET = '/run/teleagent-privileged-action/broker.sock';
 const CHILD_MARKER = 'TELEAGENT_PRIVILEGED_ACTION_CHILD=1';
-
-function requiredAbsoluteEnvironment(name) {
-  const value = String(process.env[name] || '').trim();
-  if (!value || !path.isAbsolute(value)) throw new Error(`${name} must be an absolute path.`);
-  return value;
-}
 
 function markedPrivilegedProcesses() {
   const pids = [];
@@ -45,10 +41,14 @@ async function main() {
   }
   const liveSocket = await socketIsLive();
   const processState = markedPrivilegedProcesses();
+  const state = normalizePrivilegedStateConfiguration(process.env);
   const store = new PrivilegedActionStore({
-    dbPath: requiredAbsoluteEnvironment('PRIVILEGED_ACTION_DB_PATH'),
+    dbPath: state.databasePath,
     expectedUid: 0,
+    expectedGid: 0,
     strictOwnership: true,
+    assertStorageOpen: () => state.storage.assertOpen(),
+    admitNewWork: () => state.storage.assertNewWork(),
   });
   try {
     if (command === 'status') {

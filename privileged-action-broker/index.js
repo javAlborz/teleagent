@@ -12,7 +12,12 @@ const {
   createPrivilegedActionServer,
 } = require('./server');
 const { PrivilegedActionStore } = require('./store');
+const {
+  normalizePrivilegedStateConfiguration,
+} = require('./state-configuration');
 const { createConfiguredPrivilegedActionVerifier } = require('./verifier');
+
+const EXPECTED_SOCKET_PATH = '/run/teleagent-privileged-action/broker.sock';
 
 function requiredEnvironment(name) {
   const value = String(process.env[name] || '').trim();
@@ -48,7 +53,11 @@ async function main() {
     throw new Error('The privileged action broker must run as root.');
   }
   const socketPath = absoluteEnvironment('PRIVILEGED_ACTION_SOCKET_PATH');
-  const dbPath = absoluteEnvironment('PRIVILEGED_ACTION_DB_PATH');
+  if (socketPath !== EXPECTED_SOCKET_PATH) {
+    throw new Error(`PRIVILEGED_ACTION_SOCKET_PATH must be exactly ${EXPECTED_SOCKET_PATH}.`);
+  }
+  const state = normalizePrivilegedStateConfiguration(process.env);
+  const dbPath = state.databasePath;
   const policyPath = absoluteEnvironment('PRIVILEGED_ACTION_POLICY_FILE');
   const controllerGid = controllerGroupId(socketPath);
   assertSecureSocketDirectory(socketPath, { expectedUid: 0, expectedGid: controllerGid });
@@ -60,7 +69,14 @@ async function main() {
   let socketServer;
   try {
     const policy = loadRootOwnedPolicy(policyPath, { expectedUid: 0 });
-    store = new PrivilegedActionStore({ dbPath, expectedUid: 0, strictOwnership: true });
+    store = new PrivilegedActionStore({
+      dbPath,
+      expectedUid: 0,
+      expectedGid: 0,
+      strictOwnership: true,
+      assertStorageOpen: () => state.storage.assertOpen(),
+      admitNewWork: () => state.storage.assertNewWork(),
+    });
     const verifier = createConfiguredPrivilegedActionVerifier({
       environment: process.env,
       sqliteDatabase: store.db,
@@ -75,7 +91,24 @@ async function main() {
       socketPath,
       expectedUid: 0,
       controllerGid,
-      readinessProvider: () => dispatcher.getReadiness(),
+      readinessProvider: () => {
+        const readiness = dispatcher.getReadiness();
+        try {
+          const storage = state.storage.inspect();
+          return {
+            ...readiness,
+            ready: readiness.ready && storage.admitted,
+            stateStorageAdmitted: storage.admitted,
+          };
+        } catch (error) {
+          return {
+            ...readiness,
+            ready: false,
+            stateStorageAdmitted: false,
+            stateStorageError: error.code || 'state_boundary_unavailable',
+          };
+        }
+      },
     });
     await socketServer.listen();
     dispatcher.start();
@@ -121,7 +154,11 @@ async function main() {
   process.on('SIGINT', handleSignal);
 }
 
-main().catch((error) => {
-  process.stderr.write(`Privileged action broker refused to start: ${error.message}\n`);
-  process.exitCode = 1;
-});
+if (require.main === module) {
+  main().catch((error) => {
+    process.stderr.write(`Privileged action broker refused to start: ${error.message}\n`);
+    process.exitCode = 1;
+  });
+}
+
+module.exports = { main };

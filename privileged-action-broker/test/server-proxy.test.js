@@ -10,7 +10,11 @@ const test = require('node:test');
 const { createPrivilegedActionProxy } = require('../../claude-api-server/privileged-action-proxy');
 const { acquireBrokerSingletonLock, createPrivilegedActionServer } = require('../server');
 
-function fixture(t, { panic = { locked: false, recoveryBlocked: false }, readinessProvider = null } = {}) {
+function fixture(t, {
+  panic = { locked: false, recoveryBlocked: false },
+  readinessProvider = null,
+  submitError = null,
+} = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'privileged-broker-test-'));
   fs.chmodSync(directory, 0o750);
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
@@ -18,6 +22,7 @@ function fixture(t, { panic = { locked: false, recoveryBlocked: false }, readine
   const actions = new Map();
   const broker = {
     submit(body) {
+      if (submitError) throw submitError;
       const action = {
         id: 'pact_test', idempotencyKey: body.idempotencyKey,
         state: 'queued', terminal: false,
@@ -106,6 +111,31 @@ test('broker refuses to unlink or replace a live socket', async (t) => {
   assert.equal(fs.statSync(first.socketPath).isSocket(), true);
 });
 
+test('broker socket preflight requires one canonical exact 0750 controller-group directory', (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'privileged-broker-unsafe-dir-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  fs.chmodSync(directory, 0o700);
+  assert.throws(() => createPrivilegedActionServer({
+    broker: { submit() {} },
+    store: { getPanicStatus() { return { locked: false }; } },
+    socketPath: path.join(directory, 'broker.sock'),
+    expectedUid: process.geteuid(),
+    controllerGid: process.getegid(),
+  }), /exact 0750/);
+
+  fs.chmodSync(directory, 0o750);
+  const linkedDirectory = `${directory}-link`;
+  fs.symlinkSync(directory, linkedDirectory);
+  t.after(() => fs.rmSync(linkedDirectory, { force: true }));
+  assert.throws(() => createPrivilegedActionServer({
+    broker: { submit() {} },
+    store: { getPanicStatus() { return { locked: false }; } },
+    socketPath: path.join(linkedDirectory, 'broker.sock'),
+    expectedUid: process.geteuid(),
+    controllerGid: process.getegid(),
+  }), /exact 0750/);
+});
+
 test('health is 503 while recovery is unresolved or persistent panic remains locked', async (t) => {
   const blocked = fixture(t, {
     panic: { locked: true, recoveryBlocked: true },
@@ -124,6 +154,20 @@ test('health is 503 while recovery is unresolved or persistent panic remains loc
   assert.equal(response.payload.success, false);
   assert.equal(response.payload.ready, false);
   assert.equal(response.payload.panic.recoveryBlocked, true);
+});
+
+test('new privileged work refused by the durable reserve maps to HTTP 507', async (t) => {
+  const refused = fixture(t, {
+    submitError: Object.assign(new Error('durable reserve exhausted'), {
+      code: 'PRIVILEGED_STATE_CAPACITY_EXHAUSTED',
+    }),
+  });
+  await refused.server.listen();
+  t.after(() => refused.server.close());
+  const proxy = createPrivilegedActionProxy({ socketPath: refused.socketPath, timeoutMs: 1000 });
+  const response = await proxy.submit({ idempotencyKey: 'job_capacity' });
+  assert.equal(response.status, 507);
+  assert.equal(response.payload.code, 'PRIVILEGED_STATE_CAPACITY_EXHAUSTED');
 });
 
 test('singleton lock fences recovery before a second broker can inspect or kill children', (t) => {

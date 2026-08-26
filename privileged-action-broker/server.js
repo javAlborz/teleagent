@@ -51,6 +51,7 @@ function statusForError(error) {
   if (error.code === 'IDEMPOTENCY_CONFLICT' || error.code === 'CAS_MISMATCH' ||
       error.code === 'CAPABILITY_REPLAYED') return 409;
   if (error.code === 'PRIVILEGED_PANIC_LOCKED') return 423;
+  if (error.code === 'PRIVILEGED_STATE_CAPACITY_EXHAUSTED') return 507;
   if (String(error.code || '').includes('APPROVAL') ||
       String(error.code || '').startsWith('CAPABILITY_')) return 403;
   if (String(error.code || '').includes('INVALID') ||
@@ -60,12 +61,30 @@ function statusForError(error) {
 
 function assertSecureSocketDirectory(socketPath, { expectedUid = 0, expectedGid } = {}) {
   const directory = path.dirname(path.resolve(socketPath));
-  const stat = fs.lstatSync(directory);
-  if (!stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== expectedUid ||
-      stat.gid !== expectedGid || (stat.mode & 0o007) !== 0 || (stat.mode & 0o020) !== 0) {
-    throw new Error(
-      'The broker socket directory must be root-owned, use the configured controller group, and deny other access.'
+  const before = fs.lstatSync(directory, { bigint: true });
+  if (!before.isDirectory() || before.isSymbolicLink() ||
+      before.uid !== BigInt(expectedUid) || before.gid !== BigInt(expectedGid) ||
+      (before.mode & 0o7777n) !== 0o750n || fs.realpathSync(directory) !== directory) {
+    throw new Error('The broker socket directory must be exact 0750 root:controller storage.');
+  }
+  let descriptor;
+  try {
+    descriptor = fs.openSync(
+      directory,
+      fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | (fs.constants.O_NOFOLLOW || 0)
     );
+    const opened = fs.fstatSync(descriptor, { bigint: true });
+    const after = fs.lstatSync(directory, { bigint: true });
+    for (const metadata of [opened, after]) {
+      if (!metadata.isDirectory() || metadata.isSymbolicLink() ||
+          metadata.dev !== before.dev || metadata.ino !== before.ino ||
+          metadata.uid !== before.uid || metadata.gid !== before.gid ||
+          metadata.mode !== before.mode || fs.realpathSync(directory) !== directory) {
+        throw new Error('The broker socket directory changed while it was inspected.');
+      }
+    }
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
   }
   return directory;
 }
@@ -262,6 +281,7 @@ function createPrivilegedActionServer({
   return Object.freeze({
     server,
     async listen() {
+      assertSecureSocketDirectory(socketPath, { expectedUid, expectedGid: controllerGid });
       if (fs.existsSync(socketPath)) {
         if (await probeUnixSocket(socketPath)) {
           throw new Error('A privileged action broker is already listening; refusing to replace it.');

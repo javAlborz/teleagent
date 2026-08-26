@@ -10,14 +10,19 @@ const {
   ExecutorTaskStoreError,
 } = require('../executor-task-store');
 
-function createFixture(t, { leaseMs = 5000 } = {}) {
+function createFixture(t, { leaseMs = 5000, storeOptions = {} } = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'teleagent-executor-store-'));
   const dbPath = path.join(directory, 'state', 'executor.sqlite');
   let clockMs = Date.parse('2026-08-25T12:00:00.000Z');
   const now = () => new Date(clockMs);
   const stores = [];
   const open = () => {
-    const store = new ExecutorTaskStore({ dbPath, now, defaultLeaseMs: leaseMs });
+    const store = new ExecutorTaskStore({
+      dbPath,
+      now,
+      defaultLeaseMs: leaseMs,
+      ...storeOptions,
+    });
     stores.push(store);
     return store;
   };
@@ -28,6 +33,60 @@ function createFixture(t, { leaseMs = 5000 } = {}) {
   });
   return { directory, dbPath, now, open, advance };
 }
+
+test('storage admission precedes SQLite open and gates only new task records', (t) => {
+  const refusedDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'teleagent-executor-refused-'));
+  const refusedPath = path.join(refusedDirectory, 'state', 'executor.sqlite');
+  t.after(() => fs.rmSync(refusedDirectory, { recursive: true, force: true }));
+  assert.throws(() => new ExecutorTaskStore({
+    dbPath: refusedPath,
+    assertStorageOpen: () => {
+      throw Object.assign(new Error('low reserve'), { code: 'DURABLE_STATE_CAPACITY_EXHAUSTED' });
+    },
+  }), { code: 'DURABLE_STATE_CAPACITY_EXHAUSTED' });
+  assert.equal(fs.existsSync(refusedPath), false);
+  assert.equal(fs.existsSync(path.dirname(refusedPath)), false);
+
+  let admit = true;
+  const fixture = createFixture(t, {
+    storeOptions: {
+      admitNewWork: () => {
+        if (!admit) {
+          throw Object.assign(new Error('low reserve'), {
+            code: 'DURABLE_STATE_CAPACITY_EXHAUSTED',
+          });
+        }
+      },
+    },
+  });
+  const store = fixture.open();
+  const request = {
+    idempotencyKey: 'capacity-existing',
+    taskType: 'managed_agent',
+    callId: 'call-capacity-existing',
+    request: { prompt: 'one durable task' },
+  };
+  const first = store.submitTask(request);
+  admit = false;
+  const retry = store.submitTask(request);
+  assert.equal(retry.created, false);
+  assert.equal(retry.task.id, first.task.id);
+  expectStoreError('EXECUTOR_STATE_CAPACITY_EXHAUSTED', () => store.submitTask({
+    ...request,
+    idempotencyKey: 'capacity-new',
+  }));
+
+  const cancellation = store.reserveCancellation({
+    idempotencyKey: 'capacity-cancel-before-submit',
+    callId: 'call-capacity-cancel',
+    reason: 'caller stopped',
+    source: 'capacity-test',
+  });
+  assert.equal(cancellation.idempotencyKey, 'capacity-cancel-before-submit');
+  const panic = store.panic({ reason: 'operator stop', source: 'capacity-test' });
+  assert.equal(panic.persisted, true);
+  assert.equal(store.getTask(first.task.id).state, 'canceled');
+});
 
 function expectStoreError(code, callback) {
   assert.throws(callback, (error) => {

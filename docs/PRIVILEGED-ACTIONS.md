@@ -121,20 +121,41 @@ Artifacts:
 
 Before activation, a root operator must:
 
-1. Install the pinned broker dependencies with its `package-lock.json` into the
-   root-owned deployment tree.
-2. install the sysusers/tmpfiles/unit files and verify
+1. Install the pinned broker dependencies with its own `package-lock.json` and
+   package-local `node_modules` into the root-owned deployment tree. `NODE_PATH`
+   and sibling/global dependency resolution are forbidden.
+2. provision the exact dedicated 1-8 GiB durable filesystem at
+   `/var/lib/teleagent-privileged-action`, then run the digest-pinned combined
+   disabled installer in `deploy/controller` as described in
+   `CONTROLLER-DEPLOYMENT.md`;
+3. verify
    `/run/teleagent-privileged-action` is `0750 root:teleagent-control`;
-3. install a reviewed `0600 root:root` policy and explicitly choose every
+4. install a reviewed `0600 root:root` policy and explicitly choose every
    allowed unit, namespace/resource, host/action, and exact argv rule;
-4. install the matching approval public key and an independent 32-byte replay
+5. install the matching approval public key and an independent 32-byte replay
    fingerprint key as `root:root 0400/0600` files;
-5. place one distinct 32–4096 byte `PRIVILEGED_ACTION_API_TOKEN` in the private
+6. place one distinct 32–4096 byte `PRIVILEGED_ACTION_API_TOKEN` in the private
    voice/controller secret stores (never reuse agent or executor tokens);
-6. set controller `PRIVILEGED_ACTION_PROXY_ENABLED=true`, its exact socket path,
+7. set controller `PRIVILEGED_ACTION_PROXY_ENABLED=true`, its exact socket path,
    and voice `VOICE_PRIVILEGED_ACTIONS_ENABLED=true` only after the broker health
    check succeeds;
-7. create the `ENABLE` sentinel and start the unit explicitly.
+8. create the `ENABLE` sentinel and start the unit explicitly.
+
+The unit is `User=root`, `Group=root`, with only `teleagent-control` as a
+supplementary group. There is deliberately no `RuntimeDirectory=`: tmpfiles is
+the sole owner of the socket-directory metadata. The broker has explicit CPU,
+memory, swap, task, I/O, file-size, descriptor, and core-dump bounds; an empty
+capability bounding set; and read/write access only to its private run and
+durable-state roots. The pinned Node 24 runtime is invoked with `--jitless`, so
+V8 does not allocate executable memory and the unit's
+`MemoryDenyWriteExecute=yes` policy remains compatible. Its own package-local
+`better-sqlite3` native addon must be present in the immutable release.
+
+The privileged database, replay fingerprints, panic/recovery state,
+`outcome_unknown`, append-only audit, and outbox are never deleted by retention.
+The separate filesystem bounds total host exposure. New submissions fail with
+507 below the greater of 20 percent or 512 MiB free, while exact retries,
+cancellation, panic, recovery, and terminal truth retain the reserved space.
 
 Do not mount the socket into Docker or add `teleagent-sip-gateway`/voice-app to
 `teleagent-control`.
@@ -145,14 +166,16 @@ Stop the broker and inspect local status first:
 
 ```sh
 sudo systemctl stop teleagent-privileged-action.service
-sudo env PRIVILEGED_ACTION_DB_PATH=/var/lib/teleagent-privileged-action/actions.sqlite \
+sudo env TELEAGENT_PRIVILEGED_STATE_BOUNDARY=required \
+  PRIVILEGED_ACTION_DB_PATH=/var/lib/teleagent-privileged-action/actions.sqlite \
   /opt/teleagent/node/bin/node /opt/teleagent/current/privileged-action-broker/control.js status
 ```
 
 After investigating every `outcome_unknown`, unlock only with the local command:
 
 ```sh
-sudo env PRIVILEGED_ACTION_DB_PATH=/var/lib/teleagent-privileged-action/actions.sqlite \
+sudo env TELEAGENT_PRIVILEGED_STATE_BOUNDARY=required \
+  PRIVILEGED_ACTION_DB_PATH=/var/lib/teleagent-privileged-action/actions.sqlite \
   /opt/teleagent/node/bin/node /opt/teleagent/current/privileged-action-broker/control.js unlock-panic
 ```
 

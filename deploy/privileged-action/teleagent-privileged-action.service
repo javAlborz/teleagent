@@ -4,17 +4,20 @@ Documentation=file:/opt/teleagent/current/docs/PRIVILEGED-ACTIONS.md
 After=local-fs.target network-online.target
 Wants=network-online.target
 ConditionPathExists=/etc/teleagent/privileged-action/ENABLE
+ConditionPathIsMountPoint=/var/lib/teleagent-privileged-action
 
 [Service]
 Type=simple
 User=root
-Group=teleagent-control
+Group=root
+SupplementaryGroups=teleagent-control
 UMask=0077
-RuntimeDirectory=teleagent-privileged-action
-RuntimeDirectoryMode=0750
-StateDirectory=teleagent-privileged-action
-StateDirectoryMode=0700
 WorkingDirectory=/opt/teleagent/current
+Environment=HOME=/root
+Environment=PATH=/usr/sbin:/usr/bin:/sbin:/bin
+Environment=LANG=C.UTF-8
+Environment=LC_ALL=C.UTF-8
+Environment=TELEAGENT_PRIVILEGED_STATE_BOUNDARY=required
 Environment=PRIVILEGED_ACTION_SOCKET_PATH=/run/teleagent-privileged-action/broker.sock
 Environment=PRIVILEGED_ACTION_DB_PATH=/var/lib/teleagent-privileged-action/actions.sqlite
 Environment=PRIVILEGED_ACTION_POLICY_FILE=/etc/teleagent/privileged-action/policy.json
@@ -23,26 +26,54 @@ Environment=PRIVILEGED_ACTION_APPROVAL_PUBLIC_KEY_FILE=%d/approval-public-key
 Environment=PRIVILEGED_ACTION_REPLAY_KEY_FILE=%d/replay-fingerprint-key
 LoadCredential=approval-public-key:/etc/teleagent/privileged-action/approval-public.pem
 LoadCredential=replay-fingerprint-key:/etc/teleagent/privileged-action/replay-fingerprint.key
-ExecStart=/opt/teleagent/node/bin/node /opt/teleagent/current/privileged-action-broker/index.js
+UnsetEnvironment=LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT GCONV_PATH NODE_OPTIONS NODE_PATH NODE_EXTRA_CA_CERTS NODE_TLS_REJECT_UNAUTHORIZED NODE_USE_ENV_PROXY SSLKEYLOGFILE SSL_CERT_FILE SSL_CERT_DIR HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy OPENAI_API_KEY ANTHROPIC_API_KEY CLAUDE_API_KEY CLAUDE_API_TOKEN CODEX_API_KEY API_KEY API_TOKEN AUTH_TOKEN ACCESS_TOKEN PROVIDER_TOKEN PROVIDER_SECRET
+ExecStart=/opt/teleagent/node/bin/node --jitless /opt/teleagent/current/privileged-action-broker/index.js
 Restart=on-failure
 RestartSec=2s
 KillMode=control-group
 TimeoutStopSec=15s
+OOMPolicy=kill
+CPUAccounting=yes
+CPUQuota=100%
+CPUWeight=25
+MemoryAccounting=yes
+MemoryHigh=512M
+MemoryMax=768M
+MemorySwapMax=0
+TasksAccounting=yes
+TasksMax=256
+IOAccounting=yes
+IOWeight=25
+LimitNOFILE=4096
+LimitFSIZE=8589934592
+LimitCORE=0
 NoNewPrivileges=yes
+AmbientCapabilities=
+CapabilityBoundingSet=
 PrivateDevices=yes
+PrivateIPC=yes
 PrivateTmp=yes
+KeyringMode=private
+ProtectSystem=strict
+ProtectHome=read-only
+ReadOnlyPaths=/opt/teleagent/current /opt/teleagent/node /etc/teleagent/privileged-action
+ReadWritePaths=/var/lib/teleagent-privileged-action /run/teleagent-privileged-action
+InaccessiblePaths=/var/lib/teleagent-control /var/lib/teleagent-worker-state /var/lib/teleagent-voice /var/lib/teleagent-voice-stack /srv/teleagent-agent-workspaces /etc/teleagent-voice /etc/teleagent/provider-egress-secrets /run/teleagent-worker-session /run/teleagent-provider-launch /run/teleagent-provider-egress /run/teleagent-provider-egress-control /run/teleagent-voice-stack /run/docker.sock
 ProtectControlGroups=yes
 ProtectKernelLogs=yes
 ProtectKernelModules=yes
 ProtectKernelTunables=yes
 ProtectClock=yes
 ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
 RestrictRealtime=yes
 RestrictNamespaces=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
 
 # Deliberately no [Install] section: source deployment is dormant until a root
 # operator installs policy/keys, creates ENABLE, and starts the unit explicitly.

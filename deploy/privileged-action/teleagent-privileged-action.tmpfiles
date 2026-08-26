@@ -1,3 +1,5 @@
 d /run/teleagent-privileged-action 0750 root teleagent-control -
+# This is only an empty mountpoint. Startup requires a separate reviewed 1-8
+# GiB durable filesystem mounted here; ordinary /var/lib storage is refused.
 d /var/lib/teleagent-privileged-action 0700 root root -
 d /etc/teleagent/privileged-action 0700 root root -

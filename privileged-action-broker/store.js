@@ -65,7 +65,7 @@ function leaseMatches(storedHash, leaseToken) {
   return left.length === right.length && crypto.timingSafeEqual(left, right);
 }
 
-function assertSecureStoragePath(dbPath, expectedUid) {
+function assertSecureStoragePath(dbPath, expectedUid, expectedGid) {
   const directory = path.dirname(path.resolve(dbPath));
   let directoryStat;
   try {
@@ -74,7 +74,8 @@ function assertSecureStoragePath(dbPath, expectedUid) {
     storeError('PRIVILEGED_STORAGE_UNSAFE', 'The privileged state directory must already exist.');
   }
   if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink() ||
-      directoryStat.uid !== expectedUid || (directoryStat.mode & 0o077) !== 0) {
+      directoryStat.uid !== expectedUid || directoryStat.gid !== expectedGid ||
+      (directoryStat.mode & 0o777) !== 0o700 || fs.realpathSync(directory) !== directory) {
     storeError(
       'PRIVILEGED_STORAGE_UNSAFE',
       'The privileged state directory must be root-owned and accessible only by root.'
@@ -83,7 +84,8 @@ function assertSecureStoragePath(dbPath, expectedUid) {
   if (fs.existsSync(dbPath)) {
     const stat = fs.lstatSync(dbPath);
     if (!stat.isFile() || stat.isSymbolicLink() || stat.uid !== expectedUid ||
-        (stat.mode & 0o077) !== 0) {
+        stat.gid !== expectedGid || stat.nlink !== 1 ||
+        (stat.mode & 0o777) !== 0o600 || fs.realpathSync(dbPath) !== dbPath) {
       storeError('PRIVILEGED_STORAGE_UNSAFE', 'The privileged database has unsafe ownership or mode.');
     }
   }
@@ -93,14 +95,24 @@ class PrivilegedActionStore {
   constructor({
     dbPath = ':memory:',
     expectedUid = 0,
+    expectedGid = typeof process.getegid === 'function' ? process.getegid() : 0,
     strictOwnership = dbPath !== ':memory:',
     now = () => new Date(),
     leaseMs = 15000,
+    assertStorageOpen = () => {},
+    admitNewWork = () => {},
   } = {}) {
     this.dbPath = dbPath;
     this.now = now;
     this.leaseMs = Math.max(1000, Math.min(Number.parseInt(leaseMs, 10) || 15000, 3600000));
-    if (strictOwnership && dbPath !== ':memory:') assertSecureStoragePath(dbPath, expectedUid);
+    if (typeof assertStorageOpen !== 'function' || typeof admitNewWork !== 'function') {
+      storeError('PRIVILEGED_STORAGE_UNSAFE', 'Privileged state admission callbacks are invalid.');
+    }
+    this.admitNewWork = admitNewWork;
+    assertStorageOpen();
+    if (strictOwnership && dbPath !== ':memory:') {
+      assertSecureStoragePath(dbPath, expectedUid, expectedGid);
+    }
     this.db = new Database(dbPath);
     this.db.pragma('foreign_keys = ON');
     this.db.pragma('busy_timeout = 5000');
@@ -110,6 +122,21 @@ class PrivilegedActionStore {
       fs.chmodSync(dbPath, 0o600);
     }
     this._migrate();
+    if (strictOwnership && dbPath !== ':memory:') {
+      assertSecureStoragePath(dbPath, expectedUid, expectedGid);
+    }
+  }
+
+  _assertNewWorkAdmission() {
+    try {
+      this.admitNewWork();
+    } catch (error) {
+      storeError(
+        'PRIVILEGED_STATE_CAPACITY_EXHAUSTED',
+        'Privileged durable-state reserve is exhausted; new actions are refused.',
+        { cause: error?.code || 'state_admission_failed' }
+      );
+    }
   }
 
   _now() {
@@ -366,6 +393,7 @@ class PrivilegedActionStore {
           reason: control.reason,
         });
       }
+      this._assertNewWorkAdmission();
       const id = makeId('pact');
       this.db.prepare(`
         INSERT INTO privileged_actions (

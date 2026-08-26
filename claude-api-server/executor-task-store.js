@@ -4,6 +4,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const Database = require('better-sqlite3');
+const { inspectExactStateFile } = require('../lib/durable-state-storage-boundary');
 
 const TASK_STATES = Object.freeze([
   'queued',
@@ -139,16 +140,33 @@ class ExecutorTaskStore {
     now = () => new Date(),
     defaultLeaseMs = 30000,
     busyTimeoutMs = 5000,
+    expectedUid = typeof process.geteuid === 'function' ? process.geteuid() : 0,
+    expectedGid = typeof process.getegid === 'function' ? process.getegid() : 0,
+    strictOwnership = false,
+    assertStorageOpen = () => {},
+    admitNewWork = () => {},
   } = {}) {
     this.dbPath = dbPath;
     this.now = now;
     this.defaultLeaseMs = normalizeLeaseMs(defaultLeaseMs, 30000);
     this.busyTimeoutMs = Math.max(1, Number.parseInt(busyTimeoutMs, 10) || 5000);
+    if (typeof assertStorageOpen !== 'function' || typeof admitNewWork !== 'function') {
+      throw new ExecutorTaskStoreError(
+        'EXECUTOR_STATE_BOUNDARY_INVALID',
+        'Executor durable-state admission callbacks are invalid'
+      );
+    }
+    this.admitNewWork = admitNewWork;
+    assertStorageOpen();
 
     if (dbPath !== ':memory:') {
       const stateDirectory = path.dirname(dbPath);
-      fs.mkdirSync(stateDirectory, { recursive: true, mode: 0o700 });
-      fs.chmodSync(stateDirectory, 0o700);
+      if (strictOwnership) {
+        inspectExactStateFile(dbPath, { expectedUid, expectedGid, allowAbsent: false });
+      } else {
+        fs.mkdirSync(stateDirectory, { recursive: true, mode: 0o700 });
+        fs.chmodSync(stateDirectory, 0o700);
+      }
     }
 
     this.db = new Database(dbPath);
@@ -160,7 +178,25 @@ class ExecutorTaskStore {
     }
 
     this._migrate();
-    if (dbPath !== ':memory:') fs.chmodSync(dbPath, 0o600);
+    if (dbPath !== ':memory:') {
+      if (strictOwnership) {
+        inspectExactStateFile(dbPath, { expectedUid, expectedGid, allowAbsent: false });
+      } else {
+        fs.chmodSync(dbPath, 0o600);
+      }
+    }
+  }
+
+  _assertNewWorkAdmission() {
+    try {
+      this.admitNewWork();
+    } catch (error) {
+      throw new ExecutorTaskStoreError(
+        'EXECUTOR_STATE_CAPACITY_EXHAUSTED',
+        'Executor durable-state reserve is exhausted; new tasks are refused',
+        { cause: error?.code || 'state_admission_failed' }
+      );
+    }
   }
 
   _timestamp() {
@@ -479,6 +515,8 @@ class ExecutorTaskStore {
           { reason: control.panic_reason }
         );
       }
+
+      this._assertNewWorkAdmission();
 
       const id = makeId('xtask');
       const initialState = cancellationReservation ? 'canceled' : 'queued';
