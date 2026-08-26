@@ -16,6 +16,10 @@ systemctl_bin=/usr/bin/systemctl
 mountpoint_bin=/usr/bin/mountpoint
 device_map=
 capture_root=
+runtime_fingerprints_ready=0
+release_runtime_fingerprint=
+installed_runtime_a_fingerprint=
+installed_runtime_b_fingerprint=
 
 release_link=/opt/teleagent/current
 release_parent=/opt/teleagent/releases
@@ -424,23 +428,87 @@ assert_state_mounts() {
   done
 }
 
-assert_installed_runtimes() {
-  local release_node="$gate_release_root/$release_node_relative" target before after
-  for target in "$installed_node_a" "$installed_node_b"; do
-    target=$(host_path "$target")
-    [ -f "$target" ] && [ ! -L "$target" ] || fail 'an installed Node target is absent or unsafe'
-    [ "$(/usr/bin/readlink -f -- "$target")" = "$target" ] ||
-      fail 'an installed Node target resolves through a link'
-    case "$(/usr/bin/stat -c '%u:%g:%a:%h' -- "$target")" in
-      "${expected_uid}:${expected_gid}:555:1"|"${expected_uid}:${expected_gid}:755:1") ;;
-      *) fail 'an installed Node target has unsafe metadata' ;;
-    esac
-    before=$(/usr/bin/stat -c '%d:%i:%s:%u:%g:%a:%h:%Y:%Z' -- "$target")
+runtime_fingerprint() {
+  /usr/bin/stat -c '%d|%i|%s|%u|%g|%a|%h|%y|%z' -- "$1"
+}
+
+assert_runtime_path_safe() {
+  local target=$1 kind=$2 metadata
+  [ -f "$target" ] && [ ! -L "$target" ] || fail "$kind Node runtime is absent or unsafe"
+  [ "$(/usr/bin/readlink -f -- "$target")" = "$target" ] ||
+    fail "$kind Node runtime resolves through a link"
+  metadata=$(/usr/bin/stat -c '%u:%g:%a:%h' -- "$target")
+  case "$kind:$metadata" in
+    release:"${expected_uid}:${expected_gid}:555:1"|\
+    installed:"${expected_uid}:${expected_gid}:555:1"|\
+    installed:"${expected_uid}:${expected_gid}:755:1") ;;
+    *) fail "$kind Node runtime has unsafe metadata" ;;
+  esac
+}
+
+assert_installed_runtimes_full() {
+  local capture=${1:-0}
+  local release_node="$gate_release_root/$release_node_relative"
+  local release_before release_after release_final absolute target before after
+  local runtime_a_after= runtime_b_after= runtime_a_final runtime_b_final
+  assert_runtime_path_safe "$release_node" release
+  release_before=$(runtime_fingerprint "$release_node")
+  for absolute in "$installed_node_a" "$installed_node_b"; do
+    target=$(host_path "$absolute")
+    assert_runtime_path_safe "$target" installed
+    before=$(runtime_fingerprint "$target")
     /usr/bin/cmp -s -- "$release_node" "$target" ||
       fail 'an installed Node target differs from the gated release runtime'
-    after=$(/usr/bin/stat -c '%d:%i:%s:%u:%g:%a:%h:%Y:%Z' -- "$target")
+    after=$(runtime_fingerprint "$target")
     [ "$before" = "$after" ] || fail 'an installed Node target changed while it was checked'
+    case "$absolute" in
+      "$installed_node_a") runtime_a_after=$after ;;
+      "$installed_node_b") runtime_b_after=$after ;;
+      *) fail 'an internal installed runtime target is unreviewed' ;;
+    esac
   done
+  release_after=$(runtime_fingerprint "$release_node")
+  assert_runtime_path_safe "$release_node" release
+  assert_runtime_path_safe "$(host_path "$installed_node_a")" installed
+  assert_runtime_path_safe "$(host_path "$installed_node_b")" installed
+  release_final=$(runtime_fingerprint "$release_node")
+  runtime_a_final=$(runtime_fingerprint "$(host_path "$installed_node_a")")
+  runtime_b_final=$(runtime_fingerprint "$(host_path "$installed_node_b")")
+  [ "$release_before" = "$release_after" ] && [ "$release_after" = "$release_final" ] ||
+    fail 'the gated release Node runtime changed while it was checked'
+  [ "$runtime_a_final" = "$runtime_a_after" ] &&
+    [ "$runtime_b_final" = "$runtime_b_after" ] ||
+    fail 'an installed Node target changed across the full comparison'
+  if [ "$capture" -eq 1 ]; then
+    release_runtime_fingerprint=$release_final
+    installed_runtime_a_fingerprint=$runtime_a_final
+    installed_runtime_b_fingerprint=$runtime_b_final
+  fi
+}
+
+capture_installed_runtime_fingerprints() {
+  assert_installed_runtimes_full 1
+  runtime_fingerprints_ready=1
+}
+
+assert_runtime_fingerprints_unchanged() {
+  [ "$runtime_fingerprints_ready" -eq 1 ] || fail 'runtime fingerprints were not initialized'
+  local release_node="$gate_release_root/$release_node_relative"
+  local target_a target_b
+  target_a=$(host_path "$installed_node_a")
+  target_b=$(host_path "$installed_node_b")
+  assert_runtime_path_safe "$release_node" release
+  assert_runtime_path_safe "$target_a" installed
+  assert_runtime_path_safe "$target_b" installed
+  [ "$(runtime_fingerprint "$release_node")" = "$release_runtime_fingerprint" ] &&
+    [ "$(runtime_fingerprint "$target_a")" = "$installed_runtime_a_fingerprint" ] &&
+    [ "$(runtime_fingerprint "$target_b")" = "$installed_runtime_b_fingerprint" ] ||
+    fail 'a Node runtime fingerprint changed during the disabled handoff'
+}
+
+assert_installed_runtimes_final() {
+  assert_runtime_fingerprints_unchanged
+  assert_installed_runtimes_full
 }
 
 assert_sentinels_absent() {
@@ -480,14 +548,14 @@ assert_unit_dormant() {
   local key value
   expected_fragment=$(unit_fragment_path "$unit")
   output=$(/usr/bin/mktemp "$capture_root/systemctl-show.XXXXXX")
-  /usr/bin/timeout --kill-after=5s 120s \
+  /usr/bin/timeout --signal=TERM --kill-after=1s 10s \
     /usr/bin/env -i HOME=/var/empty PATH=/usr/sbin:/usr/bin:/sbin:/bin \
       LANG=C.UTF-8 LC_ALL=C.UTF-8 \
       "$systemctl_bin" show "$unit" \
       --property=LoadState,ActiveState,SubState,UnitFileState,FragmentPath,NeedDaemonReload,DropInPaths \
-      >"$output" 2>&1 || status=$?
+      2>&1 | /usr/bin/head -c 4097 >"$output" || status=$?
   size=$(/usr/bin/stat -c '%s' -- "$output")
-  [ "$size" -le 131072 ] || fail 'a unit metadata query exceeded its output limit'
+  [ "$size" -le 4096 ] || fail 'a unit metadata query exceeded its output limit'
   [ "$status" -eq 0 ] || fail 'a unit metadata query failed'
   while IFS='=' read -r key value; do
     [ -n "$key" ] || fail 'a unit metadata query returned a malformed record'
@@ -521,7 +589,7 @@ assert_dormant_units() {
 }
 
 preinstalled_checks() {
-  assert_installed_runtimes
+  capture_installed_runtime_fingerprints
   assert_state_mounts
   assert_sentinels_absent
   assert_sip_fence
@@ -530,7 +598,7 @@ preinstalled_checks() {
 mutation_guard() {
   verify_gate_and_release
   assert_release_sources
-  assert_installed_runtimes
+  assert_runtime_fingerprints_unchanged
   assert_state_mounts
   assert_sentinels_absent
   assert_sip_fence
@@ -635,7 +703,7 @@ check_components() {
 final_checks() {
   assert_sentinels_absent
   assert_dormant_units
-  assert_installed_runtimes
+  assert_installed_runtimes_final
   assert_state_mounts
   assert_sip_fence
   verify_gate_and_release

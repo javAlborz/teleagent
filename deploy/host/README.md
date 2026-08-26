@@ -19,7 +19,12 @@ release Node only for the voice and realtime-SIP JavaScript verifiers, and
 runs the worker, controller, realtime-SIP installer, and preinstalled SIP
 fence source checks through fixed Bash. Installation requires both installed
 Node paths to be root-owned, single-link, canonical, executable, and byte-equal
-to the gated release runtime.
+to the gated release runtime. The full byte comparison runs once at entry and
+once at final handoff. After the entry comparison, the script captures each
+release/installed runtime's exact device, inode, size, owner, group, mode, link
+count, nanosecond mtime, and nanosecond ctime; intermediate mutation guards use
+those cheap fingerprints to reject an in-place write or replacement without
+repeatedly reading the large binaries.
 
 Before installation, between mutations, and at final handoff the script
 requires all activation sentinels to be absent, the preinstalled SIP fence to
@@ -45,6 +50,9 @@ run with an empty environment, `HOME=/var/empty`, bounded time, and bounded
 captured output. Final checks require every dormant unit to be exactly loaded,
 static, inactive, and dead, with its exact `/etc/systemd/system` fragment, no
 drop-ins, and no pending daemon reload.
+Each combined manager query has a ten-second deadline and a 4,096-byte output
+ceiling. The longer 120-second/128-KiB bounds remain reserved for real component
+installation and verification children.
 
 Run the isolated non-root regression suite only through the shared safety
 wrapper:

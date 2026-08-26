@@ -38,7 +38,9 @@ function installedProgram(log, label, token) {
     `printf '%s\\n' ${JSON.stringify(token)}\n`;
 }
 
-function componentSource({ log, label, sourceToken, installedTarget, installedToken, templates = [] }) {
+function componentSource({
+  log, label, sourceToken, installedTarget, installedToken, templates = [], postInstall = '',
+}) {
   const installedTemplate = `${installedTarget}.fixture-template`;
   writeFile(installedTemplate, installedProgram(log, `${label}-installed`, installedToken), 0o600);
   for (const [target, contents] of templates) {
@@ -58,6 +60,7 @@ function componentSource({ log, label, sourceToken, installedTarget, installedTo
     `case "${'${1:-}'}:$#" in\n` +
     `  --source-check:1) printf '%s\\n' ${JSON.stringify(sourceToken)} ;;\n` +
     `  --install-disabled:1)\n${installLines.split('\n').map((line) => `    ${line}`).join('\n')}\n` +
+    `${postInstall.split('\n').filter(Boolean).map((line) => `    ${line}`).join('\n')}\n` +
     `    printf '%s\\n' ${JSON.stringify(installedToken.replace(/_OK$/, ''))} ;;\n` +
     `  *) exit 77 ;;\n` +
     'esac\n';
@@ -99,6 +102,20 @@ function createFixture() {
   const controllerInstalled = installed('/usr/local/libexec/teleagent-control-plane-install');
   const sipInstalled = installed('/usr/local/libexec/teleagent-realtime-sip-gateway-install');
   const voiceInstalled = installed('/usr/local/libexec/teleagent-voice-stack-install');
+  const installedRuntime = installed('/usr/local/libexec/teleagent-node');
+  const runtimeInPlaceMarker = path.join(root, 'test-assets/runtime-in-place-tamper');
+  const runtimeReplaceMarker = path.join(root, 'test-assets/runtime-replacement-tamper');
+  const runtimeTamper = [
+    `if [ -f ${JSON.stringify(runtimeInPlaceMarker)} ]; then`,
+    `  /usr/bin/chmod 0755 -- ${JSON.stringify(installedRuntime)}`,
+    `  /usr/bin/printf X | /usr/bin/dd of=${JSON.stringify(installedRuntime)} bs=1 seek=1 count=1 conv=notrunc status=none`,
+    `  /usr/bin/chmod 0555 -- ${JSON.stringify(installedRuntime)}`,
+    'fi',
+    `if [ -f ${JSON.stringify(runtimeReplaceMarker)} ]; then`,
+    `  /usr/bin/cp --preserve=mode,timestamps -- ${JSON.stringify(installedRuntime)} ${JSON.stringify(`${installedRuntime}.replacement`)}`,
+    `  /usr/bin/mv -T -- ${JSON.stringify(`${installedRuntime}.replacement`)} ${JSON.stringify(installedRuntime)}`,
+    'fi',
+  ].join('\n');
 
   const providerPlaceholder = '# fixture provider script: interpreted by the fixed fixture Node\n';
   const sources = new Map([
@@ -108,6 +125,7 @@ function createFixture() {
       sourceToken: 'WORKER_SESSION_SOURCE_OK',
       installedTarget: workerInstalled,
       installedToken: 'WORKER_SESSION_INSTALLED_DISABLED_OK',
+      postInstall: runtimeTamper,
       templates: [
         [providerInstaller, providerPlaceholder],
         [providerChecker, providerPlaceholder],
@@ -191,6 +209,8 @@ function createFixture() {
   const transientMarker = path.join(root, 'test-assets/transient-unit-present');
   const fragmentMarker = path.join(root, 'test-assets/fragment-drift');
   const daemonReloadMarker = path.join(root, 'test-assets/daemon-reload-needed');
+  const systemctlOversizeMarker = path.join(root, 'test-assets/systemctl-oversized');
+  const systemctlTimeoutMarker = path.join(root, 'test-assets/systemctl-timeout');
   const dropInPath = path.join(
     root,
     'etc/systemd/system/teleagent-worker-session.service.d/override.conf',
@@ -207,6 +227,8 @@ function createFixture() {
     '[ "${1:-}" = show ] || exit 77\n' +
     '[ "$#" -eq 3 ] || exit 77\n' +
     '[ "$3" = --property=LoadState,ActiveState,SubState,UnitFileState,FragmentPath,NeedDaemonReload,DropInPaths ] || exit 77\n' +
+    `if [ -f ${JSON.stringify(systemctlTimeoutMarker)} ]; then while /usr/bin/sleep 1; do :; done; fi\n` +
+    `if [ -f ${JSON.stringify(systemctlOversizeMarker)} ]; then /usr/bin/printf '%05000d' 0; exit 0; fi\n` +
     'unit=$2\n' +
     `fragment=${JSON.stringify(path.join(root, 'etc/systemd/system'))}/$unit\n` +
     'case "$unit" in\n' +
@@ -273,7 +295,11 @@ function createFixture() {
     transientMarker,
     fragmentMarker,
     daemonReloadMarker,
+    systemctlOversizeMarker,
+    systemctlTimeoutMarker,
     dropInPath,
+    runtimeInPlaceMarker,
+    runtimeReplaceMarker,
     installRuntime() {
       for (const target of [
         installed('/opt/teleagent/node/bin/node'),
@@ -501,6 +527,20 @@ test('runtime and installed-component tampering fail closed', () => {
     runtime.cleanup();
   }
 
+  for (const markerName of ['runtimeInPlaceMarker', 'runtimeReplaceMarker']) {
+    const duringHandoff = createFixture();
+    try {
+      duringHandoff.installRuntime();
+      writeFile(duringHandoff[markerName], '', 0o600);
+      assertRefusal(duringHandoff.run('--install-disabled'));
+      const lines = duringHandoff.lines();
+      assert.equal(lines.some((line) => line === 'worker-source\t--install-disabled'), true);
+      assert.equal(lines.some((line) => /teleagent-provider-cli-install/u.test(line)), false);
+    } finally {
+      duringHandoff.cleanup();
+    }
+  }
+
   const component = createFixture();
   try {
     component.installRuntime();
@@ -511,6 +551,17 @@ test('runtime and installed-component tampering fail closed', () => {
   } finally {
     component.cleanup();
   }
+});
+
+test('runtime bytes are compared only at entry and final with exact intermediate fingerprints', () => {
+  const installer = fs.readFileSync(SOURCE_INSTALLER, 'utf8');
+  assert.equal((installer.match(/^  assert_installed_runtimes_full(?: 1)?$/gmu) ?? []).length, 2);
+  assert.equal((installer.match(/\/usr\/bin\/cmp -s -- "\$release_node" "\$target"/gu) ?? [])
+    .length, 1);
+  assert.match(installer, /'%d\|%i\|%s\|%u\|%g\|%a\|%h\|%y\|%z'/u);
+  const guard = /mutation_guard\(\) \{([\s\S]*?)\n\}/u.exec(installer)?.[1] ?? '';
+  assert.match(guard, /assert_runtime_fingerprints_unchanged/u);
+  assert.doesNotMatch(guard, /assert_installed_runtimes_full/u);
 });
 
 test('an activation sentinel refuses both install and check', () => {
@@ -555,6 +606,27 @@ test('drop-in, fragment, and pending daemon reload drift refuse final dormant tr
         line.startsWith('systemctl\tshow\tteleagent-worker-session.service\t' +
           '--property=LoadState,ActiveState,SubState,UnitFileState,FragmentPath,' +
           'NeedDaemonReload,DropInPaths')), true);
+    } finally {
+      fixture.cleanup();
+    }
+  }
+});
+
+test('dormant systemd truth is time- and output-bounded', () => {
+  for (const [markerName, message] of [
+    ['systemctlOversizeMarker', /exceeded its output limit/u],
+    ['systemctlTimeoutMarker', /metadata query failed/u],
+  ]) {
+    const fixture = createFixture();
+    try {
+      fixture.installRuntime();
+      fixture.installComponentFixtures();
+      writeFile(fixture[markerName], '', 0o600);
+      const started = Date.now();
+      const result = fixture.run('--check');
+      assertRefusal(result);
+      assert.match(result.stderr, message);
+      assert.ok(Date.now() - started < 15_000, markerName);
     } finally {
       fixture.cleanup();
     }
