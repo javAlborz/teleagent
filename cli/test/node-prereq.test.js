@@ -47,8 +47,11 @@ test('every deployed package lock and the voice image share the Node 24 contract
   }
 
   const dockerfile = fs.readFileSync(path.join(repoRoot, 'voice-app/Dockerfile'), 'utf8');
-  const expectedBase = 'node:24-slim@sha256:a9f5f7c91a432850b2a8a7797adf5eadb6c733ceed61167806cee7ea7fbc29df';
+  const expectedBase = 'node:24-alpine@sha256:2a49bdf71e9fd965a58c1703fd9ddd205b34e5782b692a72dd1d248abb0beb43';
   assert.equal(dockerfile.match(/^FROM /gm)?.length, 2);
   assert.equal(dockerfile.match(new RegExp(expectedBase, 'g'))?.length, 2);
   assert.doesNotMatch(dockerfile, /FROM\s+node:(?:18|20|22|23)(?:\D|$)/);
+  assert.match(dockerfile, /libcrypto3=3\.5\.8-r0/);
+  assert.match(dockerfile, /libssl3=3\.5\.8-r0/);
+  assert.match(dockerfile, /rm -rf \/usr\/local\/lib\/node_modules\/npm/);
 });
