@@ -23,8 +23,15 @@ changes:
 ```
 
 An operator may use `--install` only while `teleagent-voice-stack.service` is
-stopped. `--check` verifies source/install drift, monitor health, and the exact
-kernel table. `--remove` additionally requires Docker stopped; it is the only
-path that deletes the retained rules. The optional Hermes-wide Docker
-dependency drop-in remains infrastructure policy and is not installed by this
-application bundle.
+stopped. Installation publishes a root-only, fsync-backed transaction marker
+before its first target mutation. Any ordinary failure or termination rolls
+back to the prior inactive and enabled/disabled state; after an untrappable
+`SIGKILL` or power loss, the next `--install` performs the same exact recovery
+before retrying. `--check` refuses an unresolved marker rather than claiming a
+partial activation is healthy.
+
+`--check` verifies source/install drift, monitor health, and the exact kernel
+table. `--remove` additionally requires Docker stopped; it is the only path
+that deletes the retained rules. The optional Hermes-wide Docker dependency
+drop-in remains infrastructure policy and is not installed by this application
+bundle.

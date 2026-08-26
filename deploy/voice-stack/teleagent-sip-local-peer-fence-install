@@ -13,25 +13,156 @@ target_helper=/usr/local/libexec/teleagent-sip-local-peer-fence
 target_unit=/etc/systemd/system/teleagent-sip-local-peer-fence.service
 unit=teleagent-sip-local-peer-fence.service
 runtime_dir=/run/teleagent-sip-local-peer-fence
+state_parent=/var/lib
+state_dir=${state_parent}/teleagent-sip-local-peer-fence-install
+transaction_marker=${state_dir}/install.transaction
+transaction_new=${state_dir}/install.transaction.new
+operation_lock=${state_dir}/operation.lock
+helper_pending=/usr/local/libexec/.teleagent-sip-local-peer-fence.installing
+unit_pending=/etc/systemd/system/.teleagent-sip-local-peer-fence.service.installing
+systemctl_bin=/usr/bin/systemctl
+flock_bin=/usr/bin/flock
+expected_uid=0
+expected_gid=0
+test_only=0
 
 fail() {
   printf 'Teleagent SIP fence install: %s\n' "$*" >&2
   exit 1
 }
 
+# The test lane is confined to one caller-owned /tmp tree and substitutes only
+# filesystem roots plus systemctl. It cannot run as root and therefore cannot
+# mutate the host service manager, firewall, /etc, /run, or /var/lib.
+if [[ "${TELEAGENT_SIP_FENCE_INSTALL_TEST_ONLY:-}" == 1 ]]; then
+  ((EUID != 0)) || fail 'the installer test lane is forbidden for root'
+  test_root=${TELEAGENT_SIP_FENCE_INSTALL_TEST_ROOT:-}
+  [[ "${test_root}" =~ ^/tmp/teleagent-sip-fence-install-test-[A-Za-z0-9._-]+$ ]] ||
+    fail 'the installer test root is outside its fixed namespace'
+  [[ -d "${test_root}" && ! -L "${test_root}" ]] || fail 'the installer test root is unsafe'
+  [[ "$(readlink -e -- "${test_root}")" == "${test_root}" ]] || fail 'the installer test root is not canonical'
+  [[ "$(stat -c '%u:%a' -- "${test_root}")" == "${EUID}:700" ]] ||
+    fail 'the installer test root metadata is unsafe'
+
+  expected_uid=${EUID}
+  expected_gid=$(id -g)
+  app_root=${test_root}/opt/teleagent/current
+  source_helper=${app_root}/deploy/voice-stack/teleagent-sip-local-peer-fence
+  source_unit=${app_root}/deploy/voice-stack/teleagent-sip-local-peer-fence.service
+  target_helper=${test_root}/usr/local/libexec/teleagent-sip-local-peer-fence
+  target_unit=${test_root}/etc/systemd/system/teleagent-sip-local-peer-fence.service
+  runtime_dir=${test_root}/run/teleagent-sip-local-peer-fence
+  state_parent=${test_root}/var/lib
+  state_dir=${state_parent}/teleagent-sip-local-peer-fence-install
+  transaction_marker=${state_dir}/install.transaction
+  transaction_new=${state_dir}/install.transaction.new
+  operation_lock=${state_dir}/operation.lock
+  helper_pending=${test_root}/usr/local/libexec/.teleagent-sip-local-peer-fence.installing
+  unit_pending=${test_root}/etc/systemd/system/.teleagent-sip-local-peer-fence.service.installing
+  systemctl_bin=${test_root}/bin/systemctl
+  [[ -f "${systemctl_bin}" && ! -L "${systemctl_bin}" && -x "${systemctl_bin}" ]] ||
+    fail 'the fake systemctl dependency is unsafe'
+  [[ "$(stat -c '%u' -- "${systemctl_bin}")" == "${EUID}" ]] ||
+    fail 'the fake systemctl dependency owner is unsafe'
+  fake_systemctl_permissions=$(stat -c '%a' -- "${systemctl_bin}") ||
+    fail 'could not inspect the fake systemctl dependency permissions'
+  (((8#${fake_systemctl_permissions} & 8#022) == 0)) ||
+    fail 'the fake systemctl dependency is writable by another identity'
+  test_only=1
+elif [[ -n "${TELEAGENT_SIP_FENCE_INSTALL_TEST_ONLY:-}" ||
+        -n "${TELEAGENT_SIP_FENCE_INSTALL_TEST_ROOT:-}" ]]; then
+  fail 'installer test overrides require the explicit non-root test lane'
+fi
+
+validate_owned_file() {
+  local filename="$1" mode="$2" description="$3"
+  [[ -f "${filename}" && ! -L "${filename}" ]] || fail "${description} is missing or unsafe"
+  [[ "$(stat -c '%u:%g:%a' -- "${filename}")" == "${expected_uid}:${expected_gid}:${mode}" ]] ||
+    fail "${description} metadata is unsafe"
+  [[ "$(stat -c '%h' -- "${filename}")" == 1 ]] || fail "${description} has an unsafe link count"
+}
+
+require_not_untrusted_writable() {
+  local filename="$1" description="$2" permissions
+  permissions=$(stat -c '%a' -- "${filename}") || fail "could not inspect ${description} permissions"
+  (((8#${permissions} & 8#022) == 0)) || fail "${description} is writable by another identity"
+}
+
 validate_source() {
+  local filename
   for filename in "${source_helper}" "${source_unit}"; do
     [[ -f "${filename}" && ! -L "${filename}" ]] || fail 'a source artifact is missing or unsafe'
-    [[ "$(stat -c '%U:%G' "${filename}")" == root:root ]] || fail 'source ownership is unsafe'
-    ! find "${filename}" -maxdepth 0 -perm /022 | grep -q . || fail 'source is writable by an untrusted identity'
+    [[ "$(stat -c '%u:%g' -- "${filename}")" == "${expected_uid}:${expected_gid}" ]] ||
+      fail 'source ownership is unsafe'
+    require_not_untrusted_writable "${filename}" 'source artifact'
   done
   bash -n "${source_helper}"
   grep -Fqx 'Before=teleagent-voice-stack.service' "${source_unit}" || fail 'unit ordering drifted'
   grep -Fqx 'CapabilityBoundingSet=CAP_NET_ADMIN' "${source_unit}" || fail 'unit capability boundary drifted'
 }
 
-require_root() {
-  [[ "$(id -u)" == 0 ]] || fail 'live operations require root'
+require_operator_identity() {
+  ((test_only == 1 || EUID == 0)) || fail 'live operations require root'
+}
+
+install_directory() {
+  local mode="$1" directory="$2"
+  if ((test_only == 1)); then
+    install -d -m "${mode}" -- "${directory}"
+  else
+    install -d -o root -g root -m "${mode}" -- "${directory}"
+  fi
+}
+
+install_file() {
+  local mode="$1" source="$2" target="$3"
+  if ((test_only == 1)); then
+    install -m "${mode}" -- "${source}" "${target}"
+  else
+    install -o root -g root -m "${mode}" -- "${source}" "${target}"
+  fi
+}
+
+sync_path() {
+  /usr/bin/sync -f -- "$1"
+}
+
+require_safe_directory() {
+  local directory="$1" mode="$2" description="$3"
+  [[ -d "${directory}" && ! -L "${directory}" ]] || fail "${description} is unsafe"
+  [[ "$(readlink -e -- "${directory}")" == "${directory}" ]] || fail "${description} is not canonical"
+  [[ "$(stat -c '%u:%g:%a' -- "${directory}")" == "${expected_uid}:${expected_gid}:${mode}" ]] ||
+    fail "${description} metadata is unsafe"
+}
+
+require_trusted_parent() {
+  local directory="$1" description="$2"
+  [[ -d "${directory}" && ! -L "${directory}" ]] || fail "${description} is unsafe"
+  [[ "$(readlink -e -- "${directory}")" == "${directory}" ]] || fail "${description} is not canonical"
+  [[ "$(stat -c '%u:%g' -- "${directory}")" == "${expected_uid}:${expected_gid}" ]] ||
+    fail "${description} ownership is unsafe"
+  require_not_untrusted_writable "${directory}" "${description}"
+}
+
+prepare_state_lock() {
+  require_trusted_parent "${state_parent}" 'installer state parent'
+  if [[ -e "${state_dir}" || -L "${state_dir}" ]]; then
+    require_safe_directory "${state_dir}" 700 'installer state directory'
+  else
+    install_directory 0700 "${state_dir}"
+    sync_path "${state_parent}"
+    require_safe_directory "${state_dir}" 700 'installer state directory'
+  fi
+
+  if [[ -e "${operation_lock}" || -L "${operation_lock}" ]]; then
+    validate_owned_file "${operation_lock}" 600 'installer operation lock'
+  else
+    install_file 0600 /dev/null "${operation_lock}"
+    sync_path "${operation_lock}"
+    sync_path "${state_dir}"
+  fi
+  exec 8<>"${operation_lock}"
+  "${flock_bin}" --exclusive --timeout 10 8 || fail 'timed out acquiring the installer lock'
 }
 
 require_known_or_absent() {
@@ -42,69 +173,305 @@ require_known_or_absent() {
   fi
 }
 
+sha256_file() {
+  /usr/bin/sha256sum -- "$1" | /usr/bin/cut -d ' ' -f 1
+}
+
+unit_active_state() {
+  local service="$1" output status=0
+  output=$("${systemctl_bin}" is-active "${service}" 2>/dev/null) || status=$?
+  case "${status}:${output}" in
+    0:active) printf '%s\n' active ;;
+    3:inactive|4:inactive) printf '%s\n' inactive ;;
+    3:failed) printf '%s\n' failed ;;
+    *) return 1 ;;
+  esac
+}
+
+unit_enabled_state() {
+  local service="$1" output status=0
+  output=$("${systemctl_bin}" is-enabled "${service}" 2>/dev/null) || status=$?
+  case "${status}:${output}" in
+    0:enabled) printf '%s\n' enabled ;;
+    1:disabled|4:not-found) printf '%s\n' disabled ;;
+    *) return 1 ;;
+  esac
+}
+
+tx_phase=
+tx_helper_existed=
+tx_unit_existed=
+tx_unit_was_enabled=
+tx_libexec_existed=
+tx_helper_sha256=
+tx_unit_sha256=
+
+write_transaction_marker() {
+  [[ ! -e "${transaction_new}" && ! -L "${transaction_new}" ]] ||
+    fail 'a stale transaction staging file requires operator review'
+  install_file 0600 /dev/null "${transaction_new}"
+  printf '%s\n' \
+    'version=1' \
+    "phase=${tx_phase}" \
+    "helper_existed=${tx_helper_existed}" \
+    "unit_existed=${tx_unit_existed}" \
+    "unit_was_enabled=${tx_unit_was_enabled}" \
+    "libexec_existed=${tx_libexec_existed}" \
+    "helper_sha256=${tx_helper_sha256}" \
+    "unit_sha256=${tx_unit_sha256}" >"${transaction_new}"
+  sync_path "${transaction_new}"
+  mv -T -- "${transaction_new}" "${transaction_marker}"
+  sync_path "${state_dir}"
+}
+
+parse_transaction_marker() {
+  local -a lines=()
+  local size
+  [[ -f "${transaction_marker}" && ! -L "${transaction_marker}" ]] || {
+    printf '%s\n' 'Teleagent SIP fence install: transaction marker is unsafe' >&2
+    return 1
+  }
+  [[ "$(stat -c '%u:%g:%a' -- "${transaction_marker}")" == "${expected_uid}:${expected_gid}:600" ]] || {
+    printf '%s\n' 'Teleagent SIP fence install: transaction marker metadata is unsafe' >&2
+    return 1
+  }
+  [[ "$(stat -c '%h' -- "${transaction_marker}")" == 1 ]] || {
+    printf '%s\n' 'Teleagent SIP fence install: transaction marker link count is unsafe' >&2
+    return 1
+  }
+  size=$(stat -c '%s' -- "${transaction_marker}")
+  ((size > 0 && size <= 512)) || {
+    printf '%s\n' 'Teleagent SIP fence install: transaction marker size is unsafe' >&2
+    return 1
+  }
+  mapfile -t lines <"${transaction_marker}"
+  ((${#lines[@]} == 8)) || {
+    printf '%s\n' 'Teleagent SIP fence install: transaction marker shape is invalid' >&2
+    return 1
+  }
+  [[ "${lines[0]}" == version=1 ]] || return 1
+  [[ "${lines[1]}" =~ ^phase=(prepared|files|activation)$ ]] || return 1
+  [[ "${lines[2]}" =~ ^helper_existed=([01])$ ]] || return 1
+  tx_helper_existed=${BASH_REMATCH[1]}
+  [[ "${lines[3]}" =~ ^unit_existed=([01])$ ]] || return 1
+  tx_unit_existed=${BASH_REMATCH[1]}
+  [[ "${lines[4]}" =~ ^unit_was_enabled=([01])$ ]] || return 1
+  tx_unit_was_enabled=${BASH_REMATCH[1]}
+  [[ "${lines[5]}" =~ ^libexec_existed=([01])$ ]] || return 1
+  tx_libexec_existed=${BASH_REMATCH[1]}
+  [[ "${lines[6]}" =~ ^helper_sha256=([0-9a-f]{64})$ ]] || return 1
+  tx_helper_sha256=${BASH_REMATCH[1]}
+  [[ "${lines[7]}" =~ ^unit_sha256=([0-9a-f]{64})$ ]] || return 1
+  tx_unit_sha256=${BASH_REMATCH[1]}
+  tx_phase=${lines[1]#phase=}
+}
+
+remove_if_owned_transaction_file() {
+  local filename="$1"
+  if [[ -e "${filename}" || -L "${filename}" ]]; then
+    [[ -f "${filename}" && ! -L "${filename}" ]] || return 1
+    [[ "$(stat -c '%u:%g' -- "${filename}")" == "${expected_uid}:${expected_gid}" ]] || return 1
+    [[ "$(stat -c '%h' -- "${filename}")" == 1 ]] || return 1
+    rm -f -- "${filename}"
+    sync_path "$(dirname -- "${filename}")"
+  fi
+}
+
+remove_exact_target_if_new() {
+  local filename="$1" expected_sha="$2" existed="$3"
+  if ((existed == 1)); then
+    [[ -f "${filename}" && ! -L "${filename}" ]] || return 1
+    [[ "$(sha256_file "${filename}")" == "${expected_sha}" ]] || return 1
+    return 0
+  fi
+  if [[ -e "${filename}" || -L "${filename}" ]]; then
+    [[ -f "${filename}" && ! -L "${filename}" ]] || return 1
+    [[ "$(sha256_file "${filename}")" == "${expected_sha}" ]] || return 1
+    rm -f -- "${filename}" || return 1
+    sync_path "$(dirname -- "${filename}")" || return 1
+  fi
+}
+
+ensure_runtime_dir_for_rollback() {
+  local parent
+  parent=$(dirname -- "${runtime_dir}")
+  require_trusted_parent "${parent}" 'SIP fence runtime parent'
+  if [[ -e "${runtime_dir}" || -L "${runtime_dir}" ]]; then
+    require_safe_directory "${runtime_dir}" 700 'SIP fence runtime directory'
+  else
+    install_directory 0700 "${runtime_dir}"
+    sync_path "${parent}"
+  fi
+}
+
+rollback_transaction() {
+  local active_state enabled_state rollback_failed=0
+  parse_transaction_marker || return 1
+
+  # A command error is not trusted as proof of rollback. Verify the final
+  # service state independently below.
+  "${systemctl_bin}" disable --now "${unit}" >/dev/null 2>&1 || true
+
+  if [[ "${tx_phase}" == activation ]]; then
+    if [[ -f "${target_helper}" && ! -L "${target_helper}" &&
+          "$(sha256_file "${target_helper}")" == "${tx_helper_sha256}" ]]; then
+      ensure_runtime_dir_for_rollback || rollback_failed=1
+      if ((rollback_failed == 0)); then
+        "${target_helper}" remove >/dev/null 2>&1 || rollback_failed=1
+      fi
+    else
+      rollback_failed=1
+    fi
+  fi
+
+  remove_if_owned_transaction_file "${helper_pending}" || rollback_failed=1
+  remove_if_owned_transaction_file "${unit_pending}" || rollback_failed=1
+  remove_if_owned_transaction_file "${transaction_new}" || rollback_failed=1
+  remove_exact_target_if_new "${target_unit}" "${tx_unit_sha256}" "${tx_unit_existed}" || rollback_failed=1
+  remove_exact_target_if_new "${target_helper}" "${tx_helper_sha256}" "${tx_helper_existed}" || rollback_failed=1
+
+  if ((tx_libexec_existed == 0)) && [[ -d "$(dirname -- "${target_helper}")" ]]; then
+    rmdir -- "$(dirname -- "${target_helper}")" >/dev/null 2>&1 || rollback_failed=1
+    sync_path "$(dirname -- "$(dirname -- "${target_helper}")")" || rollback_failed=1
+  fi
+
+  "${systemctl_bin}" daemon-reload >/dev/null 2>&1 || rollback_failed=1
+  if ((tx_unit_was_enabled == 1)); then
+    "${systemctl_bin}" enable "${unit}" >/dev/null 2>&1 || rollback_failed=1
+  else
+    "${systemctl_bin}" disable "${unit}" >/dev/null 2>&1 || true
+  fi
+  enabled_state=$(unit_enabled_state "${unit}") || rollback_failed=1
+  active_state=$(unit_active_state "${unit}") || rollback_failed=1
+  if ((tx_unit_was_enabled == 1)); then
+    [[ "${enabled_state:-}" == enabled ]] || rollback_failed=1
+  else
+    [[ "${enabled_state:-}" == disabled ]] || rollback_failed=1
+  fi
+  [[ "${active_state:-}" == inactive ]] || rollback_failed=1
+
+  ((rollback_failed == 0)) || return 1
+  rm -f -- "${transaction_marker}"
+  sync_path "${state_dir}"
+}
+
+recover_incomplete_transaction() {
+  if [[ -e "${transaction_marker}" || -L "${transaction_marker}" ]]; then
+    rollback_transaction || fail 'an incomplete activation could not be rolled back exactly'
+    printf '%s\n' 'Teleagent SIP fence install: recovered an interrupted activation; prior inactive state restored' >&2
+  elif [[ -e "${transaction_new}" || -L "${transaction_new}" ]]; then
+    # The durable marker is published before the first target mutation. A
+    # staging inode without the marker is therefore safe to discard exactly.
+    remove_if_owned_transaction_file "${transaction_new}" ||
+      fail 'a stale transaction staging file requires operator review'
+  fi
+}
+
+assert_no_incomplete_transaction() {
+  [[ ! -e "${transaction_marker}" && ! -L "${transaction_marker}" &&
+     ! -e "${transaction_new}" && ! -L "${transaction_new}" ]] ||
+    fail 'an interrupted activation must be recovered with --install before checking live state'
+}
+
 check_live() {
   cmp -s "${source_helper}" "${target_helper}" || fail 'installed helper drifted'
   cmp -s "${source_unit}" "${target_unit}" || fail 'installed unit drifted'
-  [[ "$(stat -c '%U:%G:%a' "${target_helper}")" == root:root:755 ]] || fail 'installed helper metadata drifted'
-  [[ "$(stat -c '%U:%G:%a' "${target_unit}")" == root:root:644 ]] || fail 'installed unit metadata drifted'
-  systemctl is-active --quiet "${unit}" || fail 'SIP fence monitor is not active'
+  [[ "$(stat -c '%u:%g:%a' -- "${target_helper}")" == "${expected_uid}:${expected_gid}:755" ]] ||
+    fail 'installed helper metadata drifted'
+  [[ "$(stat -c '%u:%g:%a' -- "${target_unit}")" == "${expected_uid}:${expected_gid}:644" ]] ||
+    fail 'installed unit metadata drifted'
+  "${systemctl_bin}" is-active --quiet "${unit}" || fail 'SIP fence monitor is not active'
   "${target_helper}" check
 }
 
+transaction_exit() {
+  local status=$?
+  trap - EXIT HUP INT TERM
+  if [[ -e "${transaction_marker}" || -L "${transaction_marker}" ]]; then
+    if rollback_transaction; then
+      printf '%s\n' 'Teleagent SIP fence install: activation failed; prior inactive state restored' >&2
+    else
+      printf '%s\n' 'Teleagent SIP fence install: activation failed and rollback was incomplete' >&2
+      exit 77
+    fi
+  fi
+  ((status != 0)) || status=1
+  exit "${status}"
+}
+
+atomic_install_target() {
+  local source="$1" pending="$2" target="$3" mode="$4"
+  [[ ! -e "${pending}" && ! -L "${pending}" ]] || fail 'an install staging target is unexpectedly present'
+  install_file "${mode}" "${source}" "${pending}"
+  sync_path "${pending}"
+  mv -T -- "${pending}" "${target}"
+  sync_path "$(dirname -- "${target}")"
+}
+
 install_fence() {
-  ! systemctl is-active --quiet teleagent-voice-stack.service ||
-    fail 'stop the voice stack before changing its SIP fence'
+  local enabled_state fence_state voice_state
+  voice_state=$(unit_active_state teleagent-voice-stack.service) ||
+    fail 'could not prove the voice stack state'
+  [[ "${voice_state}" == inactive ]] || fail 'stop the voice stack before changing its SIP fence'
   require_known_or_absent "${source_helper}" "${target_helper}"
   require_known_or_absent "${source_unit}" "${target_unit}"
 
   # An already-active exact installation is idempotent and needs no rewrite.
-  if systemctl is-active --quiet "${unit}"; then
+  fence_state=$(unit_active_state "${unit}") || fail 'could not prove the SIP fence state'
+  if [[ "${fence_state}" == active ]]; then
     check_live
     return
   fi
+  [[ "${fence_state}" == inactive ]] || fail 'reset the failed SIP fence unit before installation'
+  require_trusted_parent "$(dirname -- "${target_unit}")" 'systemd unit directory'
+  if [[ -e "$(dirname -- "${target_helper}")" || -L "$(dirname -- "${target_helper}")" ]]; then
+    require_trusted_parent "$(dirname -- "${target_helper}")" 'local libexec directory'
+    tx_libexec_existed=1
+  else
+    require_trusted_parent "$(dirname -- "$(dirname -- "${target_helper}")")" 'local prefix directory'
+    tx_libexec_existed=0
+  fi
+  [[ ! -e "${helper_pending}" && ! -L "${helper_pending}" &&
+     ! -e "${unit_pending}" && ! -L "${unit_pending}" ]] ||
+    fail 'an install staging target is unexpectedly present'
 
-  local helper_existed=0 unit_existed=0 unit_was_enabled=0 committed=0
-  [[ -e "${target_helper}" || -L "${target_helper}" ]] && helper_existed=1
-  [[ -e "${target_unit}" || -L "${target_unit}" ]] && unit_existed=1
-  systemctl is-enabled --quiet "${unit}" && unit_was_enabled=1
+  tx_helper_existed=0
+  tx_unit_existed=0
+  tx_unit_was_enabled=0
+  [[ -e "${target_helper}" || -L "${target_helper}" ]] && tx_helper_existed=1
+  [[ -e "${target_unit}" || -L "${target_unit}" ]] && tx_unit_existed=1
+  enabled_state=$(unit_enabled_state "${unit}") || fail 'could not prove the SIP fence enablement state'
+  [[ "${enabled_state}" == disabled ]] || tx_unit_was_enabled=1
+  tx_helper_sha256=$(sha256_file "${source_helper}")
+  tx_unit_sha256=$(sha256_file "${source_unit}")
+  tx_phase=prepared
+  write_transaction_marker
 
-  rollback_install() {
-    local status=$?
-    local rollback_failed=0
-    trap - ERR
-    set +e
-    systemctl disable --now "${unit}" >/dev/null 2>&1 || rollback_failed=1
-    if [[ -x "${target_helper}" && -d "${runtime_dir}" && ! -L "${runtime_dir}" ]]; then
-      "${target_helper}" remove >/dev/null 2>&1 || rollback_failed=1
-    fi
-    ((unit_existed == 1)) || rm -f "${target_unit}" || rollback_failed=1
-    ((helper_existed == 1)) || rm -f "${target_helper}" || rollback_failed=1
-    systemctl daemon-reload >/dev/null 2>&1 || rollback_failed=1
-    if ((unit_was_enabled == 1)); then
-      systemctl enable "${unit}" >/dev/null 2>&1 || rollback_failed=1
-    fi
-    set -e
-    if ((rollback_failed != 0)); then
-      printf 'Teleagent SIP fence install: activation failed and rollback was incomplete\n' >&2
-      exit 77
-    fi
-    if ((committed == 0)); then
-      printf 'Teleagent SIP fence install: activation failed; prior disabled state restored\n' >&2
-    fi
-    exit "${status}"
-  }
-  trap rollback_install ERR
+  trap transaction_exit EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
 
-  install -d -o root -g root -m 0755 /usr/local/libexec
-  install -o root -g root -m 0755 "${source_helper}" "${target_helper}"
-  install -o root -g root -m 0644 "${source_unit}" "${target_unit}"
-  systemctl daemon-reload
+  tx_phase=files
+  write_transaction_marker
+  if ((tx_libexec_existed == 0)); then
+    install_directory 0755 "$(dirname -- "${target_helper}")"
+    sync_path "$(dirname -- "$(dirname -- "${target_helper}")")"
+  fi
+  atomic_install_target "${source_helper}" "${helper_pending}" "${target_helper}" 0755
+  atomic_install_target "${source_unit}" "${unit_pending}" "${target_unit}" 0644
+
+  tx_phase=activation
+  write_transaction_marker
+  "${systemctl_bin}" daemon-reload
   # systemd creates the root-only RuntimeDirectory before ExecStart. The
   # service monitor performs the sole atomic initial reconciliation there.
-  systemctl enable --now "${unit}"
+  "${systemctl_bin}" enable --now "${unit}"
   check_live
-  committed=1
-  trap - ERR
+
+  rm -f -- "${transaction_marker}"
+  sync_path "${state_dir}"
+  trap - EXIT HUP INT TERM
 }
 
 validate_source
@@ -115,25 +482,34 @@ case "${1:---source-check}" in
     ;;
   --check)
     [[ $# == 1 ]] || fail 'select exactly one mode'
-    require_root
+    require_operator_identity
+    if [[ -e "${state_dir}" || -L "${state_dir}" ]]; then
+      require_safe_directory "${state_dir}" 700 'installer state directory'
+      assert_no_incomplete_transaction
+    fi
     check_live
     printf '%s\n' 'PASS Teleagent SIP fence is installed and exact'
     ;;
   --install)
     [[ $# == 1 ]] || fail 'select exactly one mode'
-    require_root
+    require_operator_identity
+    prepare_state_lock
+    recover_incomplete_transaction
     install_fence
     ;;
   --remove)
     [[ $# == 1 ]] || fail 'select exactly one mode'
-    require_root
-    ! systemctl is-active --quiet teleagent-voice-stack.service || fail 'stop the voice stack before removing its SIP fence'
-    ! systemctl is-active --quiet docker.service || fail 'stop Docker before removing its SIP fence'
+    require_operator_identity
+    prepare_state_lock
+    recover_incomplete_transaction
+    [[ "$(unit_active_state teleagent-voice-stack.service)" == inactive ]] ||
+      fail 'stop the voice stack before removing its SIP fence'
+    [[ "$(unit_active_state docker.service)" == inactive ]] || fail 'stop Docker before removing its SIP fence'
     check_live
-    systemctl disable --now "${unit}"
+    "${systemctl_bin}" disable --now "${unit}"
     "${target_helper}" remove
-    rm -f "${target_helper}" "${target_unit}"
-    systemctl daemon-reload
+    rm -f -- "${target_helper}" "${target_unit}"
+    "${systemctl_bin}" daemon-reload
     ;;
   *) fail 'usage: teleagent-sip-local-peer-fence-install {--source-check|--check|--install|--remove}' ;;
 esac

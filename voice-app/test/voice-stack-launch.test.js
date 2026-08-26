@@ -650,18 +650,22 @@ test('SIP fence bundle is app-local, atomic, and removal is Docker-quiesced', ()
   assert.match(unit, /^Before=teleagent-voice-stack\.service$/m);
   assert.match(unit, /^CapabilityBoundingSet=CAP_NET_ADMIN$/m);
   assert.match(installer,
-    /! systemctl is-active --quiet docker\.service \|\| fail 'stop Docker before removing its SIP fence'/);
+    /\[\[ "\$\(unit_active_state docker\.service\)" == inactive \]\] \|\| fail 'stop Docker before removing its SIP fence'/);
   assert.doesNotMatch(installer, /"\$\{target_helper\}" reconcile/);
   const installStart = installer.indexOf('install_fence()');
   const installBody = installer.slice(
     installStart,
     installer.indexOf('\nvalidate_source\n', installStart),
   );
-  assert.ok(installBody.indexOf('systemctl enable --now "${unit}"') <
-    installBody.lastIndexOf('  check_live\n'));
-  assert.match(installer, /trap rollback_install ERR/);
-  assert.match(installer, /systemctl disable --now "\$\{unit\}"/);
-  assert.match(installer, /prior disabled state restored/);
+  const enableIndex = installBody.indexOf('"${systemctl_bin}" enable --now "${unit}"');
+  assert.ok(enableIndex >= 0);
+  assert.ok(enableIndex < installBody.lastIndexOf('  check_live\n'));
+  assert.match(installer, /trap transaction_exit EXIT/);
+  assert.match(installer, /trap 'exit 143' TERM/);
+  assert.match(installer, /transaction_marker=.*install\.transaction/);
+  assert.match(installer, /phase=\(prepared\|files\|activation\)/);
+  assert.match(installer, /systemctl_bin\}" disable --now "\$\{unit\}"/);
+  assert.match(installer, /prior inactive state restored/);
   assert.match(unit, /^RuntimeDirectory=teleagent-sip-local-peer-fence$/m);
   assert.match(unit, /^RuntimeDirectoryMode=0700$/m);
   assert.match(installer, /--source-check/);
