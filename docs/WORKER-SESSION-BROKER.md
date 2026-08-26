@@ -1,9 +1,11 @@
 # Worker execution and session boundary
 
 Teleagent never runs Claude or Codex under the controller identity. The
-controller owns scoped API bearers, approval verification state, executor
-state, and the privileged-action proxy. Every provider launch therefore needs
-all of these independently enforced host boundaries:
+controller owns scoped API bearers and executor state. Production service
+hardening removes legacy phone approval-verifier and privileged-proxy settings,
+and denies the broker socket; those implementations are dormant test substrate.
+Every provider launch therefore needs all of these independently enforced host
+boundaries:
 
 1. `teleagent-control` talks only to provider-specific supervisors over
    `/run/teleagent-provider-launch/{claude,codex}.sock`.
@@ -72,8 +74,10 @@ The broker exposes only:
   and a provider-accepted pane-creation handshake.
 
 Docker, Kubernetes, private-network, root-filesystem, owner-home, controller,
-and privileged-broker reads are not session-broker capabilities. Those require
-a typed privileged-action plan and focused phone approval.
+and privileged-broker reads are not session-broker capabilities. Production
+phone has no authority path for them. A future typed path also requires the
+independently PBX-attested controller authority described in
+`PHONE-AGENT-ARCHITECTURE.md`.
 
 The operation store uses SQLite WAL plus `synchronous=FULL`. A delivery boundary
 is persisted before tmux input; ambiguous delivery is reconciled and never

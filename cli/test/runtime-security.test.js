@@ -26,6 +26,8 @@ test('runtime secret migration rejects placeholders and duplicate scopes', () =>
   assert.equal(new Set(values).size, values.length);
   assert.ok(values.every(validRuntimeSecret));
   assert.ok(values.every((value) => /^[a-f0-9]{64}$/.test(value)));
+  assert.equal(Object.hasOwn(config.secrets, 'privilegedActionApi'), false);
+  assert.equal(Object.hasOwn(environment, 'PRIVILEGED_ACTION_API_TOKEN'), false);
   assert.equal(ensureRuntimeSecrets(config).changed, false);
 });
 
@@ -34,11 +36,11 @@ test('split deployments can persist an explicitly provisioned shared credential 
     AGENT_API_TOKEN: '1'.repeat(64),
     EXECUTOR_API_TOKEN: '2'.repeat(64),
     VOICE_CONTROL_TOKEN: '3'.repeat(64),
-    PRIVILEGED_ACTION_API_TOKEN: '4'.repeat(64),
     OUTBOUND_API_TOKEN: '5'.repeat(64)
   };
   const config = { secrets: {} };
 
   assert.equal(ensureRuntimeSecrets(config, environment).changed, true);
   assert.deepEqual(getRuntimeSecretEnvironment(config), environment);
+  assert.equal(Object.hasOwn(config.secrets, 'privilegedActionApi'), false);
 });

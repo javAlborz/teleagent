@@ -140,7 +140,7 @@ function createAgentProfileConfig(env = process.env, homeDirectory = null) {
         sessionType: 'phone-deploy',
         model: env.PHONE_DEPLOY_CLAUDE_MODEL || env.PHONE_SONNET_CLAUDE_MODEL || env.CLAUDE_MODEL || 'sonnet',
         permissionMode: env.PHONE_DEPLOY_CLAUDE_PERMISSION_MODE || env.PHONE_SONNET_CLAUDE_PERMISSION_MODE || phoneClaudePermissionMode,
-        tools: parseListEnv(env.PHONE_DEPLOY_CLAUDE_TOOLS || 'Read,Write,Edit,Glob,Grep,Bash,Skill'),
+        tools: parseListEnv(env.PHONE_DEPLOY_CLAUDE_TOOLS || 'Read,Glob,Grep'),
         allowedTools: parseListEnv(
           env.PHONE_DEPLOY_CLAUDE_ALLOWED_TOOLS ||
           env.PHONE_SONNET_CLAUDE_ALLOWED_TOOLS ||
@@ -164,7 +164,7 @@ function createAgentProfileConfig(env = process.env, homeDirectory = null) {
         sessionType: 'phone-codex-terra',
         model: env.PHONE_CODEX_TERRA_MODEL || 'gpt-5.6-terra',
         reasoningEffort: normalizeCodexReasoningEffort(env.PHONE_CODEX_TERRA_REASONING_EFFORT, 'medium'),
-        sandbox: normalizeCodexSandbox(env.PHONE_CODEX_TERRA_SANDBOX, 'workspace-write'),
+        sandbox: normalizeCodexSandbox(env.PHONE_CODEX_TERRA_SANDBOX, 'read-only'),
         approvalPolicy: normalizeCodexApprovalPolicy(env.PHONE_CODEX_APPROVAL_POLICY, 'never'),
         tools: [],
         allowedTools: [],
@@ -175,7 +175,7 @@ function createAgentProfileConfig(env = process.env, homeDirectory = null) {
         sessionType: 'phone-codex-sol',
         model: codexSolModel,
         reasoningEffort: codexSolEffort,
-        sandbox: normalizeCodexSandbox(env.PHONE_CODEX_SOL_SANDBOX, 'danger-full-access'),
+        sandbox: normalizeCodexSandbox(env.PHONE_CODEX_SOL_SANDBOX, 'read-only'),
         approvalPolicy: normalizeCodexApprovalPolicy(env.PHONE_CODEX_APPROVAL_POLICY, 'never'),
         tools: [],
         allowedTools: [],
@@ -189,7 +189,7 @@ function createAgentProfileConfig(env = process.env, homeDirectory = null) {
           env.PHONE_CODEX_DEPLOY_REASONING_EFFORT,
           codexSolEffort
         ),
-        sandbox: normalizeCodexSandbox(env.PHONE_CODEX_DEPLOY_SANDBOX, 'danger-full-access'),
+        sandbox: normalizeCodexSandbox(env.PHONE_CODEX_DEPLOY_SANDBOX, 'read-only'),
         approvalPolicy: normalizeCodexApprovalPolicy(env.PHONE_CODEX_APPROVAL_POLICY, 'never'),
         tools: [],
         allowedTools: [],

@@ -2,7 +2,6 @@
 
 const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
-const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
@@ -22,7 +21,6 @@ const RUNTIME_SECRETS = Object.freeze({
   [SECRET_PATHS.freeswitchSecret]: 'freeswitch_9876543210fedcba_HGFEDCBA',
   [SECRET_PATHS.executorApiToken]: 'executor_0123456789abcdef_ABCDEFGH',
   [SECRET_PATHS.voiceControlToken]: 'voice_control_0123456789abcdef_ABCDEFGH',
-  [SECRET_PATHS.privilegedActionApiToken]: 'privileged_0123456789abcdef_ABCDEFGH',
   [SECRET_PATHS.openaiRealtimeApiKey]: 'sk-project-0123456789abcdef-ABCDEFGH',
   [SECRET_PATHS.openaiSafetyIdentifierSalt]: 'safety_0123456789abcdef_ABCDEFGH',
   [SECRET_PATHS.outboundApiToken]: 'outbound_0123456789abcdef_ABCDEFGH',
@@ -45,10 +43,6 @@ function metadata({
 }
 
 function buildFilesystem(overrides = {}) {
-  const keys = crypto.generateKeyPairSync('ed25519', {
-    privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
-    publicKeyEncoding: { type: 'spki', format: 'pem' },
-  });
   const values = new Map([
     [VOICE_RUNTIME_PATHS.configDirectory, {
       stat: metadata({ type: 'directory', uid: 0, gid: GID, mode: 0o750, size: 0 }),
@@ -61,9 +55,6 @@ function buildFilesystem(overrides = {}) {
     }],
     [VOICE_RUNTIME_PATHS.deviceConfigFile, {
       value: Buffer.from('{"1001":{"extension":"1001"}}'),
-    }],
-    [VOICE_RUNTIME_PATHS.approvalPrivateKey, {
-      value: Buffer.from(keys.privateKey),
     }],
     [VOICE_RUNTIME_PATHS.sipIngressCredential, { value: Buffer.from(INGRESS) }],
     [VOICE_RUNTIME_PATHS.sipCallbackCredential, { value: Buffer.from(CALLBACK) }],
@@ -205,9 +196,8 @@ test('preflight rejects root, owner UID/GID 1000, and unsafe runtime paths', () 
   }
 });
 
-test('preflight rejects every secret that is not root:exact-voice-gid 0440 single-link', () => {
+test('preflight rejects every SIP secret that is not root:exact-voice-gid 0440 single-link', () => {
   const secretFiles = [
-    VOICE_RUNTIME_PATHS.approvalPrivateKey,
     VOICE_RUNTIME_PATHS.sipIngressCredential,
     VOICE_RUNTIME_PATHS.sipCallbackCredential,
   ];
@@ -233,19 +223,32 @@ test('preflight rejects every secret that is not root:exact-voice-gid 0440 singl
   }
 });
 
-test('preflight rejects invalid signer, duplicate SIP credentials, and never logs material', () => {
+test('preflight rejects retired authority files, duplicate SIP credentials, and never logs material', () => {
   assert.throws(
     () => validateVoiceRuntimePreflight({
       fsModule: buildFilesystem({
         [VOICE_RUNTIME_PATHS.approvalPrivateKey]: {
-          value: Buffer.from(`not-a-private-key-${'x'.repeat(80)}`),
-          stat: metadata({ size: 98 }),
+          value: Buffer.from('retired-approval-authority-must-remain-absent'),
+          stat: metadata({ size: 46 }),
         },
       }),
       effectiveUid: UID,
       effectiveGid: GID,
     }),
-    /approval signing key is invalid/,
+    /approval signing key must not be projected/,
+  );
+  assert.throws(
+    () => validateVoiceRuntimePreflight({
+      fsModule: buildFilesystem({
+        [VOICE_RUNTIME_PATHS.privilegedActionBearer]: {
+          value: Buffer.from('retired-privileged-bearer-must-remain-absent'),
+          stat: metadata({ size: 44 }),
+        },
+      }),
+      effectiveUid: UID,
+      effectiveGid: GID,
+    }),
+    /privileged-action bearer must not be projected/,
   );
   assert.throws(
     () => validateVoiceRuntimePreflight({
@@ -269,15 +272,10 @@ test('preflight rejects invalid signer, duplicate SIP credentials, and never log
   assert.doesNotMatch(result.stderr, new RegExp(`${INGRESS}|${CALLBACK}`));
 });
 
-test('privileged credential is required only when its feature is enabled', () => {
+test('privileged authority is rejected when its feature flag is enabled', () => {
   let observedRequired = null;
   const loader = ({ required }) => {
     observedRequired = required;
-    if (required.includes('privilegedActionApiToken')) {
-      const error = new Error('privileged credential missing');
-      error.code = 'VOICE_RUNTIME_SECRET_UNREADABLE';
-      throw error;
-    }
     return {};
   };
 
@@ -296,8 +294,8 @@ test('privileged credential is required only when its feature is enabled', () =>
     effectiveGid: GID,
     privilegedActionsEnabled: 'true',
     runtimeSecretLoader: loader,
-  }), /privileged credential missing/);
-  assert.deepEqual(observedRequired, ['privilegedActionApiToken']);
+  }), /independent approval attester/);
+  assert.deepEqual(observedRequired, []);
 });
 
 test('SIP credentials cannot reuse runtime secrets and device authentication is always rejected', () => {

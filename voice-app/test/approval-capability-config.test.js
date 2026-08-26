@@ -57,6 +57,16 @@ function secureKeyFs(contents, metadataOverrides = {}) {
   };
 }
 
+test('production voice runtime cannot load an issuer or privileged bridge', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
+  assert.doesNotMatch(source, /require\(["']\.\/lib\/approval-capability-config["']\)/u);
+  assert.doesNotMatch(source, /require\(["']\.\/lib\/privileged-action-(?:bridge|config)["']\)/u);
+  assert.doesNotMatch(source, /loadApprovalCapabilityConfig\s*\(/u);
+  assert.doesNotMatch(source, /loadPrivilegedActionConfig\s*\(/u);
+  assert.match(source, /approvalCapabilityIssuer:\s*null/u);
+  assert.match(source, /privilegedActionBridge:\s*null/u);
+});
+
 test('disabled capability configuration does not read a key and leaves mutations fail closed', () => {
   let opened = false;
   const config = loadApprovalCapabilityConfig({

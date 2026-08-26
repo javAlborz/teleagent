@@ -4,7 +4,11 @@ import { fileURLToPath } from 'url';
 import chalk from 'chalk';
 import inquirer from 'inquirer';
 import { execSync } from 'child_process';
-import { loadConfig, saveConfig, configExists } from '../config.js';
+import {
+  loadConfigWithVoiceRuntimeIdentityPreflight,
+  saveConfig,
+  configExists,
+} from '../config.js';
 
 const CANONICAL_GITHUB_REPO = 'javAlborz/teleagent';
 
@@ -224,22 +228,29 @@ function showManualInstructions(release, repoSlug = CANONICAL_GITHUB_REPO) {
 
 /**
  * Update command - Update Claude Phone to latest version
+ * @param {object} dependencies - Injectable preflight/write boundaries for tests
  * @returns {Promise<void>}
  */
-export async function updateCommand() {
+export async function updateCommand(dependencies = {}) {
+  const {
+    identityResolver,
+    persistConfig = saveConfig,
+    resolveProjectRoot = getProjectRoot,
+  } = dependencies;
   console.log(chalk.bold.cyan('\n🔄 Update Claude Phone\n'));
 
-  const projectRoot = getProjectRoot();
-  const repoSlug = isGitRepo(projectRoot) ? getOriginRepoSlug(projectRoot) : CANONICAL_GITHUB_REPO;
-
-  // Backup config before update
+  // Migration and backup are writes. Resolve every voice/media account before
+  // either of them or any Git/network operation; API-only remains exempt.
   if (configExists()) {
     console.log(chalk.gray('Backing up configuration...'));
-    const config = await loadConfig();
+    const { config } = await loadConfigWithVoiceRuntimeIdentityPreflight({ identityResolver });
     const backupPath = `${process.env.HOME}/.claude-phone/config.json.pre-update`;
-    await saveConfig(config); // This creates a backup automatically
+    await persistConfig(config); // This creates a backup automatically
     console.log(chalk.green(`✓ Config backed up to: ${backupPath}`));
   }
+
+  const projectRoot = resolveProjectRoot();
+  const repoSlug = isGitRepo(projectRoot) ? getOriginRepoSlug(projectRoot) : CANONICAL_GITHUB_REPO;
 
   // Check if git repo
   if (isGitRepo(projectRoot)) {

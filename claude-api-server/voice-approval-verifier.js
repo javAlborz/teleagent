@@ -28,7 +28,7 @@ function approvalFailure(code = 'VOICE_APPROVAL_REQUIRED') {
     code,
     authorization: null,
     userMessage: code === 'VOICE_APPROVAL_VERIFIER_UNAVAILABLE'
-      ? 'Approved phone operations are temporarily unavailable because the executor verification key is not configured.'
+      ? 'Production phone approval authority is disabled pending an independent PBX attester.'
       : 'That exact operation needs a fresh approval. Review the spoken scope and press pound to approve it.',
   };
 }
@@ -88,6 +88,68 @@ function createConfiguredApprovalVerifier({
   });
 }
 
+function currentTaskApprovalAuthority(task) {
+  if (task?.taskType === 'target_session_message') {
+    const authorization = task.request?.targetAuthorization?.authorization;
+    return {
+      keyId: authorization?.capability_key_id || '',
+      keyFingerprint: authorization?.capability_key_fingerprint || '',
+    };
+  }
+  if (task?.taskType !== 'managed_ask') return null;
+  const prompt = task.request?.ask?.prompt;
+  if (!classifyVoiceOperation(prompt).requiresApproval) return null;
+  const authorization = task.request?.voiceAuthorization?.authorization;
+  return {
+    keyId: authorization?.capability_key_id || '',
+    keyFingerprint: authorization?.capability_key_fingerprint || '',
+  };
+}
+
+function assertCurrentApprovalAuthority({ task, verifier, currentKeyId } = {}) {
+  const persisted = currentTaskApprovalAuthority(task);
+  if (persisted === null) return true;
+  if (task?.taskType !== 'managed_ask' && task?.taskType !== 'target_session_message') {
+    return true;
+  }
+  const activeKeyId = String(currentKeyId || '').trim();
+  const activeKeyFingerprint = verifier && typeof verifier.keyFingerprint === 'function'
+    ? verifier.keyFingerprint(activeKeyId)
+    : null;
+  if (!verifier || !activeKeyId || persisted.keyId !== activeKeyId ||
+      !/^[a-f0-9]{64}$/u.test(persisted.keyFingerprint) ||
+      persisted.keyFingerprint !== activeKeyFingerprint) {
+    const error = new Error(
+      'The approval authority that admitted this task is no longer active; refusing its first external effect.'
+    );
+    error.code = 'VOICE_APPROVAL_AUTHORITY_REVOKED';
+    error.result = {
+      httpStatus: 403,
+      payload: {
+        success: false,
+        code: error.code,
+        agentCode: error.code,
+        error: error.message,
+      },
+    };
+    throw error;
+  }
+  return true;
+}
+
+async function executeWithCurrentApprovalAuthority({
+  task,
+  verifier,
+  currentKeyId,
+  execute,
+} = {}) {
+  if (typeof execute !== 'function') {
+    throw new TypeError('executeWithCurrentApprovalAuthority requires an effect callback');
+  }
+  assertCurrentApprovalAuthority({ task, verifier, currentKeyId });
+  return execute();
+}
+
 function verifiedAuthorization(claims, request) {
   return Object.freeze({
     job_id: claims.job_id,
@@ -95,6 +157,7 @@ function verifiedAuthorization(claims, request) {
     approved_at: new Date(claims.iat * 1000).toISOString(),
     scope: String(request || '').trim(),
     capability_key_id: claims.key_id,
+    capability_key_fingerprint: claims.key_fingerprint,
     request_sha256: claims.request_sha256,
     plan_sha256: claims.plan_sha256,
     target: claims.target,
@@ -216,9 +279,11 @@ function authorizeTargetSessionRequest({
 }
 
 module.exports = {
+  assertCurrentApprovalAuthority,
   authorizeManagedVoiceRequest,
   authorizeTargetSessionRequest,
   createConfiguredApprovalVerifier,
+  executeWithCurrentApprovalAuthority,
   loadApprovalPublicKeys,
   readTrustedPublicKey,
 };

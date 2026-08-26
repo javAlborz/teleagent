@@ -73,7 +73,7 @@ test('the standalone preflight ignores secret environment values and fails close
 
 test('voice validates media control credentials before constructing network clients', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
-  const validation = source.indexOf('config.runtime_secrets = configureRuntimeSecrets(loadRuntimeSecrets({');
+  const validation = source.indexOf('config.runtime_secrets = configureRuntimeSecrets(loadRuntimeSecrets());');
   assert.ok(validation > 0);
   for (const boundary of [
     'var srf = new Srf()',

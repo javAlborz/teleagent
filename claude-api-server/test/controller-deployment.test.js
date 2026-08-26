@@ -10,6 +10,10 @@ const DEPLOY = path.join(ROOT, 'deploy', 'controller');
 const RELEASE_START_GATE = 'ExecStartPre=+/usr/bin/env -i HOME=/var/empty ' +
   'PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 ' +
   '/usr/local/libexec/verify-teleagent-release-closure --check-start-gate';
+const RETIRED_PHONE_AUTHORITY_ENVIRONMENT =
+  'UnsetEnvironment=VOICE_APPROVAL_KEY_ID VOICE_APPROVAL_PUBLIC_KEY_FILE ' +
+  'PRIVILEGED_ACTION_API_TOKEN PRIVILEGED_ACTION_PROXY_ENABLED ' +
+  'PRIVILEGED_ACTION_PROXY_SOCKET_PATH PRIVILEGED_ACTION_PROXY_TIMEOUT_MS';
 
 function source(filename) {
   return fs.readFileSync(path.join(DEPLOY, filename), 'utf8');
@@ -68,6 +72,7 @@ test('controller unit is dormant, exact-path, resource-capped, and isolated', ()
     '/var/lib/teleagent-voice',
     '/srv/teleagent-agent-workspaces',
     '/etc/teleagent/provider-egress-secrets',
+    '/run/teleagent-privileged-action',
   ]) {
     assert.match(service, new RegExp(
       `^InaccessiblePaths=.*${inaccessible.replaceAll('/', '\\/')}`,
@@ -76,6 +81,10 @@ test('controller unit is dormant, exact-path, resource-capped, and isolated', ()
   }
   assert.match(service, /^UnsetEnvironment=.*NODE_PATH/m);
   assert.match(service, /^UnsetEnvironment=.*LD_PRELOAD/m);
+  assert.equal(
+    service.split('\n').filter((line) => line === RETIRED_PHONE_AUTHORITY_ENVIRONMENT).length,
+    1,
+  );
   assert.doesNotMatch(service, /^StateDirectory=/m);
   assert.doesNotMatch(tmpfiles, /\/ENABLE/);
   assert.match(tmpfiles,

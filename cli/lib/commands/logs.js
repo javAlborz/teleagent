@@ -1,7 +1,12 @@
 import chalk from 'chalk';
 import { spawn } from 'child_process';
 import axios from 'axios';
-import { loadConfig, configExists, getDockerComposePath, getPidPath } from '../config.js';
+import {
+  loadConfigReadOnly,
+  configExists,
+  getDockerComposePath,
+  getPidPath,
+} from '../config.js';
 import fs from 'fs';
 
 /**
@@ -16,7 +21,7 @@ export async function logsCommand(service = null) {
     process.exit(1);
   }
 
-  const config = await loadConfig();
+  const config = await loadConfigReadOnly();
   const dockerComposePath = getDockerComposePath();
 
   // Validate service argument

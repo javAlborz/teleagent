@@ -1,4 +1,8 @@
-# Dedicated private voice-orchestrator identity. Provider/model processes must
-# never share this group because it reads the approval signer and SIP trunks.
+# Dedicated, pairwise-isolated voice and media identities. Provider/model
+# processes and the media daemons must never share the voice credential group.
 g teleagent-voice -
 u teleagent-voice - "Teleagent private voice orchestrator" /var/lib/teleagent-voice /usr/sbin/nologin
+g teleagent-drachtio -
+u teleagent-drachtio - "Teleagent private Drachtio peer" /nonexistent /usr/sbin/nologin
+g teleagent-freeswitch -
+u teleagent-freeswitch - "Teleagent private FreeSWITCH peer" /nonexistent /usr/sbin/nologin

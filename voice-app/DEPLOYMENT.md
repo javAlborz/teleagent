@@ -56,36 +56,31 @@ registration credentials live only in the mode-`0600` device configuration.
 
 | Port | Protocol | Service | Direction |
 |------|----------|---------|-----------|
-| 5060 | UDP/TCP | SIP signaling (drachtio) | Inbound |
-| 5070 | UDP/TCP | SIP signaling (if 3CX SBC present) | Inbound |
+| 5060 | UDP | Local Asterisk SIP peer | Same-host loopback only |
+| 5070 | UDP | Local Drachtio SIP peer | Same-host loopback only |
+| 5080 | UDP | Local FreeSWITCH MRF peer | Same-host loopback only |
+| 9022 | TCP | Drachtio application control | Same-host loopback only |
+| 8021 | TCP | FreeSWITCH ESL control | Same-host loopback only |
 | 3000 | TCP | Voice app HTTP API | Inbound (optional) |
 | 3001 | TCP | FreeSWITCH AudioFork callback | Same-host loopback only |
 | 3333 | TCP | Agent API server | Internal |
-| 30000-30100 | UDP | RTP audio (FreeSWITCH) | Bidirectional |
+| 30000-30100 | UDP | Asterisk/FreeSWITCH RTP | Same-host loopback only |
 
 ### Firewall Rules
 
-For voice to work correctly, you must allow:
-
-```bash
-# SIP signaling
-sudo ufw allow 5060/udp
-sudo ufw allow 5060/tcp
-
-# RTP audio (critical for audio to work)
-sudo ufw allow 30000:30100/udp
-
-# Voice app API (if exposing externally)
-sudo ufw allow 3000/tcp
-```
+Do not expose these media ports with broad host firewall rules. The tracked
+UID-bound loopback matrix in `docs/TELEAGENT-SIP-LOCAL-PEER-FENCE.md` is a
+transitional sender/source defense; it does not authenticate the receiving
+listener. TCP SIP is explicitly rejected. External PBX ingress belongs to the
+separately reviewed Asterisk boundary. Production activation remains blocked
+until per-service network namespaces provide receiver isolation and the
+infrastructure-owned Asterisk RTP allocation is exactly attested.
 
 ### NAT Considerations
 
-The `EXTERNAL_IP` setting must be your server's LAN IP that can receive RTP packets. On NAT networks:
-
-- Use your server's private IP (e.g., 192.168.1.50)
-- Ensure RTP ports are forwarded if behind NAT
-- 3CX handles NAT traversal for SIP; RTP is direct
+The hardened media stack is same-host and has no externally forwarded SIP/RTP
+ports or media-stack `EXTERNAL_IP`. NAT and external trunk ingress terminate at
+the separately reviewed Asterisk/PBX boundary.
 
 ## Docker Configuration
 
@@ -95,30 +90,30 @@ independent activation path. Both the preflight and voice-app services consume
 the same exact `${TELEAGENT_VOICE_IMAGE}` digest injected only after the
 launcher verifies its image ID, OCI source-revision label, and root-owned
 release manifest. The generated services retain the canonical memory/CPU/PID
-ceilings, dropped capabilities, no-new-privileges setting, read-only voice root
-filesystem, dedicated non-root voice UID, and loopback control defaults.
+ceilings, dropped capabilities, no-new-privileges setting, read-only roots,
+dedicated non-root voice/media UIDs, and loopback control defaults.
 
-Voice deployments require the exact `teleagent-voice` system user and primary
-group. It must use `/var/lib/teleagent-voice` as its home, a `nologin` shell,
-no supplementary groups, and an ID distinct from root, UID/GID 1000, every
-provider worker, the SIP gateway, and the installing owner. Resolve
-`VOICE_APP_UID` and `VOICE_APP_GID` from that account; canonical and generated
-Compose have no default. The CLI refuses voice setup/start when this identity
-is missing or stale. Provision these host paths before start:
+Voice deployments require exact, pairwise-distinct `teleagent-voice`,
+`teleagent-drachtio`, and `teleagent-freeswitch` system users/groups plus the
+infrastructure-owned `teleagent-asterisk` peer. All four are non-root, use
+`nologin`, have no supplementary groups, and must not reuse UID/GID 1000 or a
+provider/owner identity. Resolve every explicit Compose UID/GID binding from
+those accounts; there is no default. Provision these host paths before start:
 
 - `/etc/teleagent-voice/config`: root:`teleagent-voice`, mode `0750`;
 - `/etc/teleagent-voice/config/devices.json`: root:`teleagent-voice`, mode `0440`;
 - `/etc/teleagent-voice/credentials`: root:`teleagent-voice`, mode `0750`;
-- each signer/SIP credential: root:`teleagent-voice`, mode `0440`, one link;
+- each projected voice/SIP credential: root:`teleagent-voice`, mode `0440`, one link;
 - `/var/lib/teleagent-voice`: the root of a dedicated 4–8 GiB filesystem,
   `teleagent-voice`:`teleagent-voice`, mode `0700`, with at least 512 MiB and
   20% free before activation.
 
-A no-network `voice-runtime-preflight` runs under the resolved UID/GID before
+A no-network `voice-runtime-preflight` runs under the voice UID/GID before
 either Drachtio or FreeSWITCH. It securely opens the device configuration,
-Ed25519 signer, and two distinct SIP credentials with `O_NOFOLLOW`, verifies
-their owner/group/mode/link/type and the state/config directories, and fails
-the dependency graph closed before any SIP, media, or HTTP listener starts. It
+two distinct SIP credentials, and active non-authority runtime credentials
+with `O_NOFOLLOW`; it also rejects any retired signer or privileged bearer
+projection. It verifies owner/group/mode/link/type and state/config directories,
+and fails the dependency graph closed before any SIP, media, or HTTP listener starts. It
 mounts voice state read-only and is limited to 0.5 CPU, 256 MiB, no additional
 swap, and 64 processes. It also requires the state and configuration mounts to
 have distinct device IDs and verifies the 4–8 GiB state capacity/free-space
@@ -127,6 +122,10 @@ reserve with `statfs`. Independently, the host launcher requires the exact
 different from its immediate `/var/lib` parent; a shared `/var` or `/srv`
 filesystem does not qualify. The host launcher has an independent 512
 MiB/128-task cgroup ceiling and rejects controller responses above 128 KiB.
+Before activation intent or credential projection, it securely opens the source
+voice-control token, authenticates `/operator/health`, requires exact canonical
+read-only authority state with every retired verifier/proxy/bearer flag false,
+and erases the token buffer on every outcome.
 The long-lived voice process repeats the same check in its health endpoint and
 after SIP/API authentication but before accepting each new inbound or outbound
 call. Exhaustion returns 503 without reading caller identity, reserving a call,
@@ -147,17 +146,16 @@ range. Run `scripts/test-media-images-read-only.sh` on the bounded CI runner
 whenever either exact media-image digest, its entrypoint, or its mount contract
 changes. The canary starts both daemons without a network namespace and proves
 their loopback control sockets answer while the root filesystems remain
-read-only.
+read-only. This canary is not proof that the vendor images work under the new
+non-root media UIDs; dedicated real-call staging remains mandatory.
 
 `voice-app` does not use Compose `env_file`. Compose reads `.env` for
 interpolation, but passes only the reviewed names in the explicit service
 environment mapping. Controller provider commands/profiles, worker paths,
 executor databases and public trust anchors therefore do not enter the voice
 container. `AGENT_API_TOKEN` and `CLAUDE_API_TOKEN` are fixed empty,
-sensitive bridge logging is fixed off, and
-`VOICE_APPROVAL_SIGNING_KEY_FILE` is fixed to
-`/run/secrets/teleagent-approval-private.pem`; only the separate host mount
-source is configurable. The SQLite and execution-lock paths are likewise fixed
+sensitive bridge logging is fixed off, and no approval private key or
+privileged-action bearer is projected into voice. The SQLite and execution-lock paths are likewise fixed
 to `/app/state/voice-state.sqlite` and
 `/app/state/voice-execution.lock.json`. HTTP and AudioFork hosts are fixed to
 `127.0.0.1`, non-loopback modes are fixed off, and the AudioFork peer override
@@ -195,19 +193,23 @@ file and the CLI generator in the same change.
 
 ### Network Mode
 
-The three SIP/media services use `network_mode: host` for RTP to work
-correctly. The credential preflight instead uses `network_mode: none`:
+The current dormant three-service SIP/media bundle uses `network_mode: host`.
+That is not the accepted production receiver boundary: the infrastructure
+design must move each media service and Asterisk into a dedicated network
+namespace with explicit links and ingress policy. The credential preflight
+already uses `network_mode: none`:
 
 ```yaml
 voice-app:
   network_mode: host
 ```
 
-This allows FreeSWITCH to bind RTP ports directly.
+This transitional setting allows FreeSWITCH to bind RTP ports directly, but it
+must not be promoted as receiver-isolated.
 
 ### RTP Port Range
 
-FreeSWITCH uses ports 30000-30100 by default (configured to avoid conflict with 3CX SBC which uses 20000-20099):
+FreeSWITCH is fixed to the closed interval 30000-30100:
 
 ```yaml
 freeswitch:
@@ -215,6 +217,11 @@ freeswitch:
     --rtp-range-start 30000
     --rtp-range-end 30100
 ```
+
+The sender fence assumes Asterisk never allocates an RTP source/listener port
+in that interval. A statement about a nominal PBX/SBC default is not evidence:
+the infrastructure gate must read the exact effective Asterisk configuration,
+validate one closed numeric range, and prove it is disjoint from 30000-30100.
 
 ### Environment Variables
 
@@ -231,10 +238,6 @@ environment):
 | `AGENT_API_NON_LOOPBACK_ENABLED` | Explicit reviewed opt-in required for a split-host non-loopback controller bind |
 | `AGENT_API_TOKEN` | Controller-only bearer for general `/ask`, `/ask-structured`, and legacy non-phone lifecycle routes. Compose strips it and `CLAUDE_API_TOKEN` from `voice-app`. |
 | `EXECUTOR_API_TOKEN` | Mandatory distinct 32-4096 byte bearer for durable phone submission, lookup, cancel, and panic; no general or legacy fallback. Unlock remains voice-control scoped. |
-| `PRIVILEGED_ACTION_API_TOKEN` | Mandatory distinct 32-4096 byte bearer for the privileged-action proxy |
-| `PRIVILEGED_ACTION_PROXY_ENABLED` | Host-controller forwarding gate; leave `false` until the private root broker is activated |
-| `PRIVILEGED_ACTION_PROXY_SOCKET_PATH` | Must be `/run/teleagent-privileged-action/broker.sock` when forwarding is enabled |
-| `VOICE_PRIVILEGED_ACTIONS_ENABLED` | Voice-side root-action tool gate; requires signed approvals and the dedicated proxy token |
 | `AGENT_DURABLE_EXECUTOR_ENABLED` | Require idempotent durable execution for phone managed-agent queries (default `true`); disabling it blocks voice execution rather than falling back to `/ask` |
 | `AGENT_DURABLE_EXECUTOR_POLL_MS` | Durable task polling interval (default `500`, bounded to 10-5000 ms) |
 | `AGENT_DURABLE_EXECUTOR_SUBMIT_TIMEOUT_MS` | Initial durable submit timeout (default `10000`, bounded to 1-30 seconds) |
@@ -264,19 +267,11 @@ environment):
 | `VOICE_STATE_DIR` | Host directory mounted read/write for durable Realtime state |
 | `VOICE_APP_UID` / `VOICE_APP_GID` | Required numeric IDs of the exact dedicated `teleagent-voice` account; no owner/1000 fallback |
 | `VOICE_STATE_DB_PATH` | Fixed application constant `/app/state/voice-state.sqlite`; forbidden in the host environment |
-| `VOICE_APPROVAL_TTL_SECONDS` | Maximum age of an unconfirmed pound scope; defaults to 300 seconds |
-| `VOICE_APPROVAL_MARKER_TIMEOUT_MS` | Maximum wait for the exact FreeSWITCH downstream `playout` marker; defaults to 30 seconds and never authorizes on timeout |
-| `VOICE_APPROVAL_CAPABILITY_ENABLED` | Enables controller signing; when false, read-only jobs work and mutating/tmux jobs fail closed |
-| `VOICE_APPROVAL_SIGNING_KEY_FILE` | Fixed in-container path to a root:voice-group, mode `0440`, single-link Ed25519 private key file |
-| `VOICE_APPROVAL_SIGNING_KEY_ID` | Non-secret identifier used for public-key selection and rotation |
-| `VOICE_APPROVAL_CAPABILITY_TTL_SECONDS` | Post-approval capability lifetime; defaults to 120 and cannot exceed 300 seconds |
-| `VOICE_APPROVAL_KEY_ID` | Executor trusted key ID; must match `VOICE_APPROVAL_SIGNING_KEY_ID` |
-| `VOICE_APPROVAL_PUBLIC_KEY_FILE` | Executor-only Ed25519 public-key file; unsafe ownership, writes, and symlinks are rejected |
 | `EXECUTOR_TASK_DB_PATH` | Executor SQLite DB where task creation and replay nonce consumption commit atomically |
 | `VOICE_AGENT_RECENT_OUTPUT_MS` | Provider-log freshness window used for the `generating` activity signal |
 | `VOICE_APP_EXECUTION_LOCK_FILE` | Fixed application constant `/app/state/voice-execution.lock.json`; forbidden in the host environment |
 | `VOICE_EXECUTION_LOCK_FILE` | Optional host bridge lock path; defaults to `voice-app/state/voice-execution.lock.json` |
-| `VOICE_CONTROL_TOKEN` | Mandatory distinct bearer for status, unlock, and privileged operator routes; no general-token fallback |
+| `VOICE_CONTROL_TOKEN` | Mandatory distinct bearer for status, unlock, and authenticated operator routes; no general-token fallback |
 | `SIP_DOMAIN` | 3CX server FQDN |
 | `SIP_REGISTRAR` | SIP registrar address |
 | `SIP_TRUNK_HOST` | Exact server-owned outbound PBX hostname or IPv4 address; client routes are rejected |
@@ -285,9 +280,10 @@ environment):
 | `SIP_TRUNK_INGRESS_PASSWORD_HOST_FILE` | Required root:`teleagent-voice` mode-`0440` file containing Asterisk's dedicated inbound credential |
 | `SIP_TRUNK_CALLBACK_PASSWORD_HOST_FILE` | Required root:`teleagent-voice` mode-`0440` file containing voice-app's distinct callback credential |
 
-The CLI creates five independent random credentials (the four controller scopes
-plus outbound control), persists them only in mode-`0600` configuration, and
-reuses them across regeneration. The four scoped HTTP credentials are mandatory and pairwise distinct. Duplicate
+The CLI creates four independent random credentials (the three active
+controller scopes plus outbound control), persists them only in mode-`0600`
+configuration, and reuses them across regeneration. The three active scoped
+HTTP credentials are mandatory and pairwise distinct. Duplicate
 configured values make the controller refuse startup; a missing or malformed
 scope keeps public `/health` at `503 not_ready` and its private routes fail
 closed. Placeholder/example strings are invalid. Device configuration contains
@@ -395,63 +391,32 @@ Error connecting to agent API
 - Never commit `~/.claude-phone/config.json` to version control
 - Use environment variables in CI/CD pipelines
 
-### Signed approval capability key
+### Approval capability status
 
-Pound approval requires a bidirectional `mod_audio_fork` build with correlated
-audio markers. The controller queues a unique marker only after OpenAI emits
-`response.output_audio.done` for the exact response item, and arms the job only
-after FreeSWITCH returns that same marker with `data.event=playout`. A cleared,
-unknown, timed-out, backpressured, or disconnected marker leaves the job
-unarmed and causes a bounded exact prompt replay. Local PCM byte counts and
-timers are never an authorization signal. Verify marker support before enabling
-signed mutation capabilities; otherwise leave `VOICE_APPROVAL_CAPABILITY_ENABLED=false`.
+Production voice approval is disabled. Do not provision or mount an approval
+private key or privileged-action bearer into `voice-app`, and do not configure
+legacy `VOICE_APPROVAL_*` or privileged proxy enable settings. Voice constructs
+its job broker with null issuer/bridge values, so read-only jobs remain
+available while mutation, tmux delivery, and privileged work fail closed.
 
-Generate an Ed25519 keypair in a controller-owned secret directory outside the
-repository. Mount only the private key into `voice-app`, read-only, at the
-absolute path in `VOICE_APPROVAL_SIGNING_KEY_FILE`. Give the executor only the
-public key. For example, these are operator commands to run during deployment;
-the repository does not generate or contain a live key:
-
-```bash
-umask 077
-openssl genpkey -algorithm ED25519 -out /etc/teleagent-voice/credentials/voice-approval-private.pem
-openssl pkey -in /etc/teleagent-voice/credentials/voice-approval-private.pem -pubout \
-  -out /secure/executor/teleagent-approval-public.pem
-chown root:teleagent-voice /etc/teleagent-voice/credentials/voice-approval-private.pem
-chmod 0440 /etc/teleagent-voice/credentials/voice-approval-private.pem
-chmod 0444 /secure/executor/teleagent-approval-public.pem
-```
-
-Configure the protected host credential source expected by the launcher. On
-each activation it opens and validates the source, copies it into the private
-`/run/teleagent-voice-stack/voice-secrets` runtime directory, mounts that
-directory read-only, and removes the copy during unconditional cleanup. Do not
-add a direct host credential bind or edit generated Compose at deployment
-time.
-
-Configure the executor with `VOICE_APPROVAL_KEY_ID`,
-`VOICE_APPROVAL_PUBLIC_KEY_FILE`, and `EXECUTOR_TASK_DB_PATH` before setting
-`VOICE_APPROVAL_CAPABILITY_ENABLED=true`. A malformed enabled
-configuration stops voice-app before it opens SIP, media, or HTTP listeners.
-The bridge refuses to start when only one public-key setting is supplied or the
-trust anchor is unsafe. A new durable task and its consumed replay nonce share
-one SQLite transaction.
-The private key and capability bearer token must never enter logs, prompts,
-agent environments, or durable job payloads. Rotate by adding the new public
-key ID at the executor, changing the controller key and key ID, waiting out the
-five-minute maximum token lifetime, then removing the old public key.
+The capability, exact binding, replay, and broker-policy libraries remain
+unit-test substrate. Future activation requires an isolated PBX attester that
+plays the controller-canonical prompt and durably proves later handset-side
+DTMF for the exact request/call leg. A controller-owned authority must validate
+and consume that evidence and dispatch internally; neither signer nor
+capability may enter voice. Revoke all public trust for the former voice-held
+key before relying on this disabled boundary.
 
 ### Network Security
 
 - Voice app API (port 3000) should not be publicly exposed without authentication
 - Agent API server (port 3333) should only be accessible from the voice server
-- Codex Luna/Terra deploy requests are denied; reserve the Sol extension for privileged work
-- Non-read-only `phone-*` bridge requests require a fresh Ed25519 capability
-  bound to the request, execution plan, target, provider, and profile and
-  produced only after the caller presses `#`.
-- Existing tmux delivery additionally binds approval to a stable pane ID and
-  provider-log fingerprint. Voice cannot cancel a job; the owner must press
-  `*`, while `9` remains the global emergency stop.
+- Every Claude/Codex profile is read-only from production voice; no profile or
+  extension grants deployment or privileged authority
+- Non-read-only `phone-*` bridge requests and existing tmux delivery are
+  production-blocked; voice has no authority that can create their required
+  capability. The future attested design additionally binds tmux approval to a
+  stable pane ID and provider-log fingerprint.
 - Claude/Codex execution plus filesystem/Git/tmux inspection requires the
   worker-session broker, separate provider supervisors/workers, and private
   egress identities. There is no persistent shared worker home and no
@@ -459,13 +424,14 @@ five-minute maximum token lifetime, then removing the old public key.
   `main:phone` are intentionally out of scope.
 - The Realtime model has bounded read-only inspection tools, not arbitrary
   shell or HTTP access. Credential paths and secret-like filenames are denied.
-- Root actions use the dormant-by-default private broker documented in
+- Root actions remain unavailable to phone. The dormant private broker and
+  future typed-policy substrate are documented in
   [`docs/PRIVILEGED-ACTIONS.md`](../docs/PRIVILEGED-ACTIONS.md). Never mount its
   Unix socket into voice-app or add the public SIP identity to `teleagent-control`.
 - Dial `9` from the authenticated owner handset to persistently lock all new
   phone-originated dispatch and terminate every tracked phone-originated agent
   process group. Unlock only from the local operator CLI after reviewing logs.
-- Give Terra a narrow `PHONE_CODEX_TERRA_WORKING_DIR`; its `workspace-write` sandbox is rooted there
+- Give every profile a narrow working directory even though production phone execution forces all Codex tiers to `read-only`
 - The bridge removes SIP, speech, and bridge-control secrets from Codex child environments. This reduces accidental inheritance but is not a host-level secret boundary when the service account can read the underlying files.
 - Consider VPN for split deployments across networks
 

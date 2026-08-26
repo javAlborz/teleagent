@@ -1,5 +1,5 @@
 import chalk from 'chalk';
-import { loadConfig, configExists } from '../../config.js';
+import { loadConfigReadOnly, configExists } from '../../config.js';
 
 /**
  * Redact sensitive values for display
@@ -36,7 +36,7 @@ export async function configShowCommand() {
     return;
   }
 
-  const config = await loadConfig();
+  const config = await loadConfigReadOnly();
   const ttsConfig = config.api?.tts || {};
   const sttConfig = config.api?.stt || {};
   const realtimeConfig = config.api?.realtime || {};

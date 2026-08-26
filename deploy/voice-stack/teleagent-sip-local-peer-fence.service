@@ -1,10 +1,11 @@
 [Unit]
-Description=Restrict local Teleagent SIP peers to the root-owned PBX
+Description=Bind local Teleagent SIP and media hops to exact non-root peers
 Documentation=file:/opt/teleagent/current/docs/TELEAGENT-SIP-LOCAL-PEER-FENCE.md
 Before=teleagent-voice-stack.service
 
 [Service]
 Type=simple
+ExecStartPre=/usr/local/libexec/verify-voice-stack-identity --installed-check
 ExecStart=/usr/local/libexec/teleagent-sip-local-peer-fence monitor
 ExecReload=/usr/local/libexec/teleagent-sip-local-peer-fence reconcile
 Restart=on-failure

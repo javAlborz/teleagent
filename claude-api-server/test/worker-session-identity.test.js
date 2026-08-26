@@ -45,6 +45,22 @@ test('worker-session sysusers source is the exact split identity topology', () =
   assert.equal(validateSysusersSource(source), true);
 });
 
+test('worker identity checks accept an explicit canonical component source pin', () => {
+  const verifier = fs.readFileSync(
+    path.join(DEPLOY, 'verify-worker-session-identity'), 'utf8'
+  );
+  const installer = fs.readFileSync(
+    path.join(DEPLOY, 'teleagent-worker-session-install'), 'utf8'
+  );
+  assert.match(verifier, /--source-root ABSOLUTE_COMPONENT_ROOT/);
+  assert.match(verifier, /fs\.realpathSync\(sourceRoot\) !== sourceRoot/);
+  assert.match(verifier, /path\.basename\(sourceRoot\) !== 'worker-session'/);
+  assert.equal(
+    (installer.match(/--installed-check --source-root "\$source_root"/g) || []).length,
+    2
+  );
+});
+
 test('worker-session identity verifier accepts unique private and shared numeric identities', () => {
   const fixture = identityFixture();
   const result = validateIdentityRecords(fixture.passwd, fixture.group);

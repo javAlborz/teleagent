@@ -52,6 +52,7 @@ services:
     cpus: 1.0
     pids_limit: 256
     network_mode: host
+    user: "${DRACHTIO_UID:?DRACHTIO_UID must resolve teleagent-drachtio}:${DRACHTIO_GID:?DRACHTIO_GID must resolve teleagent-drachtio}"
     read_only: true
     cap_drop:
       - ALL
@@ -65,8 +66,8 @@ services:
     tmpfs:
       # Override the image-declared /config volume and every runtime scratch
       # path with explicit, non-persistent hard bounds.
-      - /config:rw,noexec,nosuid,nodev,mode=0700,size=1048576
-      - /tmp:rw,noexec,nosuid,nodev,mode=0700,size=16777216
+      - /config:rw,noexec,nosuid,nodev,uid=${DRACHTIO_UID:?DRACHTIO_UID must resolve teleagent-drachtio},gid=${DRACHTIO_GID:?DRACHTIO_GID must resolve teleagent-drachtio},mode=0700,size=1048576
+      - /tmp:rw,noexec,nosuid,nodev,uid=${DRACHTIO_UID:?DRACHTIO_UID must resolve teleagent-drachtio},gid=${DRACHTIO_GID:?DRACHTIO_GID must resolve teleagent-drachtio},mode=0700,size=16777216
     volumes:
       - /run/teleagent-voice-stack/drachtio.conf.xml:/etc/drachtio.conf.xml:ro
     command: ["drachtio", "-f", "/etc/drachtio.conf.xml"]
@@ -91,6 +92,7 @@ services:
     cpus: 2.0
     pids_limit: 512
     network_mode: host
+    user: "${FREESWITCH_UID:?FREESWITCH_UID must resolve teleagent-freeswitch}:${FREESWITCH_GID:?FREESWITCH_GID must resolve teleagent-freeswitch}"
     read_only: true
     cap_drop:
       - ALL
@@ -105,11 +107,11 @@ services:
       # These mounts override all writable VOLUME declarations in the vendor
       # image. Missing sounds fail softly; this stack streams call audio and
       # does not rely on the vendor prompt library.
-      - /tmp:rw,noexec,nosuid,nodev,mode=0700,size=33554432
-      - /usr/local/freeswitch/db:rw,noexec,nosuid,nodev,mode=0700,size=67108864
-      - /usr/local/freeswitch/log:rw,noexec,nosuid,nodev,mode=0700,size=67108864
-      - /usr/local/freeswitch/recordings:rw,noexec,nosuid,nodev,mode=0700,size=268435456
-      - /usr/local/freeswitch/run:rw,noexec,nosuid,nodev,mode=0700,size=8388608
+      - /tmp:rw,noexec,nosuid,nodev,uid=${FREESWITCH_UID:?FREESWITCH_UID must resolve teleagent-freeswitch},gid=${FREESWITCH_GID:?FREESWITCH_GID must resolve teleagent-freeswitch},mode=0700,size=33554432
+      - /usr/local/freeswitch/db:rw,noexec,nosuid,nodev,uid=${FREESWITCH_UID:?FREESWITCH_UID must resolve teleagent-freeswitch},gid=${FREESWITCH_GID:?FREESWITCH_GID must resolve teleagent-freeswitch},mode=0700,size=67108864
+      - /usr/local/freeswitch/log:rw,noexec,nosuid,nodev,uid=${FREESWITCH_UID:?FREESWITCH_UID must resolve teleagent-freeswitch},gid=${FREESWITCH_GID:?FREESWITCH_GID must resolve teleagent-freeswitch},mode=0700,size=67108864
+      - /usr/local/freeswitch/recordings:rw,noexec,nosuid,nodev,uid=${FREESWITCH_UID:?FREESWITCH_UID must resolve teleagent-freeswitch},gid=${FREESWITCH_GID:?FREESWITCH_GID must resolve teleagent-freeswitch},mode=0700,size=268435456
+      - /usr/local/freeswitch/run:rw,noexec,nosuid,nodev,uid=${FREESWITCH_UID:?FREESWITCH_UID must resolve teleagent-freeswitch},gid=${FREESWITCH_GID:?FREESWITCH_GID must resolve teleagent-freeswitch},mode=0700,size=8388608
       - /usr/local/freeswitch/sounds:ro,noexec,nosuid,nodev,mode=0555,size=1048576
     entrypoint: /usr/local/bin/entrypoint-hermes-freeswitch.sh
     volumes:
@@ -177,19 +179,14 @@ services:
       SIP_TRUNK_PORT: "5060"
       SIP_TRUNK_TRANSPORT: "udp"
       NODE_ENV: "production"
-      VOICE_APPROVAL_SIGNING_KEY_FILE: "/run/secrets/teleagent-approval-private.pem"
       # Agent bridge and scoped capabilities
       AGENT_DURABLE_EXECUTOR_ENABLED: "${AGENT_DURABLE_EXECUTOR_ENABLED:-}"
       AGENT_DURABLE_EXECUTOR_POLL_MS: "${AGENT_DURABLE_EXECUTOR_POLL_MS:-}"
       AGENT_DURABLE_EXECUTOR_SUBMIT_TIMEOUT_MS: "${AGENT_DURABLE_EXECUTOR_SUBMIT_TIMEOUT_MS:-}"
       PHONE_DEPLOY_TIMEOUT_SECONDS: "${PHONE_DEPLOY_TIMEOUT_SECONDS:-}"
-      VOICE_PRIVILEGED_ACTIONS_ENABLED: "${VOICE_PRIVILEGED_ACTIONS_ENABLED:-}"
-      # Signed voice approval
-      VOICE_APPROVAL_CAPABILITY_ENABLED: "${VOICE_APPROVAL_CAPABILITY_ENABLED:-}"
-      VOICE_APPROVAL_CAPABILITY_TTL_SECONDS: "${VOICE_APPROVAL_CAPABILITY_TTL_SECONDS:-}"
-      VOICE_APPROVAL_MARKER_TIMEOUT_MS: "${VOICE_APPROVAL_MARKER_TIMEOUT_MS:-}"
-      VOICE_APPROVAL_SIGNING_KEY_ID: "${VOICE_APPROVAL_SIGNING_KEY_ID:-}"
-      VOICE_APPROVAL_TTL_SECONDS: "${VOICE_APPROVAL_TTL_SECONDS:-}"
+      VOICE_PRIVILEGED_ACTIONS_ENABLED: "false"
+      # Approval authority is outside voice and is not implemented yet.
+      VOICE_APPROVAL_CAPABILITY_ENABLED: "false"
       # SIP and media services
       DEFAULT_CALLER_ID: "${DEFAULT_CALLER_ID:-}"
       # OpenAI Realtime

@@ -3,6 +3,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const { spawnSync } = require('node:child_process');
 
 const SOURCE_ROOT = '/opt/teleagent/current/deploy/voice-stack';
 const RELEASE_PARENT = '/opt/teleagent/releases';
@@ -10,6 +11,13 @@ const INSTALLED_VERIFIER = '/usr/local/libexec/verify-voice-stack-identity';
 const RELEASE_START_GATE = 'ExecStartPre=+/usr/bin/env -i HOME=/var/empty ' +
   'PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 ' +
   '/usr/local/libexec/verify-teleagent-release-closure --check-start-gate';
+const IDENTITY_SPECS = Object.freeze([
+  Object.freeze({ key: 'voice', name: 'teleagent-voice', home: '/var/lib/teleagent-voice' }),
+  Object.freeze({ key: 'drachtio', name: 'teleagent-drachtio', home: '/nonexistent' }),
+  Object.freeze({ key: 'freeswitch', name: 'teleagent-freeswitch', home: '/nonexistent' }),
+  // Asterisk is infrastructure-owned. This bundle verifies but never creates it.
+  Object.freeze({ key: 'asterisk', name: 'teleagent-asterisk', home: '/nonexistent' }),
+]);
 const COLLISION_IDENTITIES = Object.freeze([
   'teleagent-control',
   'teleagent-session-broker',
@@ -68,40 +76,25 @@ function sameSourceIdentity(left, right) {
     .every((field) => left?.[field] === right?.[field]);
 }
 
-function resolveSourceBundle(sourceRoot = SOURCE_ROOT, {
+function inspectResolvedSourceBundle(resolvedRoot, {
   releaseParent = RELEASE_PARENT,
   sourceUid = 0,
   sourceGid = 0,
   lstat = fs.lstatSync,
   realpath = fs.realpathSync,
-  readlink = fs.readlinkSync,
 } = {}) {
-  const selector = path.resolve(sourceRoot, '..', '..');
-  const selectorBefore = lstat(selector);
-  const literalTarget = readlink(selector);
-  const rootBefore = lstat(sourceRoot);
-  const resolvedRoot = realpath(sourceRoot);
-  const rootResolved = lstat(resolvedRoot);
-  const rootAfter = lstat(sourceRoot);
-  const selectorAfter = lstat(selector);
   const releaseRoot = path.resolve(resolvedRoot, '..', '..');
   const relative = path.relative(releaseParent, resolvedRoot).split(path.sep);
-  if (sourceRoot !== path.join(selector, 'deploy', 'voice-stack') ||
-      !selectorBefore.isSymbolicLink() || selectorBefore.uid !== sourceUid ||
-      selectorBefore.gid !== sourceGid || selectorBefore.nlink !== 1 ||
-      !sameSourceIdentity(selectorBefore, selectorAfter) ||
-      !rootBefore.isDirectory() || rootBefore.isSymbolicLink() ||
-      rootBefore.uid !== sourceUid || rootBefore.gid !== sourceGid ||
-      (rootBefore.mode & 0o7777) !== 0o555 ||
-      !sameSourceIdentity(rootBefore, rootResolved) ||
-      !sameSourceIdentity(rootBefore, rootAfter) ||
-      realpath(resolvedRoot) !== resolvedRoot ||
+  const rootMetadata = lstat(resolvedRoot);
+  if (!path.isAbsolute(resolvedRoot) || realpath(resolvedRoot) !== resolvedRoot ||
       realpath(releaseParent) !== releaseParent ||
+      !rootMetadata.isDirectory() || rootMetadata.isSymbolicLink() ||
+      rootMetadata.uid !== sourceUid || rootMetadata.gid !== sourceGid ||
+      (rootMetadata.mode & 0o7777) !== 0o555 ||
       relative.length !== 3 || !/^sha256-[a-f0-9]{64}$/.test(relative[0]) ||
       relative[1] !== 'deploy' || relative[2] !== 'voice-stack' ||
-      releaseRoot !== path.join(releaseParent, relative[0]) ||
-      literalTarget !== releaseRoot) {
-    refuse('the reviewed voice source bundle changed or resolved outside the immutable release');
+      releaseRoot !== path.join(releaseParent, relative[0])) {
+    refuse('the reviewed voice source bundle is outside one immutable release');
   }
   const releaseMetadata = lstat(releaseRoot);
   if (!releaseMetadata.isDirectory() || releaseMetadata.isSymbolicLink() ||
@@ -135,6 +128,54 @@ function resolveSourceBundle(sourceRoot = SOURCE_ROOT, {
   return Object.freeze({ sourceRoot: resolvedRoot, verifierPath: resolvedVerifier, releaseRoot });
 }
 
+function resolvePinnedSourceBundle(sourceRoot, options = {}) {
+  const { lstat = fs.lstatSync, realpath = fs.realpathSync } = options;
+  if (!path.isAbsolute(sourceRoot) || realpath(sourceRoot) !== sourceRoot) {
+    refuse('the pinned voice source root is not canonical');
+  }
+  const before = lstat(sourceRoot);
+  const result = inspectResolvedSourceBundle(sourceRoot, options);
+  const after = lstat(sourceRoot);
+  if (!sameSourceIdentity(before, after)) {
+    refuse('the pinned voice source root changed while it was resolved');
+  }
+  return result;
+}
+
+function resolveSourceBundle(sourceRoot = SOURCE_ROOT, {
+  releaseParent = RELEASE_PARENT,
+  sourceUid = 0,
+  sourceGid = 0,
+  lstat = fs.lstatSync,
+  realpath = fs.realpathSync,
+  readlink = fs.readlinkSync,
+} = {}) {
+  const selector = path.resolve(sourceRoot, '..', '..');
+  const selectorBefore = lstat(selector);
+  const literalTarget = readlink(selector);
+  const rootBefore = lstat(sourceRoot);
+  const resolvedRoot = realpath(sourceRoot);
+  const rootResolved = lstat(resolvedRoot);
+  const rootAfter = lstat(sourceRoot);
+  const selectorAfter = lstat(selector);
+  if (sourceRoot !== path.join(selector, 'deploy', 'voice-stack') ||
+      !selectorBefore.isSymbolicLink() || selectorBefore.uid !== sourceUid ||
+      selectorBefore.gid !== sourceGid || selectorBefore.nlink !== 1 ||
+      !sameSourceIdentity(selectorBefore, selectorAfter) ||
+      !rootBefore.isDirectory() || rootBefore.isSymbolicLink() ||
+      rootBefore.uid !== sourceUid || rootBefore.gid !== sourceGid ||
+      (rootBefore.mode & 0o7777) !== 0o555 ||
+      !sameSourceIdentity(rootBefore, rootResolved) ||
+      !sameSourceIdentity(rootBefore, rootAfter) ||
+      realpath(resolvedRoot) !== resolvedRoot ||
+      literalTarget !== path.resolve(resolvedRoot, '..', '..')) {
+    refuse('the reviewed voice source bundle changed or resolved outside the immutable release');
+  }
+  return inspectResolvedSourceBundle(resolvedRoot, {
+    releaseParent, sourceUid, sourceGid, lstat, realpath,
+  });
+}
+
 function sourceCheck(sourceRoot = SOURCE_ROOT, { sourceUid = 0, sourceGid = 0 } = {}) {
   for (const [sourceName, _target, mode] of REVIEWED_ASSETS) {
     inspectSourceAsset(path.join(sourceRoot, sourceName), {
@@ -151,6 +192,10 @@ function sourceCheck(sourceRoot = SOURCE_ROOT, { sourceUid = 0, sourceGid = 0 } 
   if (JSON.stringify(meaningfulLines(sysusers)) !== JSON.stringify([
     'g teleagent-voice -',
     'u teleagent-voice - "Teleagent private voice orchestrator" /var/lib/teleagent-voice /usr/sbin/nologin',
+    'g teleagent-drachtio -',
+    'u teleagent-drachtio - "Teleagent private Drachtio peer" /nonexistent /usr/sbin/nologin',
+    'g teleagent-freeswitch -',
+    'u teleagent-freeswitch - "Teleagent private FreeSWITCH peer" /nonexistent /usr/sbin/nologin',
   ])) refuse('the sysusers identity contract drifted');
   if (JSON.stringify(meaningfulLines(tmpfiles)) !== JSON.stringify([
     'd /etc/teleagent-voice 0750 root teleagent-voice -',
@@ -214,6 +259,19 @@ function sourceCheck(sourceRoot = SOURCE_ROOT, { sourceUid = 0, sourceGid = 0 } 
       (compose.match(/^\s+com\.teleagent\.voice\.activation-generation:/gmu) || []).length !== 4) {
     refuse('the Compose aggregate cgroup/generation contract drifted');
   }
+  const composeUsers = [
+    '    user: "${VOICE_APP_UID:?VOICE_APP_UID must resolve teleagent-voice}:${VOICE_APP_GID:?VOICE_APP_GID must resolve teleagent-voice}"',
+    '    user: "${DRACHTIO_UID:?DRACHTIO_UID must resolve teleagent-drachtio}:${DRACHTIO_GID:?DRACHTIO_GID must resolve teleagent-drachtio}"',
+    '    user: "${FREESWITCH_UID:?FREESWITCH_UID must resolve teleagent-freeswitch}:${FREESWITCH_GID:?FREESWITCH_GID must resolve teleagent-freeswitch}"',
+  ];
+  const composeLines = compose.split('\n');
+  if ((compose.match(/^    user: /gmu) || []).length !== 4 ||
+      composeLines.filter((line) => line === composeUsers[0]).length !== 2 ||
+      composeUsers.slice(1).some((line) =>
+        composeLines.filter((candidate) => candidate === line).length !== 1) ||
+      /^\s+group_add\s*:/mu.test(compose)) {
+    refuse('the Compose split non-root identity contract drifted');
+  }
   for (const dependency of [
     'teleagent-sip-local-peer-fence.service',
     'teleagent-agent-controller.service',
@@ -252,38 +310,100 @@ function numericId(value, label) {
 function validateIdentityRecords(passwdSource, groupSource) {
   const passwd = parseDatabase(passwdSource, 7, 'passwd');
   const groups = parseDatabase(groupSource, 4, 'group');
-  const user = uniqueNamed(passwd, 'teleagent-voice', 'passwd');
-  const group = uniqueNamed(groups, 'teleagent-voice', 'group');
-  const uid = numericId(user[2], 'teleagent-voice uid');
-  const gid = numericId(user[3], 'teleagent-voice primary gid');
-  const groupGid = numericId(group[2], 'teleagent-voice group gid');
-  if (uid <= 0 || gid <= 0 || uid === 1000 || gid === 1000 || gid !== groupGid ||
-      user[5] !== '/var/lib/teleagent-voice' ||
-      !['/usr/sbin/nologin', '/sbin/nologin'].includes(user[6]) || group[3] !== '') {
-    refuse('the teleagent-voice account contract is unsafe');
-  }
-  if (passwd.some((candidate) => candidate !== user && (
-    numericId(candidate[2], 'passwd uid') === uid || numericId(candidate[3], 'passwd gid') === gid
-  )) || groups.some((candidate) => candidate !== group && numericId(candidate[2], 'group gid') === gid)) {
-    refuse('the teleagent-voice numeric identity is reused');
-  }
-  if (groups.some((candidate) => candidate[3].split(',').filter(Boolean).includes('teleagent-voice'))) {
-    refuse('teleagent-voice has a stale supplementary group');
-  }
-  for (const name of COLLISION_IDENTITIES) {
-    for (const candidate of passwd.filter((fields) => fields[0] === name)) {
-      if (numericId(candidate[2], `${name} uid`) === uid ||
-          numericId(candidate[3], `${name} gid`) === gid) {
-        refuse('a split runtime identity collides with teleagent-voice');
-      }
+  const identities = {};
+  const protectedUsers = new Set();
+  const protectedGroups = new Set();
+  for (const spec of IDENTITY_SPECS) {
+    const user = uniqueNamed(passwd, spec.name, 'passwd');
+    const group = uniqueNamed(groups, spec.name, 'group');
+    const uid = numericId(user[2], `${spec.name} uid`);
+    const gid = numericId(user[3], `${spec.name} primary gid`);
+    const groupGid = numericId(group[2], `${spec.name} group gid`);
+    if (uid <= 0 || gid <= 0 || uid > 2147483647 || gid > 2147483647 ||
+        uid === 1000 || gid === 1000 || gid !== groupGid || user[5] !== spec.home ||
+        !['/usr/sbin/nologin', '/sbin/nologin'].includes(user[6]) || group[3] !== '') {
+      refuse(`the ${spec.name} account contract is unsafe`);
     }
-    for (const candidate of groups.filter((fields) => fields[0] === name)) {
-      if (numericId(candidate[2], `${name} group gid`) === gid) {
-        refuse('a split runtime group collides with teleagent-voice');
+    protectedUsers.add(user);
+    protectedGroups.add(group);
+    identities[spec.key] = Object.freeze({ name: spec.name, uid, gid });
+  }
+
+  const entries = Object.values(identities);
+  for (let left = 0; left < entries.length; left += 1) {
+    for (let right = left + 1; right < entries.length; right += 1) {
+      if ([entries[right].uid, entries[right].gid].includes(entries[left].uid) ||
+          [entries[right].uid, entries[right].gid].includes(entries[left].gid)) {
+        refuse('the voice and media numeric identities are reused');
       }
     }
   }
-  return Object.freeze({ uid, gid });
+  const protectedNumbers = new Set(entries.flatMap(({ uid, gid }) => [uid, gid]));
+  if (passwd.some((candidate) => !protectedUsers.has(candidate) && (
+    protectedNumbers.has(numericId(candidate[2], 'passwd uid')) ||
+    protectedNumbers.has(numericId(candidate[3], 'passwd gid'))
+  )) || groups.some((candidate) => !protectedGroups.has(candidate) &&
+    protectedNumbers.has(numericId(candidate[2], 'group gid')))) {
+    refuse('a voice or media numeric identity is reused');
+  }
+  for (const spec of IDENTITY_SPECS) {
+    if (groups.some((candidate) =>
+      candidate[3].split(',').filter(Boolean).includes(spec.name))) {
+      refuse(`${spec.name} has a stale supplementary group`);
+    }
+  }
+  return Object.freeze(identities);
+}
+
+function runIdentityLookup(filename, args, label, { runCommand = spawnSync } = {}) {
+  const result = runCommand(filename, args, {
+    encoding: 'utf8',
+    env: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C', LC_ALL: 'C' },
+    input: '',
+    timeout: 5000,
+    maxBuffer: 4096,
+  });
+  const output = String(result?.stdout || '');
+  if (result?.error || result?.status !== 0 || Buffer.byteLength(output) > 4096 ||
+      /\r|\0/u.test(output) || !output.endsWith('\n') || output.slice(0, -1).includes('\n')) {
+    refuse(`the resolved ${label} is unavailable or ambiguous`);
+  }
+  return output.slice(0, -1);
+}
+
+function validateResolvedIdentityRecords(passwdSource, groupSource, options = {}) {
+  const identities = validateIdentityRecords(passwdSource, groupSource);
+  const passwd = parseDatabase(passwdSource, 7, 'passwd');
+  const groups = parseDatabase(groupSource, 4, 'group');
+  for (const spec of IDENTITY_SPECS) {
+    const localPasswd = uniqueNamed(passwd, spec.name, 'passwd').join(':');
+    const localGroup = uniqueNamed(groups, spec.name, 'group').join(':');
+    const resolvedPasswd = runIdentityLookup(
+      '/usr/bin/getent', ['passwd', spec.name], `${spec.name} passwd record`, options
+    );
+    const resolvedGroup = runIdentityLookup(
+      '/usr/bin/getent', ['group', spec.name], `${spec.name} group record`, options
+    );
+    const resolvedGroups = runIdentityLookup(
+      '/usr/bin/id', ['-G', spec.name], `${spec.name} supplementary groups`, options
+    );
+    if (resolvedPasswd !== localPasswd || resolvedGroup !== localGroup ||
+        resolvedGroups !== String(identities[spec.key].gid)) {
+      refuse(`the resolved ${spec.name} identity differs from the exact local database contract`);
+    }
+  }
+  return identities;
+}
+
+function formatInstalledIdentities(identities) {
+  return `${IDENTITY_SPECS.map((spec) => {
+    const identity = identities?.[spec.key];
+    if (!identity || identity.name !== spec.name || !Number.isSafeInteger(identity.uid) ||
+        !Number.isSafeInteger(identity.gid)) {
+      refuse('the installed identity authority result is incomplete');
+    }
+    return [spec.key, spec.name, identity.uid, identity.gid].join('\t');
+  }).join('\n')}\n`;
 }
 
 function inspectPath(filename, { type, uid, gid, mode, nlink = null }) {
@@ -323,9 +443,10 @@ function installedCheck({
 } = {}) {
   if (process.getuid() !== 0) refuse('the installed check requires root');
   sourceCheck(sourceRoot);
-  const identity = validateIdentityRecords(
+  const identities = validateIdentityRecords(
     inspectRootDatabase(passwdPath), inspectRootDatabase(groupPath)
   );
+  const identity = identities.voice;
   compareInstalledAssets(sourceRoot);
   for (const [filename, uid, gid, mode] of [
     ['/etc/teleagent-voice', 0, identity.gid, 0o750],
@@ -335,20 +456,53 @@ function installedCheck({
     ['/var/lib/teleagent-voice-stack', 0, 0, 0o700],
     ['/run/teleagent-voice-stack', 0, 0, 0o700],
   ]) inspectPath(filename, { type: 'directory', uid, gid, mode });
-  return true;
+  return identities;
+}
+
+function installedIdentityAuthority({
+  sourceRoot = SOURCE_ROOT,
+  passwdPath = '/etc/passwd',
+  groupPath = '/etc/group',
+  runCommand = spawnSync,
+} = {}) {
+  const checked = installedCheck({ sourceRoot, passwdPath, groupPath });
+  const resolved = validateResolvedIdentityRecords(
+    inspectRootDatabase(passwdPath), inspectRootDatabase(groupPath), { runCommand }
+  );
+  for (const spec of IDENTITY_SPECS) {
+    if (checked[spec.key].uid !== resolved[spec.key].uid ||
+        checked[spec.key].gid !== resolved[spec.key].gid) {
+      refuse('the local identity database changed during installed identity resolution');
+    }
+  }
+  return resolved;
 }
 
 function main() {
   const mode = process.argv[2];
-  if (process.argv.length !== 3 || !['--source-check', '--installed-check'].includes(mode)) {
-    refuse('usage: verify-voice-stack-identity --source-check|--installed-check');
+  const hasPinnedRoot = process.argv.length === 5 && process.argv[3] === '--source-root';
+  if ((!hasPinnedRoot && process.argv.length !== 3) ||
+      !['--source-check', '--installed-check', '--installed-identities'].includes(mode)) {
+    refuse('usage: verify-voice-stack-identity ' +
+      '--source-check|--installed-check|--installed-identities ' +
+      '[--source-root ABSOLUTE_COMPONENT_ROOT]');
   }
   const invoked = fs.realpathSync(process.argv[1]);
-  const sourceBundle = resolveSourceBundle();
-  if (mode === '--installed-check') {
+  const sourceBundle = hasPinnedRoot
+    ? resolvePinnedSourceBundle(process.argv[4])
+    : (mode === '--source-check' && invoked !== INSTALLED_VERIFIER
+      ? resolvePinnedSourceBundle(path.dirname(invoked))
+      : resolveSourceBundle());
+  if (mode === '--installed-check' || mode === '--installed-identities') {
     if (invoked !== INSTALLED_VERIFIER) refuse('use the fixed installed verifier entrypoint');
-    installedCheck({ sourceRoot: sourceBundle.sourceRoot });
-    process.stdout.write('VOICE_STACK_IDENTITY_OK\n');
+    if (mode === '--installed-identities') {
+      process.stdout.write(formatInstalledIdentities(installedIdentityAuthority({
+        sourceRoot: sourceBundle.sourceRoot,
+      })));
+    } else {
+      installedCheck({ sourceRoot: sourceBundle.sourceRoot });
+      process.stdout.write('VOICE_STACK_IDENTITY_OK\n');
+    }
   } else {
     if (invoked !== sourceBundle.verifierPath &&
         invoked !== INSTALLED_VERIFIER) {
@@ -368,10 +522,15 @@ if (require.main === module) {
 
 module.exports = {
   COLLISION_IDENTITIES,
+  IDENTITY_SPECS,
   REVIEWED_ASSETS,
   inspectPath,
   inspectSourceAsset,
+  formatInstalledIdentities,
+  installedIdentityAuthority,
   resolveSourceBundle,
+  resolvePinnedSourceBundle,
   sourceCheck,
   validateIdentityRecords,
+  validateResolvedIdentityRecords,
 };

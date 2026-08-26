@@ -18,7 +18,7 @@ const ACTIVATION_ROOT = '/var/lib/teleagent-voice-stack';
 const ACTIVATION_STATE = `${ACTIVATION_ROOT}/activation-state.json`;
 const WRAPPER = '/usr/local/libexec/teleagent-voice-stack-launch';
 const DOCKER = '/usr/bin/docker';
-const GETENT = '/usr/bin/getent';
+const IDENTITY_VERIFIER = '/usr/local/libexec/verify-voice-stack-identity';
 const SYSTEMCTL = '/usr/bin/systemctl';
 const SIP_FENCE = '/usr/local/libexec/teleagent-sip-local-peer-fence';
 const PROVIDER_CLI_CHECK = '/usr/local/libexec/teleagent-provider-cli-check';
@@ -30,9 +30,18 @@ const PROJECT_LABEL = `com.docker.compose.project=${PROJECT}`;
 const IMAGE_REVISION_LABEL = 'org.opencontainers.image.revision';
 const ACTIVATION_GENERATION_LABEL = 'com.teleagent.voice.activation-generation';
 const CONTAINER_SLICE = 'teleagent-voice-containers.slice';
+const VOICE_IDENTITY_SPECS = Object.freeze([
+  Object.freeze({ key: 'voice', name: 'teleagent-voice', home: '/var/lib/teleagent-voice' }),
+  Object.freeze({ key: 'drachtio', name: 'teleagent-drachtio', home: '/nonexistent' }),
+  Object.freeze({ key: 'freeswitch', name: 'teleagent-freeswitch', home: '/nonexistent' }),
+  // The PBX account is infrastructure-owned and deliberately is not created by
+  // this bundle. A missing dedicated peer keeps the whole media stack dormant.
+  Object.freeze({ key: 'asterisk', name: 'teleagent-asterisk', home: '/nonexistent' }),
+]);
 const VOICE_SERVICES = Object.freeze([
   'drachtio', 'freeswitch', 'voice-app', 'voice-runtime-preflight',
 ]);
+const RUNNING_VOICE_SERVICES = Object.freeze(['drachtio', 'freeswitch', 'voice-app']);
 const MAX_CONTROL_RESPONSE_BYTES = 128 * 1024;
 const HOST_STATE_ROOT = '/var/lib/teleagent-voice';
 const HOST_STATE_PARENT = '/var/lib';
@@ -44,6 +53,8 @@ const MIN_STATE_FREE_BYTES = 512n * MIB;
 const FIXED_VOICE_APP_BOUNDARY_ENV = Object.freeze({
   HTTP_HOST: '127.0.0.1',
   OUTBOUND_API_NON_LOOPBACK_ENABLED: 'false',
+  VOICE_APPROVAL_CAPABILITY_ENABLED: 'false',
+  VOICE_PRIVILEGED_ACTIONS_ENABLED: 'false',
   VOICE_APP_EXECUTION_LOCK_FILE: '/app/state/voice-execution.lock.json',
   VOICE_STATE_DB_PATH: '/app/state/voice-state.sqlite',
   WS_ALLOWED_PEERS: '',
@@ -70,11 +81,9 @@ const CREDENTIALS = Object.freeze([
   ['freeswitch-secret', 'teleagent-freeswitch-secret', 'token', true],
   ['executor-api-token', 'teleagent-executor-api-token', 'token', true],
   ['voice-control-token', 'teleagent-voice-control-token', 'token', true],
-  ['privileged-action-api-token', 'teleagent-privileged-action-api-token', 'token', false],
   ['openai-realtime-api-key', 'teleagent-openai-realtime-api-key', 'token', true],
   ['openai-safety-salt', 'teleagent-openai-safety-salt', 'token', true],
   ['outbound-api-token', 'teleagent-outbound-api-token', 'token', true],
-  ['voice-approval-private.pem', 'teleagent-approval-private.pem', 'privateKey', true],
   ['sip-ingress-password', 'teleagent-sip-ingress-password', 'token', true],
   ['sip-callback-password', 'teleagent-sip-callback-password', 'token', true],
 ]);
@@ -294,23 +303,62 @@ function verifyVoiceImage(manifest, {
   return true;
 }
 
-function resolveVoiceIdentity() {
-  const result = run(GETENT, ['passwd', 'teleagent-voice'], {
+function resolveVoiceIdentities({ runCommand = run } = {}) {
+  const result = runCommand(IDENTITY_VERIFIER, ['--installed-identities'], {
     capture: true,
-    environment: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C' },
+    allowFailure: true,
+    environment: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C', LC_ALL: 'C' },
+    timeoutMs: 10000,
   });
-  const fields = result.stdout.trim().split(':');
-  if (fields.length !== 7 || fields[0] !== 'teleagent-voice' ||
-      !/^\d+$/u.test(fields[2]) || !/^\d+$/u.test(fields[3])) {
-    refuse('the dedicated teleagent-voice identity is unavailable');
+  const output = String(result.stdout || '');
+  if (result.status !== 0 || Buffer.byteLength(output) > 4096 || /\r|\0/u.test(output) ||
+      !output.endsWith('\n')) {
+    refuse('the installed voice identity authority is unavailable');
   }
-  const uid = Number(fields[2]);
-  const gid = Number(fields[3]);
-  if (uid <= 0 || gid <= 0 || uid === 1000 || gid === 1000 ||
-      !['/usr/sbin/nologin', '/sbin/nologin'].includes(fields[6])) {
-    refuse('the dedicated teleagent-voice identity is unsafe');
+  const rows = output.slice(0, -1).split('\n');
+  if (rows.length !== VOICE_IDENTITY_SPECS.length) {
+    refuse('the installed voice identity authority result is incomplete');
   }
-  return { uid, gid };
+  const identities = {};
+  for (let index = 0; index < VOICE_IDENTITY_SPECS.length; index += 1) {
+    const spec = VOICE_IDENTITY_SPECS[index];
+    const fields = rows[index].split('\t');
+    if (fields.length !== 4 || fields[0] !== spec.key || fields[1] !== spec.name ||
+        !/^[1-9][0-9]*$/u.test(fields[2]) || !/^[1-9][0-9]*$/u.test(fields[3])) {
+      refuse('the installed voice identity authority result is malformed');
+    }
+    const uid = Number(fields[2]);
+    const gid = Number(fields[3]);
+    if (!Number.isSafeInteger(uid) || !Number.isSafeInteger(gid) ||
+        uid > 2147483647 || gid > 2147483647 || uid === 1000 || gid === 1000) {
+      refuse('the installed voice identity authority result is unsafe');
+    }
+    identities[spec.key] = Object.freeze({ name: spec.name, uid, gid });
+  }
+  const entries = Object.values(identities);
+  for (let left = 0; left < entries.length; left += 1) {
+    for (let right = left + 1; right < entries.length; right += 1) {
+      if ([entries[right].uid, entries[right].gid].includes(entries[left].uid) ||
+          [entries[right].uid, entries[right].gid].includes(entries[left].gid)) {
+        refuse('the voice and media identities are numerically reused');
+      }
+    }
+  }
+  return Object.freeze(identities);
+}
+
+function composeIdentitySettings(identities) {
+  if (!identities?.voice || !identities?.drachtio || !identities?.freeswitch) {
+    refuse('the Compose media identity set is incomplete');
+  }
+  return Object.freeze({
+    VOICE_APP_UID: String(identities.voice.uid),
+    VOICE_APP_GID: String(identities.voice.gid),
+    DRACHTIO_UID: String(identities.drachtio.uid),
+    DRACHTIO_GID: String(identities.drachtio.gid),
+    FREESWITCH_UID: String(identities.freeswitch.uid),
+    FREESWITCH_GID: String(identities.freeswitch.gid),
+  });
 }
 
 function openCredential(filename, { gid, kind }) {
@@ -326,8 +374,10 @@ function openCredential(filename, { gid, kind }) {
     }
     contents = fs.readFileSync(descriptor);
     if (contents.includes(0)) refuse('a protected voice credential is invalid');
-    if (contents.at(-1) === 0x0a) contents = contents.subarray(0, contents.length - 1);
-    if (contents.at(-1) === 0x0d) contents = contents.subarray(0, contents.length - 1);
+    let contentLength = contents.length;
+    if (contents[contentLength - 1] === 0x0a) contents[--contentLength] = 0;
+    if (contents[contentLength - 1] === 0x0d) contents[--contentLength] = 0;
+    contents = contents.subarray(0, contentLength);
     if (kind === 'privateKey') {
       const key = crypto.createPrivateKey(contents);
       if (key.asymmetricKeyType !== 'ed25519') refuse('the approval signing key is invalid');
@@ -338,8 +388,11 @@ function openCredential(filename, { gid, kind }) {
         refuse('a protected voice credential is invalid');
       }
     }
-    return Buffer.from(contents);
+    const ownedContents = contents;
+    contents = null;
+    return ownedContents;
   } catch (error) {
+    if (contents) contents.fill(0);
     if (error?.code === 'VOICE_STACK_REFUSED') throw error;
     refuse('a protected voice credential is missing or unreadable');
   } finally {
@@ -384,12 +437,13 @@ function verifyVoiceAppRuntimeContract(runtimeContract) {
   return true;
 }
 
-function parseVoiceEnvironmentFile(source, identity, runtimeContract) {
+function parseVoiceEnvironmentFile(source, identities, runtimeContract) {
   if (/\r|\0/u.test(source)) refuse('the voice environment file has invalid encoding');
   verifyVoiceAppRuntimeContract(runtimeContract);
   const allowed = new Set([
     ...runtimeContract.VOICE_APP_RUNTIME_ENV_KEYS,
-    'VOICE_APP_UID', 'VOICE_APP_GID', 'DEVICE_CONFIG_DIR', 'VOICE_STATE_DIR',
+    'VOICE_APP_UID', 'VOICE_APP_GID', 'DRACHTIO_UID', 'DRACHTIO_GID',
+    'FREESWITCH_UID', 'FREESWITCH_GID', 'DEVICE_CONFIG_DIR', 'VOICE_STATE_DIR',
   ]);
   const settings = {};
   for (const rawLine of source.split('\n')) {
@@ -406,8 +460,8 @@ function parseVoiceEnvironmentFile(source, identity, runtimeContract) {
     }
     settings[name] = value;
   }
-  if (settings.VOICE_APP_UID !== String(identity.uid) ||
-      settings.VOICE_APP_GID !== String(identity.gid) ||
+  const expectedIdentities = composeIdentitySettings(identities);
+  if (Object.entries(expectedIdentities).some(([name, value]) => settings[name] !== value) ||
       settings.DEVICE_CONFIG_DIR !== '/etc/teleagent-voice/config' ||
       settings.VOICE_STATE_DIR !== '/var/lib/teleagent-voice') {
     refuse('the voice environment identity or path contract drifted');
@@ -415,24 +469,20 @@ function parseVoiceEnvironmentFile(source, identity, runtimeContract) {
   return settings;
 }
 
-function readEnvironmentFile(identity) {
+function readEnvironmentFile(identities) {
   inspectRootPath(ENV_FILE, { mode: 0o600 });
   const source = fs.readFileSync(ENV_FILE, 'utf8');
   const runtimeContract = require(`${APP_ROOT}/lib/voice-app-runtime-env.js`);
-  return parseVoiceEnvironmentFile(source, identity, runtimeContract);
+  return parseVoiceEnvironmentFile(source, identities, runtimeContract);
 }
 
-function readCredentialSet(identity, settings) {
+function readCredentialSet(identity) {
   inspectRootPath(CREDENTIAL_ROOT, { directory: true });
-  const requirePrivileged = String(settings.VOICE_PRIVILEGED_ACTIONS_ENABLED || '').toLowerCase() === 'true';
   const credentials = new Map();
   const comparable = [];
   try {
-    for (const [sourceName, runtimeName, kind, normallyRequired] of CREDENTIALS) {
-      if (sourceName === 'privileged-action-api-token' && !requirePrivileged) continue;
-      const required = normallyRequired || (sourceName === 'privileged-action-api-token' && requirePrivileged);
+    for (const [sourceName, runtimeName, kind] of CREDENTIALS) {
       const sourcePath = path.join(CREDENTIAL_ROOT, sourceName);
-      if (!required && !fs.existsSync(sourcePath)) continue;
       const value = openCredential(sourcePath, { gid: identity.gid, kind });
       credentials.set(runtimeName, value);
       if (kind === 'token') comparable.push([sourceName, value]);
@@ -703,7 +753,8 @@ function persistActivationState(phase, {
   return Object.freeze(state);
 }
 
-function projectRuntime(identity, credentials) {
+function projectRuntime(identities, credentials) {
+  const identity = identities.voice;
   inspectRootPath(RUNTIME_ROOT, { directory: true });
   const staging = `${RUNTIME_ROOT}/voice-secrets.new-${process.pid}`;
   fs.mkdirSync(staging, { mode: 0o750 });
@@ -728,11 +779,11 @@ function projectRuntime(identity, credentials) {
         __DRACHTIO_SIP_PORT__: '5070',
         __DRACHTIO_SIP_TRANSPORT__: 'udp',
       },
-    ), { mode: 0o400, uid: 0, gid: 0 });
+    ), { mode: 0o440, uid: 0, gid: identities.drachtio.gid });
     atomicReplaceFile(`${RUNTIME_ROOT}/freeswitch-event-socket.conf.xml`, renderTemplate(
       `${APP_ROOT}/deploy/voice-stack/freeswitch-event-socket.conf.xml.template`,
       { __FREESWITCH_SECRET__: freeswitch },
-    ), { mode: 0o400, uid: 0, gid: 0 });
+    ), { mode: 0o440, uid: 0, gid: identities.freeswitch.gid });
     ensureDockerConfigDirectory();
   } catch (error) {
     fs.rmSync(staging, { recursive: true, force: true });
@@ -880,31 +931,62 @@ function requireProviderInstallClosure() {
   }
 }
 
-async function requireControllerReady() {
-  const response = await requestJson({
-    method: 'GET',
-    pathname: '/health',
-    port: 3333,
-    timeoutMs: 2000,
-  });
-  if (response.status !== 200 || response.body?.ready !== true ||
-      response.body?.service !== 'claude-api-server') {
-    refuse('the agent controller or isolated provider plane is not ready');
+async function requireControllerReady(controlToken, { request = requestJson } = {}) {
+  if (!Buffer.isBuffer(controlToken)) {
+    refuse('the controller readiness credential is invalid');
+  }
+  try {
+    if (controlToken.length < 32 || controlToken.length > 4096) {
+      refuse('the controller readiness credential is invalid');
+    }
+    const response = await request({
+      method: 'GET',
+      pathname: '/operator/health',
+      token: controlToken.toString('utf8'),
+      port: 3333,
+      timeoutMs: 2000,
+    });
+    const body = response.body;
+    if (response.status !== 200 || body?.ready !== true ||
+        body?.service !== 'claude-api-server' ||
+        body?.phoneAuthority?.mode !== 'read_only' ||
+        body?.phoneAuthority?.status !== 'disabled_pending_independent_pbx_attester' ||
+        body?.approvalCapabilities?.verifierConfigured !== false ||
+        body?.authentication?.privilegedActionConfigured !== false ||
+        body?.authentication?.privilegedActionRequired !== false ||
+        body?.authentication?.allActiveScopesConfiguredAndDistinct !== true ||
+        body?.privilegedActions?.enabled !== false ||
+        body?.privilegedActions?.proxyConfigured !== false ||
+        body?.privilegedActions?.authConfigured !== false) {
+      refuse('the agent controller is not in the canonical read-only phone authority mode');
+    }
+  } finally {
+    controlToken.fill(0);
   }
 }
 
-async function requirePrivilegedBrokerReady(settings) {
-  if (String(settings.VOICE_PRIVILEGED_ACTIONS_ENABLED || '').toLowerCase() !== 'true') return;
-  requireActiveUnit('teleagent-privileged-action.service');
-  const response = await requestJson({
-    method: 'GET',
-    pathname: '/health',
-    socketPath: '/run/teleagent-privileged-action/broker.sock',
-    timeoutMs: 2000,
-  });
-  if (response.status !== 200 || response.body?.ready !== true ||
-      response.body?.service !== 'teleagent-privileged-action-broker') {
-    refuse('the privileged action broker is not ready');
+async function requireExecutorReady(executorToken, { request = requestJson } = {}) {
+  if (!Buffer.isBuffer(executorToken)) {
+    refuse('the executor readiness credential is invalid');
+  }
+  try {
+    if (executorToken.length < 32 || executorToken.length > 4096) {
+      refuse('the executor readiness credential is invalid');
+    }
+    const response = await request({
+      method: 'GET',
+      pathname: '/executor/health',
+      token: executorToken.toString('utf8'),
+      port: 3333,
+      timeoutMs: 2000,
+    });
+    if (response.status !== 200 || response.body?.ready !== true ||
+        response.body?.service !== 'claude-api-server' ||
+        response.body?.scope !== 'executor' || response.body?.status !== 'ready') {
+      refuse('the durable executor scope is not ready for read-only phone work');
+    }
+  } finally {
+    executorToken.fill(0);
   }
 }
 
@@ -979,7 +1061,7 @@ function requireDockerCgroupBoundary({
   return parseDockerCgroupInfo(information.stdout);
 }
 
-function parseVoiceContainerBoundary(output, activationGeneration) {
+function parseVoiceContainerBoundary(output, activationGeneration, identities) {
   if (!Number.isSafeInteger(activationGeneration) || activationGeneration < 1) {
     refuse('the voice activation generation is invalid');
   }
@@ -988,13 +1070,23 @@ function parseVoiceContainerBoundary(output, activationGeneration) {
     refuse('the voice container boundary evidence is invalid');
   }
   const rows = text.trim() ? text.trim().split('\n').map((line) => line.split('\t')) : [];
-  if (rows.length !== VOICE_SERVICES.length || rows.some((fields) => fields.length !== 3)) {
+  if (rows.length !== VOICE_SERVICES.length || rows.some((fields) => fields.length !== 5)) {
     refuse('the exact voice services are not all inside the aggregate boundary');
   }
-  const services = rows.map(([service, generation, cgroupParent]) => {
+  const expectedUsers = Object.freeze({
+    'voice-runtime-preflight': `${identities?.voice?.uid}:${identities?.voice?.gid}`,
+    drachtio: `${identities?.drachtio?.uid}:${identities?.drachtio?.gid}`,
+    freeswitch: `${identities?.freeswitch?.uid}:${identities?.freeswitch?.gid}`,
+    'voice-app': `${identities?.voice?.uid}:${identities?.voice?.gid}`,
+  });
+  const services = rows.map(([
+    service, generation, cgroupParent, configuredUser, configuredSupplementaryGroups,
+  ]) => {
     if (!VOICE_SERVICES.includes(service) || generation !== String(activationGeneration) ||
-        cgroupParent !== CONTAINER_SLICE) {
-      refuse('a voice container escaped its activation generation or aggregate boundary');
+        cgroupParent !== CONTAINER_SLICE || configuredUser !== expectedUsers[service] ||
+        !['null', '[]'].includes(configuredSupplementaryGroups) ||
+        configuredUser.startsWith('0:') || configuredUser.endsWith(':0')) {
+      refuse('a voice container escaped its activation generation, identity, or aggregate boundary');
     }
     return service;
   });
@@ -1004,7 +1096,100 @@ function parseVoiceContainerBoundary(output, activationGeneration) {
   return Object.freeze([...services].sort());
 }
 
-function verifyExactProjectContainerBoundary(activationGeneration, {
+function parseProcessIdentityStatus(source, expectedIdentity) {
+  const text = String(source || '');
+  if (Buffer.byteLength(text) > 64 * 1024 || /\r|\0/u.test(text) ||
+      !expectedIdentity || !Number.isSafeInteger(expectedIdentity.uid) ||
+      !Number.isSafeInteger(expectedIdentity.gid)) {
+    refuse('a running voice process identity is unverifiable');
+  }
+  const fields = {};
+  for (const label of ['Uid', 'Gid']) {
+    const matches = text.split('\n').filter((line) => line.startsWith(`${label}:`));
+    if (matches.length !== 1) refuse('a running voice process identity is ambiguous');
+    const values = matches[0].slice(label.length + 1).trim().split(/\s+/u);
+    if (values.length !== 4 || values.some((value) => !/^[1-9][0-9]*$/u.test(value))) {
+      refuse('a running voice process identity is malformed');
+    }
+    fields[label] = values.map(Number);
+  }
+  const groupMatches = text.split('\n').filter((line) => line.startsWith('Groups:'));
+  if (groupMatches.length !== 1) refuse('a running voice process identity is ambiguous');
+  // /proc/PID/status reports supplementary groups here; the primary GID is
+  // already bound by all four Gid fields above. Compose GroupAdd is forbidden,
+  // so any value in Groups is an identity-boundary escape.
+  const supplementaryGroups = groupMatches[0].slice('Groups:'.length).trim();
+  if (supplementaryGroups !== '') {
+    refuse('a running voice process has an unexpected supplementary group');
+  }
+  if (fields.Uid.some((value) => value !== expectedIdentity.uid) ||
+      fields.Gid.some((value) => value !== expectedIdentity.gid)) {
+    refuse('a running voice process escaped its configured host identity');
+  }
+  return true;
+}
+
+function verifyRunningProjectProcessIdentities(identities, {
+  runCommand = run,
+  environment = fixedDockerEnvironment(),
+  fsModule = fs,
+} = {}) {
+  const identifiers = listExactProjectContainerIds(runCommand, environment);
+  if (identifiers.length !== VOICE_SERVICES.length) {
+    refuse('the exact voice services are not all running inside the identity boundary');
+  }
+  const inspectArgs = [
+    'container', 'inspect', '--format',
+    '{{index .Config.Labels "com.docker.compose.service"}}\t' +
+      '{{.State.Status}}\t{{.State.Pid}}\t{{.State.ExitCode}}',
+    ...identifiers,
+  ];
+  const inspect = () => runCommand(DOCKER, inspectArgs, {
+    capture: true, allowFailure: true, environment, timeoutMs: 10000,
+  });
+  const before = inspect();
+  if (before.status !== 0 || Buffer.byteLength(String(before.stdout || '')) > 8192 ||
+      /\r|\0/u.test(String(before.stdout || ''))) {
+    refuse('the running voice process identities are unverifiable');
+  }
+  const rows = String(before.stdout || '').trim().split('\n').map((line) => line.split('\t'));
+  if (rows.length !== VOICE_SERVICES.length || rows.some((row) => row.length !== 4) ||
+      new Set(rows.map((row) => row[0])).size !== VOICE_SERVICES.length) {
+    refuse('the running voice process identity evidence is incomplete');
+  }
+  const expected = {
+    drachtio: identities?.drachtio,
+    freeswitch: identities?.freeswitch,
+    'voice-app': identities?.voice,
+  };
+  for (const [service, status, pidText, exitCode] of rows) {
+    if (service === 'voice-runtime-preflight') {
+      if (status !== 'exited' || pidText !== '0' || exitCode !== '0') {
+        refuse('the one-shot voice preflight did not exit cleanly');
+      }
+      continue;
+    }
+    if (!RUNNING_VOICE_SERVICES.includes(service) || status !== 'running' || exitCode !== '0' ||
+        !/^[1-9][0-9]*$/u.test(pidText)) {
+      refuse('a long-running voice process is not running exactly');
+    }
+    try {
+      parseProcessIdentityStatus(
+        fsModule.readFileSync(`/proc/${pidText}/status`, 'utf8'), expected[service]
+      );
+    } catch (error) {
+      if (error?.code === 'VOICE_STACK_REFUSED') throw error;
+      refuse('a running voice process identity is unreadable');
+    }
+  }
+  const after = inspect();
+  if (after.status !== 0 || after.stdout !== before.stdout) {
+    refuse('a running voice process changed during identity verification');
+  }
+  return RUNNING_VOICE_SERVICES.length;
+}
+
+function verifyExactProjectContainerBoundary(activationGeneration, identities, {
   runCommand = run,
   environment = fixedDockerEnvironment(),
 } = {}) {
@@ -1015,12 +1200,12 @@ function verifyExactProjectContainerBoundary(activationGeneration, {
   const inspection = runCommand(DOCKER, [
     'container', 'inspect', '--format',
     `{{index .Config.Labels "com.docker.compose.service"}}\t` +
-      `{{index .Config.Labels "${ACTIVATION_GENERATION_LABEL}"}}\t` +
-      '{{.HostConfig.CgroupParent}}',
+    `{{index .Config.Labels "${ACTIVATION_GENERATION_LABEL}"}}\t` +
+      '{{.HostConfig.CgroupParent}}\t{{.Config.User}}\t{{json .HostConfig.GroupAdd}}',
     ...identifiers,
   ], { capture: true, allowFailure: true, environment, timeoutMs: 10000 });
   if (inspection.status !== 0) refuse('the voice container boundary is unverifiable');
-  parseVoiceContainerBoundary(inspection.stdout, activationGeneration);
+  parseVoiceContainerBoundary(inspection.stdout, activationGeneration, identities);
   return identifiers.length;
 }
 
@@ -1087,11 +1272,20 @@ async function start() {
       environment: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8' },
     });
   }
-  const identity = resolveVoiceIdentity();
+  const identities = resolveVoiceIdentities();
+  const identity = identities.voice;
   verifyBoundedHostStateFilesystem(identity);
-  const settings = readEnvironmentFile(identity);
-  await requireControllerReady();
-  await requirePrivilegedBrokerReady(settings);
+  const settings = readEnvironmentFile(identities);
+  const controllerControlToken = openCredential(
+    path.join(CREDENTIAL_ROOT, 'voice-control-token'),
+    { gid: identity.gid, kind: 'token' }
+  );
+  await requireControllerReady(controllerControlToken);
+  const executorReadinessToken = openCredential(
+    path.join(CREDENTIAL_ROOT, 'executor-api-token'),
+    { gid: identity.gid, kind: 'token' }
+  );
+  await requireExecutorReady(executorReadinessToken);
   const startingState = persistActivationState('starting', {
     imageManifest,
     panic: 'not_requested',
@@ -1103,15 +1297,25 @@ async function start() {
   );
   let activationAttempted = false;
   try {
-    const credentials = readCredentialSet(identity, settings);
-    projectRuntime(identity, credentials);
+    const credentials = readCredentialSet(identity);
+    projectRuntime(identities, credentials);
     run(DOCKER, composeArgs('config', '--quiet'), { environment });
-    // The Docker call can partially create or start containers before it
-    // returns an error, so intent becomes outcome-unknown before invocation.
+    // Container creation is the first activating Docker mutation. Inspect the
+    // immutable configured identities before any service process may start.
     activationAttempted = true;
+    run(DOCKER, composeArgs('create', '--no-build', '--pull', 'never'), { environment });
+    verifyExactProjectContainerBoundary(
+      startingState.activationGeneration, identities, { environment }
+    );
+    // `up` retains Compose's preflight completion dependency after the
+    // separately inspected create phase.
     run(DOCKER, composeArgs('up', '--detach', '--no-build', '--pull', 'never'), { environment });
+    verifyRunningProjectProcessIdentities(identities, { environment });
     await waitForHealth();
-    verifyExactProjectContainerBoundary(startingState.activationGeneration, { environment });
+    verifyRunningProjectProcessIdentities(identities, { environment });
+    verifyExactProjectContainerBoundary(
+      startingState.activationGeneration, identities, { environment }
+    );
     persistActivationState('active', {
       imageManifest,
       panic: 'not_requested',
@@ -1150,12 +1354,14 @@ async function stop() {
   } catch (error) {
     activationEvidenceError = error;
   }
+  let identities;
   let identity;
   let settings;
   let tokenBuffer;
   try {
-    identity = resolveVoiceIdentity();
-    settings = readEnvironmentFile(identity);
+    identities = resolveVoiceIdentities();
+    identity = identities.voice;
+    settings = readEnvironmentFile(identities);
     tokenBuffer = openCredential(path.join(CREDENTIAL_ROOT, 'voice-control-token'), {
       gid: identity.gid,
       kind: 'token',
@@ -1256,7 +1462,7 @@ async function runOfflineRecovery(priorState, {
   cleanupProject = cleanupExactProject,
   removeProjection = removeRuntimeProjection,
   loadControlToken = () => {
-    const identity = resolveVoiceIdentity();
+    const identity = resolveVoiceIdentities().voice;
     return openCredential(path.join(CREDENTIAL_ROOT, 'voice-control-token'), {
       gid: identity.gid,
       kind: 'token',
@@ -1346,16 +1552,21 @@ module.exports = {
   parseDockerCgroupInfo,
   parseVoiceEnvironmentFile,
   parseExactProjectContainerIds,
+  parseProcessIdentityStatus,
   parseVoiceContainerBoundary,
+  resolveVoiceIdentities,
   requestJson,
   renderTemplate,
   renderTemplateContents,
+  requireControllerReady,
   requireDockerCgroupBoundary,
+  requireExecutorReady,
   runOfflineRecovery,
   startFailureDisposition,
   verifyBoundedHostStateFilesystem,
   verifyVoiceAppRuntimeContract,
   verifyExactProjectContainerBoundary,
+  verifyRunningProjectProcessIdentities,
   verifyVoiceImage,
   FIXED_VOICE_APP_BOUNDARY_ENV,
   MAX_CONTROL_RESPONSE_BYTES,

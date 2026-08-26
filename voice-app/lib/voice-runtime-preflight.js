@@ -12,12 +12,14 @@ const VOICE_RUNTIME_PATHS = Object.freeze({
   configDirectory: '/app/config',
   deviceConfigFile: '/app/config/devices.json',
   stateDirectory: '/app/state',
+  // These retired paths are checked for absence. The untrusted voice process
+  // must never receive approval-signing or privileged proxy authority.
   approvalPrivateKey: '/run/secrets/teleagent-approval-private.pem',
+  privilegedActionBearer: '/run/secrets/teleagent-privileged-action-api-token',
   sipIngressCredential: '/run/secrets/teleagent-sip-ingress-password',
   sipCallbackCredential: '/run/secrets/teleagent-sip-callback-password',
 });
 
-const MAX_PRIVATE_KEY_BYTES = 16 * 1024;
 const MAX_DEVICE_CONFIG_BYTES = 1024 * 1024;
 const GIB = 1024n * 1024n * 1024n;
 const MIB = 1024n * 1024n;
@@ -193,6 +195,16 @@ function sameSecret(left, right) {
   return crypto.timingSafeEqual(leftDigest, rightDigest);
 }
 
+function requireAbsent(fsModule, filename, label) {
+  try {
+    fsModule.lstatSync(filename);
+  } catch (error) {
+    if (error?.code === 'ENOENT' || error?.message === 'missing') return;
+    reject(`${label} absence is unverifiable`);
+  }
+  reject(`${label} must not be projected into the voice runtime`);
+}
+
 function enabledFlag(value, label) {
   const normalized = String(value ?? '').trim().toLowerCase();
   if (!normalized || normalized === 'false') return false;
@@ -229,6 +241,9 @@ function validateVoiceRuntimePreflight({
     stateDevice: stateDirectory.dev,
   });
 
+  requireAbsent(fsModule, paths.approvalPrivateKey, 'approval signing key');
+  requireAbsent(fsModule, paths.privilegedActionBearer, 'privileged-action bearer');
+
   const deviceConfig = readSecureFile(
     fsModule,
     paths.deviceConfigFile,
@@ -247,22 +262,6 @@ function validateVoiceRuntimePreflight({
     reject('device configuration is invalid');
   } finally {
     deviceConfig.fill(0);
-  }
-
-  const privateKey = readSecureFile(
-    fsModule,
-    paths.approvalPrivateKey,
-    'approval signing key',
-    { gid: effectiveGid, minBytes: 64, maxBytes: MAX_PRIVATE_KEY_BYTES },
-  );
-  try {
-    const key = crypto.createPrivateKey(privateKey);
-    if (key.asymmetricKeyType !== 'ed25519') reject('approval signing key is invalid');
-  } catch (error) {
-    if (error instanceof VoiceRuntimePreflightError) throw error;
-    reject('approval signing key is invalid');
-  } finally {
-    privateKey.fill(0);
   }
 
   const ingressBuffer = readSecureFile(
@@ -296,14 +295,15 @@ function validateVoiceRuntimePreflight({
   // Load and validate the complete file-backed snapshot as the final preflight
   // step. The production filesystem also verifies every ancestor; injected
   // fixture filesystems exercise file metadata without pretending to model /.
+  if (enabledFlag(privilegedActionsEnabled, 'VOICE_PRIVILEGED_ACTIONS_ENABLED')) {
+    reject('privileged voice actions require an independent approval attester');
+  }
   const runtimeSecrets = runtimeSecretLoader({
     fsModule,
     expectedUid: 0,
     expectedGid: effectiveGid,
     verifyAncestors: fsModule === fs,
-    required: enabledFlag(privilegedActionsEnabled, 'VOICE_PRIVILEGED_ACTIONS_ENABLED')
-      ? ['privilegedActionApiToken']
-      : [],
+    required: [],
   });
 
   const runtimeValues = Object.entries(runtimeSecrets).filter(([, value]) => value);

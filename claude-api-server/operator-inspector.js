@@ -985,7 +985,7 @@ class OperatorInspector {
       uptime_seconds: Math.floor(os.uptime()),
       allowed_roots: [...this.configuredRoots],
       filesystem_access: 'bounded-read-only',
-      tmux_access: 'bounded read-only inspection; approved target-bound messaging uses a separate controller',
+      tmux_access: 'bounded read-only inspection; target-bound messaging is unavailable from production phone',
     };
   }
 

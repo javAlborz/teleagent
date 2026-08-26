@@ -4,24 +4,28 @@ This path is a separate two-phase control plane. The Realtime conversational
 worker and the Claude/Codex workers never receive root, sudo, the broker Unix
 socket, the Ed25519 private key, or a reusable privileged bearer.
 
+Status: the phone path is production-disabled. Voice has neither a signer nor
+the privileged proxy bearer; the controller service discards legacy proxy and
+verifier settings after `EnvironmentFile` processing and cannot access the
+broker socket. The code below is retained typed-policy and recovery substrate,
+not an activation procedure.
+
 ## Request and approval flow
 
-1. The voice controller turns a typed request into one canonical action plan:
+The future independently attested flow is:
+
+1. The controller turns a typed request into one canonical action plan:
    exact argv array (never a shell string), target, cwd, timeout, impact/risk,
    and expected observable result.
-2. The phone speaks the stored exact approval prompt. `#` is ignored until a
-   completed, unclipped Realtime response and its exact response/item
-   transcript match, then FreeSWITCH acknowledges the unique job-bound marker
-   queued after that exact audio at the media-server queue boundary. This is
-   not proof that the physical handset rendered or the caller heard it. A
-   cleared, missing, spoofed, or timed-out marker leaves the approval unarmed.
-3. The controller issues a short-lived Ed25519 capability bound to the full
+2. An isolated PBX attester—not voice or a voice-controlled FreeSWITCH event
+   source—plays the controller-canonical prompt and durably attests later
+   handset-side `#` for the exact call leg and request.
+3. A controller-owned authority validates and atomically consumes that evidence,
+   then issues a short-lived Ed25519 capability bound to the full
    canonical plan hash, call/job, target, provider/profile, method, timestamps,
    and a random nonce.
-4. Voice-app sends one authenticated POST to the loopback host controller using
-   the dedicated `PRIVILEGED_ACTION_API_TOKEN`. The host controller forwards it
-   over `/run/teleagent-privileged-action/broker.sock`. Voice-app and the public
-   SIP gateway never receive that socket or membership in `teleagent-control`.
+4. The controller dispatches internally over the private broker socket. Voice
+   receives neither the capability nor a privileged bearer/socket membership.
 5. The root broker verifies policy and signature, atomically consumes a keyed
    replay fingerprint and inserts the durable action/audit/outbox records, then
    executes the exact argv without a shell. It never stores the capability,
@@ -119,7 +123,8 @@ Artifacts:
 - `deploy/privileged-action/policy.example.json`
 - `privileged-action-broker/`
 
-Before activation, a root operator must:
+The following broker prerequisites remain useful for offline validation, but
+they do not authorize phone activation:
 
 1. Install the pinned broker dependencies with its own `package-lock.json` and
    package-local `node_modules` into the root-owned deployment tree. `NODE_PATH`
@@ -134,12 +139,10 @@ Before activation, a root operator must:
    allowed unit, namespace/resource, host/action, and exact argv rule;
 5. install the matching approval public key and an independent 32-byte replay
    fingerprint key as `root:root 0400/0600` files;
-6. place one distinct 32–4096 byte `PRIVILEGED_ACTION_API_TOKEN` in the private
-   voice/controller secret stores (never reuse agent or executor tokens);
-7. set controller `PRIVILEGED_ACTION_PROXY_ENABLED=true`, its exact socket path,
-   and voice `VOICE_PRIVILEGED_ACTIONS_ENABLED=true` only after the broker health
-   check succeeds;
-8. create the `ENABLE` sentinel and start the unit explicitly.
+6. keep the `ENABLE` sentinel absent and do not provision a voice/controller
+   privileged bearer or proxy settings. Activation remains blocked until the
+   independent attester/controller design and its real-call recovery tests are
+   reviewed.
 
 The broker's first start command is the external host-owned release
 `--check-start-gate`, invoked with an empty environment before Node. It cheaply

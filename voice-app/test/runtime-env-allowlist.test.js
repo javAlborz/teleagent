@@ -14,12 +14,16 @@ const {
 
 const REPOSITORY_ROOT = path.resolve(__dirname, '../..');
 const VOICE_APP_ROOT = path.join(REPOSITORY_ROOT, 'voice-app');
+const DORMANT_TEST_SUBSTRATE = new Set([
+  path.join(VOICE_APP_ROOT, 'lib', 'approval-capability-config.js'),
+]);
 
 function productionJavaScriptFiles(root) {
   const files = [];
   for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
     if (entry.name === 'node_modules' || entry.name === 'test') continue;
     const resolved = path.join(root, entry.name);
+    if (DORMANT_TEST_SUBSTRATE.has(resolved)) continue;
     if (entry.isDirectory()) {
       files.push(...productionJavaScriptFiles(resolved));
     } else if (entry.isFile() && entry.name.endsWith('.js')) {
@@ -71,6 +75,13 @@ function environmentEntries(service) {
   );
 }
 
+test('dormant approval key loader is unreachable from production voice modules', () => {
+  const forbiddenImport = /require\(["']\.\/lib\/approval-capability-config["']\)/u;
+  for (const filename of productionJavaScriptFiles(VOICE_APP_ROOT)) {
+    assert.doesNotMatch(fs.readFileSync(filename, 'utf8'), forbiddenImport, filename);
+  }
+});
+
 test('voice state and listener invariants are exact application constants', () => {
   assert.equal(VOICE_STATE_DB_PATH, '/app/state/voice-state.sqlite');
   assert.equal(VOICE_EXECUTION_LOCK_FILE, '/app/state/voice-execution.lock.json');
@@ -93,6 +104,7 @@ test('voice state and listener invariants are exact application constants', () =
     WS_ALLOWED_PEERS: [undefined, '127.0.0.1', '10.0.0.8'],
     WS_NON_LOOPBACK_ENABLED: [undefined, '', 'true', 'False'],
     OUTBOUND_API_NON_LOOPBACK_ENABLED: [undefined, '', 'true', 'False'],
+    PRIVILEGED_ACTION_API_TOKEN: ['legacy-privileged-bearer', ' '],
   };
   for (const [name, values] of Object.entries(rejected)) {
     for (const value of values) {

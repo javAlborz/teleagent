@@ -56,7 +56,7 @@ test('Codex Luna and Terra deploy requests never escalate to Sol', () => {
   assert.equal(getDeploymentAuthorization('phone-codex-terra', deployPrompt).allowed, false);
 });
 
-test('Codex Sol deploy requests stay on Codex and use the deploy profile', () => {
+test('Codex Sol deploy routing retains a read-only dormant deploy profile', () => {
   const deployPrompt = 'Ship and deploy the app-platform preview';
   const config = createAgentProfileConfig({ HOME: '/home/tester' });
   const profile = resolveAgentProfile(config, 'phone-codex-sol', deployPrompt);
@@ -65,7 +65,7 @@ test('Codex Sol deploy requests stay on Codex and use the deploy profile', () =>
   assert.equal(getDeploymentAuthorization('phone-codex-sol', deployPrompt).allowed, true);
   assert.equal(profile.provider, 'codex');
   assert.equal(profile.sessionType, 'phone-codex-deploy');
-  assert.equal(profile.sandbox, 'danger-full-access');
+  assert.equal(profile.sandbox, 'read-only');
 });
 
 test('Codex-only configuration defaults untyped requests to Luna', () => {

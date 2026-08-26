@@ -1,8 +1,8 @@
 'use strict';
 
 const assert = require('node:assert/strict');
-const { spawn, spawnSync } = require('node:child_process');
-const { once } = require('node:events');
+const { spawnSync } = require('node:child_process');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
@@ -19,6 +19,66 @@ function makeDirectory(directory, mode = 0o755) {
 function writeExecutable(filename, source) {
   fs.writeFileSync(filename, source, { mode: 0o700 });
   fs.chmodSync(filename, 0o700);
+}
+
+function digest(source) {
+  return crypto.createHash('sha256').update(source).digest('hex');
+}
+
+function fakeFenceHelper(label) {
+  return `#!/usr/bin/env bash
+set -euo pipefail
+# Installer-source contract markers for the isolated fake helper:
+# teleagent-voice teleagent-drachtio teleagent-freeswitch teleagent-asterisk
+# 5060 5070 5080 9022 8021 3001 30000-30100
+root=\${TELEAGENT_SIP_FENCE_INSTALL_TEST_ROOT:?}
+case "\${1:-}" in
+  check)
+    /usr/bin/touch "\${root}/${label}-check-observed"
+    if [[ "${label}" == current && -e "\${root}/corrupt-bundle-on-current-check" ]]; then
+      printf '%s\n' corrupt >"\${root}/var/lib/teleagent-sip-local-peer-fence-install/installed.bundle"
+      /usr/bin/chmod 0600 "\${root}/var/lib/teleagent-sip-local-peer-fence-install/installed.bundle"
+    fi
+    [[ ! -e "\${root}/fail-check" && ! -e "\${root}/fail-check-${label}" ]]
+    ;;
+  reconcile)
+    /usr/bin/touch "\${root}/${label}-reconcile-observed"
+    [[ ! -e "\${root}/fail-reconcile-${label}" ]]
+    ;;
+  remove)
+    /usr/bin/touch "\${root}/${label}-remove-observed"
+    [[ ! -e "\${root}/fail-remove-${label}" ]] || exit 1
+    if [[ -e "\${root}/lock-state-on-${label}-remove" ]]; then
+      /usr/bin/chmod 0500 "\${root}/var/lib/teleagent-sip-local-peer-fence-install"
+    fi
+    ;;
+  *) exit 64 ;;
+esac
+`;
+}
+
+function bundleDescriptor(version, helperSha, unitSha, legacyVersion, legacyHelperSha,
+  legacyUnitSha) {
+  return [
+    'schema=1',
+    `bundle_version=${version}`,
+    `helper_sha256=${helperSha}`,
+    `unit_sha256=${unitSha}`,
+    `legacy_bundle_version=${legacyVersion}`,
+    `legacy_helper_sha256=${legacyHelperSha}`,
+    `legacy_unit_sha256=${legacyUnitSha}`,
+    '',
+  ].join('\n');
+}
+
+function installedDescriptor(version, helperSha, unitSha) {
+  return [
+    'schema=1',
+    `bundle_version=${version}`,
+    `helper_sha256=${helperSha}`,
+    `unit_sha256=${unitSha}`,
+    '',
+  ].join('\n');
 }
 
 function fixture(t) {
@@ -40,34 +100,62 @@ function fixture(t) {
 
   const sourceHelper = path.join(directory, 'opt/teleagent/current/deploy/voice-stack',
     'teleagent-sip-local-peer-fence');
-  writeExecutable(sourceHelper, `#!/usr/bin/env bash
-set -euo pipefail
-root=\${TELEAGENT_SIP_FENCE_INSTALL_TEST_ROOT:?}
-case "\${1:-}" in
-  check)
-    /usr/bin/touch "\${root}/check-observed"
-    [[ ! -e "\${root}/fail-check" ]]
-    ;;
-  remove) /usr/bin/touch "\${root}/remove-observed" ;;
-  *) exit 64 ;;
-esac
-`);
+  const currentHelperSource = fakeFenceHelper('current');
+  const legacyHelperSource = fakeFenceHelper('legacy');
+  writeExecutable(sourceHelper, currentHelperSource);
 
   const sourceUnit = path.join(directory, 'opt/teleagent/current/deploy/voice-stack',
     'teleagent-sip-local-peer-fence.service');
   fs.copyFileSync(path.join(ROOT, 'deploy', 'voice-stack',
     'teleagent-sip-local-peer-fence.service'), sourceUnit);
   fs.chmodSync(sourceUnit, 0o644);
+  const currentUnitSource = fs.readFileSync(sourceUnit, 'utf8');
+  const legacyUnitSource = `${currentUnitSource}# reviewed fixture legacy\n`;
+  const currentHelperSha = digest(currentHelperSource);
+  const currentUnitSha = digest(currentUnitSource);
+  const legacyHelperSha = digest(legacyHelperSource);
+  const legacyUnitSha = digest(legacyUnitSource);
+  const sourceBundle = path.join(directory, 'opt/teleagent/current/deploy/voice-stack',
+    'teleagent-sip-local-peer-fence.bundle');
+  fs.writeFileSync(sourceBundle, bundleDescriptor(
+    2, currentHelperSha, currentUnitSha, 1, legacyHelperSha, legacyUnitSha
+  ));
+  fs.chmodSync(sourceBundle, 0o644);
 
   const systemctl = path.join(directory, 'bin/systemctl');
   writeExecutable(systemctl, `#!/usr/bin/env bash
 set -euo pipefail
 root=\${TELEAGENT_SIP_FENCE_INSTALL_TEST_ROOT:?}
 state=\${root}/systemctl-state
+quiet=0
+if [[ "\${1:-}" == --quiet ]]; then
+  quiet=1
+  shift
+fi
 command=\${1:-}
 shift || true
 service=\${!#:-}
+if [[ -e "\${root}/systemctl-noisy-success" && "\${quiet}" == 0 ]]; then
+  case "\${command}" in
+    disable|enable|daemon-reload)
+      printf '%s\\n' "fixture systemctl success chatter: \${command}"
+      printf '%s\\n' "fixture systemctl success diagnostic: \${command}" >&2
+      ;;
+  esac
+fi
+if [[ "\${command}" == daemon-reload &&
+      -e "\${root}/replace-helper-current-on-daemon-reload-error" ]]; then
+  /usr/bin/mkdir -p "\${root}/usr/local/libexec"
+  /usr/bin/cp "\${root}/opt/teleagent/current/deploy/voice-stack/teleagent-sip-local-peer-fence" \
+    "\${root}/usr/local/libexec/teleagent-sip-local-peer-fence"
+  /usr/bin/chmod 0755 "\${root}/usr/local/libexec/teleagent-sip-local-peer-fence"
+  exit 70
+fi
 if [[ -e "\${root}/systemctl-error" || -e "\${root}/systemctl-error-\${command}" ]]; then
+  exit 70
+fi
+if [[ -e "\${root}/systemctl-error-once-\${command}" ]]; then
+  /usr/bin/rm -f "\${root}/systemctl-error-once-\${command}"
   exit 70
 fi
 case "\${command}" in
@@ -121,17 +209,27 @@ case "\${command}" in
       "User=\${user}" \
       "Group=\${group}"
     ;;
-  daemon-reload) exit 0 ;;
+  daemon-reload)
+    if [[ -e "\${root}/systemctl-error-after-first-daemon-reload" ]]; then
+      /usr/bin/rm -f "\${root}/systemctl-error-after-first-daemon-reload"
+      /usr/bin/touch "\${root}/systemctl-error-daemon-reload"
+    fi
+    exit 0
+    ;;
+  start) /usr/bin/touch "\${state}/\${service}.active" ;;
   enable)
     /usr/bin/touch "\${state}/\${service}.enabled"
     if [[ " $* " == *' --now '* ]]; then
       /usr/bin/touch "\${state}/\${service}.active"
       /usr/bin/mkdir -p "\${root}/run/teleagent-sip-local-peer-fence"
       /usr/bin/chmod 0700 "\${root}/run/teleagent-sip-local-peer-fence"
-      if [[ -e "\${root}/pause-after-enable" ]]; then
-        /usr/bin/rm -f "\${root}/pause-after-enable"
+      if [[ -e "\${root}/signal-parent-after-enable" ]]; then
+        signal=$(/usr/bin/cat "\${root}/signal-parent-after-enable")
+        [[ "\${signal}" =~ ^(TERM|INT|KILL)$ ]] || exit 65
+        /usr/bin/rm -f "\${root}/signal-parent-after-enable"
         /usr/bin/touch "\${root}/enable-observed"
-        while /usr/bin/sleep 1; do :; done
+        kill "-\${signal}" "\${PPID}"
+        exit 0
       fi
     fi
     ;;
@@ -156,12 +254,43 @@ esac
     encoding: 'utf8',
     timeout: 10000,
   });
-  return { directory, environment, run };
+  const installLegacy = ({ descriptor = true, active = true, enabled = true } = {}) => {
+    const paths = managedPaths(directory);
+    makeDirectory(path.dirname(paths.helper));
+    fs.writeFileSync(paths.helper, legacyHelperSource, { mode: 0o755 });
+    fs.chmodSync(paths.helper, 0o755);
+    fs.writeFileSync(paths.unit, legacyUnitSource, { mode: 0o644 });
+    fs.chmodSync(paths.unit, 0o644);
+    if (descriptor) {
+      makeDirectory(path.dirname(paths.bundle), 0o700);
+      fs.writeFileSync(paths.bundle, installedDescriptor(1, legacyHelperSha, legacyUnitSha), {
+        mode: 0o600,
+      });
+      fs.chmodSync(paths.bundle, 0o600);
+    }
+    if (active) fs.writeFileSync(paths.active, '1\n');
+    if (enabled) fs.writeFileSync(paths.enabled, '1\n');
+  };
+  return {
+    currentHelperSha,
+    currentHelperSource,
+    currentUnitSha,
+    currentUnitSource,
+    directory,
+    environment,
+    installLegacy,
+    legacyHelperSha,
+    legacyHelperSource,
+    legacyUnitSha,
+    legacyUnitSource,
+    run,
+  };
 }
 
 function managedPaths(directory) {
   return {
     active: path.join(directory, 'systemctl-state/teleagent-sip-local-peer-fence.service.active'),
+    bundle: path.join(directory, 'var/lib/teleagent-sip-local-peer-fence-install/installed.bundle'),
     enabled: path.join(directory, 'systemctl-state/teleagent-sip-local-peer-fence.service.enabled'),
     helper: path.join(directory, 'usr/local/libexec/teleagent-sip-local-peer-fence'),
     marker: path.join(directory, 'var/lib/teleagent-sip-local-peer-fence-install/install.transaction'),
@@ -169,13 +298,19 @@ function managedPaths(directory) {
   };
 }
 
-async function waitForPath(filename) {
-  const deadline = Date.now() + 10000;
-  while (!fs.existsSync(filename)) {
-    if (Date.now() > deadline) throw new Error(`timed out waiting for ${filename}`);
-    await new Promise((resolve) => setTimeout(resolve, 10));
+test('SIP fence source assets are pinned beside the resolved installer entrypoint', () => {
+  const source = fs.readFileSync(INSTALLER, 'utf8');
+  assert.doesNotMatch(source, /^app_root=\/opt\/teleagent\/current$/m);
+  assert.match(source, /installer_self=\$\(readlink -f -- "\$\{BASH_SOURCE\[0\]\}"\)/);
+  assert.match(source, /source_directory.*\$\{app_root\}\/deploy\/voice-stack/);
+  for (const [variable, basename] of [
+    ['source_helper', 'teleagent-sip-local-peer-fence'],
+    ['source_unit', 'teleagent-sip-local-peer-fence.service'],
+    ['source_bundle', 'teleagent-sip-local-peer-fence.bundle'],
+  ]) {
+    assert.equal(source.includes(`${variable}=\${source_directory}/${basename}`), true);
   }
-}
+});
 
 test('SIP fence installer fails closed on indeterminate service-manager state', (t) => {
   if (process.getuid() === 0) return t.skip('the installer fake lane rejects root');
@@ -216,7 +351,7 @@ test('SIP fence check rejects loaded-unit identity drift before checking nftable
     const current = fixture(t);
     const installed = current.run('--install');
     assert.equal(installed.status, 0, `${marker}: ${installed.stderr}`);
-    const helperObserved = path.join(current.directory, 'check-observed');
+    const helperObserved = path.join(current.directory, 'current-check-observed');
     fs.rmSync(helperObserved);
     fs.writeFileSync(path.join(current.directory, marker), '1\n');
 
@@ -232,95 +367,324 @@ test('SIP fence installer rolls back an explicit post-enable check failure', (t)
   fs.writeFileSync(path.join(current.directory, 'fail-check'), '1\n');
   const result = current.run('--install');
   assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /prior inactive state restored/);
+  assert.match(result.stderr, /prior bundle restored/);
   const paths = managedPaths(current.directory);
   for (const filename of Object.values(paths)) assert.equal(fs.existsSync(filename), false);
-  assert.equal(fs.existsSync(path.join(current.directory, 'remove-observed')), true);
+  assert.equal(fs.existsSync(path.join(current.directory, 'current-remove-observed')), true);
 });
 
-test('SIP fence installer traps TERM after enable and restores inactive state', async (t) => {
+test('SIP fence installer traps TERM after enable and restores inactive state', (t) => {
   if (process.getuid() === 0) return t.skip('the installer fake lane rejects root');
   const current = fixture(t);
-  fs.writeFileSync(path.join(current.directory, 'pause-after-enable'), '1\n');
-  const child = spawn(INSTALLER, ['--install'], {
-    detached: true,
-    env: current.environment,
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  const exited = once(child, 'exit');
-  await waitForPath(path.join(current.directory, 'enable-observed'));
-  process.kill(-child.pid, 'SIGTERM');
-  const [code] = await exited;
-  assert.notEqual(code, 0);
+  fs.writeFileSync(path.join(current.directory, 'signal-parent-after-enable'), 'TERM\n');
+  const result = current.run('--install');
+  assert.notEqual(result.status, 0);
+  assert.equal(fs.existsSync(path.join(current.directory, 'enable-observed')), true);
   const paths = managedPaths(current.directory);
   for (const filename of Object.values(paths)) assert.equal(fs.existsSync(filename), false);
 });
 
-test('SIP fence installer traps INT after enable and restores inactive state', async (t) => {
+test('SIP fence installer traps INT after enable and restores inactive state', (t) => {
   if (process.getuid() === 0) return t.skip('the installer fake lane rejects root');
   const current = fixture(t);
-  fs.writeFileSync(path.join(current.directory, 'pause-after-enable'), '1\n');
-  const child = spawn(INSTALLER, ['--install'], {
-    detached: true,
-    env: current.environment,
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  const exited = once(child, 'exit');
-  await waitForPath(path.join(current.directory, 'enable-observed'));
-  process.kill(-child.pid, 'SIGINT');
-  const [code] = await exited;
-  assert.notEqual(code, 0);
+  fs.writeFileSync(path.join(current.directory, 'signal-parent-after-enable'), 'INT\n');
+  const result = current.run('--install');
+  assert.notEqual(result.status, 0);
+  assert.equal(fs.existsSync(path.join(current.directory, 'enable-observed')), true);
   const paths = managedPaths(current.directory);
   for (const filename of Object.values(paths)) assert.equal(fs.existsSync(filename), false);
 });
 
-test('SIP fence rollback preserves a prior enabled but inactive exact installation', (t) => {
+test('SIP fence upgrade rollback restores the exact legacy bundle and service state', (t) => {
   if (process.getuid() === 0) return t.skip('the installer fake lane rejects root');
   const current = fixture(t);
   const paths = managedPaths(current.directory);
-  makeDirectory(path.dirname(paths.helper));
-  fs.copyFileSync(path.join(current.directory,
-    'opt/teleagent/current/deploy/voice-stack/teleagent-sip-local-peer-fence'), paths.helper);
-  fs.chmodSync(paths.helper, 0o755);
-  fs.copyFileSync(path.join(current.directory,
-    'opt/teleagent/current/deploy/voice-stack/teleagent-sip-local-peer-fence.service'), paths.unit);
-  fs.chmodSync(paths.unit, 0o644);
-  fs.writeFileSync(paths.enabled, '1\n');
-  fs.writeFileSync(path.join(current.directory, 'fail-check'), '1\n');
+  current.installLegacy();
+  fs.writeFileSync(path.join(current.directory, 'fail-check-current'), '1\n');
 
   const result = current.run('--install');
   assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /prior inactive state restored/);
+  assert.match(result.stderr, /prior bundle restored/);
   assert.equal(fs.existsSync(paths.marker), false);
-  assert.equal(fs.existsSync(paths.active), false);
+  assert.equal(fs.existsSync(paths.active), true);
   assert.equal(fs.existsSync(paths.enabled), true);
-  assert.equal(fs.existsSync(paths.helper), true);
-  assert.equal(fs.existsSync(paths.unit), true);
+  assert.equal(fs.readFileSync(paths.helper, 'utf8'), current.legacyHelperSource);
+  assert.equal(fs.readFileSync(paths.unit, 'utf8'), current.legacyUnitSource);
+  assert.equal(fs.readFileSync(paths.bundle, 'utf8'), installedDescriptor(
+    1, current.legacyHelperSha, current.legacyUnitSha
+  ));
+  assert.equal(fs.existsSync(path.join(current.directory, 'legacy-reconcile-observed')), true);
 });
 
-test('SIP fence installer recovers a durable SIGKILL transaction on next install', async (t) => {
+test('SIP fence rollback never reactivates after reload or reconcile ambiguity', (t) => {
+  if (process.getuid() === 0) return t.skip('the installer fake lane rejects root');
+  for (const failureMarker of [
+    'systemctl-error-after-first-daemon-reload',
+    'fail-reconcile-legacy',
+  ]) {
+    const current = fixture(t);
+    const paths = managedPaths(current.directory);
+    current.installLegacy();
+    fs.writeFileSync(path.join(current.directory, 'fail-check-current'), '1\n');
+    fs.writeFileSync(path.join(current.directory, failureMarker), '1\n');
+
+    const result = current.run('--install');
+    assert.notEqual(result.status, 0, failureMarker);
+    assert.match(result.stderr, /rollback was incomplete/, failureMarker);
+    assert.equal(fs.existsSync(paths.marker), true, failureMarker);
+    assert.equal(fs.existsSync(paths.active), false, failureMarker);
+    assert.equal(fs.existsSync(paths.enabled), false, failureMarker);
+    assert.equal(fs.readFileSync(paths.helper, 'utf8'), current.legacyHelperSource,
+      failureMarker);
+    assert.equal(fs.readFileSync(paths.unit, 'utf8'), current.legacyUnitSource,
+      failureMarker);
+  }
+});
+
+test('SIP fence rollback refuses a concurrently replaced installed descriptor', (t) => {
   if (process.getuid() === 0) return t.skip('the installer fake lane rejects root');
   const current = fixture(t);
-  fs.writeFileSync(path.join(current.directory, 'pause-after-enable'), '1\n');
-  const child = spawn(INSTALLER, ['--install'], {
-    detached: true,
-    env: current.environment,
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  const exited = once(child, 'exit');
-  await waitForPath(path.join(current.directory, 'enable-observed'));
-  process.kill(-child.pid, 'SIGKILL');
-  await exited;
+  const paths = managedPaths(current.directory);
+  current.installLegacy();
+  fs.writeFileSync(path.join(current.directory, 'fail-check-current'), '1\n');
+  fs.writeFileSync(path.join(current.directory, 'corrupt-bundle-on-current-check'), '1\n');
+
+  const result = current.run('--install');
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /rollback was incomplete/);
+  assert.equal(fs.existsSync(paths.marker), true);
+  assert.equal(fs.existsSync(paths.active), false);
+  assert.equal(fs.existsSync(paths.enabled), false);
+  assert.equal(fs.readFileSync(paths.bundle, 'utf8'), 'corrupt\n');
+  assert.equal(fs.readFileSync(paths.helper, 'utf8'), current.currentHelperSource);
+  assert.equal(fs.readFileSync(paths.unit, 'utf8'), current.currentUnitSource);
+});
+
+test('SIP fence absent rollback retains the exact removal retry path', (t) => {
+  if (process.getuid() === 0) return t.skip('the installer fake lane rejects root');
+  const current = fixture(t);
+  const paths = managedPaths(current.directory);
+  const failCheck = path.join(current.directory, 'fail-check-current');
+  const failRemove = path.join(current.directory, 'fail-remove-current');
+  fs.writeFileSync(failCheck, '1\n');
+  fs.writeFileSync(failRemove, '1\n');
+
+  const failed = current.run('--install');
+  assert.notEqual(failed.status, 0);
+  assert.match(failed.stderr, /rollback was incomplete/);
+  assert.equal(fs.existsSync(paths.marker), true);
+  assert.equal(fs.existsSync(paths.active), false);
+  assert.equal(fs.existsSync(paths.enabled), false);
+  assert.equal(fs.readFileSync(paths.helper, 'utf8'), current.currentHelperSource);
+  assert.equal(fs.readFileSync(paths.unit, 'utf8'), current.currentUnitSource);
+
+  fs.rmSync(failCheck);
+  fs.rmSync(failRemove);
+  const recovered = current.run('--install');
+  assert.equal(recovered.status, 0, recovered.stderr);
+  assert.match(recovered.stderr, /recovered an interrupted fence operation/);
+  assert.equal(fs.existsSync(paths.marker), false);
+  assert.equal(fs.existsSync(paths.active), true);
+  assert.equal(fs.existsSync(paths.enabled), true);
+  assert.equal(fs.readFileSync(paths.helper, 'utf8'), current.currentHelperSource);
+  assert.equal(fs.readFileSync(paths.unit, 'utf8'), current.currentUnitSource);
+});
+
+test('SIP fence absent rollback durably resumes after table removal', (t) => {
+  if (process.getuid() === 0) return t.skip('the installer fake lane rejects root');
+  const current = fixture(t);
+  const paths = managedPaths(current.directory);
+  const failCheck = path.join(current.directory, 'fail-check-current');
+  const armReloadFailure = path.join(
+    current.directory, 'systemctl-error-after-first-daemon-reload'
+  );
+  const reloadFailure = path.join(current.directory, 'systemctl-error-daemon-reload');
+  fs.writeFileSync(failCheck, '1\n');
+  fs.writeFileSync(armReloadFailure, '1\n');
+
+  const failed = current.run('--install');
+  assert.notEqual(failed.status, 0);
+  assert.match(failed.stderr, /rollback was incomplete/);
+  assert.equal(fs.existsSync(paths.marker), true);
+  assert.match(fs.readFileSync(paths.marker, 'utf8'), /^phase=files$/m);
+  assert.equal(fs.existsSync(paths.helper), false);
+  assert.equal(fs.existsSync(paths.unit), false);
+  assert.equal(fs.existsSync(paths.active), false);
+  assert.equal(fs.existsSync(paths.enabled), false);
+
+  fs.rmSync(failCheck);
+  fs.rmSync(reloadFailure);
+  const recovered = current.run('--install');
+  assert.equal(recovered.status, 0, recovered.stderr);
+  assert.match(recovered.stderr, /recovered an interrupted fence operation/);
+  assert.equal(fs.existsSync(paths.marker), false);
+  assert.equal(fs.existsSync(paths.active), true);
+  assert.equal(fs.existsSync(paths.enabled), true);
+  assert.equal(fs.readFileSync(paths.helper, 'utf8'), current.currentHelperSource);
+  assert.equal(fs.readFileSync(paths.unit, 'utf8'), current.currentUnitSource);
+});
+
+test('SIP fence absent rollback stops before deleting its retry helper if phase persistence fails', (t) => {
+  if (process.getuid() === 0) return t.skip('the installer fake lane rejects root');
+  const current = fixture(t);
+  const paths = managedPaths(current.directory);
+  fs.writeFileSync(path.join(current.directory, 'fail-check-current'), '1\n');
+  fs.writeFileSync(path.join(current.directory, 'lock-state-on-current-remove'), '1\n');
+
+  const result = current.run('--install');
+  fs.chmodSync(path.dirname(paths.marker), 0o700);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /rollback was incomplete/);
+  assert.equal(fs.existsSync(paths.marker), true);
+  assert.match(fs.readFileSync(paths.marker, 'utf8'), /^phase=activation$/m);
+  assert.equal(fs.existsSync(paths.active), false);
+  assert.equal(fs.existsSync(paths.enabled), false);
+  assert.equal(fs.readFileSync(paths.helper, 'utf8'), current.currentHelperSource);
+  assert.equal(fs.readFileSync(paths.unit, 'utf8'), current.currentUnitSource);
+});
+
+test('SIP fence installer recovers a durable SIGKILL upgrade on next install', (t) => {
+  if (process.getuid() === 0) return t.skip('the installer fake lane rejects root');
+  const current = fixture(t);
+  current.installLegacy();
+  fs.writeFileSync(path.join(current.directory, 'signal-parent-after-enable'), 'KILL\n');
+  const interrupted = current.run('--install');
+  assert.notEqual(interrupted.status, 0);
+  assert.equal(fs.existsSync(path.join(current.directory, 'enable-observed')), true);
 
   const paths = managedPaths(current.directory);
   assert.equal(fs.existsSync(paths.marker), true);
   assert.equal(fs.existsSync(paths.active), true);
   const recovered = current.run('--install');
   assert.equal(recovered.status, 0, recovered.stderr);
-  assert.match(recovered.stderr, /recovered an interrupted activation/);
+  assert.match(recovered.stderr, /recovered an interrupted fence operation/);
   assert.equal(fs.existsSync(paths.marker), false);
   assert.equal(fs.existsSync(paths.active), true);
   assert.equal(fs.existsSync(paths.enabled), true);
-  assert.equal(fs.existsSync(paths.helper), true);
-  assert.equal(fs.existsSync(paths.unit), true);
+  assert.equal(fs.readFileSync(paths.helper, 'utf8'), current.currentHelperSource);
+  assert.equal(fs.readFileSync(paths.unit, 'utf8'), current.currentUnitSource);
+  assert.equal(fs.readFileSync(paths.bundle, 'utf8'), installedDescriptor(
+    2, current.currentHelperSha, current.currentUnitSha
+  ));
+  assert.equal(fs.existsSync(path.join(current.directory, 'legacy-reconcile-observed')), true);
+});
+
+test('SIP fence installer commits a fixed current bundle descriptor', (t) => {
+  if (process.getuid() === 0) return t.skip('the installer fake lane rejects root');
+  const current = fixture(t);
+  const result = current.run('--install');
+  assert.equal(result.status, 0, result.stderr);
+  const paths = managedPaths(current.directory);
+  assert.equal(fs.readFileSync(paths.bundle, 'utf8'), installedDescriptor(
+    2, current.currentHelperSha, current.currentUnitSha
+  ));
+});
+
+test('SIP fence installer suppresses successful systemctl chatter for aggregate capture', (t) => {
+  if (process.getuid() === 0) return t.skip('the installer fake lane rejects root');
+  const current = fixture(t);
+  fs.writeFileSync(path.join(current.directory, 'systemctl-noisy-success'), '1\n');
+  const result = current.run('--install');
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, '');
+  assert.equal(result.stderr, '');
+  const paths = managedPaths(current.directory);
+  assert.equal(fs.readFileSync(paths.bundle, 'utf8'), installedDescriptor(
+    2, current.currentHelperSha, current.currentUnitSha
+  ));
+});
+
+test('SIP fence installer adopts and upgrades only a descriptor-less known legacy pair', (t) => {
+  if (process.getuid() === 0) return t.skip('the installer fake lane rejects root');
+  const current = fixture(t);
+  current.installLegacy({ descriptor: false });
+  const result = current.run('--install');
+  assert.equal(result.status, 0, result.stderr);
+  const paths = managedPaths(current.directory);
+  assert.equal(fs.readFileSync(paths.helper, 'utf8'), current.currentHelperSource);
+  assert.equal(fs.readFileSync(paths.bundle, 'utf8'), installedDescriptor(
+    2, current.currentHelperSha, current.currentUnitSha
+  ));
+});
+
+test('SIP fence installer refuses an unknown target before publishing state', (t) => {
+  if (process.getuid() === 0) return t.skip('the installer fake lane rejects root');
+  const current = fixture(t);
+  const paths = managedPaths(current.directory);
+  makeDirectory(path.dirname(paths.helper));
+  fs.writeFileSync(paths.helper, '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
+  fs.chmodSync(paths.helper, 0o755);
+  fs.writeFileSync(paths.unit, '[Unit]\nDescription=unknown\n', { mode: 0o644 });
+  fs.chmodSync(paths.unit, 0o644);
+  const result = current.run('--install');
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /refusing to overwrite an unknown install target/);
+  assert.equal(fs.existsSync(paths.marker), false);
+  assert.equal(fs.existsSync(paths.bundle), false);
+});
+
+test('SIP fence installer refuses target drift against an installed descriptor', (t) => {
+  if (process.getuid() === 0) return t.skip('the installer fake lane rejects root');
+  const current = fixture(t);
+  current.installLegacy();
+  const paths = managedPaths(current.directory);
+  fs.appendFileSync(paths.helper, '# drift\n');
+  const result = current.run('--install');
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /installed fence helper digest drifted/);
+  assert.equal(fs.existsSync(paths.marker), false);
+  assert.equal(fs.readFileSync(paths.bundle, 'utf8'), installedDescriptor(
+    1, current.legacyHelperSha, current.legacyUnitSha
+  ));
+});
+
+test('SIP fence removal uses the installed legacy descriptor when source is newer', (t) => {
+  if (process.getuid() === 0) return t.skip('the installer fake lane rejects root');
+  const current = fixture(t);
+  current.installLegacy();
+  const paths = managedPaths(current.directory);
+  const result = current.run('--remove');
+  assert.equal(result.status, 0, result.stderr);
+  for (const filename of Object.values(paths)) assert.equal(fs.existsSync(filename), false);
+  assert.equal(fs.existsSync(path.join(current.directory, 'legacy-remove-observed')), true);
+});
+
+test('SIP fence removal failure restores the exact installed descriptor and table', (t) => {
+  if (process.getuid() === 0) return t.skip('the installer fake lane rejects root');
+  const current = fixture(t);
+  current.installLegacy();
+  const paths = managedPaths(current.directory);
+  fs.writeFileSync(path.join(current.directory, 'systemctl-error-once-daemon-reload'), '1\n');
+  const result = current.run('--remove');
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /prior bundle restored/);
+  assert.equal(fs.existsSync(paths.active), true);
+  assert.equal(fs.existsSync(paths.enabled), true);
+  assert.equal(fs.readFileSync(paths.helper, 'utf8'), current.legacyHelperSource);
+  assert.equal(fs.readFileSync(paths.unit, 'utf8'), current.legacyUnitSource);
+  assert.equal(fs.readFileSync(paths.bundle, 'utf8'), installedDescriptor(
+    1, current.legacyHelperSha, current.legacyUnitSha
+  ));
+  assert.equal(fs.existsSync(path.join(current.directory, 'legacy-reconcile-observed')), true);
+});
+
+test('SIP fence removal rollback refuses current bytes injected into a legacy transaction', (t) => {
+  if (process.getuid() === 0) return t.skip('the installer fake lane rejects root');
+  const current = fixture(t);
+  current.installLegacy();
+  const paths = managedPaths(current.directory);
+  fs.writeFileSync(
+    path.join(current.directory, 'replace-helper-current-on-daemon-reload-error'),
+    '1\n'
+  );
+
+  const result = current.run('--remove');
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /rollback was incomplete/);
+  assert.equal(fs.existsSync(paths.marker), true);
+  assert.equal(fs.existsSync(paths.active), false);
+  assert.equal(fs.existsSync(paths.enabled), false);
+  assert.equal(fs.readFileSync(paths.helper, 'utf8'), current.currentHelperSource);
+  assert.equal(fs.existsSync(paths.unit), false);
+  assert.equal(fs.existsSync(paths.bundle), false);
 });

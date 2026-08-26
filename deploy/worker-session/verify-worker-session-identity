@@ -181,11 +181,12 @@ function sourceCheck(sourceRoot = SOURCE_ROOT) {
 }
 
 function installedCheck({
+  sourceRoot = SOURCE_ROOT,
   passwdPath = '/etc/passwd',
   groupPath = '/etc/group',
 } = {}) {
   if (process.getuid() !== 0) refuse('the installed identity check requires root');
-  sourceCheck();
+  sourceCheck(sourceRoot);
   return validateIdentityRecords(
     inspectRootDatabase(passwdPath),
     inspectRootDatabase(groupPath)
@@ -194,10 +195,23 @@ function installedCheck({
 
 function main() {
   const mode = process.argv[2];
-  if (process.argv.length !== 3 || !['--source-check', '--installed-check'].includes(mode)) {
-    refuse('usage: verify-worker-session-identity --source-check|--installed-check');
+  const hasPinnedRoot = process.argv.length === 5 && process.argv[3] === '--source-root';
+  if ((!hasPinnedRoot && process.argv.length !== 3) ||
+      !['--source-check', '--installed-check'].includes(mode)) {
+    refuse('usage: verify-worker-session-identity ' +
+      '--source-check|--installed-check [--source-root ABSOLUTE_COMPONENT_ROOT]');
   }
   const invoked = fs.realpathSync(process.argv[1]);
+  let sourceRoot = hasPinnedRoot ? process.argv[4] : SOURCE_ROOT;
+  if (hasPinnedRoot) {
+    if (!path.isAbsolute(sourceRoot) || fs.realpathSync(sourceRoot) !== sourceRoot ||
+        path.basename(sourceRoot) !== 'worker-session' ||
+        path.basename(path.dirname(sourceRoot)) !== 'deploy') {
+      refuse('the pinned worker-session source root is not one canonical component directory');
+    }
+  } else if (mode === '--source-check' && invoked !== INSTALLED_VERIFIER) {
+    sourceRoot = path.dirname(invoked);
+  }
   if (mode === '--installed-check') {
     if (invoked !== INSTALLED_VERIFIER) refuse('use the fixed installed identity verifier');
     const metadata = fs.lstatSync(INSTALLED_VERIFIER);
@@ -205,13 +219,13 @@ function main() {
         metadata.gid !== 0 || (metadata.mode & 0o777) !== 0o755 || metadata.nlink !== 1) {
       refuse('the installed identity verifier metadata is unsafe');
     }
-    installedCheck();
+    installedCheck({ sourceRoot });
     process.stdout.write('WORKER_SESSION_IDENTITY_OK\n');
     return;
   }
-  if (invoked !== path.join(SOURCE_ROOT, 'verify-worker-session-identity') &&
+  if (invoked !== path.join(sourceRoot, 'verify-worker-session-identity') &&
       invoked !== INSTALLED_VERIFIER) refuse('source check requires a reviewed fixed entrypoint');
-  sourceCheck();
+  sourceCheck(sourceRoot);
   process.stdout.write('WORKER_SESSION_IDENTITY_SOURCE_OK\n');
 }
 
@@ -225,6 +239,7 @@ if (require.main === module) {
 module.exports = {
   SHARED_GROUP_MEMBERS,
   USERS,
+  sourceCheck,
   validateIdentityRecords,
   validateSysusersSource,
 };

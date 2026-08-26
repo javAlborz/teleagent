@@ -5,7 +5,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { spawnSync } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
 const test = require('node:test');
 
 const SOURCE_INSTALLER = path.join(__dirname, 'teleagent-disabled-host-install');
@@ -56,21 +56,32 @@ function componentSource({
     return `/usr/bin/install -d -m 0755 -- ${JSON.stringify(path.dirname(target))}\n` +
       `/usr/bin/install -m 0755 -- ${JSON.stringify(template)} ${JSON.stringify(target)}`;
   }).join('\n');
-  return `#!/bin/bash\nset -euo pipefail\n${commandLogger(log, `${label}-source`)}\n` +
+  return `#!/bin/bash\nset -euo pipefail\n` +
+    `log=${JSON.stringify(log)}\n` +
+    `command_label=${JSON.stringify(`${label}-source`)}\n` +
+    `[ "${'${1:-}'}" != --check ] || command_label=${JSON.stringify(`${label}-installed`)}\n` +
+    `printf '%s' "$command_label" >> "$log"\n` +
+    `for argument in "$@"; do printf '\\t%s' "$argument" >> "$log"; done\n` +
+    `printf '\\n' >> "$log"\n` +
     `case "${'${1:-}'}:$#" in\n` +
     `  --source-check:1) printf '%s\\n' ${JSON.stringify(sourceToken)} ;;\n` +
     `  --install-disabled:1)\n${installLines.split('\n').map((line) => `    ${line}`).join('\n')}\n` +
     `${postInstall.split('\n').filter(Boolean).map((line) => `    ${line}`).join('\n')}\n` +
     `    printf '%s\\n' ${JSON.stringify(installedToken.replace(/_OK$/, ''))} ;;\n` +
+    `  --check:1)\n` +
+    `    /usr/bin/cmp -s -- ${JSON.stringify(installedTemplate)} ${JSON.stringify(installedTarget)}\n` +
+    `    printf '%s\\n' ${JSON.stringify(installedToken)} ;;\n` +
     `  *) exit 77 ;;\n` +
     'esac\n';
 }
 
-function createFixture() {
+function createFixture({ entrypointBarrier = false, fenceInstallOutput = '' } = {}) {
   const root = fs.mkdtempSync('/tmp/teleagent-disabled-host-install-test-');
   fs.chmodSync(root, 0o700);
   const log = path.join(root, 'commands.log');
   fs.writeFileSync(log, '', { mode: 0o600 });
+  const entrypointReady = path.join(root, 'test-assets/entrypoint-ready');
+  const entrypointContinue = path.join(root, 'test-assets/entrypoint-continue');
 
   for (const [directory, mode] of [
     ['run', 0o755], ['opt', 0o755], ['opt/teleagent', 0o755],
@@ -93,6 +104,7 @@ function createFixture() {
   const digest = crypto.createHash('sha256').update(manifest).digest('hex');
   const releaseId = `sha256-${digest}`;
   const releaseRoot = path.join(root, 'opt/teleagent/releases', releaseId);
+  let promotedReleaseRoot = null;
   mkdir(releaseRoot, 0o755);
 
   const installed = (absolute) => path.join(root, absolute.slice(1));
@@ -118,6 +130,18 @@ function createFixture() {
   ].join('\n');
 
   const providerPlaceholder = '# fixture provider script: interpreted by the fixed fixture Node\n';
+  const fenceProgram = `#!/bin/bash\nset -euo pipefail\n` +
+    `log=${JSON.stringify(log)}\n` +
+    `case "${'${1:-}'}:$#" in\n` +
+    `  --source-check:1) label=fence-source; token='PASS Teleagent SIP fence source is exact and inactive' ;;\n` +
+    `  --install:1) label=fence-install; token=${JSON.stringify(fenceInstallOutput)} ;;\n` +
+    `  --check:1) label=fence-installed; token='PASS Teleagent SIP fence is installed and exact' ;;\n` +
+    `  *) exit 77 ;;\n` +
+    `esac\n` +
+    `printf '%s' "$label" >> "$log"\n` +
+    `for argument in "$@"; do printf '\\t%s' "$argument" >> "$log"; done\n` +
+    `printf '\\n' >> "$log"\n` +
+    `[ -z "$token" ] || printf '%s\\n' "$token"\n`;
   const sources = new Map([
     ['deploy/worker-session/teleagent-worker-session-install', componentSource({
       log,
@@ -152,10 +176,7 @@ function createFixture() {
       installedTarget: voiceInstalled,
       installedToken: 'VOICE_STACK_INSTALLED_DISABLED_OK',
     })],
-    ['deploy/voice-stack/teleagent-sip-local-peer-fence-install',
-      `#!/bin/bash\nset -euo pipefail\n${commandLogger(log, 'fence-source')}\n` +
-      '[ "${1:-}" = --source-check ] && [ "$#" -eq 1 ] || exit 77\n' +
-      "printf '%s\\n' 'PASS Teleagent SIP fence source is exact and inactive'\n"],
+    ['deploy/voice-stack/teleagent-sip-local-peer-fence-install', fenceProgram],
     ['deploy/voice-stack/verify-voice-stack-identity', '# fixture voice verifier\n'],
     ['realtime-sip-gateway/deploy/verify-realtime-sip-gateway', '# fixture SIP verifier\n'],
     ['artifacts/provider-cli/claude', 'fixture claude bytes\n'],
@@ -186,14 +207,22 @@ function createFixture() {
     'esac\n';
   writeFile(path.join(releaseRoot, 'runtime/node/bin/node'), nodeProgram, 0o555);
   writeFile(path.join(releaseRoot, 'teleagent-release.manifest.json'), manifest, 0o444);
+  let aggregateSource = fs.readFileSync(SOURCE_INSTALLER, 'utf8');
+  if (entrypointBarrier) {
+    const captureMarker = 'capture_executing_release\n';
+    assert.equal(aggregateSource.split(captureMarker).length, 2,
+      'aggregate capture marker must occur exactly once');
+    aggregateSource = aggregateSource.replace(captureMarker, `${captureMarker}` +
+      `/usr/bin/printf 'ready\\n' > ${JSON.stringify(entrypointReady)}\n` +
+      'entrypoint_barrier_count=0\n' +
+      `while [ ! -f ${JSON.stringify(entrypointContinue)} ]; do\n` +
+      '  entrypoint_barrier_count=$((entrypoint_barrier_count + 1))\n' +
+      "  [ \"$entrypoint_barrier_count\" -le 500 ] || fail 'test entrypoint barrier timed out'\n" +
+      '  /usr/bin/sleep 0.01\n' +
+      'done\n');
+  }
   writeFile(path.join(releaseRoot, 'deploy/host/teleagent-disabled-host-install'),
-    fs.readFileSync(SOURCE_INSTALLER), 0o555);
-
-  const fenceInstalled = installed('/usr/local/libexec/teleagent-sip-local-peer-fence-install');
-  writeFile(fenceInstalled,
-    `#!/bin/bash\nset -euo pipefail\n${commandLogger(log, 'fence-installed')}\n` +
-    '[ "${1:-}" = --check ] && [ "$#" -eq 1 ] || exit 77\n' +
-    "printf '%s\\n' 'PASS Teleagent SIP fence is installed and exact'\n", 0o755);
+    aggregateSource, 0o555);
 
   for (const stateRoot of [
     'var/lib/teleagent-worker-state',
@@ -263,7 +292,9 @@ function createFixture() {
   ].join('\n'), 0o600);
 
   writeFile(path.join(root, 'proc/sys/kernel/random/boot_id'), `${BOOT_ID}\n`, 0o444);
-  fs.symlinkSync(`releases/${releaseId}`, path.join(root, 'opt/teleagent/current'));
+  const currentSelector = path.join(root, 'opt/teleagent/current');
+  const gatePath = path.join(root, 'run/teleagent-release-gate/verified.json');
+  fs.symlinkSync(`releases/${releaseId}`, currentSelector);
   fs.chmodSync(releaseRoot, 0o555);
   const releaseMetadata = fs.statSync(releaseRoot, { bigint: true });
   const gate = `{"version":1,"application":"teleagent","releaseId":"${releaseId}",` +
@@ -272,7 +303,7 @@ function createFixture() {
     `"releaseDevice":${releaseMetadata.dev},"releaseInode":${releaseMetadata.ino},` +
     `"bootId":"${BOOT_ID}"}\n`;
   mkdir(path.join(root, 'run/teleagent-release-gate'), 0o700);
-  writeFile(path.join(root, 'run/teleagent-release-gate/verified.json'), gate, 0o400);
+  writeFile(gatePath, gate, 0o400);
   fs.chmodSync(path.join(root, 'run/teleagent-release-gate'), 0o700);
 
   const environment = {
@@ -283,7 +314,11 @@ function createFixture() {
     TELEAGENT_DISABLED_HOST_INSTALL_TEST_MOUNTPOINT: mountpoint,
     TELEAGENT_DISABLED_HOST_INSTALL_TEST_DEVICE_MAP: deviceMap,
   };
-  const entrypoint = path.join(root, 'opt/teleagent/current/deploy/host/teleagent-disabled-host-install');
+  const entrypoint = path.join(releaseRoot, 'deploy/host/teleagent-disabled-host-install');
+  const mutableEntrypoint = path.join(
+    root,
+    'opt/teleagent/current/deploy/host/teleagent-disabled-host-install',
+  );
 
   return {
     root,
@@ -291,6 +326,7 @@ function createFixture() {
     releaseRoot,
     environment,
     entrypoint,
+    mutableEntrypoint,
     deviceMap,
     transientMarker,
     fragmentMarker,
@@ -300,6 +336,8 @@ function createFixture() {
     dropInPath,
     runtimeInPlaceMarker,
     runtimeReplaceMarker,
+    entrypointReady,
+    entrypointContinue,
     installRuntime() {
       for (const target of [
         installed('/opt/teleagent/node/bin/node'),
@@ -330,6 +368,64 @@ function createFixture() {
         timeout: 120_000,
       });
     },
+    runAsync(mode) {
+      return new Promise((resolve, reject) => {
+        const child = spawn('/bin/bash', [entrypoint, mode], {
+          env: environment,
+          timeout: 10_000,
+        });
+        let stdout = '';
+        let stderr = '';
+        child.stdout.setEncoding('utf8');
+        child.stderr.setEncoding('utf8');
+        child.stdout.on('data', (chunk) => { stdout += chunk; });
+        child.stderr.on('data', (chunk) => { stderr += chunk; });
+        child.once('error', reject);
+        child.once('close', (status, signal) => resolve({ status, signal, stdout, stderr }));
+      });
+    },
+    promoteClone() {
+      const promotedRevision = 'abcdef1234567890abcdef1234567890abcdef12';
+      const promotedManifest = `${JSON.stringify({
+        version: 2,
+        application: 'teleagent',
+        source: {
+          repository: 'https://github.com/javAlborz/teleagent.git',
+          revision: promotedRevision,
+          tree: promotedRevision,
+        },
+        target: { os: 'linux', architecture: 'amd64' },
+      })}\n`;
+      const promotedDigest = crypto.createHash('sha256').update(promotedManifest).digest('hex');
+      const promotedId = `sha256-${promotedDigest}`;
+      const promotedRoot = path.join(root, 'opt/teleagent/releases', promotedId);
+      promotedReleaseRoot = promotedRoot;
+      mkdir(promotedRoot);
+      for (const entry of fs.readdirSync(releaseRoot)) {
+        fs.cpSync(path.join(releaseRoot, entry), path.join(promotedRoot, entry), {
+          recursive: true,
+          preserveTimestamps: true,
+        });
+      }
+      fs.chmodSync(promotedRoot, 0o555);
+      const promotedManifestPath = path.join(promotedRoot, 'teleagent-release.manifest.json');
+      fs.chmodSync(promotedManifestPath, 0o600);
+      fs.writeFileSync(promotedManifestPath, promotedManifest);
+      fs.chmodSync(promotedManifestPath, 0o444);
+      const promotedMetadata = fs.statSync(promotedRoot, { bigint: true });
+      const promotedGate = `{"version":1,"application":"teleagent",` +
+        `"releaseId":"${promotedId}","manifestSha256":"sha256:${promotedDigest}",` +
+        `"sourceRevision":"${promotedRevision}",` +
+        `"currentTarget":"/opt/teleagent/releases/${promotedId}",` +
+        `"releaseDevice":${promotedMetadata.dev},"releaseInode":${promotedMetadata.ino},` +
+        `"bootId":"${BOOT_ID}"}\n`;
+      fs.unlinkSync(currentSelector);
+      fs.symlinkSync(`releases/${promotedId}`, currentSelector);
+      fs.chmodSync(gatePath, 0o600);
+      fs.writeFileSync(gatePath, promotedGate);
+      fs.chmodSync(gatePath, 0o400);
+      return { promotedId, promotedRoot };
+    },
     lines() {
       return fs.readFileSync(log, 'utf8').trim().split('\n').filter(Boolean);
     },
@@ -342,6 +438,7 @@ function createFixture() {
     },
     cleanup() {
       try { fs.chmodSync(releaseRoot, 0o700); } catch {}
+      try { if (promotedReleaseRoot) fs.chmodSync(promotedReleaseRoot, 0o700); } catch {}
       fs.rmSync(root, { recursive: true, force: true });
     },
     installed,
@@ -360,6 +457,15 @@ function assertRefusal(result) {
   assert.doesNotMatch(result.stdout, /TELEAGENT_HOST_.*(?:OK|DISABLED)/u);
 }
 
+async function waitForPath(filename, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (fs.existsSync(filename)) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timed out waiting for ${filename}`);
+}
+
 test('source check consumes the boot gate before installed Node exists', () => {
   const fixture = createFixture();
   try {
@@ -374,7 +480,44 @@ test('source check consumes the boot gate before installed Node exists', () => {
   }
 });
 
-test('fresh disabled install follows the exact component order and never activates', () => {
+test('mutable current-release invocation is refused', () => {
+  const fixture = createFixture();
+  try {
+    const result = spawnSync('/bin/bash', [fixture.mutableEntrypoint, '--source-check'], {
+      encoding: 'utf8',
+      env: fixture.environment,
+      timeout: 120_000,
+    });
+    assertRefusal(result);
+    assert.match(result.stderr, /exact canonical immutable-release entrypoint/u);
+    assert.deepEqual(fixture.lines(), []);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test('an executing release cannot follow a concurrent selector and gate promotion', async () => {
+  const fixture = createFixture({ entrypointBarrier: true });
+  let completion;
+  try {
+    completion = fixture.runAsync('--source-check');
+    await waitForPath(fixture.entrypointReady);
+    fixture.promoteClone();
+    writeFile(fixture.entrypointContinue, 'continue\n', 0o600);
+    const result = await completion;
+    assertRefusal(result);
+    assert.match(result.stderr, /executing aggregate differs from the gated release/u);
+    assert.deepEqual(fixture.lines(), []);
+  } finally {
+    if (!fs.existsSync(fixture.entrypointContinue)) {
+      writeFile(fixture.entrypointContinue, 'continue\n', 0o600);
+    }
+    if (completion) await completion.catch(() => {});
+    fixture.cleanup();
+  }
+});
+
+test('fresh handoff activates only the SIP fence before disabled workload installs', () => {
   const fixture = createFixture();
   try {
     fixture.installRuntime();
@@ -386,11 +529,12 @@ test('fresh disabled install follows the exact component order and never activat
       .filter((label) => label !== 'fence-installed');
     assert.deepEqual(labels, [
       'worker-source', 'controller-source', 'fence-source', 'node', 'sip-source', 'node',
+      'voice-source', 'voice-installed',
+      'fence-install',
       'worker-source', 'worker-installed',
       'node', 'node', 'node',
       'controller-source', 'controller-installed',
       'sip-source', 'sip-installed',
-      'voice-source', 'voice-installed',
     ]);
     for (const line of lines.filter((entry) => entry.startsWith('systemctl\t'))) {
       assert.match(line,
@@ -403,6 +547,23 @@ test('fresh disabled install follows the exact component order and never activat
       'etc/teleagent/privileged-action/ENABLE',
       'etc/teleagent/realtime-sip-gateway/ENABLE',
     ]) assert.equal(fs.existsSync(path.join(fixture.root, sentinel)), false);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test('unexpected successful SIP fence output is refused before later component mutation', () => {
+  const fixture = createFixture({ fenceInstallOutput: 'fixture systemctl success chatter' });
+  try {
+    fixture.installRuntime();
+    const result = fixture.run('--install-disabled');
+    assertRefusal(result);
+    assert.match(result.stderr, /SIP fence install returned an unexpected result/u);
+    const labels = fixture.lines().map((line) => line.split('\t')[0]);
+    assert.equal(labels.includes('fence-install'), true);
+    assert.equal(labels.includes('worker-installed'), false);
+    assert.equal(labels.includes('controller-installed'), false);
+    assert.equal(labels.includes('sip-installed'), false);
   } finally {
     fixture.cleanup();
   }
@@ -551,6 +712,7 @@ test('runtime and installed-component tampering fail closed', () => {
   } finally {
     component.cleanup();
   }
+
 });
 
 test('runtime bytes are compared only at entry and final with exact intermediate fingerprints', () => {

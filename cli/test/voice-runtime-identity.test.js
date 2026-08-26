@@ -2,8 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   assertVoiceRuntimeEnvFile,
+  normalizeMediaRuntimeIdentities,
   normalizeVoiceRuntimeIdentity,
+  resolveMediaRuntimeIdentities,
   resolveVoiceRuntimeIdentity,
+  resolveVoiceRuntimeIdentitiesForInstallation,
   resolveVoiceRuntimeIdentityForInstallation,
   VoiceRuntimeIdentityError,
 } from '../lib/voice-runtime-identity.js';
@@ -14,6 +17,16 @@ const READY = Object.freeze({
   gid: 989,
   home: '/var/lib/teleagent-voice',
   shell: '/usr/sbin/nologin',
+});
+const MEDIA_READY = Object.freeze({
+  drachtio: Object.freeze({
+    name: 'teleagent-drachtio', uid: 988, gid: 988,
+    home: '/nonexistent', shell: '/usr/sbin/nologin',
+  }),
+  freeswitch: Object.freeze({
+    name: 'teleagent-freeswitch', uid: 987, gid: 987,
+    home: '/nonexistent', shell: '/usr/sbin/nologin',
+  }),
 });
 
 test('resolves only the exact private non-login teleagent-voice identity', () => {
@@ -44,6 +57,85 @@ test('setup/start identity routing exempts only API-only installations', () => {
   assert.equal(calls, 2);
 });
 
+test('voice setup preflight resolves the voice, Drachtio, and FreeSWITCH identities', () => {
+  const calls = [];
+  const voiceResolver = () => {
+    calls.push('teleagent-voice');
+    return READY;
+  };
+  const mediaResolver = ({ voiceIdentity }) => {
+    assert.equal(voiceIdentity, READY);
+    calls.push('teleagent-drachtio', 'teleagent-freeswitch');
+    return MEDIA_READY;
+  };
+
+  assert.equal(
+    resolveVoiceRuntimeIdentitiesForInstallation(
+      'api-server', voiceResolver, mediaResolver
+    ),
+    null
+  );
+  assert.deepEqual(calls, []);
+  assert.deepEqual(
+    resolveVoiceRuntimeIdentitiesForInstallation(
+      'voice-server', voiceResolver, mediaResolver
+    ),
+    { voiceIdentity: READY, mediaIdentities: MEDIA_READY }
+  );
+  assert.deepEqual(calls, [
+    'teleagent-voice',
+    'teleagent-drachtio',
+    'teleagent-freeswitch',
+  ]);
+  calls.length = 0;
+  assert.deepEqual(
+    resolveVoiceRuntimeIdentitiesForInstallation(
+      'both', voiceResolver, mediaResolver
+    ),
+    { voiceIdentity: READY, mediaIdentities: MEDIA_READY }
+  );
+  assert.deepEqual(calls, [
+    'teleagent-voice',
+    'teleagent-drachtio',
+    'teleagent-freeswitch',
+  ]);
+});
+
+test('resolves distinct non-root Drachtio and FreeSWITCH peer identities', () => {
+  const identities = resolveMediaRuntimeIdentities({
+    voiceIdentity: READY,
+    platform: 'linux',
+    currentUid: 1000,
+    lookup(database, name) {
+      const identity = Object.values(MEDIA_READY).find((candidate) => candidate.name === name);
+      assert.ok(identity);
+      return database === 'passwd'
+        ? `${name}:x:${identity.uid}:${identity.gid}:Media:/nonexistent:/usr/sbin/nologin`
+        : `${name}:x:${identity.gid}:`;
+    },
+    supplementaryGroups(name) {
+      return String(Object.values(MEDIA_READY).find((candidate) => candidate.name === name).gid);
+    },
+  });
+  assert.deepEqual(identities, MEDIA_READY);
+  assert.throws(
+    () => normalizeMediaRuntimeIdentities({
+      ...MEDIA_READY,
+      drachtio: { ...MEDIA_READY.drachtio, uid: READY.gid },
+    }, READY),
+    /numeric identities are reused/,
+  );
+  assert.throws(
+    () => resolveMediaRuntimeIdentities({
+      voiceIdentity: READY,
+      platform: 'linux',
+      lookup: () => '',
+      supplementaryGroups: () => '',
+    }),
+    /does not exist/,
+  );
+});
+
 test('never falls back to root, UID/GID 1000, the invoking owner, or a login account', () => {
   for (const identity of [
     { ...READY, uid: 0 },
@@ -55,7 +147,7 @@ test('never falls back to root, UID/GID 1000, the invoking owner, or a login acc
     assert.throws(
       () => normalizeVoiceRuntimeIdentity(identity),
       error => error instanceof VoiceRuntimeIdentityError &&
-        /Provision the dedicated non-login teleagent-voice/.test(error.message),
+        /Provision distinct dedicated non-login teleagent-voice/.test(error.message),
     );
   }
 
@@ -127,7 +219,6 @@ test('generated env must be single-link mode 0600 with exact identity and paths'
     'VOICE_APP_GID=989',
     'DEVICE_CONFIG_DIR=/etc/teleagent-voice/config',
     'VOICE_STATE_DIR=/var/lib/teleagent-voice',
-    'VOICE_APPROVAL_SIGNING_KEY_HOST_FILE=/etc/teleagent-voice/credentials/voice-approval-private.pem',
     'SIP_TRUNK_INGRESS_PASSWORD_HOST_FILE=/etc/teleagent-voice/credentials/sip-ingress-password',
     'SIP_TRUNK_CALLBACK_PASSWORD_HOST_FILE=/etc/teleagent-voice/credentials/sip-callback-password',
     '',

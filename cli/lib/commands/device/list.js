@@ -1,5 +1,5 @@
 import chalk from 'chalk';
-import { loadConfig, configExists } from '../../config.js';
+import { loadConfigReadOnly, configExists } from '../../config.js';
 
 /**
  * Device list command - List all configured devices
@@ -14,7 +14,7 @@ export async function deviceListCommand() {
     process.exit(1);
   }
 
-  const config = await loadConfig();
+  const config = await loadConfigReadOnly();
 
   if (config.devices.length === 0) {
     console.log(chalk.yellow('No devices configured.'));

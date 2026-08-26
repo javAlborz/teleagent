@@ -44,9 +44,6 @@ var getRealtimeApiKey = realtimeClientConfig.getRealtimeApiKey;
 var loadRealtimeEndpointConfig = realtimeClientConfig.loadRealtimeEndpointConfig;
 var queueRuntimeCallback = require("./lib/conversation-loop").queueRuntimeCallback;
 var refreshRuntimeTranscriptionVocabulary = require("./lib/realtime-conversation").refreshRuntimeTranscriptionVocabulary;
-var loadApprovalCapabilityConfig = require("./lib/approval-capability-config").loadApprovalCapabilityConfig;
-var PrivilegedActionBridge = require("./lib/privileged-action-bridge").PrivilegedActionBridge;
-var loadPrivilegedActionConfig = require("./lib/privileged-action-config").loadPrivilegedActionConfig;
 var loadSipTrunkSecurityConfig = require("./lib/sip-trunk-auth").loadSipTrunkSecurityConfig;
 var loadMediaControlEndpoints = require("./lib/media-control-endpoints").loadMediaControlEndpoints;
 var loadLegacySpeechConfig = require("./lib/legacy-speech-config").loadLegacySpeechConfig;
@@ -95,7 +92,17 @@ var config = {
   ws_port: parseInt(process.env.WS_PORT) || 3001,
   audio_dir: process.env.AUDIO_DIR || "/tmp/voice-audio",
   voice_state_db_path: fixedRuntimeEnvironment.stateDbPath,
-  voice_execution_lock_path: fixedRuntimeEnvironment.executionLockFile
+  voice_execution_lock_path: fixedRuntimeEnvironment.executionLockFile,
+  approval_capability: Object.freeze({
+    enabled: false,
+    issuer: null,
+    status: "blocked_pending_independent_pbx_attester"
+  }),
+  privileged_actions: Object.freeze({
+    enabled: false,
+    apiToken: null,
+    status: "blocked_pending_controller_owned_approval_authority"
+  })
 };
 
 try {
@@ -106,11 +113,7 @@ try {
   config.drachtio.port = config.media_endpoints.drachtio.port;
   config.freeswitch.host = config.media_endpoints.freeswitch.host;
   config.freeswitch.port = config.media_endpoints.freeswitch.port;
-  config.runtime_secrets = configureRuntimeSecrets(loadRuntimeSecrets({
-    required: String(process.env.VOICE_PRIVILEGED_ACTIONS_ENABLED || '').trim().toLowerCase() === 'true'
-      ? ['privilegedActionApiToken']
-      : [],
-  }));
+  config.runtime_secrets = configureRuntimeSecrets(loadRuntimeSecrets());
   assertAudioForkDebugSafe(process.env.DEBUG);
   config.audio_fork = normalizeAudioForkServerOptions({
     port: config.ws_port,
@@ -124,10 +127,10 @@ try {
   process.exit(1);
 }
 
-// Load the controller-only signing key before opening SIP, media, or HTTP
-// listeners. Enabling signed capabilities with an absent, broad-permission, or
-// invalid key is a fatal configuration error. Neither the key nor tokens are
-// included in configuration logs.
+// Voice is not an approval authority. It must never load a signing key or a
+// privileged controller bearer. Mutating, target-session, and privileged jobs
+// remain fail closed until an independent PBX attester and controller-owned
+// approval authority are implemented.
 try {
   config.drachtio.secret = config.runtime_secrets.drachtioSecret;
   config.freeswitch.secret = config.runtime_secrets.freeswitchSecret;
@@ -136,11 +139,6 @@ try {
   });
   config.sip_trunk_security = loadSipTrunkSecurityConfig();
   config.outbound_routing = config.sip_trunk_security.outboundRouting;
-  config.approval_capability = loadApprovalCapabilityConfig();
-  config.privileged_actions = loadPrivilegedActionConfig({
-    runtimeSecrets: config.runtime_secrets,
-    approvalCapability: config.approval_capability
-  });
 } catch (error) {
   console.error("[CONFIG] Voice authorization setup failed: " + error.message);
   process.exit(1);
@@ -277,15 +275,12 @@ function initializeServers() {
   });
   voiceStateStore = runtimeState.stateStore;
   var voiceExecutionControl = new VoiceExecutionControl({ lockFile: config.voice_execution_lock_path });
-  var privilegedActionBridge = config.privileged_actions.enabled
-    ? new PrivilegedActionBridge({ apiToken: config.privileged_actions.apiToken })
-    : null;
   agentJobBroker = new AgentJobBroker({
     stateStore: voiceStateStore,
     agentBridge: claudeBridge,
     executionControl: voiceExecutionControl,
-    approvalCapabilityIssuer: config.approval_capability.issuer,
-    privilegedActionBridge: privilegedActionBridge,
+    approvalCapabilityIssuer: null,
+    privilegedActionBridge: null,
     outboundControl: outboundModule,
     callbackDispatcher: async function(job, thread, delivery) {
       if (!thread || !thread.callback_target) {
@@ -372,11 +367,13 @@ function initializeServers() {
       model: config.realtime_endpoint.model,
       approvalCapabilities: {
         enabled: config.approval_capability.enabled,
-        mutatingVoiceJobs: config.approval_capability.enabled ? "enabled" : "blocked"
+        mutatingVoiceJobs: "blocked",
+        status: config.approval_capability.status
       },
       privilegedActions: {
         enabled: config.privileged_actions.enabled,
-        boundary: "authenticated_host_controller"
+        boundary: "unavailable_to_voice",
+        status: config.privileged_actions.status
       },
       voiceExecution: {
         locked: executionHealth.locked,

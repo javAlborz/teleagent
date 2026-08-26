@@ -102,6 +102,10 @@ test('controller-style proxy env uses a dedicated token and the fixed private so
     proxyConfigured: true,
     authConfigured: true,
   });
+  assert.deepEqual(health.phoneAuthority, {
+    mode: 'legacy_authority_present',
+    status: 'unsafe_for_voice_activation',
+  });
 
   for (const token of [agentToken, 'another-unrelated-token-32-bytes-minimum']) {
     const denied = await fetch(`${baseUrl}/privileged-actions/health`, {

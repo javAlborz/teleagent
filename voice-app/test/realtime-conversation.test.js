@@ -9,6 +9,7 @@ const path = require('node:path');
 const test = require('node:test');
 const { setImmediate } = require('node:timers');
 const {
+  buildConductorInstructions,
   isBackchannelOnly,
   isCutoffReport,
   isDefinitiveGoodbye,
@@ -20,6 +21,18 @@ const {
   runRealtimeConversation,
 } = require('../lib/realtime-conversation');
 const { VoiceStateStore } = require('../lib/voice-state-store');
+
+test('production conductor instructions expose read-only managed authority only', () => {
+  const instructions = buildConductorInstructions({
+    thread: { id: 'vt_read_only', selected_profile: 'codex-sol' },
+    resumeContext: null,
+    startupAnnouncement: null,
+  });
+  assert.match(instructions, /every production phone job is forced read-only/);
+  assert.match(instructions, /Pound does not grant production authority/);
+  assert.doesNotMatch(instructions, /send_agent_session_message|start_privileged_action/);
+  assert.doesNotMatch(instructions, /Sonnet \(write\)|Opus \(admin\)|Terra \(write\)|Sol \(admin\)/);
+});
 
 class FakeRealtimeClient extends EventEmitter {
   constructor(options, dialog, { autoDestroyGreeting = true } = {}) {

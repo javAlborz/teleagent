@@ -83,8 +83,11 @@ invoke it explicitly after provisioning these mounts.
 ## Configuration and activation
 
 Install `/etc/teleagent/controller/runtime.env` as a canonical root-owned
-`0600` regular file. It carries only the scoped controller tokens and reviewed
-worker/privileged proxy settings. Do not place provider credentials there. The
+`0600` regular file. It carries only the active scoped controller tokens and
+reviewed worker settings. Do not place provider credentials, legacy phone
+approval trust anchors, or privileged-proxy settings there. The production
+unit applies `UnsetEnvironment` after this file for every retired verifier and
+proxy name and makes `/run/teleagent-privileged-action` inaccessible. The
 unit fixes and the application revalidates `HOME`, database/lock paths,
 loopback binding, and the hardened state-boundary mode; alternate paths are
 rejected.
@@ -108,11 +111,15 @@ After the installed verifier is green:
 
 1. create and activate the worker-session sentinel/units using the reviewed
    worker activation procedure;
-2. create `/etc/teleagent/privileged-action/ENABLE` as `0600 root:root` and
-   start the privileged unit explicitly;
+2. leave `/etc/teleagent/privileged-action/ENABLE` absent; phone privileged
+   actions remain blocked pending an independent PBX attester and
+   controller-owned approval authority;
 3. create `/etc/teleagent/controller/ENABLE` as `0600 root:root` and start the
    controller unit explicitly;
-4. require controller and broker health before activating the voice stack.
+4. let the guarded voice launcher authenticate `/operator/health` with the
+   source voice-control credential before any activation intent or credential
+   projection. It requires canonical `phoneAuthority` read-only status, no
+   verifier or privileged proxy/bearer, and valid active scoped auth.
 
 Do not create a sentinel until the immediately preceding verifier and canary
 is green. Neither unit has an `[Install]` section.

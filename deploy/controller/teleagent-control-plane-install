@@ -263,6 +263,7 @@ source_check() {
   load_manifest
   local controller="$source_root/teleagent-agent-controller.service"
   local privileged="$app_root/deploy/privileged-action/teleagent-privileged-action.service"
+  local retired_authority_environment='UnsetEnvironment=VOICE_APPROVAL_KEY_ID VOICE_APPROVAL_PUBLIC_KEY_FILE PRIVILEGED_ACTION_API_TOKEN PRIVILEGED_ACTION_PROXY_ENABLED PRIVILEGED_ACTION_PROXY_SOCKET_PATH PRIVILEGED_ACTION_PROXY_TIMEOUT_MS'
   [ "$(/usr/bin/grep -Fxc \
     'ConditionPathExists=/etc/teleagent/controller/ENABLE' "$controller" || true)" -eq 1 ] ||
     fail 'the controller unit lost its exact activation sentinel'
@@ -272,6 +273,11 @@ source_check() {
   [ "$(/usr/bin/grep -Fxc \
     'ConditionPathExists=/etc/teleagent/privileged-action/ENABLE' "$privileged" || true)" -eq 1 ] ||
     fail 'the privileged unit lost its exact activation sentinel'
+  [ "$(/usr/bin/grep -Fxc "$retired_authority_environment" "$controller" || true)" -eq 1 ] ||
+    fail 'the controller can inherit retired phone approval authority'
+  /usr/bin/grep -Eq \
+    '^InaccessiblePaths=.*[[:space:]]/run/teleagent-privileged-action([[:space:]]|$)' \
+    "$controller" || fail 'the controller can reach the retired privileged-action socket'
   assert_release_preflight "$controller"
   assert_release_preflight "$privileged"
   ! /usr/bin/grep -Eq '^\[Install\][[:space:]]*$' "$controller" "$privileged" ||
@@ -611,14 +617,14 @@ create_exact_initial_file() {
     fail 'a controller initialization file could not be staged'
   /usr/bin/chown "$expected_uid:$expected_gid" "$temporary"
   /usr/bin/chmod "$mode" "$temporary"
-  /usr/bin/sync -f "$temporary"
+  /usr/bin/sync -- "$temporary"
   /usr/bin/ln -- "$temporary" "$filename" ||
     fail 'a controller initialization file raced with another publisher'
   /usr/bin/rm -f -- "$temporary"
   /usr/bin/chown "$uid:$gid" "$filename"
   /usr/bin/chmod "$mode" "$filename"
-  /usr/bin/sync -f "$filename"
-  /usr/bin/sync -d "$(/usr/bin/dirname -- "$filename")"
+  /usr/bin/sync -- "$filename"
+  /usr/bin/sync -- "$(/usr/bin/dirname -- "$filename")"
 }
 
 create_exact_empty_file() {
@@ -633,14 +639,14 @@ create_exact_empty_file() {
     fail 'a durable database initialization file could not be staged'
   /usr/bin/chown "$expected_uid:$expected_gid" "$temporary"
   /usr/bin/chmod 0600 "$temporary"
-  /usr/bin/sync -f "$temporary"
+  /usr/bin/sync -- "$temporary"
   /usr/bin/ln -- "$temporary" "$filename" ||
     fail 'a durable database initialization raced with another publisher'
   /usr/bin/rm -f -- "$temporary"
   /usr/bin/chown "$uid:$gid" "$filename"
   /usr/bin/chmod 0600 "$filename"
-  /usr/bin/sync -f "$filename"
-  /usr/bin/sync -d "$(/usr/bin/dirname -- "$filename")"
+  /usr/bin/sync -- "$filename"
+  /usr/bin/sync -- "$(/usr/bin/dirname -- "$filename")"
 }
 
 ensure_controller_state_initialized() {
@@ -849,7 +855,7 @@ install_disabled() {
         else
           /usr/bin/rm -f -- "$rollback_target"
         fi
-        /usr/bin/sync -d "$(/usr/bin/dirname -- "$rollback_target")"
+        /usr/bin/sync -- "$(/usr/bin/dirname -- "$rollback_target")"
       done
       run_systemctl daemon-reload >/dev/null 2>&1
     fi
@@ -870,14 +876,14 @@ install_disabled() {
     fi
     /usr/bin/install -o "$expected_uid" -g "$expected_gid" \
       -m "${modes[$index]}" -- "$app_root/${sources[$index]}" "$temporary"
-    /usr/bin/sync -f "$temporary"
+    /usr/bin/sync -- "$temporary"
   done
 
   install_committed=1
   for ((index = 0; index < ${#targets[@]}; index += 1)); do
     target=$(host_path "${targets[$index]}")
     /usr/bin/mv -f -- "${target}.new-$$" "$target"
-    /usr/bin/sync -d "$(/usr/bin/dirname -- "$target")"
+    /usr/bin/sync -- "$(/usr/bin/dirname -- "$target")"
   done
 
   "$sysusers_bin" "$(host_path /etc/sysusers.d/teleagent-privileged-action.conf)"

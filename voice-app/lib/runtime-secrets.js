@@ -33,12 +33,6 @@ const SECRET_SPECS = Object.freeze({
     kind: 'token',
     required: true,
   }),
-  privilegedActionApiToken: Object.freeze({
-    filename: 'teleagent-privileged-action-api-token',
-    label: 'privileged-action API credential',
-    kind: 'token',
-    required: false,
-  }),
   openaiRealtimeApiKey: Object.freeze({
     filename: 'teleagent-openai-realtime-api-key',
     label: 'OpenAI Realtime API credential',

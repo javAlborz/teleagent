@@ -13,7 +13,9 @@ import {
   getRuntimeSecretEnvironment
 } from './runtime-security.js';
 import {
+  normalizeMediaRuntimeIdentities,
   normalizeVoiceRuntimeIdentity,
+  resolveMediaRuntimeIdentities,
   resolveVoiceRuntimeIdentity,
   VOICE_RUNTIME_PATH_BINDINGS,
 } from './voice-runtime-identity.js';
@@ -131,10 +133,14 @@ export function generateDockerCompose(config) {
  * Generate .env file from config
  * @param {object} config - Configuration object
  * @param {object} voiceIdentity - Resolved dedicated teleagent-voice identity
+ * @param {object} mediaIdentities - Resolved dedicated media peer identities
  * @returns {string} Environment file content
  */
-export function generateEnvFile(config, voiceIdentity) {
+export function generateEnvFile(config, voiceIdentity, mediaIdentities) {
   const normalizedVoiceIdentity = normalizeVoiceRuntimeIdentity(voiceIdentity);
+  const normalizedMediaIdentities = normalizeMediaRuntimeIdentities(
+    mediaIdentities, normalizedVoiceIdentity
+  );
   const deploymentMode = String(config.deployment?.mode || '').trim();
   const installationType = String(config.installationType || '').trim();
   if (installationType === 'voice-server' ||
@@ -179,6 +185,10 @@ export function generateEnvFile(config, voiceIdentity) {
     '# Network Configuration',
     `VOICE_APP_UID=${normalizedVoiceIdentity.uid}`,
     `VOICE_APP_GID=${normalizedVoiceIdentity.gid}`,
+    `DRACHTIO_UID=${normalizedMediaIdentities.drachtio.uid}`,
+    `DRACHTIO_GID=${normalizedMediaIdentities.drachtio.gid}`,
+    `FREESWITCH_UID=${normalizedMediaIdentities.freeswitch.uid}`,
+    `FREESWITCH_GID=${normalizedMediaIdentities.freeswitch.gid}`,
     `DEVICE_CONFIG_DIR=${VOICE_DEVICE_CONFIG_DIR}`,
     `VOICE_STATE_DIR=${VOICE_STATE_DIR}`,
     '# SIP/media control and callback routes are fixed in Compose.',
@@ -188,8 +198,6 @@ export function generateEnvFile(config, voiceIdentity) {
     `AGENT_API_BIND_HOST=${config.server?.agentApiBindHost || '127.0.0.1'}`,
     `AGENT_API_NON_LOOPBACK_ENABLED=${config.server?.agentApiNonLoopbackEnabled === true}`,
     `AGENT_API_TOKEN=${runtimeSecrets.AGENT_API_TOKEN}`,
-    'PRIVILEGED_ACTION_PROXY_ENABLED=false',
-    'VOICE_PRIVILEGED_ACTIONS_ENABLED=false',
     'AGENT_DURABLE_EXECUTOR_ENABLED=true',
     '',
     '# Agent Providers',
@@ -228,7 +236,6 @@ export function generateEnvFile(config, voiceIdentity) {
     `OPENAI_REALTIME_HARD_MAX_SPOKEN_WORDS=${realtimeHardMaxSpokenWords}`,
     `OPENAI_REALTIME_CONTEXT_TOKEN_LIMIT=${realtimeContextTokenLimit}`,
     `OPENAI_REALTIME_CONTEXT_RETENTION_RATIO=${realtimeContextRetentionRatio}`,
-    'VOICE_APPROVAL_CAPABILITY_ENABLED=false',
     '',
     '# Legacy local TTS/STT are disabled in hardened production.',
     'LEGACY_SPEECH_SERVICES_ENABLED=false',
@@ -254,6 +261,7 @@ export function generateEnvFile(config, voiceIdentity) {
  */
 export async function writeDockerConfig(config, {
   voiceIdentity = resolveVoiceRuntimeIdentity(),
+  mediaIdentities = resolveMediaRuntimeIdentities({ voiceIdentity }),
 } = {}) {
   const dockerComposePath = getDockerComposePath();
   const envPath = getEnvPath();
@@ -263,7 +271,7 @@ export async function writeDockerConfig(config, {
   }
 
   const dockerComposeContent = generateDockerCompose(config);
-  const envContent = generateEnvFile(config, voiceIdentity);
+  const envContent = generateEnvFile(config, voiceIdentity, mediaIdentities);
 
   await fs.promises.writeFile(dockerComposePath, dockerComposeContent, { mode: 0o644 });
   await fs.promises.writeFile(envPath, envContent, { mode: 0o600 });

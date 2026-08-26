@@ -121,82 +121,11 @@ function buildRealtimeTools(profiles) {
     {
       type: 'function',
       name: 'send_agent_message',
-      description: 'Silently route a message to a Teleagent-managed Claude Code or Codex profile session as the first output item. Never use this for an existing tmux pane, named tmux window, or the current Codex/Claude thread; use send_agent_session_message for those.',
+      description: 'Silently route one read-only request to a Teleagent-managed Claude Code or Codex profile session as the first output item. Production phone jobs cannot mutate files, deploy, administer systems, or message an existing tmux/provider conversation.',
       parameters: {
         type: 'object',
         properties: taskProperties,
         required: ['request'],
-        additionalProperties: false,
-      },
-    },
-    {
-      type: 'function',
-      name: 'send_agent_session_message',
-      description: 'Send one exact message to the Codex or Claude provider session already attached to an exact tmux target. This always requires pound approval and reports success only after provider history verifies both delivery and the final response.',
-      parameters: {
-        type: 'object',
-        properties: {
-          target: {
-            type: 'string',
-            description: 'Use the stable_target returned by tmux/history tools whenever available; otherwise use an exact named target such as main:phone.',
-          },
-          message: {
-            type: 'string',
-            maxLength: 4000,
-            description: 'The exact instruction or question to deliver to that existing provider conversation.',
-          },
-          notify_when_complete: {
-            type: 'string',
-            enum: ['in_call', 'callback', 'resume'],
-          },
-        },
-        required: ['target', 'message'],
-        additionalProperties: false,
-      },
-    },
-    {
-      type: 'function',
-      name: 'start_privileged_action',
-      description: 'Create a typed exact-argv action for the separate root broker. Use this—not a Codex/Claude session—for systemctl, root journal, named-host SSH, approved Hera-routed kubectl, or an explicitly requested exact argv escape. It never executes immediately: the app speaks the complete exact argv, target, impact, and expected result, then arms focused pound approval only after playback finishes.',
-      parameters: {
-        type: 'object',
-        properties: {
-          adapter: { type: 'string', enum: ['systemctl', 'journalctl', 'ssh', 'kubectl', 'argv'] },
-          action: { type: 'string', description: 'systemctl action.' },
-          unit: { type: 'string', description: 'Exact systemd unit including suffix.' },
-          lines: { type: 'integer', minimum: 1, maximum: 500 },
-          host: {
-            type: 'string',
-            enum: ['hera', 'aphrodite', 'dionysus', 'prometheus', 'atlas', 'zeus', 'hephaestus'],
-          },
-          remote_action: {
-            type: 'string',
-            enum: ['hostname', 'uptime', 'systemctl_status', 'systemctl_restart', 'exact_argv'],
-          },
-          operation: { type: 'string', enum: ['get', 'rollout_restart', 'scale'] },
-          namespace: { type: 'string' },
-          kind: { type: 'string' },
-          name: { type: 'string' },
-          replicas: { type: 'integer', minimum: 0, maximum: 100 },
-          argv: {
-            type: 'array',
-            minItems: 1,
-            maxItems: 16,
-            items: { type: 'string', maxLength: 256 },
-            description: 'HIGH RISK local escape only: exact tokens, with one canonical absolute executable as argv[0]. Never use a shell command string.',
-          },
-          remote_argv: {
-            type: 'array',
-            minItems: 1,
-            maxItems: 16,
-            items: { type: 'string', maxLength: 256 },
-            description: 'HIGH RISK named-host SSH escape: exact remote tokens; no shell string or metacharacters.',
-          },
-          cwd: { type: 'string', description: 'Canonical absolute cwd for the local exact argv adapter.' },
-          timeout_seconds: { type: 'integer', minimum: 5, maximum: 300 },
-          notify_when_complete: { type: 'string', enum: ['in_call', 'callback', 'resume'] },
-        },
-        required: ['adapter'],
         additionalProperties: false,
       },
     },
@@ -490,7 +419,7 @@ function buildRealtimeRouterTool(profiles) {
       'Silently classify exactly one caller turn before any speech.',
       'Use respond for an ordinary conversational answer.',
       'Otherwise select exactly one bounded application action by name and put its JSON arguments in arguments_json.',
-      'Inspection actions read authoritative state; send_agent_message starts managed Claude/Codex work; send_agent_session_message targets an existing tmux-attached provider conversation; end_call ends the phone call.',
+      'Inspection actions read authoritative state; send_agent_message starts read-only managed Claude/Codex work; end_call ends the phone call.',
       'Never narrate, approve, cancel, or claim an action inside this routing response.',
     ].join(' '),
     parameters: {

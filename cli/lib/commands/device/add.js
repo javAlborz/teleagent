@@ -1,7 +1,12 @@
 import inquirer from 'inquirer';
 import chalk from 'chalk';
 import ora from 'ora';
-import { loadConfig, saveConfig, configExists } from '../../config.js';
+import {
+  loadConfigWithVoiceRuntimeIdentityPreflight,
+  peekConfig,
+  saveConfig,
+  configExists,
+} from '../../config.js';
 import { validateExtension, validateTtsVoice } from '../../validators.js';
 import { writeDockerConfig } from '../../docker.js';
 import { getAgentProfileChoices } from '../../agents.js';
@@ -19,7 +24,11 @@ export async function deviceAddCommand() {
     process.exit(1);
   }
 
-  const config = await loadConfig();
+  // Gate every voice-mode write on the complete three-account preflight. The
+  // snapshot read itself performs no migration or save.
+  const configSnapshot = await peekConfig();
+  const { config, voiceRuntimeIdentities } =
+    await loadConfigWithVoiceRuntimeIdentityPreflight({ snapshot: configSnapshot });
   const profileChoices = getAgentProfileChoices(config);
 
   // Gather device information
@@ -110,8 +119,10 @@ export async function deviceAddCommand() {
   const saveSpinner = ora('Saving configuration...').start();
   await saveConfig(config);
 
-  // Regenerate Docker config with new device
-  await writeDockerConfig(config);
+  // API-only installations have no voice deployment artifacts to regenerate.
+  if (voiceRuntimeIdentities) {
+    await writeDockerConfig(config, voiceRuntimeIdentities);
+  }
 
   saveSpinner.succeed(chalk.green('Configuration saved'));
 

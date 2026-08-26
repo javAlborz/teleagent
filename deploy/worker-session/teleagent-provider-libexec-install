@@ -178,7 +178,7 @@ done < "$manifest"
 
 while IFS=' ' read -r digest _source target mode _extra; do
   /usr/bin/mv -f "$stage/$target" "$target_root/$target"
-  /usr/bin/sync -d "$target_root/$target"
+  /usr/bin/sync -- "$target_root/$target"
   installed_output=$(/usr/bin/sha256sum -- "$target_root/$target") || {
     echo "installed provider libexec digest is unavailable" >&2
     exit 77
@@ -192,6 +192,6 @@ while IFS=' ' read -r digest _source target mode _extra; do
   fi
 done < "$manifest"
 /usr/bin/install -o root -g root -m 0444 "$manifest" "$installed_manifest"
-/usr/bin/sync -d "$target_root" "$installed_manifest"
+/usr/bin/sync -- "$target_root" "$installed_manifest"
 trap - EXIT INT TERM
 /usr/bin/rmdir "$stage"

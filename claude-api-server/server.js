@@ -75,6 +75,7 @@ const {
   authorizeManagedVoiceRequest,
   authorizeTargetSessionRequest,
   createConfiguredApprovalVerifier,
+  executeWithCurrentApprovalAuthority,
 } = require('./voice-approval-verifier');
 const { hashApprovalPlan } = require('../lib/voice-approval-capability');
 const {
@@ -191,11 +192,14 @@ for (const [name, token] of Object.entries(SCOPED_API_TOKENS)) {
   }
   seenScopedApiTokens.set(token, name);
 }
-const SCOPED_AUTH_CONFIGURATION_VALID = Object.values(SCOPED_API_TOKENS).every(Boolean);
 const PRIVILEGED_ACTION_PROXY_ENABLED = parseStrictBoolean(
   process.env.PRIVILEGED_ACTION_PROXY_ENABLED,
   'PRIVILEGED_ACTION_PROXY_ENABLED',
   false
+);
+const ACTIVE_SCOPED_AUTH_CONFIGURATION_VALID = Boolean(
+  AGENT_API_TOKEN && EXECUTOR_API_TOKEN && VOICE_CONTROL_TOKEN &&
+  (!PRIVILEGED_ACTION_PROXY_ENABLED || PRIVILEGED_ACTION_API_TOKEN)
 );
 const EXPECTED_PRIVILEGED_ACTION_SOCKET_PATH = '/run/teleagent-privileged-action/broker.sock';
 const PRIVILEGED_ACTION_SOCKET_PATH = String(
@@ -263,6 +267,7 @@ const executorTaskStore = new ExecutorTaskStore({
     : () => {},
 });
 let approvalVerifier;
+const APPROVAL_KEY_ID = String(process.env.VOICE_APPROVAL_KEY_ID || '').trim();
 try {
   approvalVerifier = createConfiguredApprovalVerifier({
     environment: process.env,
@@ -376,15 +381,15 @@ const PHONE_CODEX_LUNA_SANDBOX = normalizeCodexSandbox(
 );
 const PHONE_CODEX_TERRA_SANDBOX = normalizeCodexSandbox(
   process.env.PHONE_CODEX_TERRA_SANDBOX,
-  'workspace-write'
+  'read-only'
 );
 const PHONE_CODEX_SOL_SANDBOX = normalizeCodexSandbox(
   process.env.PHONE_CODEX_SOL_SANDBOX,
-  'danger-full-access'
+  'read-only'
 );
 const PHONE_CODEX_DEPLOY_SANDBOX = normalizeCodexSandbox(
   process.env.PHONE_CODEX_DEPLOY_SANDBOX,
-  'danger-full-access'
+  'read-only'
 );
 const PHONE_CODEX_APPROVAL_POLICY = normalizeCodexApprovalPolicy(
   process.env.PHONE_CODEX_APPROVAL_POLICY,
@@ -575,7 +580,7 @@ const PHONE_HAIKU_CLAUDE_TOOLS = parseListEnv(process.env.PHONE_HAIKU_CLAUDE_TOO
 const PHONE_SONNET_CLAUDE_TOOLS = parseListEnv(process.env.PHONE_SONNET_CLAUDE_TOOLS || PHONE_CLAUDE_TOOLS.join(','));
 const PHONE_OPUS_CLAUDE_TOOLS = parseListEnv(process.env.PHONE_OPUS_CLAUDE_TOOLS || PHONE_CLAUDE_TOOLS.join(','));
 const PHONE_DEPLOY_CLAUDE_TOOLS = parseListEnv(
-  process.env.PHONE_DEPLOY_CLAUDE_TOOLS || 'Read,Write,Edit,Glob,Grep,Bash,Skill'
+  process.env.PHONE_DEPLOY_CLAUDE_TOOLS || 'Read,Glob,Grep'
 );
 const ENABLED_AGENT_PROVIDERS = (() => {
   const requested = parseListEnv(process.env.AGENT_PROVIDERS).map(provider => provider.toLowerCase());
@@ -763,7 +768,7 @@ function buildVoiceAuthorizationContext(validation) {
   if (!validation.authorization) {
     return `[VOICE READ-ONLY EXECUTION BOUNDARY]\n` +
       `This request is classified read-only. Do not edit files, execute state-changing commands, send messages, deploy, publish, restart services, or use sudo.\n` +
-      `If the requested answer requires a mutation, stop and say that a new extension-7 approval is required.\n` +
+      `Production phone authority is read-only. If the requested answer requires a mutation, stop and say that the operation is unavailable from the phone.\n` +
       `[END VOICE READ-ONLY EXECUTION BOUNDARY]\n\n`;
   }
   return `[VOICE OPERATION AUTHORIZATION]\n` +
@@ -1725,7 +1730,7 @@ function runAgentOnce({
  * This tells the selected agent how to handle voice-specific patterns:
  * - Output VOICE_RESPONSE for TTS (conversational, 40 words max)
  * - Output COMPLETED for status logging (12 words max)
- * - For Slack delivery requests: do the work, send to Slack, then acknowledge
+ * - Stay inside the production phone runtime's read-only authority boundary
  */
 const VOICE_CONTEXT = `[VOICE CALL CONTEXT]
 This query comes via voice call. You MUST include BOTH of these lines in your response:
@@ -1736,37 +1741,16 @@ This query comes via voice call. You MUST include BOTH of these lines in your re
 
 IMPORTANT: The VOICE_RESPONSE line is what the caller HEARS. Make it conversational and complete - don't just say "Done" or "Task completed". Actually answer their question or confirm what you did in a natural way.
 
-PHONE GIT SAFETY:
-- For repo commit/push requests, use the phone-publish Bash wrapper instead of raw git commit/git push commands.
-- For GitHub PR merge requests, use the phone-merge-pr Bash wrapper instead of raw gh pr merge.
-
-PHONE TROUBLESHOOTING:
-- Haiku and Sonnet are trusted troubleshooting-shell profiles on Hermes.
-- For routine phone-runtime troubleshooting on Haiku or Sonnet, prefer this exact command shortlist first unless the caller clearly needs something else:
-  - docker ps
-  - docker logs --tail 100 voice-app
-  - docker logs --tail 100 drachtio
-  - docker logs --tail 100 freeswitch
-  - docker logs --tail 100 hermes-asterisk
-  - systemctl --user status claude-api-server
-  - journalctl --user -u claude-api-server --no-pager -n 100
-  - curl -fsS http://127.0.0.1:3000/health
-  - curl -fsS http://127.0.0.1:3333/health
-- Start with those commands before reaching for broader shell access.
-- Treat Bash as operator-grade access on Hermes rather than a sandboxed wrapper.
+PHONE AUTHORITY BOUNDARY:
+- Production phone requests are read-only inspection, research, and explanation only.
+- Do not edit files, run state-changing commands, commit or push, merge pull requests, deploy or publish, change services, use sudo, or send messages to people or external channels.
+- Do not claim that a mutation started or completed. If one is requested, explain briefly that it is unavailable from the phone and provide read-only guidance instead.
 
 PHONE CALLBACK DELIVERY: When the caller requests callback delivery (phrases like "call me when done", "phone me when done", "ring me when this finishes"):
-1. Do the requested work first.
+1. Complete only the permitted read-only work first.
 2. If the caller stays on the line, answer normally on the current call.
 3. If the caller hangs up before you answer, the phone runtime will place the callback automatically.
 4. Do not invoke the Call skill yourself from a live phone call unless the user explicitly wants an additional separate callback even after hearing the current answer.
-
-SLACK DELIVERY: When the caller requests delivery to Slack (phrases like "send to Slack", "post to #channel", "message me when done"):
-1. Do the requested work (research, generate content, analyze, etc.)
-2. Send results to the specified Slack channel using the Slack skill
-3. Include a VOICE_RESPONSE like: "Done! I sent the weather info to the 508 channel."
-
-The caller may hang up while you're working (they'll hear hold music). That's fine - complete the work and send to Slack. They'll see it there.
 
 Example query: "What's the weather in Royce City?"
 Example response:
@@ -1776,18 +1760,9 @@ Example response:
 
 `;
 
-const PHONE_DEPLOY_CONTEXT = `[PHONE DEPLOY EXECUTION]
-This request explicitly asks you to deploy, ship, merge, publish, or republish app-platform work.
-
-Execution rules:
-- Loading a skill only reads instructions. It does not execute the workflow.
-- Do not say deployment started or completed unless you actually ran the required commands.
-- Use Bash for the real workflow steps.
-- For commit/push, use phone-publish instead of raw git commit/git push.
-- For PR merge, use phone-merge-pr instead of raw gh pr merge.
-- Treat the deploy as incomplete until GitHub/CI/workflow state confirms the step finished or you hit a concrete blocker.
-- If something blocks execution, state the exact blocker instead of claiming the deploy is in progress.
-[END PHONE DEPLOY EXECUTION]
+const PHONE_DEPLOY_CONTEXT = `[PHONE MUTATION REFUSAL]
+This phone request asks for deployment, shipping, merging, publishing, or another mutation. Production phone authority is read-only: do not execute or claim any such action. Explain that it is unavailable from the phone and, when useful, provide read-only status or validation guidance.
+[END PHONE MUTATION REFUSAL]
 
 `;
 
@@ -2052,12 +2027,17 @@ app.post('/operator/session-message', async (req, res) => {
     authorization,
   });
   if (!approval.allowed) {
+    const authorityUnavailable = approval.code === 'VOICE_APPROVAL_VERIFIER_UNAVAILABLE';
     return res.status(403).json({
       success: false,
       code: approval.code,
       agentCode: approval.code,
-      error: 'Job-specific DTMF approval is required for target-session delivery.',
-      userMessage: 'Review the exact tmux target and message, then press pound to approve it.',
+      error: authorityUnavailable
+        ? 'Production phone approval authority is disabled.'
+        : 'Job-specific DTMF approval is required for target-session delivery.',
+      userMessage: authorityUnavailable
+        ? approval.userMessage
+        : 'Review the exact tmux target and message, then press pound to approve it.',
     });
   }
 
@@ -2540,6 +2520,9 @@ function sanitizeVoiceAuthorizationDecision(validation) {
       method: String(authorization.method || '').slice(0, 100),
       approved_at: String(authorization.approved_at || '').slice(0, 100),
       capability_key_id: String(authorization.capability_key_id || '').slice(0, 96),
+      capability_key_fingerprint: String(
+        authorization.capability_key_fingerprint || ''
+      ).slice(0, 64),
       request_sha256: String(authorization.request_sha256 || '').slice(0, 128),
       plan_sha256: String(authorization.plan_sha256 || '').slice(0, 128),
       target: String(authorization.target || '').slice(0, 512),
@@ -2560,6 +2543,9 @@ function sanitizeTargetAuthorizationDecision(validation) {
       method: String(authorization.method || '').slice(0, 100),
       approved_at: String(authorization.approved_at || '').slice(0, 100),
       capability_key_id: String(authorization.capability_key_id || '').slice(0, 96),
+      capability_key_fingerprint: String(
+        authorization.capability_key_fingerprint || ''
+      ).slice(0, 64),
       request_sha256: String(authorization.request_sha256 || '').slice(0, 128),
       plan_sha256: String(authorization.plan_sha256 || '').slice(0, 128),
       target: String(authorization.target || '').slice(0, 512),
@@ -2866,12 +2852,17 @@ function authorizeTargetSessionSubmission(rawRequest, preparedSubmission) {
     authorization: rawRequest?.authorization,
   });
   if (!approval.allowed) {
+    const authorityUnavailable = approval.code === 'VOICE_APPROVAL_VERIFIER_UNAVAILABLE';
     throw new ExecutorSubmissionError(403, {
       success: false,
       code: approval.code,
       agentCode: approval.code,
-      error: 'Job-specific DTMF approval is required for target-session delivery.',
-      userMessage: 'Review the exact tmux target and message, then press pound to approve it.',
+      error: authorityUnavailable
+        ? 'Production phone approval authority is disabled.'
+        : 'Job-specific DTMF approval is required for target-session delivery.',
+      userMessage: authorityUnavailable
+        ? approval.userMessage
+        : 'Review the exact tmux target and message, then press pound to approve it.',
     });
   }
   return {
@@ -3046,13 +3037,20 @@ async function executeTargetSessionTask(task, context) {
 }
 
 async function executeExecutorTask(task, context) {
-  if (task.taskType === 'managed_ask') return executeManagedAskTask(task, context);
-  if (task.taskType === 'target_session_message') {
-    return executeTargetSessionTask(task, context);
-  }
-  const error = new Error(`Unsupported executor task type: ${task.taskType}`);
-  error.code = 'EXECUTOR_TASK_TYPE_UNSUPPORTED';
-  throw error;
+  return executeWithCurrentApprovalAuthority({
+    task,
+    verifier: approvalVerifier,
+    currentKeyId: APPROVAL_KEY_ID,
+    execute: () => {
+      if (task.taskType === 'managed_ask') return executeManagedAskTask(task, context);
+      if (task.taskType === 'target_session_message') {
+        return executeTargetSessionTask(task, context);
+      }
+      const error = new Error(`Unsupported executor task type: ${task.taskType}`);
+      error.code = 'EXECUTOR_TASK_TYPE_UNSUPPORTED';
+      throw error;
+    },
+  });
 }
 
 async function reconcileInterruptedExecutorTask(task) {
@@ -4251,8 +4249,11 @@ function controllerHealthSnapshot() {
     agentWorkerConfig.enabled && workerSessionProxyConfig.enabled &&
     workerSessionBoundaryStatus.ready
   );
+  const phoneAuthorityDisabled = !approvalVerifier &&
+    !PRIVILEGED_ACTION_PROXY_ENABLED && !privilegedActionProxy &&
+    !PRIVILEGED_ACTION_API_TOKEN;
   const ready = serverReady && executorReady && workerReady &&
-    voiceExecution.locked !== true && SCOPED_AUTH_CONFIGURATION_VALID && !shutdownRequested;
+    voiceExecution.locked !== true && ACTIVE_SCOPED_AUTH_CONFIGURATION_VALID && !shutdownRequested;
   return {
     ready,
     public: {
@@ -4267,13 +4268,20 @@ function controllerHealthSnapshot() {
       service: 'claude-api-server',
       providers: ENABLED_AGENT_PROVIDERS,
       voiceExecution,
+      phoneAuthority: {
+        mode: phoneAuthorityDisabled ? 'read_only' : 'legacy_authority_present',
+        status: phoneAuthorityDisabled
+          ? 'disabled_pending_independent_pbx_attester'
+          : 'unsafe_for_voice_activation',
+      },
       approvalCapabilities: { verifierConfigured: Boolean(approvalVerifier) },
       authentication: {
         agentConfigured: Boolean(AGENT_API_TOKEN),
         executorConfigured: Boolean(EXECUTOR_API_TOKEN),
         voiceControlConfigured: Boolean(VOICE_CONTROL_TOKEN),
         privilegedActionConfigured: Boolean(PRIVILEGED_ACTION_API_TOKEN),
-        allScopesConfiguredAndDistinct: SCOPED_AUTH_CONFIGURATION_VALID,
+        privilegedActionRequired: PRIVILEGED_ACTION_PROXY_ENABLED,
+        allActiveScopesConfiguredAndDistinct: ACTIVE_SCOPED_AUTH_CONFIGURATION_VALID,
       },
       privilegedActions: {
         enabled: PRIVILEGED_ACTION_PROXY_ENABLED,
@@ -4306,6 +4314,21 @@ function controllerHealthSnapshot() {
 app.get('/operator/health', (_req, res) => {
   const health = controllerHealthSnapshot();
   return res.status(health.ready ? 200 : 503).json(health.detailed);
+});
+
+/**
+ * GET /executor/health
+ * State-free executor-scope authentication and readiness proof used before
+ * voice activation. It deliberately exposes no task or operator diagnostics.
+ */
+app.get('/executor/health', (_req, res) => {
+  const health = controllerHealthSnapshot();
+  return res.status(health.ready ? 200 : 503).json({
+    ready: health.ready,
+    service: 'claude-api-server',
+    scope: 'executor',
+    status: health.ready ? 'ready' : 'not_ready',
+  });
 });
 
 /**
@@ -4343,6 +4366,7 @@ app.get('/', (req, res) => {
       'POST /operator/session-message/prepare': 'Resolve and fingerprint an exact tmux-attached provider session',
       'POST /operator/session-message': 'Deliver an approved message to that exact tmux-attached provider session',
       'GET /operator/health': 'Read authenticated controller diagnostics',
+      'GET /executor/health': 'Prove executor-scope authentication and readiness',
       'POST /cancel-session': 'Cancel active agent work for a call',
       'POST /voice-control/stop': 'Lock and terminate all phone-originated agent work',
       'GET /voice-control/status': 'Get the persistent phone execution lock state',
@@ -4448,16 +4472,16 @@ async function startServer() {
     console.log(`Executor API auth: ${EXECUTOR_API_TOKEN ? 'enabled' : 'unavailable'}`);
     console.log(`Voice control API auth: ${VOICE_CONTROL_TOKEN ? 'enabled' : 'unavailable'}`);
     console.log(`Privileged action proxy: ${PRIVILEGED_ACTION_PROXY_ENABLED ? 'enabled' : 'disabled'}`);
-    console.log(`Privileged action proxy auth: ${PRIVILEGED_ACTION_PROXY_ENABLED && PRIVILEGED_ACTION_API_TOKEN ? 'enabled' : 'unavailable'}`);
-    console.log(`Approval capability verifier: ${approvalVerifier ? 'configured' : 'unavailable'}`);
+    console.log(`Privileged action proxy auth: ${PRIVILEGED_ACTION_PROXY_ENABLED ? (PRIVILEGED_ACTION_API_TOKEN ? 'enabled' : 'unavailable') : 'not required (proxy disabled)'}`);
+    console.log(`Approval capability verifier: ${approvalVerifier ? 'configured' : 'disabled'}`);
     console.log(`Hardened agent worker: ${agentWorkerConfig.enabled ? 'configured' : 'unavailable'}`);
     console.log(`Worker session broker: ${workerSessionBoundaryStatus.ready ? 'ready' : 'not ready'}`);
     console.log(`Enabled providers: ${ENABLED_AGENT_PROVIDERS.join(', ')}`);
     console.log(`Executor task store: ${EXECUTOR_TASK_DB_PATH}`);
-    if (SCOPED_AUTH_CONFIGURATION_VALID && workerSessionBoundaryStatus.ready) {
+    if (ACTIVE_SCOPED_AUTH_CONFIGURATION_VALID && workerSessionBoundaryStatus.ready) {
       console.log('\nReady to receive Claude and Codex queries from voice interface.\n');
     } else {
-      console.warn('\nController is listening but not ready: scoped auth and the hardened worker boundary are required.\n');
+      console.warn('\nController is listening but not ready: active scoped auth and the hardened worker boundary are required.\n');
     }
   } catch (error) {
     if (shutdownRequested) return;

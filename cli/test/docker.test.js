@@ -16,9 +16,19 @@ const VOICE_IDENTITY = Object.freeze({
   home: '/var/lib/teleagent-voice',
   shell: '/usr/sbin/nologin',
 });
+const MEDIA_IDENTITIES = Object.freeze({
+  drachtio: Object.freeze({
+    name: 'teleagent-drachtio', uid: 988, gid: 988,
+    home: '/nonexistent', shell: '/usr/sbin/nologin',
+  }),
+  freeswitch: Object.freeze({
+    name: 'teleagent-freeswitch', uid: 987, gid: 987,
+    home: '/nonexistent', shell: '/usr/sbin/nologin',
+  }),
+});
 
 function generateVoiceEnv(config) {
-  return generateEnvFile(config, VOICE_IDENTITY);
+  return generateEnvFile(config, VOICE_IDENTITY, MEDIA_IDENTITIES);
 }
 
 function voiceAppEnvironmentEntries(compose) {
@@ -466,6 +476,10 @@ test('docker compose generation', async (t) => {
       compose,
       /user: "\$\{VOICE_APP_UID:\?VOICE_APP_UID must resolve teleagent-voice}:\$\{VOICE_APP_GID:\?VOICE_APP_GID must resolve teleagent-voice}"/
     );
+    assert.match(compose,
+      /user: "\$\{DRACHTIO_UID:\?DRACHTIO_UID must resolve teleagent-drachtio}:\$\{DRACHTIO_GID:\?DRACHTIO_GID must resolve teleagent-drachtio}"/);
+    assert.match(compose,
+      /user: "\$\{FREESWITCH_UID:\?FREESWITCH_UID must resolve teleagent-freeswitch}:\$\{FREESWITCH_GID:\?FREESWITCH_GID must resolve teleagent-freeswitch}"/);
     assert.doesNotMatch(compose, /VOICE_APP_(?:UID|GID):-/);
     assert.doesNotMatch(compose, /(?:uid|gid)=1000|user: "1000:1000"/);
     assert.equal((compose.match(/^    read_only: true$/gm) || []).length, 4);
@@ -501,9 +515,9 @@ test('docker compose generation', async (t) => {
     const voiceApp = composeServiceBlock(compose, 'voice-app');
     assert.match(drachtio, /^    mem_limit: 384m\n    memswap_limit: 384m$/m);
     assert.match(drachtio,
-      /^      - \/config:rw,noexec,nosuid,nodev,mode=0700,size=1048576$/m);
+      /^      - \/config:rw,noexec,nosuid,nodev,uid=\$\{DRACHTIO_UID:\?[^}]+},gid=\$\{DRACHTIO_GID:\?[^}]+},mode=0700,size=1048576$/m);
     assert.match(drachtio,
-      /^      - \/tmp:rw,noexec,nosuid,nodev,mode=0700,size=16777216$/m);
+      /^      - \/tmp:rw,noexec,nosuid,nodev,uid=\$\{DRACHTIO_UID:\?[^}]+},gid=\$\{DRACHTIO_GID:\?[^}]+},mode=0700,size=16777216$/m);
     assert.match(freeswitch, /^    mem_limit: 1g\n    memswap_limit: 1g$/m);
     assert.match(freeswitch, /^    pids_limit: 512$/m);
     for (const mountpoint of ['db', 'log', 'recordings', 'run', 'sounds']) {
@@ -544,12 +558,16 @@ test('docker compose generation', async (t) => {
     assert.equal(env.SIP_TRUNK_TRANSPORT, undefined);
     assert.equal(env.VOICE_APP_UID, '989');
     assert.equal(env.VOICE_APP_GID, '989');
+    assert.equal(env.DRACHTIO_UID, '988');
+    assert.equal(env.DRACHTIO_GID, '988');
+    assert.equal(env.FREESWITCH_UID, '987');
+    assert.equal(env.FREESWITCH_GID, '987');
     assert.equal(env.DEVICE_CONFIG_DIR, '/etc/teleagent-voice/config');
     assert.equal(env.VOICE_STATE_DIR, '/var/lib/teleagent-voice');
     assert.equal(env.VOICE_APPROVAL_SIGNING_KEY_HOST_FILE, undefined);
     assert.equal(env.SIP_TRUNK_INGRESS_PASSWORD_HOST_FILE, undefined);
     assert.equal(env.SIP_TRUNK_CALLBACK_PASSWORD_HOST_FILE, undefined);
-    assert.equal(env.VOICE_APPROVAL_CAPABILITY_ENABLED, 'false');
+    assert.equal(env.VOICE_APPROVAL_CAPABILITY_ENABLED, undefined);
     assert.equal(env.AUDIO_DIR, undefined);
     assert.equal(generatedAgain, envFile, 'regeneration must not rotate persisted config secrets');
   });

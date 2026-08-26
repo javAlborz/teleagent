@@ -8,11 +8,14 @@ const { spawnSync } = require('node:child_process');
 const test = require('node:test');
 const {
   REVIEWED_ASSETS,
+  formatInstalledIdentities,
   inspectPath,
   inspectSourceAsset,
+  resolvePinnedSourceBundle,
   resolveSourceBundle,
   sourceCheck,
   validateIdentityRecords,
+  validateResolvedIdentityRecords,
 } = require('../../deploy/voice-stack/verify-voice-stack-identity');
 
 const ROOT = path.resolve(__dirname, '..', '..');
@@ -96,7 +99,7 @@ function voiceInstallerFixture(t) {
   fs.writeFileSync(verifier, [
     '#!/bin/bash',
     'set -euo pipefail',
-    '[ "$*" = --installed-check ]',
+    'case "$*" in --installed-check\\ --source-root\\ /*/deploy/voice-stack) ;; *) exit 77 ;; esac',
     'touch "$TELEAGENT_VOICE_INSTALL_TEST_ROOT/verifier-observed"',
     'printf \'VOICE_STACK_IDENTITY_OK\\n\'',
     '',
@@ -166,6 +169,12 @@ function voiceInstallerFixture(t) {
 function identityFixture({
   voiceUser = 'teleagent-voice:x:991:991:Teleagent:/var/lib/teleagent-voice:/usr/sbin/nologin',
   voiceGroup = 'teleagent-voice:x:991:',
+  drachtioUser = 'teleagent-drachtio:x:993:993:Drachtio:/nonexistent:/usr/sbin/nologin',
+  drachtioGroup = 'teleagent-drachtio:x:993:',
+  freeswitchUser = 'teleagent-freeswitch:x:994:994:FreeSWITCH:/nonexistent:/usr/sbin/nologin',
+  freeswitchGroup = 'teleagent-freeswitch:x:994:',
+  asteriskUser = 'teleagent-asterisk:x:995:995:Asterisk:/nonexistent:/usr/sbin/nologin',
+  asteriskGroup = 'teleagent-asterisk:x:995:',
   extraPasswd = [],
   extraGroups = [],
 } = {}) {
@@ -173,6 +182,9 @@ function identityFixture({
     passwd: [
       'root:x:0:0:root:/root:/bin/bash',
       voiceUser,
+      drachtioUser,
+      freeswitchUser,
+      asteriskUser,
       'teleagent-control:x:992:992:Control:/var/lib/teleagent-control:/usr/sbin/nologin',
       ...extraPasswd,
       '',
@@ -180,6 +192,9 @@ function identityFixture({
     group: [
       'root:x:0:',
       voiceGroup,
+      drachtioGroup,
+      freeswitchGroup,
+      asteriskGroup,
       'teleagent-control:x:992:',
       ...extraGroups,
       '',
@@ -193,6 +208,7 @@ test('voice deployment source is dormant and contains only the reviewed identity
     sourceGid: process.getgid(),
   }), true);
   const unit = fs.readFileSync(path.join(DEPLOY, 'teleagent-voice-stack.service'), 'utf8');
+  const compose = fs.readFileSync(path.join(ROOT, 'docker-compose.yml'), 'utf8');
   assert.equal(unit.split('\n').filter((line) => line === RELEASE_START_GATE).length, 1);
   assert.equal((unit.match(/verify-teleagent-release-closure/gu) ?? []).length, 1);
   assert.equal(unit.split('\n').filter((line) => /^ExecStart(?:Pre)?=/u.test(line))[0],
@@ -204,6 +220,7 @@ test('voice deployment source is dormant and contains only the reviewed identity
     /^ExecStopPost=\/usr\/local\/libexec\/teleagent-voice-stack-install --emergency-cleanup$/m);
   assert.doesNotMatch(unit, /^\[Install\]$/m);
   assert.doesNotMatch(unit, /^Environment=.*(?:TOKEN|PASSWORD|SECRET|API_KEY|PRIVATE_KEY)=/mi);
+  assert.doesNotMatch(compose, /^\s+group_add\s*:/m);
 });
 
 test('voice source assets accept only installed or immutable read-only modes', (t) => {
@@ -309,6 +326,14 @@ test('voice source check resolves current once to one stable immutable release',
     releaseRoot: releaseRoots[0],
   });
   assert.equal(sourceCheck(resolved.sourceRoot, identity), true);
+  assert.deepEqual(
+    resolvePinnedSourceBundle(voiceRoots[0], { releaseParent, ...identity }),
+    resolved
+  );
+  assert.throws(
+    () => resolvePinnedSourceBundle(sourceRoot, { releaseParent, ...identity }),
+    /pinned voice source root is not canonical/
+  );
 
   fs.unlinkSync(current);
   fs.symlinkSync(releaseRoots[0], current);
@@ -337,9 +362,53 @@ test('voice source check resolves current once to one stable immutable release',
   }), /changed or resolved outside/);
 });
 
-test('voice identity accepts one private nologin account with no ID reuse or supplementary group', () => {
+test('voice identity accepts four distinct private nologin peers with no ID reuse', () => {
   const fixture = identityFixture();
-  assert.deepEqual(validateIdentityRecords(fixture.passwd, fixture.group), { uid: 991, gid: 991 });
+  const expected = {
+    voice: { name: 'teleagent-voice', uid: 991, gid: 991 },
+    drachtio: { name: 'teleagent-drachtio', uid: 993, gid: 993 },
+    freeswitch: { name: 'teleagent-freeswitch', uid: 994, gid: 994 },
+    asterisk: { name: 'teleagent-asterisk', uid: 995, gid: 995 },
+  };
+  assert.deepEqual(validateIdentityRecords(fixture.passwd, fixture.group), expected);
+  const passwdByName = new Map(fixture.passwd.trim().split('\n').map((line) => [line.split(':')[0], line]));
+  const groupByName = new Map(fixture.group.trim().split('\n').map((line) => [line.split(':')[0], line]));
+  const resolved = validateResolvedIdentityRecords(fixture.passwd, fixture.group, {
+    runCommand(filename, args) {
+      const name = args.at(-1);
+      if (filename === '/usr/bin/getent') {
+        const record = args[0] === 'passwd' ? passwdByName.get(name) : groupByName.get(name);
+        return { status: record ? 0 : 2, stdout: record ? `${record}\n` : '' };
+      }
+      return { status: 0, stdout: `${expected[Object.keys(expected).find(
+        (key) => expected[key].name === name
+      )].gid}\n` };
+    },
+  });
+  assert.deepEqual(resolved, expected);
+  assert.equal(formatInstalledIdentities(resolved), [
+    'voice\tteleagent-voice\t991\t991',
+    'drachtio\tteleagent-drachtio\t993\t993',
+    'freeswitch\tteleagent-freeswitch\t994\t994',
+    'asterisk\tteleagent-asterisk\t995\t995',
+    '',
+  ].join('\n'));
+
+  assert.throws(() => validateResolvedIdentityRecords(fixture.passwd, fixture.group, {
+    runCommand(filename, args) {
+      const name = args.at(-1);
+      if (filename === '/usr/bin/id' && name === 'teleagent-drachtio') {
+        return { status: 0, stdout: '27 993\n' };
+      }
+      if (filename === '/usr/bin/getent') {
+        const record = args[0] === 'passwd' ? passwdByName.get(name) : groupByName.get(name);
+        return { status: 0, stdout: `${record}\n` };
+      }
+      return { status: 0, stdout: `${expected[Object.keys(expected).find(
+        (key) => expected[key].name === name
+      )].gid}\n` };
+    },
+  }), /differs from the exact local database contract/);
 });
 
 test('voice identity rejects duplicate, reused, login-capable, and supplementary identities', () => {
@@ -362,6 +431,10 @@ test('voice identity rejects duplicate, reused, login-capable, and supplementary
       voiceUser: 'teleagent-voice:x:991:991:Teleagent:/home/teleagent-voice:/usr/sbin/nologin',
     }),
     identityFixture({ voiceGroup: 'teleagent-voice:x:991:teleagent-voice' }),
+    identityFixture({ asteriskUser: '' }),
+    identityFixture({
+      drachtioUser: 'teleagent-drachtio:x:991:993:Drachtio:/nonexistent:/usr/sbin/nologin',
+    }),
   ];
   for (const fixture of invalid) {
     assert.throws(() => validateIdentityRecords(fixture.passwd, fixture.group),
@@ -417,6 +490,10 @@ test('voice installer can only install or check a disabled stack and never provi
   ]) assert.equal(scrubbed.has(variable), true, variable);
   assert.equal(scrubbed.has('TELEAGENT_VOICE_INSTALL_TEST_ONLY'), false);
   assert.equal(scrubbed.has('FAKE_SYSTEMCTL_LOG'), false);
+  assert.doesNotMatch(installer, /^source_root=\/opt\/teleagent\/current/m);
+  assert.match(installer, /self=\$\(\/usr\/bin\/readlink -f -- "\$0"\)/);
+  assert.match(installer, /source operations require an immutable release entrypoint/);
+  assert.match(installer, /source_root.*\$app_root\/deploy\/voice-stack/);
   assert.match(installer, /--source-check\|--install-disabled\|--check\|--emergency-cleanup/);
   assert.match(installer, /systemd-sysusers/);
   assert.match(installer, /systemd-tmpfiles/);
@@ -571,13 +648,17 @@ fi
 input=$(/bin/cat)
 /usr/bin/printf '%s\\n---BATCH---\\n' "$input" >>"$FAKE_NFT_CAPTURE"
 if /usr/bin/grep -q '^add table inet teleagent_sip_local_peer_fence$' <<<"$input"; then
-  /usr/bin/printf '%s\\n' \\
-    'table inet teleagent_sip_local_peer_fence {' \\
-    'chain output {' \\
-    'type filter hook output priority -200; policy accept;' \\
-    'ip daddr 127.0.0.1 udp dport 5060 meta skuid != 0 reject with icmp 3 comment "teleagent-voice-only"' \\
-    'ip daddr 127.0.0.1 udp dport 5070 meta skuid != 0 reject with icmp 3 comment "teleagent-pbx-only"' \\
-    '}' '}' >"$FAKE_NFT_STATE"
+  {
+    /usr/bin/printf '%s\\n' \\
+      'table inet teleagent_sip_local_peer_fence {' \\
+      'chain output {' \\
+      'type filter hook output priority -200; policy accept;'
+    /usr/bin/grep '^add rule inet teleagent_sip_local_peer_fence output ' <<<"$input" | \\
+      /usr/bin/sed \\
+        -e 's/^add rule inet teleagent_sip_local_peer_fence output //' \\
+        -e 's/reject with icmp type port-unreachable/reject with icmp 3/'
+    /usr/bin/printf '%s\\n' '}' '}'
+  } >"$FAKE_NFT_STATE"
 else
   /bin/rm -f "$FAKE_NFT_STATE"
 fi
@@ -589,10 +670,22 @@ fi
     TELEAGENT_SIP_FENCE_TEST_ONLY: '1',
     TELEAGENT_SIP_FENCE_TEST_NFT: fakeNft,
     TELEAGENT_SIP_FENCE_TEST_LOCK: lock,
+    TELEAGENT_SIP_FENCE_TEST_VOICE_UID: '2101',
+    TELEAGENT_SIP_FENCE_TEST_VOICE_GID: '3101',
+    TELEAGENT_SIP_FENCE_TEST_DRACHTIO_UID: '2102',
+    TELEAGENT_SIP_FENCE_TEST_DRACHTIO_GID: '3102',
+    TELEAGENT_SIP_FENCE_TEST_FREESWITCH_UID: '2103',
+    TELEAGENT_SIP_FENCE_TEST_FREESWITCH_GID: '3103',
+    TELEAGENT_SIP_FENCE_TEST_ASTERISK_UID: '2104',
+    TELEAGENT_SIP_FENCE_TEST_ASTERISK_GID: '3104',
     FAKE_NFT_STATE: state,
     FAKE_NFT_CAPTURE: capture,
   };
-  const run = (action) => spawnSync(helper, [action], { env: environment, encoding: 'utf8' });
+  const run = (action, additions = {}) => spawnSync(helper, [action], {
+    env: { ...environment, ...additions }, encoding: 'utf8',
+  });
+  assert.notEqual(run('check', { TELEAGENT_SIP_FENCE_TEST_ASTERISK_UID: '' }).status, 0);
+  assert.notEqual(run('check', { TELEAGENT_SIP_FENCE_TEST_DRACHTIO_UID: '2101' }).status, 0);
   assert.equal(run('reconcile').status, 0);
   assert.equal(run('check').status, 0);
   const firstBatch = fs.readFileSync(capture, 'utf8');

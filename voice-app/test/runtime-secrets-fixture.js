@@ -7,7 +7,6 @@ const TEST_RUNTIME_SECRETS = Object.freeze({
   freeswitchSecret: 'freeswitch_9876543210fedcba_HGFEDCBA',
   executorApiToken: 'executor_0123456789abcdef_ABCDEFGH',
   voiceControlToken: 'voice_control_0123456789abcdef_ABCDEFGH',
-  privilegedActionApiToken: 'privileged_0123456789abcdef_ABCDEFGH',
   openaiRealtimeApiKey: 'sk-project-0123456789abcdef-ABCDEFGH',
   openaiSafetyIdentifierSalt: 'safety_0123456789abcdef_ABCDEFGH',
   outboundApiToken: 'outbound-test-token-0123456789abcdef0123456789abcdef',

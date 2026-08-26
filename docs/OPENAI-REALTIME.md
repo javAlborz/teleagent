@@ -2,8 +2,8 @@
 
 Extensions `7` and `77` provide a Zeus-independent, full-duplex voice control
 plane on Hermes. OpenAI Realtime owns the live conversation; Claude Code and
-Codex remain the agents that inspect, edit, test, deploy, and administer the
-homelab.
+Codex remain the agents that inspect and analyze bounded state. Phone mutation,
+deployment, existing-session delivery, and administration are disabled.
 
 ## Extensions and profiles
 
@@ -14,23 +14,20 @@ homelab.
 
 The conductor can address all six managed profiles:
 
-| Profile | Provider | Capability | Bridge boundary |
+| Profile | Provider | Production capability | Bridge boundary |
 | --- | --- | --- | --- |
-| `claude-haiku` | Claude | Read | Phone Haiku tools |
-| `claude-sonnet` | Claude | Write | Phone Sonnet tools |
-| `claude-opus` | Claude | Admin | Phone Opus tools |
-| `codex-luna` | Codex | Read | `read-only` sandbox |
-| `codex-terra` | Codex | Write | `workspace-write` sandbox |
-| `codex-sol` | Codex | Admin | `danger-full-access` sandbox |
+| `claude-haiku` | Claude | Read-only | Phone Haiku read tools |
+| `claude-sonnet` | Claude | Read-only | Phone Sonnet read tools |
+| `claude-opus` | Claude | Read-only | Phone Opus read tools |
+| `codex-luna` | Codex | Read-only | `read-only` sandbox |
+| `codex-terra` | Codex | Read-only | `read-only` sandbox |
+| `codex-sol` | Codex | Read-only | `read-only` sandbox |
 
-When the caller names a profile, the request stays on that profile or is
-rejected if the profile is underscoped. With `auto`, the broker keeps the
-currently selected provider and chooses its read, write, or admin tier.
-Complex read-only reviews may use the provider's admin-tier model without
-receiving mutation authorization. At execution time, every read-only phone job
-is additionally downgraded: Codex uses `read-only` regardless of tier, and
-Claude loses `Write`, `Edit`, `Task`, and `Bash`. The normal tier boundary is
-restored only for a scoped mutation approved with `#`.
+When the caller names a profile, the request stays on that model profile. With
+`auto`, the broker selects model strength and reasoning effort, never authority.
+Codex uses `read-only` regardless of tier, and Claude receives only read tools.
+Mutating, target-session, and privileged phone jobs are blocked pending an
+independent PBX-attested approval authority.
 
 ## State ownership
 
@@ -70,8 +67,8 @@ provider session ID. Its tools are grouped as follows:
   the dedicated worker tmux socket, read redacted numbered chunks from the exact
   Codex or Claude provider log attached to a pane, inspect current provider
   task/output activity, and describe the bounded worker runtime. Docker,
-  cluster, and root-visible reads use typed
-  privileged adapters rather than this broker.
+  cluster, and root-visible reads would require typed privileged adapters, but
+  that phone path is production-disabled.
 - Utility actions: current weather and deterministic call termination.
 
 Filesystem inspection resolves real paths, denies credential locations and
@@ -86,40 +83,40 @@ Provider IDs and source filenames are not returned to Realtime. Numbered
 chunks carry an app-owned continuation cursor so “next” cannot accidentally
 repeat the prior chunk.
 
-## Jobs, mutation approval, and audit
+## Jobs, dormant approval substrate, and audit
 
-`send_agent_message` returns a durable job ID immediately. One job per profile
-may be active in a thread, and independent read-only profiles may run in
-parallel. Mutating jobs serialize through one workspace mutex.
+`send_agent_message` returns a durable job ID immediately. One read-only job per
+profile may be active in a thread, and independent profiles may run in parallel.
 
 Every request is structurally classified as `read_only`, `mutating`, `high`,
 or `privileged`. Informational requests such as “show release history” remain
 read-only; an explicit follow-up action such as “then deploy it” does not.
 
-Only one operation per thread can wait for approval. The caller hears its
-bounded scope once:
+Production voice has no approval issuer or privileged bridge and receives no
+signing key or privileged-action bearer. Read-only jobs remain available;
+mutating jobs, existing-session delivery, and privileged jobs fail at creation.
+The retained state/capability libraries model a dormant future flow in which
+only one operation per thread could wait for approval and the caller would hear
+its bounded scope once. These controls do not grant production authority:
 
-- `#` approves that exact focused job.
+- `#` would approve only that exact focused job after independent attestation.
 - `*` rejects or cancels the focused job.
 - Dialing `9` outside the conversation activates the persistent global
   voice-execution lock and kills all voice-originated Claude/Codex work.
 
-Approval records bind the DTMF decision to the job ID, normalized request
-SHA-256, risk level, timestamp, and scope. After `#`, the controller signs a
-short-lived Ed25519 capability that additionally binds a canonical execution
-plan hash, exact target, provider, profile, issuance/expiry timestamps, and a
-random nonce. Existing-conversation delivery includes the stable tmux pane ID
-and provider-log fingerprint in that hashed plan. The executor receives only the
-public verification key and must atomically consume each nonce from durable
-storage before accepting work; signature verification alone is not execution
-authorization. Neither the bearer token nor private key is logged or passed to
-an agent child. The authenticated bridge independently rejects any non-read-only
-`phone-*` request without a fresh matching capability.
-Direct speed-dial calls therefore cannot bypass the extension-7 approval flow
-for mutations. A spoken “cancel” may withdraw a scope that is still awaiting
-`#` because nothing has executed; queued or running work still requires `*`.
-Unconfirmed scopes expire after five minutes by default, and call teardown
-rejects any remaining scope.
+The future authority must not trust voice's DTMF or playout events. An isolated
+PBX attester must play the controller-canonical prompt, observe handset-side
+`#`, and submit durable evidence bound to the job, normalized request SHA-256,
+canonical plan hash, exact target/provider/profile, prompt hash, call leg,
+event ordering, and expiry. Only the controller-owned authority may validate
+and consume that evidence, sign a short-lived capability, and dispatch it
+internally. Existing-conversation delivery additionally binds the stable tmux
+pane ID and provider-log fingerprint. The executor/root broker still atomically
+consume replay state with durable insertion and independently revalidate the
+request/plan; signature verification alone is never execution authorization.
+Until that authority exists, direct and Realtime calls both fail closed for
+mutation. The legacy local approval-state behavior below is retained for unit
+validation only and is not accepted as production authorization.
 
 The approval marker is accepted only on the exact AudioFork WebSocket attached
 to that call with a fresh one-use 32-byte credential. A pathless or unsolicited
@@ -237,12 +234,6 @@ VOICE_INSPECTION_ROOTS=/var/lib/teleagent-control
 VOICE_APP_UID=<id -u teleagent-voice>
 VOICE_APP_GID=<id -g teleagent-voice>
 VOICE_STATE_DIR=/var/lib/teleagent-voice
-VOICE_APPROVAL_TTL_SECONDS=300
-VOICE_APPROVAL_MARKER_TIMEOUT_MS=30000
-VOICE_APPROVAL_CAPABILITY_ENABLED=false
-VOICE_APPROVAL_SIGNING_KEY_FILE=/run/secrets/teleagent-approval-private.pem
-VOICE_APPROVAL_SIGNING_KEY_ID=controller-2026-01
-VOICE_APPROVAL_CAPABILITY_TTL_SECONDS=120
 VOICE_AGENT_RECENT_OUTPUT_MS=5000
 ```
 
@@ -257,13 +248,12 @@ The caller number is hashed before use as `OpenAI-Safety-Identifier`. Keep the
 dedicated Realtime key, API bridge token, and explicit salt in the server-side
 `.env` with mode `0600`. They are not passed to agent subprocesses.
 
-The approval private key is different: keep it out of `.env` in a dedicated
-controller-owned file with mode `0400` or `0600`, mounted read-only into the
-voice app. Enabling signed capabilities with a missing, symlinked,
-broad-permission, oversized, or non-Ed25519 key stops voice-app startup before
-it opens listeners. With the feature disabled, read-only jobs remain available
-but mutation and tmux-delivery job creation fail closed. Enable it only after
-the executor trusts the matching public key and has durable replay consumption.
+Do not provision or mount an approval private key or privileged-action bearer
+into voice. The production controller also discards legacy verifier/proxy
+environment settings after reading `runtime.env` and cannot reach the root
+broker socket. The capability/key-loading modules remain unit-test substrate,
+not an activation path. Old verifier keys must be revoked so a formerly exposed
+voice key cannot be paired with the executor bearer to regain mutation.
 
 ### Existing tmux agent sessions
 
@@ -274,12 +264,11 @@ owner/alborz sessions such as `main:phone` are intentionally invisible.
 `get_latest_agent_session_message` reads the actual latest provider message,
 not a pane placeholder or the first log page.
 
-Sending to an existing tmux conversation uses `send_agent_session_message` and
-always requires `#`, even for a question. The first inspection resolves numeric
-or named aliases to a stable tmux pane ID, and later reads, approval, and writes
-stay on that pane even if window indexes move. The approval names the provider
-conversation and binds the stable pane, message hash, provider-log fingerprint,
-and configured approval window (five minutes by default). Delivery waits for a provider idle boundary and
+Sending to an existing tmux conversation is production-disabled because voice
+cannot obtain an independently attested capability. The retained unit-level
+flow resolves numeric or named aliases to a stable tmux pane ID and binds the
+pane, message hash, provider-log fingerprint, and configured approval window.
+Delivery would wait for a provider idle boundary and
 uses a private tmux buffer so the message is not present in process arguments.
 Canceling during that wait leaves the pre-existing task untouched.
 The job completes only after that same provider log verifies the exact user
@@ -307,10 +296,10 @@ files written with `--output` use mode `0600`. The health endpoint does not
 open a billable Realtime connection.
 
 After a voice-app restart, stale Realtime media sessions close, while durable
-managed and target-session work is recovered by idempotency key and reconciled
-without blind resubmission. Any target or privileged delivery that may have
-crossed its external side-effect boundary is reported as `outcome_unknown`
-unless the exact provider/postcondition can be verified. Pending approvals stay
-unarmed and require an exact prompt replay before `#` can authorize them.
-Completed jobs, transcript history, preferences, usage, audit, and provider
-session mappings remain durable.
+read-only managed work is recovered by idempotency key without blind
+resubmission. Legacy target work that already crossed its durable delivery
+attempt boundary is limited to GET-only reconciliation; pre-effect legacy
+target or mutation work fails against the current disabled authority. Pending
+legacy approvals never become production authorization. Completed jobs,
+transcript history, preferences, usage, audit, and provider session mappings
+remain durable.

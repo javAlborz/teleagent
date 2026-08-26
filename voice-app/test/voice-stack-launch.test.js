@@ -19,18 +19,23 @@ const {
   normalizeActivationState,
   normalizeVoiceImageManifest,
   parseDockerCgroupInfo,
+  parseProcessIdentityStatus,
   parseVoiceContainerBoundary,
   parseVoiceEnvironmentFile,
   parseExactProjectContainerIds,
   requestJson,
   renderTemplateContents,
+  resolveVoiceIdentities,
+  requireControllerReady,
   requireDockerCgroupBoundary,
+  requireExecutorReady,
   runOfflineRecovery,
   startFailureDisposition,
   verifyBoundedHostStateFilesystem,
   verifyVoiceAppRuntimeContract,
   verifyVoiceImage,
   verifyExactProjectContainerBoundary,
+  verifyRunningProjectProcessIdentities,
   FIXED_VOICE_APP_BOUNDARY_ENV,
   MAX_CONTROL_RESPONSE_BYTES,
 } = require('../../deploy/voice-stack/teleagent-voice-stack-launch');
@@ -51,6 +56,12 @@ const PROMOTED_IMAGE_MANIFEST = Object.freeze({
   runtimeReference: `registry.example/teleagent/voice-app@sha256:${'a'.repeat(64)}`,
   registryReference: `registry.example/teleagent/voice-app@sha256:${'a'.repeat(64)}`,
   registryManifestDigest: `sha256:${'a'.repeat(64)}`,
+});
+const RUNTIME_IDENTITIES = Object.freeze({
+  voice: Object.freeze({ name: 'teleagent-voice', uid: 989, gid: 989 }),
+  drachtio: Object.freeze({ name: 'teleagent-drachtio', uid: 988, gid: 988 }),
+  freeswitch: Object.freeze({ name: 'teleagent-freeswitch', uid: 987, gid: 987 }),
+  asterisk: Object.freeze({ name: 'teleagent-asterisk', uid: 986, gid: 986 }),
 });
 
 function directoryMetadata({ uid = 0, gid = 0, mode = 0o755, dev = 100, ino = 1,
@@ -119,7 +130,9 @@ test('root launcher closes fixed voice state/listener values against host overri
   assert.deepEqual(FIXED_VOICE_APP_BOUNDARY_ENV, {
     HTTP_HOST: '127.0.0.1',
     OUTBOUND_API_NON_LOOPBACK_ENABLED: 'false',
+    VOICE_APPROVAL_CAPABILITY_ENABLED: 'false',
     VOICE_APP_EXECUTION_LOCK_FILE: '/app/state/voice-execution.lock.json',
+    VOICE_PRIVILEGED_ACTIONS_ENABLED: 'false',
     VOICE_STATE_DB_PATH: '/app/state/voice-state.sqlite',
     WS_ALLOWED_PEERS: '',
     WS_CONNECT_HOST: '127.0.0.1',
@@ -142,17 +155,24 @@ test('root launcher closes fixed voice state/listener values against host overri
     ],
   }), /fixed state\/listener contract drifted/);
 
-  const identity = { uid: 989, gid: 990 };
   const base = [
     'VOICE_APP_UID=989',
-    'VOICE_APP_GID=990',
+    'VOICE_APP_GID=989',
+    'DRACHTIO_UID=988',
+    'DRACHTIO_GID=988',
+    'FREESWITCH_UID=987',
+    'FREESWITCH_GID=987',
     'DEVICE_CONFIG_DIR=/etc/teleagent-voice/config',
     'VOICE_STATE_DIR=/var/lib/teleagent-voice',
     '',
   ].join('\n');
-  assert.deepEqual(parseVoiceEnvironmentFile(base, identity, voiceAppRuntimeContract), {
+  assert.deepEqual(parseVoiceEnvironmentFile(base, RUNTIME_IDENTITIES, voiceAppRuntimeContract), {
     VOICE_APP_UID: '989',
-    VOICE_APP_GID: '990',
+    VOICE_APP_GID: '989',
+    DRACHTIO_UID: '988',
+    DRACHTIO_GID: '988',
+    FREESWITCH_UID: '987',
+    FREESWITCH_GID: '987',
     DEVICE_CONFIG_DIR: '/etc/teleagent-voice/config',
     VOICE_STATE_DIR: '/var/lib/teleagent-voice',
   });
@@ -169,13 +189,40 @@ test('root launcher closes fixed voice state/listener values against host overri
     for (const value of values) {
       assert.throws(
         () => parseVoiceEnvironmentFile(
-          `${base}${name}=${value}\n`, identity, voiceAppRuntimeContract
+          `${base}${name}=${value}\n`, RUNTIME_IDENTITIES, voiceAppRuntimeContract
         ),
         /unreviewed setting/,
         `${name}=${value}`,
       );
     }
   }
+});
+
+test('root launcher consumes only the fixed installed identity authority result', () => {
+  const exact = [
+    'voice\tteleagent-voice\t989\t989',
+    'drachtio\tteleagent-drachtio\t988\t988',
+    'freeswitch\tteleagent-freeswitch\t987\t987',
+    'asterisk\tteleagent-asterisk\t986\t986',
+    '',
+  ].join('\n');
+  const runCommand = (filename, args) => {
+    assert.equal(filename, '/usr/local/libexec/verify-voice-stack-identity');
+    assert.deepEqual(args, ['--installed-identities']);
+    return { status: 0, stdout: exact };
+  };
+  assert.deepEqual(resolveVoiceIdentities({ runCommand }), RUNTIME_IDENTITIES);
+  assert.throws(() => resolveVoiceIdentities({
+    runCommand: () => ({ status: 77, stdout: '' }),
+  }), /identity authority is unavailable/);
+  assert.throws(() => resolveVoiceIdentities({
+    runCommand: () => ({ status: 0, stdout: exact.replace(
+      'asterisk\tteleagent-asterisk\t986\t986', 'asterisk\tteleagent-asterisk\t988\t986'
+    ) }),
+  }), /numerically reused/);
+  assert.throws(() => resolveVoiceIdentities({
+    runCommand: () => ({ status: 0, stdout: exact.replace('drachtio\t', 'wrong\t') }),
+  }), /authority result is malformed/);
 });
 
 test('stack shutdown refuses persisted-but-unquiesced panic and forced exits', () => {
@@ -207,7 +254,7 @@ test('failed stack start never clears panic evidence after Compose activation wa
   );
   const startBody = source.slice(source.indexOf('async function start()'),
     source.indexOf('async function stop()'));
-  assert.ok(startBody.indexOf('activationAttempted = true') < startBody.indexOf("composeArgs('up'"));
+  assert.ok(startBody.indexOf('activationAttempted = true') < startBody.indexOf("composeArgs('create'"));
   assert.match(startBody, /startFailureDisposition\(activationAttempted\)/);
   assert.doesNotMatch(startBody,
     /catch \(error\)[\s\S]*rollbackStartedStack\(environment\)[\s\S]*persistActivationState\('inactive'/);
@@ -264,6 +311,86 @@ test('root control client bounds advertised and streamed response bodies', async
   );
 });
 
+test('voice activation authenticates exact authority-disabled controller health and erases its token', async () => {
+  const exactHealth = {
+    ready: true,
+    service: 'claude-api-server',
+    phoneAuthority: {
+      mode: 'read_only',
+      status: 'disabled_pending_independent_pbx_attester',
+    },
+    approvalCapabilities: { verifierConfigured: false },
+    authentication: {
+      privilegedActionConfigured: false,
+      privilegedActionRequired: false,
+      allActiveScopesConfiguredAndDistinct: true,
+    },
+    privilegedActions: {
+      enabled: false,
+      proxyConfigured: false,
+      authConfigured: false,
+    },
+  };
+  const token = Buffer.from('controller-readiness-token-32-bytes');
+  await requireControllerReady(token, {
+    request: async (options) => {
+      assert.equal(options.method, 'GET');
+      assert.equal(options.pathname, '/operator/health');
+      assert.equal(options.port, 3333);
+      assert.equal(options.token, 'controller-readiness-token-32-bytes');
+      return { status: 200, body: exactHealth };
+    },
+  });
+  assert.equal(token.every((byte) => byte === 0), true);
+
+  for (const mutate of [
+    (health) => { health.phoneAuthority.status = 'unsafe_for_voice_activation'; },
+    (health) => { health.approvalCapabilities.verifierConfigured = true; },
+    (health) => { health.authentication.privilegedActionConfigured = true; },
+    (health) => { health.authentication.privilegedActionRequired = true; },
+    (health) => { health.authentication.allActiveScopesConfiguredAndDistinct = false; },
+    (health) => { health.privilegedActions.enabled = true; },
+    (health) => { health.privilegedActions.proxyConfigured = true; },
+    (health) => { health.privilegedActions.authConfigured = true; },
+  ]) {
+    const rejectedToken = Buffer.from('controller-readiness-token-32-bytes');
+    const health = structuredClone(exactHealth);
+    mutate(health);
+    await assert.rejects(requireControllerReady(rejectedToken, {
+      request: async () => ({ status: 200, body: health }),
+    }), /canonical read-only phone authority mode/);
+    assert.equal(rejectedToken.every((byte) => byte === 0), true);
+  }
+});
+
+test('voice activation authenticates executor readiness and erases its token', async () => {
+  const token = Buffer.from('executor-readiness-token-32-bytes--');
+  await requireExecutorReady(token, {
+    request: async (options) => {
+      assert.equal(options.method, 'GET');
+      assert.equal(options.pathname, '/executor/health');
+      assert.equal(options.port, 3333);
+      assert.equal(options.token, 'executor-readiness-token-32-bytes--');
+      return {
+        status: 200,
+        body: {
+          ready: true,
+          service: 'claude-api-server',
+          scope: 'executor',
+          status: 'ready',
+        },
+      };
+    },
+  });
+  assert.equal(token.every((byte) => byte === 0), true);
+
+  const rejectedToken = Buffer.from('executor-readiness-token-32-bytes--');
+  await assert.rejects(requireExecutorReady(rejectedToken, {
+    request: async () => ({ status: 401, body: { code: 'EXECUTOR_UNAUTHORIZED' } }),
+  }), /executor scope is not ready/);
+  assert.equal(rejectedToken.every((byte) => byte === 0), true);
+});
+
 test('protected media templates require every exact placeholder once', () => {
   const template = path.join(__dirname, '..', '..', 'deploy', 'voice-stack', 'drachtio.conf.xml.template');
   const source = fs.readFileSync(template, 'utf8');
@@ -290,8 +417,9 @@ test('wrapper never puts credentials in Docker argv or inherited environment', (
   assert.match(source, /--env-file', '\/dev\/null'/);
   assert.match(source, /--no-build', '--pull', 'never'/);
   assert.match(source, /assertPanicQuiesced\(panic\)[\s\S]*assertVoiceExit\(inspection\)[\s\S]*composeArgs\('down'/);
-  assert.match(source, /requireControllerReady\(\)/);
-  assert.match(source, /body\?\.ready !== true/);
+  assert.match(source, /requireControllerReady\(controllerControlToken\)/);
+  assert.match(source, /requireExecutorReady\(executorReadinessToken\)/);
+  assert.match(source, /body\?\.phoneAuthority\?\.mode !== 'read_only'/);
   assert.match(source, /teleagent-provider-cli-check/);
   assert.match(source, /teleagent-provider-model \(enforce\)/);
   assert.match(source, /teleagent-sip-local-peer-fence/);
@@ -305,20 +433,35 @@ test('wrapper never puts credentials in Docker argv or inherited environment', (
     source.indexOf('async function stop()'));
   for (const [before, after] of [
     ['activationRequiresRecovery(readActivationState())', 'cleanupExactProject()'],
-    ['verifyVoiceImage(imageManifest)', 'readCredentialSet(identity, settings)'],
-    ["persistActivationState('starting'", "composeArgs('up'"],
-    ['beginActivation: true', "composeArgs('up'"],
-    ['requireActiveUnit(CONTAINER_SLICE)', "composeArgs('up'"],
-    ['requireDockerCgroupBoundary()', "composeArgs('up'"],
-    ['verifyExactProjectContainerBoundary(startingState.activationGeneration',
-      "persistActivationState('active'"],
-    ['resolveVoiceIdentity()', 'verifyBoundedHostStateFilesystem(identity)'],
-    ['verifyBoundedHostStateFilesystem(identity)', 'readEnvironmentFile(identity)'],
+    ['verifyVoiceImage(imageManifest)', 'readCredentialSet(identity)'],
+    ["persistActivationState('starting'", "composeArgs('create'"],
+    ['beginActivation: true', "composeArgs('create'"],
+    ['requireActiveUnit(CONTAINER_SLICE)', "composeArgs('create'"],
+    ['requireDockerCgroupBoundary()', "composeArgs('create'"],
+    ["composeArgs('create'", 'verifyExactProjectContainerBoundary('],
+    ['verifyExactProjectContainerBoundary(', "composeArgs('up'"],
+    ["composeArgs('up'", 'verifyRunningProjectProcessIdentities(identities'],
+    ['verifyRunningProjectProcessIdentities(identities', 'waitForHealth()'],
+    ['await waitForHealth()', "persistActivationState('active'"],
+    ['resolveVoiceIdentities()', 'verifyBoundedHostStateFilesystem(identity)'],
+    ['verifyBoundedHostStateFilesystem(identity)', 'readEnvironmentFile(identities)'],
+    ["openCredential(\n    path.join(CREDENTIAL_ROOT, 'voice-control-token')",
+      'requireControllerReady(controllerControlToken)'],
+    ['requireControllerReady(controllerControlToken)', "persistActivationState('starting'"],
+    ['requireControllerReady(controllerControlToken)', 'readCredentialSet(identity)'],
+    ['requireExecutorReady(executorReadinessToken)', "persistActivationState('starting'"],
+    ['requireExecutorReady(executorReadinessToken)', 'readCredentialSet(identity)'],
   ]) {
     assert.notEqual(startBody.indexOf(before), -1);
     assert.notEqual(startBody.indexOf(after), -1);
     assert.ok(startBody.indexOf(before) < startBody.indexOf(after));
   }
+  const healthIndex = startBody.indexOf('await waitForHealth()');
+  const postHealthIdentityIndex = startBody.indexOf(
+    'verifyRunningProjectProcessIdentities(identities', healthIndex
+  );
+  assert.ok(postHealthIdentityIndex > healthIndex);
+  assert.ok(startBody.indexOf("persistActivationState('active'") > postHealthIdentityIndex);
 });
 
 test('voice image release manifest is canonical, immutable, and resolved before use', () => {
@@ -491,22 +634,31 @@ test('every exact Compose service proves the durable generation and aggregate cg
 
   const generation = 9;
   const services = ['voice-runtime-preflight', 'drachtio', 'freeswitch', 'voice-app'];
+  const configuredUsers = {
+    'voice-runtime-preflight': '989:989', drachtio: '988:988',
+    freeswitch: '987:987', 'voice-app': '989:989',
+  };
   const evidence = services.map((service) =>
-    `${service}\t${generation}\tteleagent-voice-containers.slice`).join('\n') + '\n';
-  assert.deepEqual(parseVoiceContainerBoundary(evidence, generation), [...services].sort());
+    `${service}\t${generation}\tteleagent-voice-containers.slice\t${configuredUsers[service]}\tnull`
+  ).join('\n') + '\n';
+  assert.deepEqual(parseVoiceContainerBoundary(
+    evidence, generation, RUNTIME_IDENTITIES
+  ), [...services].sort());
   for (const invalid of [
     evidence.replace('\t9\t', '\t8\t'),
     evidence.replace('teleagent-voice-containers.slice', 'system.slice'),
     evidence.replace('voice-app\t9', 'drachtio\t9'),
+    evidence.replace('drachtio\t9\tteleagent-voice-containers.slice\t988:988\tnull',
+      'drachtio\t9\tteleagent-voice-containers.slice\t988:988\t["27"]'),
     evidence.split('\n').slice(0, 3).join('\n'),
   ]) {
-    assert.throws(() => parseVoiceContainerBoundary(invalid, generation),
+    assert.throws(() => parseVoiceContainerBoundary(invalid, generation, RUNTIME_IDENTITIES),
       /aggregate boundary|escaped/);
   }
 
   const identifiers = ['a', 'b', 'c', 'd'].map((value) => value.repeat(64));
   const calls = [];
-  assert.equal(verifyExactProjectContainerBoundary(generation, {
+  assert.equal(verifyExactProjectContainerBoundary(generation, RUNTIME_IDENTITIES, {
     environment: {},
     runCommand: (_filename, args) => {
       calls.push(args);
@@ -519,6 +671,38 @@ test('every exact Compose service proves the durable generation and aggregate cg
   assert.deepEqual(calls[1].slice(-4), identifiers);
   assert.match(calls[1][3], /activation-generation/);
   assert.match(calls[1][3], /CgroupParent/);
+  assert.match(calls[1][3], /Config\.User/);
+  assert.match(calls[1][3], /GroupAdd/);
+
+  const status = (uid, gid) => `Name:\tmedia\nUid:\t${uid}\t${uid}\t${uid}\t${uid}\n` +
+    `Gid:\t${gid}\t${gid}\t${gid}\t${gid}\nGroups:\t\n`;
+  assert.equal(parseProcessIdentityStatus(status(988, 988), RUNTIME_IDENTITIES.drachtio), true);
+  assert.throws(() => parseProcessIdentityStatus(
+    status(0, 0), RUNTIME_IDENTITIES.drachtio
+  ), /malformed|escaped/);
+  assert.throws(() => parseProcessIdentityStatus(
+    status(988, 988).replace('Groups:\t\n', 'Groups:\t27\n'),
+    RUNTIME_IDENTITIES.drachtio
+  ), /supplementary group/);
+  const runningEvidence = [
+    'voice-runtime-preflight\texited\t0\t0',
+    'drachtio\trunning\t111\t0',
+    'freeswitch\trunning\t222\t0',
+    'voice-app\trunning\t333\t0',
+  ].join('\n') + '\n';
+  assert.equal(verifyRunningProjectProcessIdentities(RUNTIME_IDENTITIES, {
+    environment: {},
+    runCommand: (_filename, args) => args[1] === 'ls'
+      ? { status: 0, stdout: `${identifiers.join('\n')}\n` }
+      : { status: 0, stdout: runningEvidence },
+    fsModule: {
+      readFileSync(filename) {
+        if (filename.includes('/111/')) return status(988, 988);
+        if (filename.includes('/222/')) return status(987, 987);
+        return status(989, 989);
+      },
+    },
+  }), 3);
 });
 
 test('interrupted activation remains recovery-gated until coordinated panic is proven', () => {
@@ -717,6 +901,11 @@ test('dormant systemd gate binds the private voice identity and every prerequisi
   ]) assert.match(containerSlice, expected);
   assert.match(sysusers,
     /^u teleagent-voice - "Teleagent private voice orchestrator" \/var\/lib\/teleagent-voice \/usr\/sbin\/nologin$/m);
+  assert.match(sysusers,
+    /^u teleagent-drachtio - "Teleagent private Drachtio peer" \/nonexistent \/usr\/sbin\/nologin$/m);
+  assert.match(sysusers,
+    /^u teleagent-freeswitch - "Teleagent private FreeSWITCH peer" \/nonexistent \/usr\/sbin\/nologin$/m);
+  assert.doesNotMatch(sysusers, /^u teleagent-asterisk /m);
   assert.match(tmpfiles,
     /^d \/etc\/teleagent-voice\/credentials 0750 root teleagent-voice -$/m);
   assert.match(tmpfiles,
@@ -724,6 +913,8 @@ test('dormant systemd gate binds the private voice identity and every prerequisi
   assert.match(tmpfiles, /^d \/var\/lib\/teleagent-voice-stack 0700 root root -$/m);
   assert.match(tmpfiles, /^d \/run\/teleagent-voice-stack 0700 root root -$/m);
   assert.equal((compose.match(/image: "\$\{TELEAGENT_VOICE_IMAGE:\?/g) || []).length, 2);
+  assert.match(compose, /user: "\$\{DRACHTIO_UID:\?[^}]+}:\$\{DRACHTIO_GID:\?[^}]+}"/);
+  assert.match(compose, /user: "\$\{FREESWITCH_UID:\?[^}]+}:\$\{FREESWITCH_GID:\?[^}]+}"/);
   assert.doesNotMatch(compose, /^\s+build:/m);
   const preflight = compose.slice(
     compose.indexOf('  voice-runtime-preflight:'),
@@ -804,55 +995,69 @@ test('dormant systemd gate binds the private voice identity and every prerequisi
   }
 });
 
-test('voice launcher projects the exact eleven reviewed credential classes', () => {
+test('voice launcher projects the exact nine non-authority credential classes', () => {
   const source = fs.readFileSync(
     path.join(__dirname, '..', '..', 'deploy', 'voice-stack', 'teleagent-voice-stack-launch.js'),
     'utf8',
   );
-  const matches = [...source.matchAll(/^  \['([^']+)', 'teleagent-[^']+', '(?:token|privateKey)', (?:true|false)\],$/gm)];
+  const matches = [...source.matchAll(/^  \['([^']+)', 'teleagent-[^']+', 'token', true\],$/gm)];
   assert.deepEqual(matches.map((entry) => entry[1]), [
     'drachtio-secret',
     'freeswitch-secret',
     'executor-api-token',
     'voice-control-token',
-    'privileged-action-api-token',
     'openai-realtime-api-key',
     'openai-safety-salt',
     'outbound-api-token',
-    'voice-approval-private.pem',
     'sip-ingress-password',
     'sip-callback-password',
   ]);
 });
 
-test('SIP fence bundle is app-local, atomic, and removal is Docker-quiesced', () => {
+test('SIP fence bundle is versioned, atomic, identity-bound, and Docker-quiesced', () => {
   const deploy = path.join(__dirname, '..', '..', 'deploy', 'voice-stack');
   const helper = fs.readFileSync(path.join(deploy, 'teleagent-sip-local-peer-fence'), 'utf8');
   const installer = fs.readFileSync(path.join(deploy, 'teleagent-sip-local-peer-fence-install'), 'utf8');
   const unit = fs.readFileSync(path.join(deploy, 'teleagent-sip-local-peer-fence.service'), 'utf8');
+  const bundle = fs.readFileSync(path.join(deploy, 'teleagent-sip-local-peer-fence.bundle'), 'utf8');
   assert.match(helper, /type filter hook output priority -200; policy accept;/);
-  assert.match(helper, /127\.0\.0\.1 udp dport 5060 meta skuid != 0/);
-  assert.match(helper, /127\.0\.0\.1 udp dport 5070 meta skuid != 0/);
+  assert.match(helper, /udp dport 5060 meta skuid != \$\{drachtio_uid}/);
+  assert.match(helper, /udp dport 5070 meta skuid != \$\{asterisk_uid} meta skuid != \$\{freeswitch_uid}/);
+  assert.match(helper, /udp dport 5080 meta skuid != \$\{drachtio_uid}/);
+  assert.match(helper, /tcp dport 9022 meta skuid != \$\{voice_uid}/);
+  assert.match(helper, /tcp dport 8021 meta skuid != \$\{voice_uid}/);
+  assert.match(helper, /tcp dport 3001 meta skuid != \$\{freeswitch_uid}/);
+  assert.match(helper, /udp dport 30000-30100 meta skuid != \$\{asterisk_uid}/);
+  assert.doesNotMatch(helper, /meta skuid != 0(?:\D|$)/);
+  assert.match(helper,
+    /identity_verifier=\/usr\/local\/libexec\/verify-voice-stack-identity/);
+  assert.match(helper, /"\$\{identity_verifier\}" --installed-identities/);
   assert.match(helper, /printf '%s\\n' "\$\{ruleset\}" \| "\$\{nft_bin\}" -f -/);
   assert.match(unit, /^Before=teleagent-voice-stack\.service$/m);
+  assert.match(unit,
+    /^ExecStartPre=\/usr\/local\/libexec\/verify-voice-stack-identity --installed-check$/m);
   assert.match(unit, /^CapabilityBoundingSet=CAP_NET_ADMIN$/m);
   assert.match(installer,
-    /\[\[ "\$\(unit_active_state docker\.service\)" == inactive \]\] \|\| fail 'stop Docker before removing its SIP fence'/);
-  assert.doesNotMatch(installer, /"\$\{target_helper\}" reconcile/);
+    /\[\[ "\$\(unit_active_state docker\.service\)" == inactive \]\] \|\|\s+fail 'stop Docker before removing its SIP fence'/);
+  assert.match(installer, /"\$\{target_helper\}" reconcile/);
+  assert.match(bundle, /^schema=1\nbundle_version=2\nhelper_sha256=[0-9a-f]{64}\nunit_sha256=[0-9a-f]{64}\nlegacy_bundle_version=1\nlegacy_helper_sha256=[0-9a-f]{64}\nlegacy_unit_sha256=[0-9a-f]{64}\n$/);
   const installStart = installer.indexOf('install_fence()');
   const installBody = installer.slice(
     installStart,
     installer.indexOf('\nvalidate_source\n', installStart),
   );
-  const enableIndex = installBody.indexOf('"${systemctl_bin}" enable --now "${unit}"');
+  const enableIndex = installBody.indexOf(
+    '"${systemctl_bin}" --quiet enable --now "${unit}"',
+  );
   assert.ok(enableIndex >= 0);
-  assert.ok(enableIndex < installBody.lastIndexOf('  check_live\n'));
+  assert.ok(enableIndex < installBody.indexOf('  assert_live_unit_truth\n', enableIndex));
   assert.match(installer, /trap transaction_exit EXIT/);
   assert.match(installer, /trap 'exit 143' TERM/);
   assert.match(installer, /transaction_marker=.*install\.transaction/);
-  assert.match(installer, /phase=\(prepared\|files\|activation\)/);
-  assert.match(installer, /systemctl_bin\}" disable --now "\$\{unit\}"/);
-  assert.match(installer, /prior inactive state restored/);
+  assert.match(installer, /phase=\(prepared\|files\|activation\|descriptor\)/);
+  assert.match(installer, /systemctl_bin\}" --quiet disable --now "\$\{unit\}"/);
+  assert.match(installer, /systemctl_bin\}" --quiet daemon-reload/);
+  assert.match(installer, /prior bundle restored/);
   assert.match(unit, /^RuntimeDirectory=teleagent-sip-local-peer-fence$/m);
   assert.match(unit, /^RuntimeDirectoryMode=0700$/m);
   assert.match(installer, /--source-check/);

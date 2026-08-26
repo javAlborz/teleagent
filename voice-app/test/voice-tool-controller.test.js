@@ -18,7 +18,9 @@ function createController(t) {
   const targeted = [];
   const canceled = [];
   const jobBroker = {
-    listProfileDetails: () => [{ profile: 'codex-luna', provider: 'codex', capability: 'read' }],
+    listProfileDetails: () => [{
+      profile: 'codex-luna', provider: 'codex', capability: 'read_only', authority: 'read_only',
+    }],
     listAgentSessions: () => ({ sessions: [] }),
     listAgentTasks: () => ({ jobs: [] }),
     getAgentTask: () => ({ found: false }),
@@ -68,10 +70,15 @@ test('targeted session messages and ambiguous session listings use their dedicat
   assert.match(runtime.managed.meaning, /Teleagent-managed/);
   assert.match(runtime.tmux.meaning, /agent_running means process presence/i);
   assert.match(runtime.tmux.meaning, /get_agent_activity/i);
+  assert.equal(runtime.managed.profiles[0].capability, 'read_only');
   assert.deepEqual(inspections.at(-1), {
     action: 'list_tmux_sessions',
     args: { session: 'main' },
   });
+
+  const described = await controller.handle('describe_runtime', {}, { callId: 'runtime-description' });
+  assert.equal(described.profiles[0].authority, 'read_only');
+  assert.equal(described.emergency_controls.pound, 'no production authority');
 });
 
 test('current activity uses the dedicated provider-log inspector', async (t) => {

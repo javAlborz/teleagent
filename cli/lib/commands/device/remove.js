@@ -1,7 +1,12 @@
 import inquirer from 'inquirer';
 import chalk from 'chalk';
 import ora from 'ora';
-import { loadConfig, saveConfig, configExists } from '../../config.js';
+import {
+  loadConfigWithVoiceRuntimeIdentityPreflight,
+  peekConfig,
+  saveConfig,
+  configExists,
+} from '../../config.js';
 import { writeDockerConfig } from '../../docker.js';
 
 /**
@@ -18,7 +23,11 @@ export async function deviceRemoveCommand(deviceName) {
     process.exit(1);
   }
 
-  const config = await loadConfig();
+  // Resolve the full voice/media identity bundle before config migration or
+  // any later save. API-only installations remain explicitly exempt.
+  const configSnapshot = await peekConfig();
+  const { config, voiceRuntimeIdentities } =
+    await loadConfigWithVoiceRuntimeIdentityPreflight({ snapshot: configSnapshot });
 
   // Find device
   const deviceIndex = config.devices.findIndex(
@@ -71,8 +80,10 @@ export async function deviceRemoveCommand(deviceName) {
   // Save config
   await saveConfig(config);
 
-  // Regenerate Docker config without this device
-  await writeDockerConfig(config);
+  // API-only installations have no voice deployment artifacts to regenerate.
+  if (voiceRuntimeIdentities) {
+    await writeDockerConfig(config, voiceRuntimeIdentities);
+  }
 
   spinner.succeed(chalk.green('Device removed'));
 

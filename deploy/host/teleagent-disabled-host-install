@@ -20,6 +20,11 @@ runtime_fingerprints_ready=0
 release_runtime_fingerprint=
 installed_runtime_a_fingerprint=
 installed_runtime_b_fingerprint=
+executing_script_fd=
+executing_script_descriptor=
+executing_entrypoint=
+executing_release_root=
+executing_entrypoint_fingerprint=
 
 release_link=/opt/teleagent/current
 release_parent=/opt/teleagent/releases
@@ -48,7 +53,6 @@ provider_checker=/usr/local/libexec/teleagent-provider-cli-check
 controller_installed=/usr/local/libexec/teleagent-control-plane-install
 sip_installer_installed=/usr/local/libexec/teleagent-realtime-sip-gateway-install
 voice_installer_installed=/usr/local/libexec/teleagent-voice-stack-install
-sip_fence_installed=/usr/local/libexec/teleagent-sip-local-peer-fence-install
 
 state_roots=(
   /var/lib/teleagent-worker-state
@@ -159,8 +163,40 @@ configure_environment() {
 
 configure_environment
 
-source_entrypoint=$(host_path "$release_link/deploy/host/$name")
-[ "$0" = "$source_entrypoint" ] || fail 'use the exact current-release entrypoint'
+capture_executing_release() {
+  local bash_script_fd release_id expected_parent path_fingerprint
+  # Bash keeps the script it is executing open on descriptor 255. Resolve that
+  # descriptor instead of resolving $0 again: current may already have changed
+  # after Bash opened release A but before this script began executing.
+  bash_script_fd="/proc/$$/fd/255"
+  [ -r "$bash_script_fd" ] && [ -f "$bash_script_fd" ] ||
+    fail 'the executing aggregate descriptor is unavailable or unsafe'
+  exec {executing_script_descriptor}<"$bash_script_fd" ||
+    fail 'the executing aggregate descriptor could not be retained'
+  executing_script_fd="/proc/$$/fd/$executing_script_descriptor"
+  executing_entrypoint=$(/usr/bin/readlink -f -- "$executing_script_fd") ||
+    fail 'the executing aggregate descriptor could not be resolved'
+  executing_release_root=${executing_entrypoint%"/$host_installer_source"}
+  [ "$executing_entrypoint" = "$executing_release_root/$host_installer_source" ] ||
+    fail 'the executing aggregate is outside a release root'
+  [ "$0" = "$executing_entrypoint" ] ||
+    fail 'use the exact canonical immutable-release entrypoint'
+  expected_parent=$(host_path "$release_parent")
+  [ "$(/usr/bin/dirname -- "$executing_release_root")" = "$expected_parent" ] ||
+    fail 'the executing aggregate release parent is unreviewed'
+  release_id=$(/usr/bin/basename -- "$executing_release_root")
+  [[ "$release_id" =~ ^sha256-[a-f0-9]{64}$ ]] ||
+    fail 'the executing aggregate release identity is invalid'
+  executing_entrypoint_fingerprint=$(/usr/bin/stat -Lc \
+    '%d:%i:%s:%u:%g:%a:%h:%y:%z' -- "$executing_script_fd") ||
+    fail 'the executing aggregate descriptor metadata is unavailable'
+  path_fingerprint=$(/usr/bin/stat -c '%d:%i:%s:%u:%g:%a:%h:%y:%z' -- \
+    "$executing_entrypoint") || fail 'the executing aggregate path metadata is unavailable'
+  [ "$executing_entrypoint_fingerprint" = "$path_fingerprint" ] ||
+    fail 'the executing aggregate descriptor and path identities differ'
+}
+
+capture_executing_release
 
 cleanup_capture() {
   if [ -n "$capture_root" ] && [ -d "$capture_root" ] && [ ! -L "$capture_root" ]; then
@@ -201,6 +237,13 @@ run_captured() {
     empty)
       [ "$size" -eq 0 ] || fail "$label returned unexpected output"
       ;;
+    optional-exact)
+      if [ "$size" -ne 0 ]; then
+        [ "$size" -eq $((${#expected} + 1)) ] &&
+          printf '%s\n' "$expected" | /usr/bin/cmp -s - "$output" ||
+          fail "$label returned an unexpected result"
+      fi
+      ;;
     *) fail 'an internal child-output contract is invalid' ;;
   esac
   /usr/bin/rm -f -- "$output"
@@ -216,6 +259,12 @@ run_empty() {
   local label=$1
   shift
   run_captured empty '' "$label" "$@"
+}
+
+run_optional_exact() {
+  local expected=$1 label=$2
+  shift 2
+  run_captured optional-exact "$expected" "$label" "$@"
 }
 
 assert_directory_safe() {
@@ -265,6 +314,28 @@ assert_installed_file() {
 gate_release_root=
 gate_release_id=
 gate_source_revision=
+
+assert_executing_release_binding() {
+  local expected_entrypoint descriptor_path descriptor_fingerprint path_fingerprint
+  expected_entrypoint="$gate_release_root/$host_installer_source"
+  [ "$executing_release_root" = "$gate_release_root" ] &&
+    [ "$executing_entrypoint" = "$expected_entrypoint" ] ||
+    fail 'the executing aggregate differs from the gated release'
+  [ -r "$executing_script_fd" ] && [ -f "$executing_script_fd" ] ||
+    fail 'the executing aggregate descriptor became unavailable or unsafe'
+  descriptor_path=$(/usr/bin/readlink -f -- "$executing_script_fd") ||
+    fail 'the executing aggregate descriptor could not be re-resolved'
+  [ "$descriptor_path" = "$expected_entrypoint" ] ||
+    fail 'the executing aggregate descriptor moved outside the gated release'
+  descriptor_fingerprint=$(/usr/bin/stat -Lc \
+    '%d:%i:%s:%u:%g:%a:%h:%y:%z' -- "$executing_script_fd") ||
+    fail 'the executing aggregate descriptor metadata became unavailable'
+  path_fingerprint=$(/usr/bin/stat -c '%d:%i:%s:%u:%g:%a:%h:%y:%z' -- \
+    "$expected_entrypoint") || fail 'the gated aggregate metadata became unavailable'
+  [ "$descriptor_fingerprint" = "$executing_entrypoint_fingerprint" ] &&
+    [ "$path_fingerprint" = "$executing_entrypoint_fingerprint" ] ||
+    fail 'the executing aggregate identity changed or differs from the gated release'
+}
 
 verify_gate_and_release() {
   local gate_directory gate manifest release_id manifest_digest source_revision
@@ -359,6 +430,7 @@ verify_gate_and_release() {
   gate_release_root=$release_root
   gate_release_id=$release_id
   gate_source_revision=$source_revision
+  assert_executing_release_binding
 }
 
 assert_release_sources() {
@@ -522,9 +594,11 @@ assert_sentinels_absent() {
 }
 
 assert_sip_fence() {
-  assert_installed_file "$sip_fence_installed"
+  # Run the gate-authenticated release checker directly. A stale fixed-path
+  # checker is not an authority and cannot bypass the current descriptor or
+  # transaction policy.
   run_exact 'PASS Teleagent SIP fence is installed and exact' 'installed SIP fence check' \
-    /bin/bash "$(host_path "$sip_fence_installed")" --check
+    /bin/bash "$gate_release_root/$sip_fence_source" --check
 }
 
 unit_fragment_path() {
@@ -588,11 +662,23 @@ assert_dormant_units() {
     --all --plain --no-legend 'teleagent-provider-launch-*.service'
 }
 
-preinstalled_checks() {
+preinstalled_checks_without_fence() {
   capture_installed_runtime_fingerprints
   assert_state_mounts
   assert_sentinels_absent
+}
+
+preinstalled_checks() {
+  preinstalled_checks_without_fence
   assert_sip_fence
+}
+
+bootstrap_guard() {
+  verify_gate_and_release
+  assert_release_sources
+  assert_runtime_fingerprints_unchanged
+  assert_state_mounts
+  assert_sentinels_absent
 }
 
 mutation_guard() {
@@ -612,7 +698,7 @@ install_worker() {
   assert_sentinels_absent
   assert_installed_file "$worker_installed"
   run_exact WORKER_SESSION_INSTALLED_DISABLED_OK 'worker installed check' \
-    /bin/bash "$(host_path "$worker_installed")" --check
+    /bin/bash "$gate_release_root/$worker_source" --check
   mutation_guard
 }
 
@@ -656,7 +742,7 @@ install_controller() {
   assert_sentinels_absent
   assert_installed_file "$controller_installed"
   run_exact TELEAGENT_CONTROL_PLANE_INSTALLED_DISABLED_OK 'controller installed check' \
-    /bin/bash "$(host_path "$controller_installed")" --check
+    /bin/bash "$gate_release_root/$controller_source" --check
   mutation_guard
 }
 
@@ -668,36 +754,47 @@ install_sip_gateway() {
   assert_sentinels_absent
   assert_installed_file "$sip_installer_installed"
   run_exact SIP_GATEWAY_INSTALLED_DISABLED_OK 'SIP gateway installed check' \
-    /bin/bash "$(host_path "$sip_installer_installed")" --check
+    /bin/bash "$gate_release_root/$sip_installer_source" --check
   mutation_guard
 }
 
 install_voice() {
-  mutation_guard
+  bootstrap_guard
   run_exact VOICE_STACK_INSTALLED_DISABLED 'voice disabled install' \
     /bin/bash "$gate_release_root/$voice_installer_source" --install-disabled
   verify_gate_and_release
   assert_sentinels_absent
   assert_installed_file "$voice_installer_installed"
   run_exact VOICE_STACK_INSTALLED_DISABLED_OK 'voice installed check' \
-    /bin/bash "$(host_path "$voice_installer_installed")" --check
+    /bin/bash "$gate_release_root/$voice_installer_source" --check
+  bootstrap_guard
+}
+
+install_sip_fence() {
+  bootstrap_guard
+  run_optional_exact \
+    'Teleagent SIP fence install: recovered an interrupted fence operation; prior bundle restored' \
+    'SIP fence install' /bin/bash "$gate_release_root/$sip_fence_source" --install
+  verify_gate_and_release
+  assert_sentinels_absent
+  assert_sip_fence
   mutation_guard
 }
 
 check_components() {
   assert_installed_file "$worker_installed"
   run_exact WORKER_SESSION_INSTALLED_DISABLED_OK 'worker installed check' \
-    /bin/bash "$(host_path "$worker_installed")" --check
+    /bin/bash "$gate_release_root/$worker_source" --check
   check_provider_cli
   assert_installed_file "$controller_installed"
   run_exact TELEAGENT_CONTROL_PLANE_INSTALLED_DISABLED_OK 'controller installed check' \
-    /bin/bash "$(host_path "$controller_installed")" --check
+    /bin/bash "$gate_release_root/$controller_source" --check
   assert_installed_file "$sip_installer_installed"
   run_exact SIP_GATEWAY_INSTALLED_DISABLED_OK 'SIP gateway installed check' \
-    /bin/bash "$(host_path "$sip_installer_installed")" --check
+    /bin/bash "$gate_release_root/$sip_installer_source" --check
   assert_installed_file "$voice_installer_installed"
   run_exact VOICE_STACK_INSTALLED_DISABLED_OK 'voice installed check' \
-    /bin/bash "$(host_path "$voice_installer_installed")" --check
+    /bin/bash "$gate_release_root/$voice_installer_source" --check
 }
 
 final_checks() {
@@ -723,12 +820,16 @@ main() {
       printf 'TELEAGENT_HOST_SOURCE_OK\n'
       ;;
     --install-disabled)
-      preinstalled_checks
+      # Voice identities and their fixed verifier must exist before the current
+      # SIP fence can attest and start. The voice service itself remains
+      # disabled; only the security fence is activated before other mutations.
+      preinstalled_checks_without_fence
+      install_voice
+      install_sip_fence
       install_worker
       install_provider_cli
       install_controller
       install_sip_gateway
-      install_voice
       final_checks
       printf 'TELEAGENT_HOST_INSTALLED_DISABLED\n'
       ;;

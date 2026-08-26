@@ -12,8 +12,8 @@ const PROFILE_CHOICES = {
   ],
   codex: [
     { name: 'Codex GPT-5.6 Luna - low reasoning, read-only', value: 'phone-codex-luna' },
-    { name: 'Codex GPT-5.6 Terra - medium reasoning, workspace write', value: 'phone-codex-terra' },
-    { name: 'Codex GPT-5.6 Sol - high reasoning, full access', value: 'phone-codex-sol' }
+    { name: 'Codex GPT-5.6 Terra - medium reasoning, read-only', value: 'phone-codex-terra' },
+    { name: 'Codex GPT-5.6 Sol - high reasoning, read-only', value: 'phone-codex-sol' }
   ]
 };
 
@@ -48,13 +48,13 @@ export function createDefaultAgentConfig({
       terra: {
         model: 'gpt-5.6-terra',
         reasoningEffort: 'medium',
-        sandbox: 'workspace-write',
+        sandbox: 'read-only',
         workingDirectory: homeDirectory
       },
       sol: {
         model: 'gpt-5.6-sol',
         reasoningEffort: 'high',
-        sandbox: 'danger-full-access',
+        sandbox: 'read-only',
         workingDirectory: homeDirectory
       }
     }
@@ -117,6 +117,12 @@ export function buildAgentServerEnvironment(config, baseEnvironment = process.en
     ...runtimeSecrets,
     AGENT_API_BIND_HOST: bindHost,
     AGENT_API_NON_LOOPBACK_ENABLED: String(nonLoopbackEnabled),
+    PRIVILEGED_ACTION_API_TOKEN: '',
+    PRIVILEGED_ACTION_PROXY_ENABLED: 'false',
+    PRIVILEGED_ACTION_PROXY_SOCKET_PATH: '',
+    PRIVILEGED_ACTION_PROXY_TIMEOUT_MS: '',
+    VOICE_APPROVAL_KEY_ID: '',
+    VOICE_APPROVAL_PUBLIC_KEY_FILE: '',
     AGENT_DURABLE_EXECUTOR_ENABLED: 'true',
     AGENT_PROVIDERS: agents.providers.join(','),
     CLAUDE_COMMAND: agents.claude.command,

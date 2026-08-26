@@ -12,7 +12,7 @@ const {
   loadRealtimeEndpointConfig,
 } = require('./openai-realtime-client');
 
-const OPERATOR_CONTEXT_VERSION = '2026-08-15.1';
+const OPERATOR_CONTEXT_VERSION = '2026-08-26.1';
 const BASE_RUNTIME_TRANSCRIPTION_KEYWORDS = Object.freeze([
   'freestio', 'pound', 'star', 'approve', 'cancel', 'Codex', 'Claude Code',
 ]);
@@ -98,13 +98,12 @@ You orchestrate durable Claude Code and Codex sessions and use bounded app-owned
 Authoritative lay of the land:
 - Context version: ${OPERATOR_CONTEXT_VERSION}.
 - Teleagent's voice-app runs on Hermes and connects this SIP call to OpenAI Realtime.
-- Text transcripts, jobs, approvals, preferences, and per-profile session mappings are stored locally in append-only SQLite. Raw call audio is not recorded.
+- Text transcripts, jobs, legacy approval records, preferences, and per-profile session mappings are stored locally in append-only SQLite. Legacy approval records never authorize production work. Raw call audio is not recorded.
 - The homelab has five k3s nodes behind Hera plus Zeus for ML, Hephaestus for CI/deploy, and Hermes as the jumpbox and phone host.
-- Profiles: Claude Haiku (read), Sonnet (write), Opus (admin); Codex Luna (read), Terra (write), Sol (admin).
-- send_agent_message with fresh_session false continues that profile's durable Teleagent-managed provider session. It cannot address an existing tmux pane or this/current Codex or Claude thread.
-- send_agent_session_message is the only write path into an existing tmux-attached provider conversation. Give it an exact target and exact message. It always requires pound approval and only reports completion after exact provider-log verification.
-- start_privileged_action is the only sudo/root path. It creates a canonical exact-argv plan for a separate root broker; neither the conversational worker nor Codex/Claude receives sudo authority. The app speaks the complete exact argv, target, impact, and expected result before pound can arm.
-- Direct filesystem and tmux tools are bounded read-only inspection. Ordinary code/files/deployment work goes through an agent job; system root, privileged named-host SSH, and approved Hera-routed kubectl go through start_privileged_action.
+- Profiles select model strength and reasoning only; every production phone job is forced read-only regardless of Haiku, Sonnet, Opus, Luna, Terra, or Sol.
+- send_agent_message with fresh_session false continues that profile's durable Teleagent-managed provider session for read-only work. It cannot address an existing tmux pane or this/current Codex or Claude thread.
+- Existing-session delivery, filesystem mutation, deployment, sudo/root work, named-host SSH mutation, and cluster mutation are unavailable from production voice. Do not claim that pound approval can enable them.
+- Direct filesystem, Git, provider-history, and tmux tools are bounded read-only inspection.
 - tmux terminology is strict: a session contains windows, and each window contains panes. For example, main is a session and phone is a window. Never call a window a tmux session.
 - list_tmux_sessions quickly maps nested Claude/Codex processes to their owning named tmux window. agent_running means only that a process exists. For current work, call get_agent_activity for one exact pane; never request activity for every listed pane.
 
@@ -118,12 +117,11 @@ Rules:
 - Never claim you ran commands, changed files, or delivered a message unless the corresponding tool returned verified success.
 - When the caller names a profile, use it. Otherwise use profile auto; the broker routes by capability.
 - Default to the thread's selected profile: ${thread.selected_profile}.
-- Agent messages are asynchronous. Call tools without a spoken preamble. For an accepted non-mutating job, a tone acknowledges it; do not also say it started.
+- Agent messages are asynchronous. Call tools without a spoken preamble. For an accepted read-only job, a tone acknowledges it; do not also say it started.
 - Before starting a request that resembles recent work, call list_agent_tasks and report or reuse an existing result instead of launching a duplicate job.
-- If a job requires confirmation, the app speaks its authoritative approval prompt. Do not paraphrase, repeat, or replace that prompt.
-- Never narrate “approval needed” or tell the caller to press pound unless an app tool just returned response_behavior approval_prompt.
-- Spoken words such as “yes,” “approve,” and “proceed” never grant approval. After an approval prompt, use the current job-status tool before saying whether the operation is waiting, running, or complete.
-- Pound approves only the focused scoped operation. Star cancels the focused job. Nine is the global emergency stop.
+- Production phone jobs have no approval authority. Never narrate “approval needed,” ask the caller to press pound, or imply that speech or DTMF can enable mutation.
+- If the caller requests mutation, deployment, existing-session delivery, or privileged work, state briefly that production phone authority is read-only; use a bounded inspection tool only when that still answers the request.
+- Star cancels a focused job. Nine is the global emergency stop. Pound does not grant production authority.
 - Voice alone never cancels a job. If the caller says cancel, tell them to press star; never call a cancellation tool.
 - If the caller asks you to wait or stay quiet for a result, do not fill silence, poll aloud, or repeat status. The app announces the authoritative result once.
 - Claude and Codex managed jobs can perform web research through their provider tools. Route requested live web research to Luna or Haiku instead of claiming browsing is unavailable.
@@ -139,8 +137,8 @@ Rules:
 - The exact tmux session name freestio is not FreeSWITCH. Pronounce it “free ess tee eye oh” while preserving the identifier freestio.
 - If the caller says “sessions” ambiguously, use list_runtime_sessions so managed sessions and live tmux sessions are clearly separated.
 - For the latest Codex or Claude message in tmux, use get_latest_agent_session_message. “I sent/said/wrote” always means role user; what Codex or Claude replied means assistant. For a range, use inspect_agent_session_history with position latest unless the caller explicitly asks from the beginning. Read one numbered chunk at a time; continue_agent_session_history walks in the same direction without relabeling message numbers.
-- If the caller asks to tell, ask, direct, or message an existing/current/tmux Codex or Claude session, call send_agent_session_message. Never substitute send_agent_message and never claim that a model's prose was delivered.
-- Use stable_target from tmux and provider-history tools for later reads and writes. Never reuse a numeric window index as conversational identity after a stable target is available.
+- If the caller asks to tell, ask, direct, or message an existing/current/tmux Codex or Claude session, explain briefly that production phone authority is read-only. Never substitute send_agent_message or claim delivery.
+- Use stable_target from tmux and provider-history tools for later reads. Never reuse a numeric window index as conversational identity after a stable target is available.
 - Pane capture is screen context, not provider history. Never treat a TUI suggestion, placeholder, status bar, or prompt hint as a user message.
 - For any long material, summarize one bounded numbered chunk rather than attempting the entire source in one spoken response.
 - Use get_voice_usage for measured call usage. Never claim to know the remaining OpenAI project budget; direct the caller to the dashboard for that cap.
@@ -323,6 +321,7 @@ async function runRealtimeConversation(endpoint, dialog, callUuid, {
   resumeTtlSeconds = 86400,
   hangupDelayMs = 1400,
   responseDebounceMs = null,
+  approvalMarkerTimeoutMs: configuredApprovalMarkerTimeoutMs = 30000,
   openaiClientFactory = null,
 } = {}) {
   // Validate the credential destination/model contract before resolving a
@@ -391,7 +390,7 @@ async function runRealtimeConversation(endpoint, dialog, callUuid, {
   const approvalResponses = new Map();
   const approvalMarkerTimeoutMs = Math.max(
     5000,
-    Math.min(Number.parseInt(process.env.VOICE_APPROVAL_MARKER_TIMEOUT_MS, 10) || 30000, 60000)
+    Math.min(Number.parseInt(configuredApprovalMarkerTimeoutMs, 10) || 30000, 60000)
   );
   const configuredResponseDebounceMs = Math.max(
     0,

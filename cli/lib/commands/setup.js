@@ -7,8 +7,10 @@ import fs from 'fs';
 import { execSync } from 'child_process';
 import {
   loadConfig,
+  peekConfig,
   saveConfig,
-  configExists
+  configExists,
+  getInstallationType,
 } from '../config.js';
 import {
   validateExtension,
@@ -25,7 +27,7 @@ import {
   getAgentProfileChoices,
   normalizeAgentConfig
 } from '../agents.js';
-import { resolveVoiceRuntimeIdentityForInstallation } from '../voice-runtime-identity.js';
+import { resolveVoiceRuntimeIdentitiesForInstallation } from '../voice-runtime-identity.js';
 
 /**
  * Prompt for installation type
@@ -67,21 +69,9 @@ async function promptInstallationType(currentType = 'both') {
 export async function setupCommand(options = {}) {
   console.log(chalk.bold.cyan('\n🎯 Teleagent Setup\n'));
 
-  // Run minimal prerequisite check first (Node.js only)
-  if (!options.skipPrereqs) {
-    const minimalPrereq = await runPrereqChecks({ type: 'minimal' });
-
-    if (!minimalPrereq.success) {
-      console.log(chalk.red('\n❌ Prerequisites not met. Please fix the issues above and try again.\n'));
-      process.exit(1);
-    }
-  } else {
-    console.log(chalk.yellow('⚠️  Skipping prerequisite checks (--skip-prereqs flag)\n'));
-  }
-
   // Check if config exists
   const hasConfig = configExists();
-  let existingConfig = null;
+  let configSnapshot = null;
 
   if (hasConfig) {
     console.log(chalk.yellow('⚠️  Configuration already exists.'));
@@ -99,17 +89,37 @@ export async function setupCommand(options = {}) {
       return;
     }
 
-    existingConfig = await loadConfig();
+    configSnapshot = await peekConfig();
   }
 
   // Prompt for installation type
   console.log(chalk.bold.cyan('\n📦 Installation Type\n'));
   const installationType = await promptInstallationType(
-    existingConfig ? existingConfig.installationType : 'both'
+    configSnapshot ? getInstallationType(configSnapshot) : 'both'
   );
-  // Resolve before the wizard saves or mutates any voice deployment state.
-  // API-only setup has no voice identity dependency; every voice mode does.
-  resolveVoiceRuntimeIdentityForInstallation(installationType);
+  // Resolve all three accounts before prerequisite auto-fix, config migration,
+  // or any other setup write. API-only setup remains explicitly exempt.
+  const voiceRuntimeIdentities =
+    resolveVoiceRuntimeIdentitiesForInstallation(installationType);
+
+  // Run minimal prerequisite checks only after the selected mode's identity
+  // gate; auto-fix may install software and persist rollback state.
+  if (!options.skipPrereqs) {
+    const minimalPrereq = await runPrereqChecks({ type: 'minimal' });
+
+    if (!minimalPrereq.success) {
+      console.log(chalk.red('\n❌ Prerequisites not met. Please fix the issues above and try again.\n'));
+      process.exit(1);
+    }
+  } else {
+    console.log(chalk.yellow('⚠️  Skipping prerequisite checks (--skip-prereqs flag)\n'));
+  }
+
+  // Loading may persist migrations, so consume the exact snapshot only after
+  // the complete voice identity preflight has succeeded.
+  const existingConfig = configSnapshot
+    ? await loadConfig({ snapshot: configSnapshot })
+    : null;
 
   // Detect platform (for Pi split-mode detection)
   const isPi = await isRaspberryPi();
@@ -131,13 +141,17 @@ export async function setupCommand(options = {}) {
 
     if (changeToPi) {
       // Re-run with voice-server type
-      return setupInstallationType('voice-server', existingConfig, isPi, options);
+      return setupInstallationType(
+        'voice-server', existingConfig, isPi, options, voiceRuntimeIdentities
+      );
     }
   }
 
   // Run type-specific setup
   try {
-    await setupInstallationType(installationType, existingConfig, isPi, options);
+    await setupInstallationType(
+      installationType, existingConfig, isPi, options, voiceRuntimeIdentities
+    );
   } catch (error) {
     console.error(chalk.red('\n\n❌ Setup failed with error:'));
     console.error(chalk.red(error.message));
@@ -153,9 +167,19 @@ export async function setupCommand(options = {}) {
  * @param {object} existingConfig - Existing config or null
  * @param {boolean} isPi - Is Raspberry Pi
  * @param {object} options - Command options
+ * @param {object|null} voiceRuntimeIdentities - Preflighted voice/media identities
  * @returns {Promise<void>}
  */
-async function setupInstallationType(installationType, existingConfig, isPi, options) {
+async function setupInstallationType(
+  installationType,
+  existingConfig,
+  isPi,
+  options,
+  voiceRuntimeIdentities,
+) {
+  if (installationType !== 'api-server' && !voiceRuntimeIdentities) {
+    throw new Error('Voice runtime identity preflight was not completed.');
+  }
   // Load existing config or create default
   const baseConfig = existingConfig || createDefaultConfig();
 

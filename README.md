@@ -106,13 +106,13 @@ The Hermes deployment provides paired fresh/resume profiles:
 
 | Fresh | Resume | Agent | Runtime boundary |
 | --- | --- | --- | --- |
-| `1` | `11` | Claude Haiku | Read-only or approved workspace tools |
-| `2` | `22` | Claude Sonnet | Read-only or approved workspace tools |
-| `3` | `33` | Claude Opus | Read-only or approved workspace tools |
+| `1` | `11` | Claude Haiku | Read-only, fastest model tier |
+| `2` | `22` | Claude Sonnet | Read-only, stronger model tier |
+| `3` | `33` | Claude Opus | Read-only, strongest model tier |
 | `4` | `44` | Codex GPT-5.6 Luna | Read-only, low reasoning |
-| `5` | `55` | Codex GPT-5.6 Terra | Workspace-write, medium reasoning |
-| `6` | `66` | Codex GPT-5.6 Sol | Approved workspace mutation, high reasoning |
-| `7` | `77` | OpenAI Realtime conductor | Directs any Claude/Codex profile |
+| `5` | `55` | Codex GPT-5.6 Terra | Read-only, medium reasoning |
+| `6` | `66` | Codex GPT-5.6 Sol | Read-only, high reasoning |
+| `7` | `77` | OpenAI Realtime conductor | Read-only routing and inspection |
 
 Dial `9` from the authenticated owner handset to activate the global voice
 emergency stop. It immediately locks new phone-originated dispatch, cancels
@@ -127,9 +127,9 @@ npm run voice-control -- status
 npm run voice-control -- unlock
 ```
 
-Deploy/publish requests are unavailable until a separate audited tool/action
-broker exists. They fail before approval consumption and provider launch; Sol
-does not receive direct GitHub, cluster, or homelab network access.
+Mutation, deploy/publish, target-session delivery, and privileged requests are
+unavailable until an independently attested controller authority exists. They
+fail before provider or tmux execution; Sol receives no extra phone authority.
 
 Extensions `7` and `77` use OpenAI's native speech-to-speech Realtime API.
 They do not call the separately hosted TTS or STT services, so they remain
@@ -147,40 +147,28 @@ uses one acknowledgement tone and stays quiet until an authoritative result.
 Tmux inspection returns sessions, windows, and panes hierarchically, maps
 node-wrapped Claude/Codex descendants to the owning pane, and never treats TUI
 placeholder text as provider history. It also returns a stable pane ID; later
-history reads and writes use that identity rather than a window index that may
-move.
+history reads use that identity rather than a window index that may move.
 
-An existing worker-owned tmux-attached Claude conversation is a
-separate namespace from the six Teleagent-managed profile sessions. Ask for
-“all runtime sessions” to see both. To direct an existing conversation, name
-its exact target on `/run/teleagent-worker-session/tmux.sock` and the exact
-message. Historical owner/alborz sessions such as `main:phone` are
-intentionally invisible, and interactive Codex panes remain disabled. Teleagent fingerprints the bound
-provider log before approval, reads the target and message once, waits for `#`,
-waits for any pre-existing target task to become idle, pastes through a private
-tmux buffer, and reports completion only after the same provider log contains
-both the exact user message and a final assistant reply.
-If `*` races with completion, the verified completion wins; if delivery occurred
-before interruption, Teleagent says so explicitly rather than claiming the
-message never went out. Voice requests to cancel only prompt for `*`. Dial `9`
-to interrupt every voice-originated task and persistently lock further
-execution.
+An existing worker-owned tmux-attached Claude conversation is a separate
+namespace from the six Teleagent-managed profile sessions. Ask for “all runtime
+sessions” to see both. Production voice can inspect bounded provider history on
+the private worker socket, but it cannot send a message into an existing tmux
+conversation. Historical owner/alborz sessions such as `main:phone` remain
+intentionally invisible, and interactive Codex panes remain disabled.
 
-Any supported voice-originated workspace mutation or root action must be
-created through `7/77`. Deploy/publish remains explicitly unavailable. The app speaks the focused scope; `#`
-approves that job and `*` cancels it. Ordinary agent mutations use the durable
-non-root executor. Root actions use the separate exact-argv root broker and a
-second authenticated controller proxy; conversational Claude/Codex workers
-never receive sudo or the broker socket. See
-[Privileged phone actions](docs/PRIVILEGED-ACTIONS.md).
+Production phone authority is read-only. The Realtime schema does not publish
+target-session delivery or privileged-action tools, and `#` cannot enable
+workspace mutation, deployment, root work, named-host mutation, or cluster
+mutation. The retained capability and typed broker implementations are future
+unit-test substrate; see [Privileged phone actions](docs/PRIVILEGED-ACTIONS.md).
 Every Claude/Codex launch crosses its provider-specific worker/supervisor/egress
 boundary, and filesystem/Git/tmux inspection crosses the distinct
 `teleagent-session-broker` boundary; there is no controller-UID fallback.
 See [Worker execution and sessions](docs/WORKER-SESSION-BROKER.md).
-Consequently, direct profile extensions `1` through `6` remain useful for
-read-only conversations but cannot bypass the scoped Realtime approval flow.
-The bridge also forces every read-only Codex job into `read-only` and removes
-Claude mutation tools even when Opus or Sol was named explicitly.
+Consequently, all profile extensions remain useful for read-only conversations
+but cannot acquire authority through Realtime. The bridge forces every phone
+Codex job into `read-only` and removes Claude mutation tools even when Opus or
+Sol was named explicitly.
 
 ## API
 
@@ -236,12 +224,6 @@ VOICE_INSPECTION_ROOTS=/var/lib/teleagent-control
 VOICE_APP_UID=<id -u teleagent-voice>
 VOICE_APP_GID=<id -g teleagent-voice>
 VOICE_STATE_DIR=/var/lib/teleagent-voice
-VOICE_APPROVAL_CAPABILITY_ENABLED=false
-VOICE_APPROVAL_SIGNING_KEY_FILE=/run/secrets/teleagent-approval-private.pem
-VOICE_APPROVAL_SIGNING_KEY_ID=controller-2026-01
-VOICE_APPROVAL_CAPABILITY_TTL_SECONDS=120
-VOICE_APPROVAL_KEY_ID=controller-2026-01
-VOICE_APPROVAL_PUBLIC_KEY_FILE=/secure/executor/teleagent-approval-public.pem
 EXECUTOR_TASK_DB_PATH=/var/lib/teleagent-control/executor-tasks.sqlite
 ```
 
@@ -253,18 +235,24 @@ likewise fixed to `127.0.0.1`. Host environment files must omit the correspondin
 path, host, peer, and non-loopback variables; the launcher rejects them even
 when their value happens to match the fixed contract.
 
-Mutating voice work uses short-lived Ed25519 capabilities bound to the approved
-job, request and execution-plan hashes, target, provider, and profile. Keep the
-controller private key in a root:`teleagent-voice` mode-`0440`, single-link file
-mounted read-only at the fixed in-container path; never put it in `.env`, the repository, agent prompts,
-or worker environments. Until the executor has the matching public key and a
-durable replay store, leave `VOICE_APPROVAL_CAPABILITY_ENABLED=false`. That mode
-keeps read-only voice use available and fails every mutation closed.
+Mutating, target-session, and privileged phone work is intentionally disabled.
+`voice-app` receives no approval private key or privileged-action bearer and is
+constructed with neither an issuer nor a privileged bridge. The production
+controller removes approval-verifier and privileged-proxy settings after its
+`EnvironmentFile` is read, and cannot access the root-broker socket. Read-only
+phone jobs remain available; all authority-bearing phone jobs fail closed. The
+guarded launcher authenticates detailed controller health and requires this
+exact disabled authority state before recording activation intent or projecting
+credentials.
 
-The executor opens its public key with symlink protection and rejects writable
-or incorrectly owned trust anchors. Replay nonce consumption and durable task
-creation share one SQLite transaction, so an insert failure cannot burn an
-approval without creating its task.
+The Ed25519 capability, replay, exact-plan, and typed broker libraries remain
+unit-tested future substrate. They must not be production-enabled until an
+independent PBX attester plays the controller-canonical prompt, supplies durable
+request-bound handset DTMF evidence, and a controller-owned authority validates
+that evidence without trusting voice to assert consent. The future executor
+persists both the admitting key ID and the verifier-derived SHA-256 SPKI
+fingerprint, then rechecks both immediately before the first external effect so
+same-ID key replacement revokes queued work.
 
 Keep the local Drachtio Contact transport aligned with the Asterisk trunk. The
 Hermes default is `DRACHTIO_SIP_TRANSPORT=udp`; this ensures app-originated BYE
@@ -279,24 +267,19 @@ AGENT_API_BIND_HOST=127.0.0.1
 AGENT_API_NON_LOOPBACK_ENABLED=false
 AGENT_API_TOKEN=replace-with-distinct-general-token-at-least-32-bytes
 EXECUTOR_API_TOKEN=replace-with-distinct-executor-token-at-least-32-bytes
-PRIVILEGED_ACTION_API_TOKEN=replace-with-distinct-privileged-token-at-least-32-bytes
-PRIVILEGED_ACTION_PROXY_ENABLED=false
-PRIVILEGED_ACTION_PROXY_SOCKET_PATH=/run/teleagent-privileged-action/broker.sock
-VOICE_PRIVILEGED_ACTIONS_ENABLED=false
 VOICE_CONTROL_TOKEN=replace-with-distinct-control-token-at-least-32-bytes
 AGENT_PROVIDERS=claude,codex
 AGENT_DURABLE_EXECUTOR_ENABLED=true
 ```
 
-All four bearers are mandatory on the host controller and must be clean,
+The three active controller bearers are mandatory and must be clean,
 pairwise-distinct 32-4096 byte tokens. `AGENT_API_TOKEN` protects ordinary
 non-public bridge routes and no longer falls back to `CLAUDE_API_TOKEN`.
 `EXECUTOR_API_TOKEN` protects every `/executor` route and does not accept the
 general or legacy token. Docker Compose explicitly blanks `AGENT_API_TOKEN` and
-`CLAUDE_API_TOKEN` inside `voice-app`; the voice process receives only its
-executor, voice-control, and privileged-action capabilities. The controller
-refuses startup if scoped tokens are reused, and `/health` remains
-`503 not_ready` until all four controller credentials are installed.
+`CLAUDE_API_TOKEN` inside `voice-app`; the voice process receives its executor
+and voice-control credentials but no privileged-action credential. The
+controller refuses startup if active scoped tokens are reused.
 Committed placeholder/example values are treated as unconfigured. The phone
 controller and voice app are fixed to loopback; non-loopback agent API routing
 is not a supported phone deployment boundary.
@@ -337,9 +320,9 @@ and [CLI command reference](https://learn.chatgpt.com/docs/developer-commands?su
 
 Their models, reasoning efforts, profile-specific working directories, and sandboxes are set with
 the `PHONE_CODEX_*` variables documented in `.env.example`. The bridge runs
-phone requests with approval policy `never`; Luna/Terra/Sol capability is
-therefore determined by their explicit `read-only`, `workspace-write`, and
-`danger-full-access` sandbox settings.
+phone requests with approval policy `never` and forces Luna, Terra, and Sol to
+the `read-only` sandbox. Profile selection changes model/reasoning strength, not
+phone authority.
 
 On Ubuntu hosts with `kernel.apparmor_restrict_unprivileged_userns=1`, install
 the repository's narrow Bubblewrap launcher profile and reload AppArmor:

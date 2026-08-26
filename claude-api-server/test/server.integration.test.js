@@ -236,6 +236,10 @@ process.stdin.on('end', () => {
       PHONE_CODEX_TERRA_WORKING_DIR: tempDirectory,
       PHONE_CODEX_SOL_WORKING_DIR: tempDirectory,
       PHONE_CODEX_DEPLOY_WORKING_DIR: tempDirectory,
+      // The integration fixture exercises dormant approved-mutation substrate
+      // explicitly; production defaults and deployment settings are read-only.
+      PHONE_CODEX_SOL_SANDBOX: 'danger-full-access',
+      PHONE_CODEX_DEPLOY_SANDBOX: 'danger-full-access',
       PHONE_SONNET_CLAUDE_TOOLS: '',
       PHONE_SONNET_CLAUDE_ALLOWED_TOOLS: '',
       PHONE_OPUS_CLAUDE_TOOLS: 'Read,Write,Edit,Glob,Grep,Bash',
@@ -327,6 +331,10 @@ process.stdin.on('end', () => {
     }
     assert.deepEqual(health.providers, ['claude', 'codex']);
     assert.equal(health.approvalCapabilities.verifierConfigured, true);
+    assert.deepEqual(health.phoneAuthority, {
+      mode: 'legacy_authority_present',
+      status: 'unsafe_for_voice_activation',
+    });
     assert.deepEqual(health.agentWorker, {
       enabled: true,
       hardened: true,
@@ -458,6 +466,12 @@ process.stdin.on('end', () => {
       'dontAsk'
     );
     assert.doesNotMatch(readTools, /Bash|Write|Edit|Task/);
+    assert.match(readInvocation.prompt, /PHONE AUTHORITY BOUNDARY/);
+    assert.match(readInvocation.prompt, /Production phone authority is read-only/);
+    assert.doesNotMatch(
+      readInvocation.prompt,
+      /phone-publish|phone-merge-pr|operator-grade|SLACK DELIVERY|new extension-7 approval/
+    );
 
     const writePrompt = 'Implement the approved phone change.';
     const writeCallId = 'job_claudewrite123';

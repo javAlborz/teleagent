@@ -325,6 +325,47 @@ for (const [label, invalidToken] of [
   });
 }
 
+test('disabled privileged proxy does not require or report a privileged bearer', async (t) => {
+  const server = await startServer(t, {
+    PRIVILEGED_ACTION_API_TOKEN: '',
+    PRIVILEGED_ACTION_PROXY_ENABLED: 'false',
+    PRIVILEGED_ACTION_PROXY_SOCKET_PATH: '',
+  });
+  assert.equal((await fetch(`${server.baseUrl}/health`)).status, 200, server.output());
+  const response = await fetch(`${server.baseUrl}/operator/health`, {
+    headers: { Authorization: `Bearer ${TOKENS.voice}` },
+  });
+  assert.equal(response.status, 200);
+  const health = await response.json();
+  assert.equal(health.authentication.privilegedActionConfigured, false);
+  assert.equal(health.authentication.privilegedActionRequired, false);
+  assert.equal(health.authentication.allActiveScopesConfiguredAndDistinct, true);
+  assert.deepEqual(health.phoneAuthority, {
+    mode: 'read_only',
+    status: 'disabled_pending_independent_pbx_attester',
+  });
+  assert.deepEqual(health.privilegedActions, {
+    enabled: false,
+    proxyConfigured: false,
+    authConfigured: false,
+  });
+  const executorHealthResponse = await fetch(`${server.baseUrl}/executor/health`, {
+    headers: { Authorization: `Bearer ${TOKENS.executor}` },
+  });
+  assert.equal(executorHealthResponse.status, 200);
+  assert.deepEqual(await executorHealthResponse.json(), {
+    ready: true,
+    service: 'claude-api-server',
+    scope: 'executor',
+    status: 'ready',
+  });
+  const wrongScope = await fetch(`${server.baseUrl}/executor/health`, {
+    headers: { Authorization: `Bearer ${TOKENS.voice}` },
+  });
+  assert.equal(wrongScope.status, 401);
+  assert.match(server.output(), /Privileged action proxy auth: not required \(proxy disabled\)/u);
+});
+
 test('server refuses startup when scoped capabilities reuse one token', async (t) => {
   await assertStartupFails(
     t,

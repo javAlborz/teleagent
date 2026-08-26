@@ -1718,6 +1718,19 @@ class VoiceStateStore {
     return transaction();
   }
 
+  cancelAllAwaitingApprovals(reason = 'Approval canceled before execution', options = {}) {
+    const threadIds = this.db.prepare(`
+      SELECT DISTINCT voice_thread_id FROM jobs
+      WHERE status = 'awaiting_approval'
+      ORDER BY voice_thread_id ASC
+    `).all().map((row) => row.voice_thread_id);
+    const canceled = [];
+    for (const threadId of threadIds) {
+      canceled.push(...this.cancelAwaitingApprovalsForThread(threadId, reason, options));
+    }
+    return canceled;
+  }
+
   expireAwaitingApprovals({ threadId = null, maxAgeMs = 300000 } = {}) {
     const safeMaxAgeMs = Math.max(1000, Number.parseInt(maxAgeMs, 10) || 300000);
     const cutoff = new Date(Date.now() - safeMaxAgeMs).toISOString();

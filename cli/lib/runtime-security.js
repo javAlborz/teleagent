@@ -4,7 +4,6 @@ const RUNTIME_SECRET_FIELDS = Object.freeze([
   ['agentApi', 'AGENT_API_TOKEN'],
   ['executorApi', 'EXECUTOR_API_TOKEN'],
   ['voiceControl', 'VOICE_CONTROL_TOKEN'],
-  ['privilegedActionApi', 'PRIVILEGED_ACTION_API_TOKEN'],
   ['outboundApi', 'OUTBOUND_API_TOKEN']
 ]);
 
@@ -36,6 +35,13 @@ export function ensureRuntimeSecrets(config, environment = process.env) {
   }
 
   let changed = false;
+  // The former voice/controller privileged bearer is an unsafe stale
+  // credential now that phone mutation is retired. Remove it during normal
+  // configuration migration and never export it to a child process.
+  if (Object.hasOwn(config.secrets, 'privilegedActionApi')) {
+    delete config.secrets.privilegedActionApi;
+    changed = true;
+  }
   const used = new Set();
   for (const [field, environmentName] of RUNTIME_SECRET_FIELDS) {
     let value = config.secrets[field];

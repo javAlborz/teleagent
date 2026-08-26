@@ -1,8 +1,9 @@
 # Phone agent architecture
 
-Status: accepted design; source implementation and offline validation are in
-progress. Production activation is intentionally blocked until every promotion
-gate in this document passes.
+Status: accepted target design. Production read-only phone work remains
+available, but mutating, target-session, and privileged phone work is
+fail-closed until the independent PBX-attested approval authority described
+below exists and every promotion gate passes.
 
 ## Decision
 
@@ -31,11 +32,12 @@ The system assumes all of the following can be hostile or fail at any time:
 handset
   |  registered endpoint
   v
-Asterisk/PBX  <== mutual SIP authentication ==>  voice/media plane
-                                                       |
-                                                       | scoped request only
-                                                       v
-                                              controller + durable ledger
+Asterisk/PBX + isolated approval attester
+       |  mutual SIP authentication                 | authenticated,
+       v                                            | request-bound evidence
+voice/media plane ----------------------------------+
+       | read-only scoped request                   v
+       +---------------------------------> controller + durable ledger
                                                 |             |
                                        read-only|             |approved mutation
                                                 v             v
@@ -50,9 +52,10 @@ than the plane before it and must be authenticated independently.
 
 ### Voice and media plane
 
-The voice application may interpret speech, maintain conversational text,
-announce an exact proposed action, and collect a DTMF confirmation. It cannot
-execute provider or root work on its own.
+The voice application may interpret speech and maintain conversational text.
+It cannot execute provider/root work, hold an approval signing key or
+privileged bearer, or produce authorization-grade DTMF evidence. Production
+constructs it without a capability issuer or privileged bridge.
 
 Inbound calls must authenticate as the PBX before caller identity, media,
 thread state, or approval state is created. Callback calls use a separate PBX
@@ -71,22 +74,33 @@ The production Realtime client is pinned to the reviewed OpenAI WebSocket
 origin, path, model, transcription model, and voice set. Configuration cannot
 redirect the provider credential or call stream to another origin.
 
-The handset confirmation becomes useful only after the exact approval summary
-has entered the authenticated media session. A one-time, call-bound signed
-capability then identifies one canonical action plan. It does not authorize a
-free-form prompt or a later retry.
+In the future design, handset confirmation becomes useful only after an
+independently isolated PBX attester—not voice and not a FreeSWITCH event source
+voice can inject into—plays the controller-canonical summary and durably
+attests later handset-side DTMF for the exact call leg and request. A
+controller-owned authority validates that evidence and internally dispatches
+one call-bound capability for one canonical action plan. Voice never receives
+the signer or capability.
 
 ### Controller and durable executor
 
 The controller owns scoped HTTP authentication, request classification, and
-coordination. General, executor, privileged, outbound, and voice-control tokens
-are distinct and non-interchangeable. The voice-to-controller endpoint is a
+coordination. Active general, executor, outbound, and voice-control tokens are
+distinct and non-interchangeable. The production service removes legacy phone
+approval-verifier and privileged-proxy settings after reading its environment
+file and cannot access the privileged socket. The voice-to-controller endpoint is a
 fixed numeric loopback address and port with redirects disabled; configuration
 cannot redirect a scoped bearer or signed action to another destination.
 
-Mutating requests are rejected from synchronous `/ask` surfaces. They are first
-recorded in a durable task ledger with idempotency, approval, cancellation, and
-recovery truth. A provider is launched only after that record is durable.
+Production mutating requests are rejected before durable submission. The
+retained future path records approved mutations in a durable task ledger with
+idempotency, approval, cancellation, and recovery truth. Immediately before a
+first provider or tmux effect, the executor also requires the currently active
+verifier and exact admitting key epoch: both the persisted key ID and the
+verifier-derived SHA-256 SPKI fingerprint must match. Replacing a public key
+under the same ID therefore revokes pre-rotation queued work. Revoked/pre-cut
+queued work fails; already-attempted target delivery retains GET-only
+reconciliation.
 
 A provider start intent is itself durable. Once execution may have crossed the
 provider boundary, a crash, timeout, cancellation, malformed response, or lost
@@ -179,17 +193,38 @@ credential-bearing connections are pinned to exact loopback addresses and
 ports. Static/generated media is private runtime data and is served only through
 exact no-follow paths.
 
+The tracked host-network nftables table is a transitional sender/source fence,
+not the target receiver boundary: `meta skuid` identifies an emitting socket but
+cannot prevent a hostile local process from binding a reviewed listener's
+vacated port. Production activation remains blocked until infrastructure puts
+each media service, including Asterisk, in its reviewed per-service network
+namespace, enforces explicit ingress links, and attests that Asterisk's exact
+effective RTP allocation is disjoint from FreeSWITCH `30000-30100`. The current
+application bundle deliberately does not create that topology. The release
+reason
+`receiver-safe-sip-media-network-boundary-and-asterisk-rtp-attestation-are-not-implemented`
+must remain present until staging proves the installed infrastructure boundary.
+
 The voice stack has no autonomous Docker restart policy. A systemd-owned gate
 starts it only after the local SIP fence, split provider plane, controller,
-privileged broker, identities, credentials, and configuration are verified.
+distinct media identities, non-authority credentials, and configuration are
+verified. The privileged broker stays dormant and inaccessible.
+Before it records activation intent or projects credentials, the launcher
+securely opens the source voice-control token, authenticates detailed controller
+health, and requires the new canonical read-only phone-authority status plus
+every verifier/proxy/bearer flag false. The token buffer is erased on success or
+failure, so an old authority-enabled controller cannot satisfy activation.
 The root launcher itself is CPU-, memory-, swap-, I/O-, and task-bounded, and
 accepts at most 128 KiB from any controller health or panic response. Every
 Compose service is also assigned to the fixed
 `teleagent-voice-containers.slice` parent. That slice caps the four containers
 together at three CPUs, 3 GiB memory, zero swap, and 1024 tasks; the launcher
 first requires canonical Docker evidence for the `systemd` cgroup driver and
-cgroup v2. It then inspects every exact project container after startup and refuses activation if
-its cgroup parent or durable activation-generation label differs. The
+cgroup v2. It creates every exact project container without starting it,
+verifies its configured non-root user, cgroup parent, and durable
+activation-generation label, then starts the graph. Before health, it verifies
+each long-running container's host-visible PID UID/GID through `/proc` and
+repeats Docker state/PID inspection to close the race. The
 external host-owned release verifier is the first start command, before the
 application identity check or launcher. Its empty-environment
 `--check-start-gate` cheaply revalidates current-boot approval, selected
@@ -268,6 +303,9 @@ The installer accepts each root-owned, single-link release source only at its
 exact installed mode (`0644` or `0755`) or the corresponding immutable release
 mode (`0444` or `0555`). It rejects every other mode and always normalizes the
 installed policy and executable copies back to their exact target modes.
+The shell installer resolves its own actual entrypoint and copies sibling
+assets only from that one release tree; it never re-resolves
+`/opt/teleagent/current` between mutations.
 The source verifier resolves `/opt/teleagent/current` once to the exact
 `/opt/teleagent/releases/sha256-<manifest-digest>` tree, proves stable directory
 and verifier identity, and performs the whole source check through that resolved
@@ -325,9 +363,9 @@ Production activation remains blocked until all of these are true:
 5. Panic, cancellation, crash, and reboot tests preserve durable truth and do
    not release a singleton, database, credential runtime, or successor process
    before every applicable plane is quiescent.
-6. Mutual-auth inbound and callback calls, spoken approval, executor mutation,
-   cancellation, outbound completion, panic, and restart recovery pass end to
-   end on the staged host.
+6. Mutual-auth inbound and callback calls, independently PBX-attested
+   request-bound approval, executor mutation, cancellation, outbound
+   completion, panic, and restart recovery pass end to end on the staged host.
 7. A reboot and soak complete before legacy single-UID workers, old credentials,
    or old deployment paths are retired.
 

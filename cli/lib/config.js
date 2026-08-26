@@ -3,6 +3,7 @@ import path from 'path';
 import os from 'os';
 import { normalizeAgentConfig } from './agents.js';
 import { ensureRuntimeSecrets } from './runtime-security.js';
+import { resolveVoiceRuntimeIdentitiesForInstallation } from './voice-runtime-identity.js';
 
 function getDefaultApiConfig() {
   return {
@@ -103,10 +104,14 @@ export function configExists() {
 }
 
 /**
- * Load configuration from disk
- * @returns {Promise<object>} Configuration object
+ * Read configuration without applying or persisting migrations.
+ *
+ * Mutating commands use this snapshot to determine whether the complete voice
+ * runtime identity gate applies before loadConfig is allowed to change state.
+ *
+ * @returns {Promise<object>} Unmigrated configuration snapshot
  */
-export async function loadConfig() {
+export async function peekConfig() {
   const configPath = getConfigPath();
 
   if (!fs.existsSync(configPath)) {
@@ -114,9 +119,15 @@ export async function loadConfig() {
   }
 
   const data = await fs.promises.readFile(configPath, 'utf8');
-  const config = JSON.parse(data);
+  return JSON.parse(data);
+}
 
-  // Ensure installationType exists for backward compatibility
+function normalizeConfigSnapshot(snapshot, { provisionRuntimeSecrets = false } = {}) {
+  // Config snapshots originate as JSON. Clone before applying migrations so a
+  // read-only caller cannot mutate either its input object or on-disk bytes.
+  const config = JSON.parse(JSON.stringify(snapshot));
+
+  // Ensure installationType exists for backward compatibility.
   if (!config.installationType) {
     config.installationType = 'both';
   }
@@ -129,11 +140,55 @@ export async function loadConfig() {
     defaultProviders: ['claude']
   });
 
+  const runtimeSecrets = provisionRuntimeSecrets
+    ? ensureRuntimeSecrets(config)
+    : { changed: false };
+  return {
+    config,
+    removedLegacySipAuthentication,
+    removedLegacyMediaControlCredentials,
+    runtimeSecretsChanged: runtimeSecrets.changed,
+  };
+}
+
+/**
+ * Return a migrated in-memory view without provisioning credentials, mutating
+ * the supplied snapshot, or writing configuration/backup files.
+ *
+ * Diagnostic, display, logging, and shutdown commands use this path so they
+ * remain available when voice identities need repair.
+ *
+ * @param {object} options - Load options
+ * @param {object} options.snapshot - Optional snapshot returned by peekConfig
+ * @returns {Promise<object>} Non-persisted configuration view
+ */
+export async function loadConfigReadOnly({ snapshot } = {}) {
+  const exactSnapshot = snapshot === undefined ? await peekConfig() : snapshot;
+  return normalizeConfigSnapshot(exactSnapshot).config;
+}
+
+/**
+ * Load configuration and persist any required migrations.
+ * @param {object} options - Load options
+ * @param {object} options.snapshot - Optional snapshot returned by peekConfig
+ * @returns {Promise<object>} Configuration object
+ */
+export async function loadConfig({ snapshot } = {}) {
+  // Reuse the exact preflighted snapshot when one is supplied. Reading the
+  // file again here would introduce a race where an API-only snapshot could be
+  // replaced with a voice configuration before migration writes begin.
+  const exactSnapshot = snapshot === undefined ? await peekConfig() : snapshot;
+  const {
+    config,
+    removedLegacySipAuthentication,
+    removedLegacyMediaControlCredentials,
+    runtimeSecretsChanged,
+  } = normalizeConfigSnapshot(exactSnapshot, { provisionRuntimeSecrets: true });
+
   // Migrate older configs before any controller or voice process is started.
   // Without persisted shared credentials, separate CLI invocations would
   // generate different bearers and either fail open or make the stack unusable.
-  const runtimeSecrets = ensureRuntimeSecrets(config);
-  if (runtimeSecrets.changed || removedLegacySipAuthentication ||
+  if (runtimeSecretsChanged || removedLegacySipAuthentication ||
       removedLegacyMediaControlCredentials) {
     // Do not make a second on-disk copy of retired SIP registration secrets.
     await saveConfig(config, {
@@ -142,6 +197,26 @@ export async function loadConfig() {
   }
 
   return config;
+}
+
+/**
+ * Resolve the complete voice/media account bundle before any migration can be
+ * persisted. API-only installations are explicitly exempt by the resolver.
+ *
+ * @param {object} options - Guard options
+ * @param {object} options.snapshot - Optional snapshot returned by peekConfig
+ * @param {Function} options.identityResolver - Testable identity authority
+ * @returns {Promise<{config: object, voiceRuntimeIdentities: object|null}>}
+ */
+export async function loadConfigWithVoiceRuntimeIdentityPreflight({
+  snapshot,
+  identityResolver = resolveVoiceRuntimeIdentitiesForInstallation,
+} = {}) {
+  const exactSnapshot = snapshot === undefined ? await peekConfig() : snapshot;
+  const installationType = getInstallationType(exactSnapshot);
+  const voiceRuntimeIdentities = identityResolver(installationType);
+  const config = await loadConfig({ snapshot: exactSnapshot });
+  return { config, voiceRuntimeIdentities };
 }
 
 /**

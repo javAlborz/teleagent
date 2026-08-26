@@ -67,17 +67,17 @@ case "${1:-install}" in
       /usr/bin/install -o root -g root -m 0644 "$installed_profile" "$backup"
     fi
     mv -f "$stage" "$installed_profile"
-    sync -d "$installed_profile" /etc/apparmor.d
+    sync -- "$installed_profile" /etc/apparmor.d
     if ! "$parser" -r -W "$installed_profile" ||
        ! grep -qx 'teleagent-provider-model (enforce)' "$profiles"; then
       if [ -n "$backup" ]; then
         mv -f "$backup" "$installed_profile"
-        sync -d "$installed_profile" /etc/apparmor.d
+        sync -- "$installed_profile" /etc/apparmor.d
         "$parser" -r -W "$installed_profile" || true
       else
         "$parser" -R "$installed_profile" 2>/dev/null || true
         rm -f "$installed_profile"
-        sync -d /etc/apparmor.d
+        sync -- /etc/apparmor.d
       fi
       echo "provider AppArmor profile could not be atomically enforced" >&2
       exit 77
@@ -95,7 +95,7 @@ case "${1:-install}" in
       "$parser" -R "$installed_profile"
     fi
     rm -f "$installed_profile"
-    sync -d /etc/apparmor.d
+    sync -- /etc/apparmor.d
     ;;
   *)
     echo "usage: teleagent-provider-apparmor-install [install|--remove]" >&2

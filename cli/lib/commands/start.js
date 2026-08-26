@@ -2,7 +2,12 @@ import chalk from 'chalk';
 import ora from 'ora';
 import fs from 'fs';
 import path from 'path';
-import { loadConfig, configExists, getInstallationType } from '../config.js';
+import {
+  loadConfigWithVoiceRuntimeIdentityPreflight,
+  peekConfig,
+  configExists,
+  getInstallationType,
+} from '../config.js';
 import { checkDocker, writeDockerConfig, startContainers } from '../docker.js';
 import { startServer, isServerRunning } from '../process-manager.js';
 import { sleep } from '../utils.js';
@@ -12,7 +17,6 @@ import {
   buildAgentServerEnvironment,
   checkConfiguredAgentProviders
 } from '../agents.js';
-import { resolveVoiceRuntimeIdentityForInstallation } from '../voice-runtime-identity.js';
 
 export function assertPersonaOnlyDeviceConfiguration(devices) {
   for (const device of devices || []) {
@@ -89,11 +93,14 @@ export async function startCommand() {
     process.exit(1);
   }
 
-  // Load config and get installation type
-  const config = await loadConfig();
-  const installationType = getInstallationType(config);
+  // The first config read is deliberately non-mutating. Resolve all three
+  // voice/media accounts before loadConfig migrations or prerequisite repair
+  // can write state. API-only installations remain exempt.
+  const configSnapshot = await peekConfig();
+  const installationType = getInstallationType(configSnapshot);
+  const { config, voiceRuntimeIdentities } =
+    await loadConfigWithVoiceRuntimeIdentityPreflight({ snapshot: configSnapshot });
   const isPiMode = config.deployment?.mode === 'pi-split';
-  const voiceIdentity = resolveVoiceRuntimeIdentityForInstallation(installationType);
 
   console.log(chalk.gray(`Installation type: ${installationType}\n`));
 
@@ -114,11 +121,11 @@ export async function startCommand() {
       await startApiServer(config);
       break;
     case 'voice-server':
-      await startVoiceServer(config, isPiMode, voiceIdentity);
+      await startVoiceServer(config, isPiMode, voiceRuntimeIdentities);
       break;
     case 'both':
     default:
-      await startBoth(config, isPiMode, voiceIdentity);
+      await startBoth(config, isPiMode, voiceRuntimeIdentities);
       break;
   }
 }
@@ -182,7 +189,7 @@ async function startApiServer(config) {
  * @param {boolean} isPiMode - Is Pi split-mode
  * @returns {Promise<void>}
  */
-async function startVoiceServer(config, isPiMode, voiceIdentity) {
+async function startVoiceServer(config, isPiMode, voiceRuntimeIdentities) {
   // Verify voice-app path exists
   if (!fs.existsSync(config.paths.voiceApp)) {
     console.log(chalk.red(`✗ Voice app not found at: ${config.paths.voiceApp}`));
@@ -217,7 +224,7 @@ async function startVoiceServer(config, isPiMode, voiceIdentity) {
   // Generate Docker config
   spinner.start('Generating Docker configuration...');
   try {
-    await writeDockerConfig(config, { voiceIdentity });
+    await writeDockerConfig(config, voiceRuntimeIdentities);
 
     spinner.succeed('Docker configuration generated');
   } catch (error) {
@@ -228,7 +235,7 @@ async function startVoiceServer(config, isPiMode, voiceIdentity) {
   // Start Docker containers
   spinner.start('Starting Docker containers...');
   try {
-    await startContainers({ voiceIdentity });
+    await startContainers();
     spinner.succeed('Docker containers started');
   } catch (error) {
     spinner.fail(`Failed to start containers: ${error.message}`);
@@ -273,7 +280,7 @@ async function startVoiceServer(config, isPiMode, voiceIdentity) {
  * @param {boolean} isPiMode - Is Pi split-mode
  * @returns {Promise<void>}
  */
-async function startBoth(config, isPiMode, voiceIdentity) {
+async function startBoth(config, isPiMode, voiceRuntimeIdentities) {
   // Verify voice-app path exists
   if (!fs.existsSync(config.paths.voiceApp)) {
     console.log(chalk.red(`✗ Voice app not found at: ${config.paths.voiceApp}`));
@@ -331,7 +338,7 @@ async function startBoth(config, isPiMode, voiceIdentity) {
   // Generate Docker config
   spinner.start('Generating Docker configuration...');
   try {
-    await writeDockerConfig(config, { voiceIdentity });
+    await writeDockerConfig(config, voiceRuntimeIdentities);
 
     spinner.succeed('Docker configuration generated');
   } catch (error) {
@@ -342,7 +349,7 @@ async function startBoth(config, isPiMode, voiceIdentity) {
   // Start Docker containers
   spinner.start('Starting Docker containers...');
   try {
-    await startContainers({ voiceIdentity });
+    await startContainers();
     spinner.succeed('Docker containers started');
   } catch (error) {
     spinner.fail(`Failed to start containers: ${error.message}`);

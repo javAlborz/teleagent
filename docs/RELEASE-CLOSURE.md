@@ -48,12 +48,14 @@ tree and deterministic archive twice, and uploads only evidence. It never deploy
 starts, imports on a target, provisions credentials, or pushes to a registry.
 
 `release-summary.json` keeps `promotionEligibility.status` exactly `blocked`
-and emits these five machine-readable reasons, in this order:
+and emits these seven machine-readable reasons, in this order:
 
 ```text
 persistent-docker-group-self-hosted-runner-is-not-an-external-trust-boundary
 voice-image-build-toolchain-is-not-hermetic
 separate-trusted-ephemeral-attestation-job-is-not-defined
+independent-pbx-attested-request-bound-approval-authority-is-not-implemented
+receiver-safe-sip-media-network-boundary-and-asterisk-rtp-attestation-are-not-implemented
 universal-current-boot-release-gate-enforcement-at-credential-bearing-service-restart-is-not-proven
 dedicated-staging-proof-including-non-root-media-containers-is-missing
 ```
@@ -62,8 +64,10 @@ The old `host-executed-bound-source-integration-is-pending` blocker is closed:
 the source-side manifest now carries the complete production host closure.
 That does not remove any blocker above. In particular, the target still needs
 one universal boot-bound gate before every credential-bearing service start or
-restart, and dedicated staging still must prove the full dormant/install/
-activation behavior including the non-root media containers.
+restart. Caller confirmation must also be attested outside the voice process
+that proposes work; moving a signing key behind an endpoint that trusts the
+same process is not sufficient. Dedicated staging still must prove the full
+dormant/install/activation behavior including the non-root media containers.
 
 ## Security decision
 
@@ -194,7 +198,7 @@ version, application, source, target, files, hostRuntime, providerCli, voiceImag
 
 The generator and verifier in `release_closure.py` are the canonical schema;
 the focused tests compare the generated structure and canonical bytes. The
-130-entry `hostRuntime.boundSourcePaths` array is emitted dynamically from the
+131-entry `hostRuntime.boundSourcePaths` array is emitted dynamically from the
 single reviewed `BOUND_SOURCE_PATHS` tuple rather than copied into the workflow
 or this document.
 
@@ -224,7 +228,7 @@ release code runs.
 
 ## Production host source closure
 
-`BOUND_SOURCE_PATHS` is one explicit, duplicate-free, byte-sorted 130-path
+`BOUND_SOURCE_PATHS` is one explicit, duplicate-free, byte-sorted 131-path
 tuple. It is derived from production consumption boundaries, not from a broad
 directory glob:
 
@@ -244,14 +248,14 @@ directory glob:
 - the voice unit/slice/sysusers/tmpfiles, launcher/verifier/installer, Compose
   file, rendered configuration templates, three FreeSWITCH bind inputs, and
   the launcher-loaded runtime-environment module;
-- the SIP peer-fence helper/unit/installer and the aggregate
+- the SIP peer-fence helper/unit/installer/version descriptor and the aggregate
   `deploy/host/teleagent-disabled-host-install` entrypoint.
 
 Documentation, tests, example policies/configuration, and unused legacy assets
 are deliberately absent. They remain covered by the complete release file
 inventory, but are not mislabeled as production host execution inputs. A
 focused regression independently derives the import and component-manifest
-sets, requires exact equality with the reviewed tuple, proves all 130 paths are
+sets, requires exact equality with the reviewed tuple, proves all 131 paths are
 real regular files, derives every host JavaScript file's nearest package scope,
 and pins the complete realtime-SIP import list.
 
@@ -313,7 +317,7 @@ must reject null registry fields.
 
 The generator accepts an external canonical JSON description. This file is
 build input, not part of the release and not an approval. The dormant CI lane
-creates it from the reviewed commit and tree without copying the 130-path host
+creates it from the reviewed commit and tree without copying the 131-path host
 closure into shell or workflow code:
 
 ```bash
@@ -429,8 +433,8 @@ scripts/hermes-safe-test python3 -m unittest -v \
 
 Tests cover canonicalization, traversal, extra/missing/tampered files,
 symlinks, hardlinks, FIFOs, xattrs, modes, all three exact package-local native
-dependency trees, provider/image/SBOM cross-binding, the exact derived 130-path
+dependency trees, provider/image/SBOM cross-binding, the exact derived 131-path
 host closure, lifecycle-container isolation, immutable Action/tool pins, manual
-default-branch runner gating, all five exact non-promotable blockers, and
+default-branch runner gating, all seven exact non-promotable blockers, and
 byte-identical double packaging. These static/unit tests do not run Docker or
 download tools.

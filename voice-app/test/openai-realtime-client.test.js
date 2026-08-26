@@ -100,7 +100,8 @@ test('Realtime session uses 24 kHz PCM, manual semantic VAD, tuned transcription
   const actions = update.session.tools[0].parameters.properties.action.enum;
   assert.ok(actions.includes('respond'));
   assert.ok(actions.includes('send_agent_message'));
-  assert.ok(actions.includes('send_agent_session_message'));
+  assert.equal(actions.includes('send_agent_session_message'), false);
+  assert.equal(actions.includes('start_privileged_action'), false);
   assert.ok(actions.includes('get_voice_history'));
   assert.ok(actions.includes('get_agent_activity'));
   assert.ok(actions.includes('end_call'));
@@ -382,6 +383,8 @@ test('empty transcription and context-truncation lifecycle events are observable
 
 test('tool schema exposes only the supplied profile enum', () => {
   const tools = buildRealtimeTools(['claude-opus', 'codex-sol']);
+  assert.equal(tools.some((tool) => tool.name === 'send_agent_session_message'), false);
+  assert.equal(tools.some((tool) => tool.name === 'start_privileged_action'), false);
   assert.deepEqual(
     tools[0].parameters.properties.profile.enum,
     ['auto', 'claude-opus', 'codex-sol']

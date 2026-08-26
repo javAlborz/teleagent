@@ -351,7 +351,11 @@ class VoiceToolController {
             voice_runtime: 'Teleagent voice-app on Hermes',
             transcript_storage: 'Local append-only SQLite text events; raw audio is not recorded.',
             profiles: this.jobBroker.listProfileDetails(),
-            emergency_controls: { pound: 'approve focused operation', star: 'cancel focused job', nine: 'global emergency stop' },
+            emergency_controls: {
+              pound: 'no production authority',
+              star: 'cancel focused job',
+              nine: 'global emergency stop',
+            },
           };
         }
         case 'get_homelab_status': return this._inspect('homelab_status');

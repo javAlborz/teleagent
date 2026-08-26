@@ -2,7 +2,7 @@ import chalk from 'chalk';
 import ora from 'ora';
 import { spawn } from 'child_process';
 import path from 'path';
-import { loadConfig, configExists } from '../config.js';
+import { loadConfigWithVoiceRuntimeIdentityPreflight, configExists } from '../config.js';
 import { getProjectRoot } from '../utils.js';
 import { savePid, removePid } from '../process-manager.js';
 import {
@@ -15,17 +15,31 @@ import {
  * API Server command - Start claude-api-server for remote connections
  * @param {object} options - Command options
  * @param {number} options.port - Port to listen on (default: 3333)
+ * @param {object} dependencies - Injectable process boundaries for tests
  * @returns {Promise<void>}
  */
-export async function apiServerCommand(options = {}) {
+export async function apiServerCommand(options = {}, dependencies = {}) {
+  const {
+    identityResolver,
+    checkProviders = checkConfiguredAgentProviders,
+    spawnProcess = spawn,
+    persistPid = savePid,
+    deletePid = removePid,
+  } = dependencies;
   console.log(chalk.bold.cyan('\n🤖 Teleagent API Server\n'));
 
-  // Load config to get port if not provided
+  // A configured voice-capable installation may persist migrations and shared
+  // API credentials here, so its three-account identity gate must run before
+  // provider checks, process creation, or PID writes. API-only remains exempt.
   let port = options.port;
-  const config = configExists()
-    ? await loadConfig()
-    : { agents: createDefaultAgentConfig({ providers: ['claude'] }) };
-  if (!port && configExists()) {
+  const hasConfig = configExists();
+  let config;
+  if (hasConfig) {
+    ({ config } = await loadConfigWithVoiceRuntimeIdentityPreflight({ identityResolver }));
+  } else {
+    config = { agents: createDefaultAgentConfig({ providers: ['claude'] }) };
+  }
+  if (!port && hasConfig) {
     port = config.server?.claudeApiPort || 3333;
   }
   if (!port) {
@@ -35,7 +49,7 @@ export async function apiServerCommand(options = {}) {
   console.log(chalk.gray(`Starting API server on port ${port}...`));
   console.log(chalk.gray('This wraps the configured Claude and/or Codex CLIs for voice-server connections.\n'));
 
-  const providerChecks = await checkConfiguredAgentProviders(config);
+  const providerChecks = await checkProviders(config);
   const providerFailure = providerChecks.find(result => !result.installed || !result.authenticated);
   if (providerFailure) {
     const label = providerFailure.provider === 'codex' ? 'Codex' : 'Claude';
@@ -48,7 +62,7 @@ export async function apiServerCommand(options = {}) {
   const spinner = ora('Starting server...').start();
 
   try {
-    const child = spawn('node', [serverPath], {
+    const child = spawnProcess('node', [serverPath], {
       env: {
         ...buildAgentServerEnvironment(config),
         PORT: port.toString()
@@ -57,7 +71,7 @@ export async function apiServerCommand(options = {}) {
     });
 
     // Save PID
-    savePid('claude-api-server', child.pid);
+    persistPid('claude-api-server', child.pid);
 
     spinner.succeed(chalk.green('Server started'));
     console.log(chalk.bold.cyan(`\n📡 Listening on port ${port}\n`));
@@ -66,7 +80,7 @@ export async function apiServerCommand(options = {}) {
 
     // Handle cleanup on exit
     const cleanup = () => {
-      removePid('claude-api-server');
+      deletePid('claude-api-server');
       child.kill();
       process.exit(0);
     };
@@ -76,7 +90,7 @@ export async function apiServerCommand(options = {}) {
 
     // Wait for child to exit
     child.on('exit', (code) => {
-      removePid('claude-api-server');
+      deletePid('claude-api-server');
       if (code !== 0) {
         console.log(chalk.red(`\n✗ Server exited with code ${code}\n`));
         process.exit(code);

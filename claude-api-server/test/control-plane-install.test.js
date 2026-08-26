@@ -207,6 +207,20 @@ test('control-plane installer source has exact disabled activation truth', () =>
   assert.match(installer,
     /\/usr\/bin\/env -i HOME=\/var\/empty PATH=\/usr\/sbin:\/usr\/bin:\/sbin:\/bin/);
   assert.match(installer, /response has unsafe framing/);
+  assert.match(installer, /the controller can inherit retired phone approval authority/);
+  assert.match(installer, /the controller can reach the retired privileged-action socket/);
+  const verifier = fs.readFileSync(
+    path.join(CONTROLLER_DEPLOY, 'verify-teleagent-control-plane'),
+    'utf8',
+  );
+  for (const name of [
+    'VOICE_APPROVAL_KEY_ID',
+    'VOICE_APPROVAL_PUBLIC_KEY_FILE',
+    'PRIVILEGED_ACTION_API_TOKEN',
+    'PRIVILEGED_ACTION_PROXY_ENABLED',
+    'PRIVILEGED_ACTION_PROXY_SOCKET_PATH',
+    'PRIVILEGED_ACTION_PROXY_TIMEOUT_MS',
+  ]) assert.match(verifier, new RegExp(`(?:^|\\s)${name}(?:\\s|$)`, 'm'));
   assert.doesNotMatch(installer, /"\$systemctl_bin"\s+(?:start|enable|restart)\b/);
   assert.doesNotMatch(installer, /(?:touch|install|cp|mv)[^\n]*\/ENABLE/);
 });

@@ -100,6 +100,8 @@ test('issued capabilities bind the exact operation and are consumable only once'
     }
   );
   assert.match(verified.nonce, /^[A-Za-z0-9_-]{32}$/);
+  assert.match(verified.key_fingerprint, /^[a-f0-9]{64}$/u);
+  assert.equal(verified.key_fingerprint, verifier.keyFingerprint(verified.key_id));
 
   const consumed = await verifier.consume(token, bindings());
   assert.equal(consumed.job_id, bindings().jobId);

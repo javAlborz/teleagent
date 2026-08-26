@@ -51,6 +51,9 @@ PROMOTION_BLOCKERS = (
     "persistent-docker-group-self-hosted-runner-is-not-an-external-trust-boundary",
     "voice-image-build-toolchain-is-not-hermetic",
     "separate-trusted-ephemeral-attestation-job-is-not-defined",
+    "independent-pbx-attested-request-bound-approval-authority-is-not-implemented",
+    "receiver-safe-sip-media-network-boundary-and-asterisk-rtp-attestation-"
+    "are-not-implemented",
     "universal-current-boot-release-gate-enforcement-at-"
     "credential-bearing-service-restart-is-not-proven",
     "dedicated-staging-proof-including-non-root-media-containers-is-missing",

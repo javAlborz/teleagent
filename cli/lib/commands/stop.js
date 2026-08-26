@@ -1,6 +1,6 @@
 import chalk from 'chalk';
 import ora from 'ora';
-import { loadConfig, configExists, getInstallationType } from '../config.js';
+import { loadConfigReadOnly, configExists, getInstallationType } from '../config.js';
 import { stopContainers } from '../docker.js';
 import { stopServer, isServerRunning } from '../process-manager.js';
 
@@ -18,7 +18,7 @@ export async function stopCommand() {
   }
 
   // Load config and get installation type
-  const config = await loadConfig();
+  const config = await loadConfigReadOnly();
   const installationType = getInstallationType(config);
 
   console.log(chalk.gray(`Installation type: ${installationType}\n`));

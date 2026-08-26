@@ -10,7 +10,6 @@ const OTHER_VOICE_SCOPE_TOKENS = Object.freeze([
   'CLAUDE_API_TOKEN',
   'EXECUTOR_API_TOKEN',
   'OUTBOUND_API_TOKEN',
-  'PRIVILEGED_ACTION_API_TOKEN',
 ]);
 
 class VoiceControlAuthConfigError extends Error {
@@ -53,7 +52,6 @@ function loadVoiceControlAuthConfig({ env: suppliedSettings = null, runtimeSecre
     const runtimeName = {
       EXECUTOR_API_TOKEN: 'executorApiToken',
       OUTBOUND_API_TOKEN: 'outboundApiToken',
-      PRIVILEGED_ACTION_API_TOKEN: 'privilegedActionApiToken',
     }[name];
     const other = String(
       suppliedSettings ? suppliedSettings[name] : (runtimeName

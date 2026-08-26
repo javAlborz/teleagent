@@ -14,9 +14,10 @@ unset ENV BASH_ENV CDPATH LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT GCONV_PATH \
   DOCKER_HOST DOCKER_CONTEXT DOCKER_CONFIG
 umask 077
 
-source_root=/opt/teleagent/current/deploy/voice-stack
+name=teleagent-voice-stack-install
+source_root=
 node_runtime=/usr/local/libexec/teleagent-node
-source_verifier=$source_root/verify-voice-stack-identity
+source_verifier=
 installed_verifier=/usr/local/libexec/verify-voice-stack-identity
 unit=teleagent-voice-stack.service
 slice_unit=teleagent-voice-containers.slice
@@ -87,6 +88,35 @@ host_path() {
 }
 
 configure_environment
+
+resolve_source_bundle() {
+  local self app_root installed_entrypoint
+  case "$requested_action" in
+    --source-check|--install-disabled|--check) ;;
+    *) return ;;
+  esac
+  self=$(/usr/bin/readlink -f -- "$0") || fail 'the source entrypoint could not be resolved'
+  installed_entrypoint=$(host_path /usr/local/libexec/teleagent-voice-stack-install)
+  if [ "$self" = "$installed_entrypoint" ]; then
+    [ "$requested_action" = --check ] ||
+      fail 'source operations require an immutable release entrypoint'
+    source_root=$(/usr/bin/readlink -f -- \
+      "$(host_path /opt/teleagent/current/deploy/voice-stack)") ||
+      fail 'the installed check source directory could not be resolved'
+  else
+    [ "$(/usr/bin/basename -- "$self")" = "$name" ] ||
+      fail 'the source entrypoint is unreviewed'
+    source_root=$(/usr/bin/dirname -- "$self") ||
+      fail 'the source directory could not be resolved'
+  fi
+  app_root=$(/usr/bin/readlink -f -- "$source_root/../..") ||
+    fail 'the source release root could not be resolved'
+  [ "$source_root" = "$app_root/deploy/voice-stack" ] ||
+    fail 'the source bundle is outside one resolved release root'
+  source_verifier=$source_root/verify-voice-stack-identity
+}
+
+resolve_source_bundle
 systemctl_command=("$systemctl_bin")
 if [ "$test_only" -eq 0 ]; then
   systemctl_command=(/usr/bin/env -i HOME=/var/empty PATH=/usr/sbin:/usr/bin:/sbin:/bin
@@ -186,7 +216,7 @@ remove_runtime_projection() {
       fail 'a generated voice configuration path became a directory'
     /usr/bin/rm -f -- "$target"
   done
-  /usr/bin/sync -d "$runtime_root"
+  /usr/bin/sync -- "$runtime_root"
 }
 
 emergency_cleanup() {
@@ -421,13 +451,13 @@ install_disabled() {
     fi
     /usr/bin/install -o root -g root -m "${modes[$index]}" -- \
       "${sources[$index]}" "${targets[$index]}.new-$$"
-    /usr/bin/sync -f "${targets[$index]}.new-$$"
+    /usr/bin/sync -- "${targets[$index]}.new-$$"
   done
 
   committed=1
   for ((index = 0; index < ${#targets[@]}; index += 1)); do
     /usr/bin/mv -f -- "${targets[$index]}.new-$$" "${targets[$index]}"
-    /usr/bin/sync -d "$(dirname "${targets[$index]}")"
+    /usr/bin/sync -- "$(dirname "${targets[$index]}")"
   done
 
   # These tools create only the reviewed identity and empty directories. They
@@ -435,7 +465,8 @@ install_disabled() {
   "$sysusers_bin" /etc/sysusers.d/teleagent-voice-stack.conf
   "$tmpfiles_bin" --create /etc/tmpfiles.d/teleagent-voice-stack.conf
   run_systemctl daemon-reload
-  "$installed_verifier" --installed-check | /usr/bin/grep -qx VOICE_STACK_IDENTITY_OK ||
+  "$installed_verifier" --installed-check --source-root "$source_root" |
+    /usr/bin/grep -qx VOICE_STACK_IDENTITY_OK ||
     fail 'the installed voice identity did not verify'
   assert_disabled
   complete=1
@@ -445,7 +476,8 @@ install_disabled() {
 check_installed() {
   require_root
   assert_disabled
-  "$installed_verifier" --installed-check | /usr/bin/grep -qx VOICE_STACK_IDENTITY_OK ||
+  "$installed_verifier" --installed-check --source-root "$source_root" |
+    /usr/bin/grep -qx VOICE_STACK_IDENTITY_OK ||
     fail 'the installed voice identity did not verify'
   printf 'VOICE_STACK_INSTALLED_DISABLED_OK\n'
 }

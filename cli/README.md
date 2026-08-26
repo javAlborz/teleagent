@@ -33,13 +33,25 @@ The split-host voice/controller mode is retired. Credential-bearing voice
 traffic must be co-located with the guarded controller on fixed loopback; the
 configuration generator refuses `voice-server` and `pi-split` deployment modes.
 
-Voice setup and start require a pre-provisioned, non-login
-`teleagent-voice` system account. The CLI resolves its exact UID/GID and never
-falls back to the invoking owner or UID/GID 1000. Install device configuration
-and the approval/SIP credentials under `/etc/teleagent-voice` with the
-root:`teleagent-voice` modes documented in `voice-app/DEPLOYMENT.md`, and use
-`/var/lib/teleagent-voice` for durable state. Missing identity or unsafe
-metadata stops startup before Docker opens a listener.
+Voice setup and start require three distinct, pre-provisioned, non-login system
+accounts: `teleagent-voice`, `teleagent-drachtio`, and `teleagent-freeswitch`.
+The CLI resolves every exact user, primary group, UID, and GID, requires the
+three numeric identities to be distinct, and never falls back to the invoking
+owner or UID/GID 1000. In every voice mode, setup performs this complete
+identity preflight before it writes configuration or other deployment state.
+Use `/var/lib/teleagent-voice` only for durable voice state; both media accounts
+have `/nonexistent` homes.
+
+Install device configuration under `/etc/teleagent-voice/config`. The two
+root-owned files
+`/etc/teleagent-voice/credentials/sip-ingress-password` and
+`/etc/teleagent-voice/credentials/sip-callback-password` must use
+`root:teleagent-voice` mode `0440`, as documented in `voice-app/DEPLOYMENT.md`.
+They authenticate only the two local SIP trunk directions. They grant no
+caller-approval, agent-mutation, target-session, privileged-action, or provider
+authority. Production voice receives neither an approval signer nor a
+privileged bearer. A missing or unsafe identity or credential stops activation
+before Docker opens a listener.
 
 ### API Server
 
@@ -152,8 +164,9 @@ All configuration is stored in `~/.claude-phone/`:
 The generated `voice-app` service does not inherit this `.env` wholesale.
 Compose uses it only to resolve an explicit, source-tested voice runtime
 allowlist. General Claude/Codex bridge bearers remain empty in the container,
-sensitive bridge logging is forced off, and the approval signer always uses
-the fixed read-only `/run/secrets/teleagent-approval-private.pem` mount. Start
+sensitive bridge logging is forced off, and no approval signer or privileged
+bearer is projected into voice. Phone mutation remains blocked until an
+independent PBX-attested, controller-owned authority exists. Start
 only through the CLI, which delegates to the root-owned guarded unit. Running
 Compose from `~/.claude-phone` is unsupported because it bypasses the immutable
 image, credential, panic, activation-state, and crash-cleanup gates.
@@ -183,13 +196,13 @@ image, credential, panic, activation-state, and crash-cleanup gates.
       "terra": {
         "model": "gpt-5.6-terra",
         "reasoningEffort": "medium",
-        "sandbox": "workspace-write",
+        "sandbox": "read-only",
         "workingDirectory": "/home/example/phone"
       },
       "sol": {
         "model": "gpt-5.6-sol",
         "reasoningEffort": "high",
-        "sandbox": "danger-full-access",
+        "sandbox": "read-only",
         "workingDirectory": "/home/example"
       }
     }

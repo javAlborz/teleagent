@@ -25,19 +25,19 @@ artifacts.
 
 Hermes' model map is:
 
-| Fresh | Resume | Profile | Normal boundary |
+| Fresh | Resume | Profile | Production phone boundary |
 | --- | --- | --- | --- |
-| `1` | `11` | Claude Haiku | read/troubleshooting |
-| `2` | `22` | Claude Sonnet | workspace mutation |
-| `3` | `33` | Claude Opus | admin-tier agent tools |
-| `4` | `44` | Codex GPT-5.6 Luna | read-only sandbox |
-| `5` | `55` | Codex GPT-5.6 Terra | workspace-write sandbox |
-| `6` | `66` | Codex GPT-5.6 Sol | danger-full-access sandbox |
-| `7` | `77` | OpenAI Realtime conductor | app-owned typed tools |
+| `1` | `11` | Claude Haiku | read-only, fastest tier |
+| `2` | `22` | Claude Sonnet | read-only, stronger tier |
+| `3` | `33` | Claude Opus | read-only, strongest tier |
+| `4` | `44` | Codex GPT-5.6 Luna | read-only, low reasoning |
+| `5` | `55` | Codex GPT-5.6 Terra | read-only, medium reasoning |
+| `6` | `66` | Codex GPT-5.6 Sol | read-only, high reasoning |
+| `7` | `77` | OpenAI Realtime conductor | read-only typed tools |
 
-An admin-tier model does not by itself authorize mutation. Read-only phone jobs
-are downgraded at execution time. Mutating, target-session, and root work must
-pass the exact phone approval flow.
+Model tier changes reasoning quality, not authority. Every production phone job
+is forced read-only. Mutating, target-session, deployment, and root work are
+unavailable until the independently attested authority described below exists.
 
 ## Architecture and trust boundaries
 
@@ -60,17 +60,19 @@ Asterisk private PBX
                        +--> private worker-session Unix-socket proxy
                        |       +--> worker-owned tmux sessions only
                        |
-                       +--> private privileged-action Unix-socket proxy
-                               +--> exact-rule root broker
+                       + - - retired privileged-action proxy boundary
+
+exact-rule root broker (separate, dormant, and inaccessible to the controller)
 ```
 
 The important split is capability-based:
 
-- `voice-app` owns SIP/media, the Realtime API key, durable phone state, and the
-  Ed25519 approval issuer. It has no sudo access, root-broker socket, general
-  `/ask` bearer, or provider credentials.
+- `voice-app` owns SIP/media, the Realtime API key, and durable phone state. It
+  has no approval signing key, privileged-action bearer, sudo access,
+  root-broker socket, general `/ask` bearer, or provider credentials.
 - `claude-api-server` is the private controller. It owns durable executor state
-  and verifies signed plans. It is not public ingress.
+  but production service hardening removes phone approval verifier trust and
+  privileged-proxy access. It is not public ingress.
 - `teleagent-worker` owns the bounded Claude/Codex workspace and provider
   processes. The controller reaches it only through the fixed root-owned
   launcher. Agent prompts go over stdin, never process argv.
@@ -90,14 +92,19 @@ tmux socket with the worker, or grant the worker broad sudo/group membership.
 
 ## Authorization invariants
 
-Four HTTP bearer tokens are mandatory, clean, pairwise distinct, and scoped:
+Three active HTTP bearer tokens are mandatory, clean, pairwise distinct, and
+scoped:
 
 | Credential | Routes |
 | --- | --- |
 | `AGENT_API_TOKEN` | general non-phone bridge routes |
 | `EXECUTOR_API_TOKEN` | durable `/executor/**` routes |
 | `VOICE_CONTROL_TOKEN` | `/voice-control/**`, operator, and unlock routes |
-| `PRIVILEGED_ACTION_API_TOKEN` | privileged controller proxy |
+
+The privileged-action bearer and proxy implementation remain only as
+unit-tested future substrate. The production controller service removes their
+environment settings after `EnvironmentFile` processing and cannot access the
+broker socket.
 
 Committed example, placeholder, `changeme`, or `replace-with` values are
 invalid. The controller defaults to `127.0.0.1`; a non-loopback bind requires
@@ -105,18 +112,25 @@ invalid. The controller defaults to `127.0.0.1`; a non-loopback bind requires
 Compose explicitly blanks the general and legacy Claude bearer inside
 `voice-app`.
 
-Voice mutation approval is a two-phase protocol:
+Phone mutation, target-session delivery, and privileged work are production
+disabled. Voice always constructs `AgentJobBroker` without a capability issuer
+or privileged bridge, so these requests fail before an approval can authorize
+execution. The retained capability primitives describe the future two-phase
+protocol, not a production activation path:
 
 1. Store the exact normalized request and canonical execution plan.
-2. Speak the exact bounded approval prompt.
-3. Wait for OpenAI `response.output_audio.done`, then enqueue a unique marker
-   after that PCM and wait for the correlated FreeSWITCH marker acknowledgement.
-   This proves the media server consumed the marked audio; it is not a physical
-   handset playback acknowledgement.
-4. Accept `#` only for the currently armed job, call UUID, Realtime session,
-   response, and item. `*` rejects/cancels the focused job.
-5. Issue a short-lived Ed25519 capability bound to job, call, request hash,
-   canonical plan hash, target, provider/profile, key ID, expiry, and nonce.
+2. Have an independently isolated PBX attester, not `voice-app`, play the exact
+   controller-canonical approval prompt and observe handset-side DTMF.
+3. Persist request-bound prompt-completion and `#` evidence tied to the exact
+   call leg; voice/FreeSWITCH events that voice can forge are insufficient.
+4. Have a controller-owned authority atomically validate and consume that
+   evidence, then issue a short-lived Ed25519 capability bound to job, call,
+   request hash, canonical plan hash, target, provider/profile, key ID, expiry,
+   and nonce.
+5. The executor derives the SHA-256 SPKI fingerprint of the verifying public
+   key and persists it with the admitting key ID. Immediately before the first
+   external effect, both must still match the active verifier epoch—even when a
+   replacement key reuses the same ID.
 6. The executor or root broker atomically consumes replay state while inserting
    the durable work item. Raw capabilities and reusable credentials are never
    persisted.
@@ -231,8 +245,10 @@ development environment report ready.
 `.env.example` documents variables; it intentionally contains nonfunctional
 placeholders. Secrets belong in ignored mode-`0600` files or systemd
 `LoadCredential`, never Git, command argv, logs, transcripts, or agent prompts.
-The approval private key belongs only to voice; controller/root receive the
-public key.
+No approval private key belongs in voice. Production controller and root trust
+anchors for the retired phone signer must remain absent/revoked. A future
+private key belongs only inside the independently attested controller authority;
+executor/root verifiers receive only its public key.
 
 Useful local checks:
 

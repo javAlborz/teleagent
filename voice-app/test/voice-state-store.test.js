@@ -514,6 +514,64 @@ test('pending approvals expire or cancel without ever entering the execution que
   assert.equal(store.approveFocusedJob(thread.id), null);
 });
 
+test('retiring approval authority cancels fresh pending approvals across every thread', (t) => {
+  const { store } = withStore(t);
+  const threads = ['1001', '1002'].map((callerId, index) => {
+    const thread = store.createThread({ callerId });
+    const realtime = store.createRealtimeSession({
+      voiceThreadId: thread.id,
+      callId: `authority-retired-call-${index}`,
+      model: 'gpt-realtime-2.1-mini',
+    });
+    const job = store.createJob({
+      voiceThreadId: thread.id,
+      realtimeSessionId: realtime.id,
+      toolCallId: `authority-retired-tool-${index}`,
+      profile: 'codex-sol',
+      provider: 'codex',
+      request: 'Restart the protected service.',
+      requiresApproval: true,
+      riskLevel: 'high',
+      ...approvalFields(
+        'Approval needed. Restart the protected service. Press pound to approve or star to cancel.'
+      ),
+    }).job;
+    return { thread, job };
+  });
+
+  const canceled = store.cancelAllAwaitingApprovals(
+    'Production phone approval authority is disabled.',
+    {
+      auditAction: 'approval_authority_retired',
+      auditMetadata: { source: 'startup_recovery' },
+    }
+  );
+
+  assert.deepEqual(
+    new Set(canceled.map((job) => job.id)),
+    new Set(threads.map(({ job }) => job.id))
+  );
+  for (const { thread, job } of threads) {
+    assert.equal(store.getJob(job.id).status, 'canceled');
+    assert.equal(store.getJob(job.id).notification_status, 'skipped');
+    assert.equal(store.getThread(thread.id).focused_approval_job_id, null);
+    assert.equal(
+      store.db.prepare('SELECT status FROM approvals WHERE job_id = ?').get(job.id).status,
+      'rejected'
+    );
+  }
+  const audit = store.db.prepare(`
+    SELECT action, metadata_json FROM operation_audit
+    WHERE action = 'approval_authority_retired'
+    ORDER BY id ASC
+  `).all();
+  assert.equal(audit.length, 2);
+  assert.deepEqual(
+    audit.map((row) => JSON.parse(row.metadata_json).source),
+    ['startup_recovery', 'startup_recovery']
+  );
+});
+
 test('completion notifications stay durable until the phone confirms delivery', (t) => {
   const { store } = withStore(t);
   const thread = store.createThread({ callerId: '1001' });

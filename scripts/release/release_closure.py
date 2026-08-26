@@ -90,6 +90,7 @@ BOUND_SOURCE_PATHS = (
     "deploy/voice-stack/freeswitch-event-socket.conf.xml.template",
     "deploy/voice-stack/teleagent-sip-local-peer-fence",
     "deploy/voice-stack/teleagent-sip-local-peer-fence-install",
+    "deploy/voice-stack/teleagent-sip-local-peer-fence.bundle",
     "deploy/voice-stack/teleagent-sip-local-peer-fence.service",
     "deploy/voice-stack/teleagent-voice-containers.slice",
     "deploy/voice-stack/teleagent-voice-stack-install",

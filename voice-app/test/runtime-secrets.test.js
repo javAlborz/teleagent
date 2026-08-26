@@ -20,7 +20,6 @@ const VALUES = Object.freeze({
   freeswitchSecret: 'freeswitch_9876543210fedcba_HGFEDCBA',
   executorApiToken: 'executor_0123456789abcdef_ABCDEFGH',
   voiceControlToken: 'voice_control_0123456789abcdef_ABCDEFGH',
-  privilegedActionApiToken: 'privileged_0123456789abcdef_ABCDEFGH',
   openaiRealtimeApiKey: 'sk-project-0123456789abcdef-ABCDEFGH',
   openaiSafetyIdentifierSalt: 'safety_0123456789abcdef_ABCDEFGH',
   outboundApiToken: 'outbound_0123456789abcdef_ABCDEFGH',
@@ -60,15 +59,16 @@ test('loads one immutable, pairwise-distinct runtime secret snapshot', (t) => {
   assert.throws(() => getRuntimeSecret('executorApiToken'), RuntimeSecretError);
 });
 
-test('required and explicitly-enabled credentials fail closed when absent', (t) => {
+test('required credentials fail closed when absent', (t) => {
   const missingCore = fixture(t, { executorApiToken: null });
   assert.throws(() => load(missingCore), { code: 'VOICE_RUNTIME_SECRET_UNREADABLE' });
+});
 
-  const missingPrivileged = fixture(t, { privilegedActionApiToken: null });
-  assert.throws(
-    () => load(missingPrivileged, { required: ['privilegedActionApiToken'] }),
-    { code: 'VOICE_RUNTIME_SECRET_UNREADABLE' },
-  );
+test('voice runtime has no privileged-action credential slot', () => {
+  assert.equal(Object.hasOwn(SECRET_SPECS, 'privilegedActionApiToken'), false);
+  assert.throws(() => getRuntimeSecret('privilegedActionApiToken'), {
+    code: 'VOICE_RUNTIME_SECRET_UNKNOWN',
+  });
 });
 
 test('rejects symlinks, hard links, unsafe modes, placeholders, and reuse', (t) => {

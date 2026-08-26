@@ -665,20 +665,21 @@ install_disabled() {
     fi
     /usr/bin/install -o "$expected_uid" -g "$expected_gid" \
       -m "${target_modes[$index]}" -- "$app_root/${sources[$index]}" "$temporary"
-    /usr/bin/sync -f "$temporary"
+    /usr/bin/sync -- "$temporary"
   done
 
   committed=1
   for ((index = 0; index < ${#targets[@]}; index += 1)); do
     target=$(host_path "${targets[$index]}")
     /usr/bin/mv -f -- "${target}.new-$$" "$target"
-    /usr/bin/sync -d "$(/usr/bin/dirname -- "$target")"
+    /usr/bin/sync -- "$(/usr/bin/dirname -- "$target")"
   done
 
   "$sysusers_bin" "$(host_path /etc/sysusers.d/teleagent-worker-session.conf)"
   "$tmpfiles_bin" --create "$(host_path /etc/tmpfiles.d/teleagent-worker-session.conf)"
   run_systemctl daemon-reload
-  "$identity_bin" --installed-check | /usr/bin/grep -qx WORKER_SESSION_IDENTITY_OK ||
+  "$identity_bin" --installed-check --source-root "$source_root" |
+    /usr/bin/grep -qx WORKER_SESSION_IDENTITY_OK ||
     fail 'the installed split numeric identities failed verification'
   assert_dormant installed
   check_installed_assets
@@ -693,7 +694,8 @@ check_installed() {
   source_check
   assert_dormant installed
   check_installed_assets
-  "$identity_bin" --installed-check | /usr/bin/grep -qx WORKER_SESSION_IDENTITY_OK ||
+  "$identity_bin" --installed-check --source-root "$source_root" |
+    /usr/bin/grep -qx WORKER_SESSION_IDENTITY_OK ||
     fail 'the installed split numeric identities failed verification'
   assert_component_storage
 }

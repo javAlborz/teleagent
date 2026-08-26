@@ -27,6 +27,14 @@ function fixture(t) {
   return { inspector, root };
 }
 
+test('runtime description advertises only the production read-only tmux boundary', (t) => {
+  const { inspector } = fixture(t);
+  const runtime = inspector.describeRuntime();
+  assert.match(runtime.tmux_access, /bounded read-only inspection/);
+  assert.match(runtime.tmux_access, /unavailable from production phone/);
+  assert.doesNotMatch(runtime.tmux_access, /approved target-bound messaging/);
+});
+
 test('bounded file inspection lists safe files, clips output, and redacts labeled secrets', async (t) => {
   const { inspector, root } = fixture(t);
   const listing = await inspector.listDirectory({ path: root });

@@ -218,7 +218,6 @@ test('voice-control token validation fails startup for weak, placeholder, or reu
     'CLAUDE_API_TOKEN',
     'EXECUTOR_API_TOKEN',
     'OUTBOUND_API_TOKEN',
-    'PRIVILEGED_ACTION_API_TOKEN',
   ]) {
     assert.throws(
       () => loadVoiceControlAuthConfig({

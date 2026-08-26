@@ -76,6 +76,7 @@ VOICE_AND_HOST_SOURCE_PATHS = (
     "deploy/voice-stack/freeswitch-event-socket.conf.xml.template",
     "deploy/voice-stack/teleagent-sip-local-peer-fence",
     "deploy/voice-stack/teleagent-sip-local-peer-fence-install",
+    "deploy/voice-stack/teleagent-sip-local-peer-fence.bundle",
     "deploy/voice-stack/teleagent-sip-local-peer-fence.service",
     "deploy/voice-stack/teleagent-voice-containers.slice",
     "deploy/voice-stack/teleagent-voice-stack-install",
@@ -95,6 +96,9 @@ EXPECTED_PROMOTION_BLOCKERS = (
     "persistent-docker-group-self-hosted-runner-is-not-an-external-trust-boundary",
     "voice-image-build-toolchain-is-not-hermetic",
     "separate-trusted-ephemeral-attestation-job-is-not-defined",
+    "independent-pbx-attested-request-bound-approval-authority-is-not-implemented",
+    "receiver-safe-sip-media-network-boundary-and-asterisk-rtp-attestation-"
+    "are-not-implemented",
     "universal-current-boot-release-gate-enforcement-at-"
     "credential-bearing-service-restart-is-not-proven",
     "dedicated-staging-proof-including-non-root-media-containers-is-missing",
@@ -280,7 +284,7 @@ class CiReleaseTests(unittest.TestCase):
             | sip_sources
         )
         self.assertEqual(BOUND_SOURCE_PATHS, tuple(sorted(expected)))
-        self.assertEqual(len(BOUND_SOURCE_PATHS), 130)
+        self.assertEqual(len(BOUND_SOURCE_PATHS), 131)
         self.assertEqual(len(BOUND_SOURCE_PATHS), len(set(BOUND_SOURCE_PATHS)))
         package_scopes = {
             nearest_package_scope(relative)

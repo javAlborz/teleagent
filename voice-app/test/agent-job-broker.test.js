@@ -140,6 +140,27 @@ test('generic managed-session dispatch refuses to impersonate delivery to an exi
   });
   assert.equal(denied.accepted, false);
   assert.equal(denied.code, 'TARGETED_SESSION_REQUIRED');
+  assert.match(denied.message, /unavailable from production phone/);
+  assert.doesNotMatch(denied.message, /send_agent_session_message/);
+});
+
+test('cross-agent handoff prompt stays inside the production read-only boundary', async (t) => {
+  const { broker, calls, realtime, thread } = createFixture(t);
+  const completion = once(broker, 'job.completed');
+  const accepted = await broker.handoffAgentTask({
+    voiceThreadId: thread.id,
+    realtimeSessionId: realtime.id,
+    toolCallId: 'read-only-handoff',
+    fromProfile: 'claude-haiku',
+    toProfile: 'codex-terra',
+    objective: 'Inspect the current repository status.',
+    additionalContext: 'The prior profile reported a clean working tree.',
+  });
+  assert.equal(accepted.accepted, true);
+  await completion;
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].request, /return read-only findings only/);
+  assert.doesNotMatch(calls[0].request, /before changing it|send_agent_session_message/);
 });
 
 test('targeted tmux messages always require pound approval and complete only after provider verification', async (t) => {
@@ -582,11 +603,13 @@ test('mutating and targeted work fail closed when the controller has no signing 
     voiceThreadId: thread.id,
     realtimeSessionId: realtime.id,
     toolCallId: 'unsigned-mutation',
-    profile: 'codex-sol',
+    profile: 'codex-luna',
     request: 'Restart the phone service.',
   });
   assert.equal(mutating.accepted, false);
   assert.equal(mutating.code, 'APPROVAL_CAPABILITY_UNAVAILABLE');
+  assert.match(mutating.message, /Production phone authority is read-only/);
+  assert.doesNotMatch(mutating.message, /codex-sol|write|admin|press pound/i);
   assert.equal(stateStore.listJobs(thread.id).length, 0);
 
   const targeted = await broker.startTargetedSessionTask({
@@ -665,12 +688,12 @@ test('expired and explicitly withdrawn approvals are canceled before execution',
 test('all six profiles are visible and explicit underscoped profiles are rejected', async (t) => {
   const { broker, realtime, thread } = createFixture(t);
   assert.deepEqual(broker.listProfileDetails().map((entry) => [entry.profile, entry.capability]), [
-    ['claude-haiku', 'read'],
-    ['claude-sonnet', 'write'],
-    ['claude-opus', 'admin'],
-    ['codex-luna', 'read'],
-    ['codex-terra', 'write'],
-    ['codex-sol', 'admin'],
+    ['claude-haiku', 'read_only'],
+    ['claude-sonnet', 'read_only'],
+    ['claude-opus', 'read_only'],
+    ['codex-luna', 'read_only'],
+    ['codex-terra', 'read_only'],
+    ['codex-sol', 'read_only'],
   ]);
 
   const denied = await broker.startAgentTask({
@@ -790,6 +813,48 @@ test('startup recovery schedules durable queued jobs exactly once', async (t) =>
   assert.equal(completed.id, queued.id);
   assert.equal(completed.status, 'completed');
   assert.equal(calls.length, 1);
+});
+
+test('startup without an issuer cancels a fresh legacy approval before it can be replayed', (t) => {
+  const { broker, calls, realtime, stateStore, thread } = createFixture(t, null, {
+    approvalCapabilityIssuer: null,
+  });
+  const pending = stateStore.createJob({
+    voiceThreadId: thread.id,
+    realtimeSessionId: realtime.id,
+    toolCallId: 'fresh-legacy-approval',
+    profile: 'codex-sol',
+    provider: 'codex',
+    request: 'Restart the phone service.',
+    requiresApproval: true,
+    riskLevel: 'mutating',
+    operation: {
+      spokenApprovalPrompt: 'Approval needed. Restart the phone service. Press pound to approve or star to cancel.',
+    },
+    approvalPrompt: 'Approval needed. Restart the phone service. Press pound to approve or star to cancel.',
+  }).job;
+
+  assert.equal(pending.status, 'awaiting_approval');
+  assert.equal(broker.recoverDurableJobs(), 0);
+
+  const canceled = stateStore.getJob(pending.id);
+  assert.equal(canceled.status, 'canceled');
+  assert.equal(canceled.notification_status, 'skipped');
+  assert.match(canceled.error, /authority is disabled/);
+  assert.equal(stateStore.getFocusedJob(thread.id), null);
+  assert.equal(
+    stateStore.db.prepare('SELECT status FROM approvals WHERE job_id = ?').get(pending.id).status,
+    'rejected'
+  );
+  assert.equal(
+    stateStore.db.prepare(`
+      SELECT COUNT(*) AS count FROM operation_audit
+      WHERE job_id = ? AND action = 'approval_authority_retired'
+    `).get(pending.id).count,
+    1
+  );
+  assert.equal(broker.approveNextJob(thread.id).code, 'NO_PENDING_APPROVAL');
+  assert.equal(calls.length, 0);
 });
 
 test('startup recovery refuses to mint a new capability for an expired approval', async (t) => {

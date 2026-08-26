@@ -32,37 +32,37 @@ const PROFILE_DEFINITIONS = Object.freeze({
     provider: 'claude',
     sessionType: 'phone-haiku',
     timeoutSeconds: 600,
-    capability: 'read',
+    routingTier: 'read',
   },
   'claude-sonnet': {
     provider: 'claude',
     sessionType: 'phone-sonnet',
     timeoutSeconds: 1800,
-    capability: 'write',
+    routingTier: 'write',
   },
   'claude-opus': {
     provider: 'claude',
     sessionType: 'phone-opus',
     timeoutSeconds: 3600,
-    capability: 'admin',
+    routingTier: 'admin',
   },
   'codex-luna': {
     provider: 'codex',
     sessionType: 'phone-codex-luna',
     timeoutSeconds: 600,
-    capability: 'read',
+    routingTier: 'read',
   },
   'codex-terra': {
     provider: 'codex',
     sessionType: 'phone-codex-terra',
     timeoutSeconds: 1800,
-    capability: 'write',
+    routingTier: 'write',
   },
   'codex-sol': {
     provider: 'codex',
     sessionType: 'phone-codex-sol',
     timeoutSeconds: 3600,
-    capability: 'admin',
+    routingTier: 'admin',
   },
 });
 
@@ -100,7 +100,7 @@ function refersToTargetedSession(request) {
 
 function profileCan(profile, capability) {
   const definition = PROFILE_DEFINITIONS[profile];
-  return Boolean(definition && CAPABILITY_RANK[definition.capability] >= CAPABILITY_RANK[capability]);
+  return Boolean(definition && CAPABILITY_RANK[definition.routingTier] >= CAPABILITY_RANK[capability]);
 }
 
 function routedProfile({ requestedProfile, selectedProfile, request, capability }) {
@@ -261,7 +261,7 @@ class AgentJobBroker extends EventEmitter {
     approvalCapabilityIssuer = null,
     privilegedActionBridge = null,
     outboundControl = null,
-    approvalTtlSeconds = process.env.VOICE_APPROVAL_TTL_SECONDS || 300,
+    approvalTtlSeconds = 300,
     reconciliationBaseDelayMs = process.env.VOICE_JOB_RECONCILIATION_BASE_MS || 250,
     reconciliationMaxDelayMs = process.env.VOICE_JOB_RECONCILIATION_MAX_MS || 30000,
     reconciliationPollWindowMs = process.env.VOICE_JOB_RECONCILIATION_POLL_MS || 2000,
@@ -364,7 +364,7 @@ class AgentJobBroker extends EventEmitter {
     return {
       accepted: false,
       code: 'APPROVAL_CAPABILITY_UNAVAILABLE',
-      message: 'Mutating voice work is disabled because signed approval capabilities are unavailable.',
+      message: 'Production phone authority is read-only. Mutating and privileged work is unavailable.',
     };
   }
 
@@ -397,7 +397,8 @@ class AgentJobBroker extends EventEmitter {
     return Object.entries(PROFILE_DEFINITIONS).map(([profile, definition]) => ({
       profile,
       provider: definition.provider,
-      capability: definition.capability,
+      capability: 'read_only',
+      authority: 'read_only',
       timeout_seconds: definition.timeoutSeconds,
     }));
   }
@@ -445,7 +446,7 @@ class AgentJobBroker extends EventEmitter {
       return {
         accepted: false,
         code: 'TARGETED_SESSION_REQUIRED',
-        message: 'Use send_agent_session_message with an exact tmux target. This managed-session tool cannot claim delivery to an existing tmux conversation.',
+        message: 'Delivery to an existing tmux conversation is unavailable from production phone. Use bounded session inspection when a read-only answer is sufficient.',
       };
     }
 
@@ -465,6 +466,10 @@ class AgentJobBroker extends EventEmitter {
       };
     }
 
+    if (classification.requiresApproval && !this.approvalCapabilityIssuer?.issue) {
+      return this._approvalCapabilityUnavailable();
+    }
+
     if (!profileCan(normalizedProfile, classification.capability)) {
       const suggested = routedProfile({
         requestedProfile: 'auto',
@@ -475,7 +480,7 @@ class AgentJobBroker extends EventEmitter {
       return {
         accepted: false,
         code: 'AGENT_PROFILE_CAPABILITY_REQUIRED',
-        message: `${normalizedProfile} is ${PROFILE_DEFINITIONS[normalizedProfile].capability}-scope. Use ${suggested} for this ${classification.level} request.`,
+        message: `The selected profile cannot satisfy this dormant classified test request. Use ${suggested}.`,
         suggested_profile: suggested,
         risk: classification.level,
       };
@@ -486,9 +491,6 @@ class AgentJobBroker extends EventEmitter {
       : 'in_call';
     const definition = PROFILE_DEFINITIONS[normalizedProfile];
     const requiresApproval = classification.requiresApproval;
-    if (requiresApproval && !this.approvalCapabilityIssuer?.issue) {
-      return this._approvalCapabilityUnavailable();
-    }
     const approvalSummary = requiresApproval
       ? buildApprovalSummary({ profile: normalizedProfile, request: normalizedRequest, classification })
       : null;
@@ -877,7 +879,7 @@ class AgentJobBroker extends EventEmitter {
       `Source managed session exists: ${sourceSession ? 'yes' : 'no'}\n` +
       `${brief ? `Recent source work:\n${brief}\n` : ''}` +
       `${additionalContext ? `Additional sanitized context:\n${String(additionalContext).slice(0, 8000)}\n` : ''}` +
-      `Treat this brief as an explicit handoff, not shared hidden context. Validate the current workspace state before changing it.\n` +
+      `Treat this brief as an explicit handoff, not shared hidden context. Inspect the current workspace state and return read-only findings only.\n` +
       `[END CROSS-AGENT HANDOFF]`;
     return this.startAgentTask({
       voiceThreadId,
@@ -1133,6 +1135,16 @@ class AgentJobBroker extends EventEmitter {
   recoverDurableJobs() {
     if (!this._isOperational()) return 0;
     this._expireApprovals(null);
+    if (!this.approvalCapabilityIssuer?.issue) {
+      const canceled = this.stateStore.cancelAllAwaitingApprovals(
+        'Production phone approval authority is disabled; the legacy approval was canceled before replay or execution.',
+        {
+          auditAction: 'approval_authority_retired',
+          auditMetadata: { source: 'startup_recovery' },
+        }
+      );
+      for (const job of canceled) this._emitSafely('job.updated', job);
+    }
     this._drainPendingCallbacks();
     const lock = this.getExecutionLock();
     const recoverable = this.stateStore.listRecoverableJobs();

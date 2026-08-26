@@ -147,7 +147,8 @@ exit 0
   }
   writeExecutable(identity, `#!/bin/bash
 printf '%s %s\\n' "$(basename "$0")" "$*" >>"$FAKE_DEPENDENCY_LOG"
-[ "$*" = --installed-check ] || exit 77
+[ "$#" -eq 3 ] && [ "$1" = --installed-check ] && [ "$2" = --source-root ] || exit 77
+case "$3" in /*/deploy/worker-session) ;; *) exit 77 ;; esac
 [ "\${FAKE_IDENTITY_FAILURE:-}" != 1 ] || exit 77
 printf 'WORKER_SESSION_IDENTITY_OK\\n'
 `);
@@ -321,7 +322,8 @@ test('worker-session installer performs an offline transactional disabled instal
   assert.match(dependencyCalls, /^systemd-sysusers /m);
   assert.match(dependencyCalls, /^systemd-tmpfiles --create /m);
   assert.match(dependencyCalls, /^visudo -cf /m);
-  assert.match(dependencyCalls, /^identity --installed-check$/m);
+  assert.match(dependencyCalls,
+    /^identity --installed-check --source-root \/tmp\/teleagent-worker-session-install-test-[^/]+\/release\/deploy\/worker-session$/m);
   assert.equal(
     dependencyCalls.match(/^storage-attestor --action attest-workspace-storage$/gm)?.length,
     2

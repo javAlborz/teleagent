@@ -23,6 +23,7 @@ const { requestHash } = require('../../lib/voice-operation-risk');
 const {
   authorizeManagedVoiceRequest,
   authorizeTargetSessionRequest,
+  executeWithCurrentApprovalAuthority,
   loadApprovalPublicKeys,
 } = require('../voice-approval-verifier');
 
@@ -48,6 +49,137 @@ test('read-only phone work does not require an approval capability', async () =>
   });
   assert.equal(result.allowed, true);
   assert.equal(result.authorization, null);
+});
+
+test('absent phone authority never instructs the caller to approve with DTMF', () => {
+  const result = authorizeTargetSessionRequest({ verifier: null });
+  assert.equal(result.allowed, false);
+  assert.equal(result.code, 'VOICE_APPROVAL_VERIFIER_UNAVAILABLE');
+  assert.match(result.userMessage, /disabled pending an independent PBX attester/);
+  assert.doesNotMatch(result.userMessage, /pound|DTMF/i);
+});
+
+test('execution-time authority gate blocks provider and tmux effects after verifier revocation', async () => {
+  let effects = 0;
+  const execute = async () => { effects += 1; };
+  const managedTask = {
+    taskType: 'managed_ask',
+    request: {
+      ask: { prompt: 'Edit the phone configuration.' },
+      voiceAuthorization: {
+        authorization: { capability_key_id: 'retired-key' },
+      },
+    },
+  };
+  const targetTask = {
+    taskType: 'target_session_message',
+    request: {
+      targetAuthorization: {
+        authorization: { capability_key_id: 'retired-key' },
+      },
+    },
+  };
+
+  await assert.rejects(
+    executeWithCurrentApprovalAuthority({
+      task: managedTask,
+      verifier: null,
+      currentKeyId: '',
+      execute,
+    }),
+    { code: 'VOICE_APPROVAL_AUTHORITY_REVOKED' }
+  );
+  await assert.rejects(
+    executeWithCurrentApprovalAuthority({
+      task: targetTask,
+      verifier: null,
+      currentKeyId: '',
+      execute,
+    }),
+    { code: 'VOICE_APPROVAL_AUTHORITY_REVOKED' }
+  );
+  await assert.rejects(
+    executeWithCurrentApprovalAuthority({
+      task: managedTask,
+      verifier: { keyFingerprint: () => 'a'.repeat(64) },
+      currentKeyId: 'retired-key',
+      execute,
+    }),
+    { code: 'VOICE_APPROVAL_AUTHORITY_REVOKED' }
+  );
+  assert.equal(effects, 0);
+});
+
+test('execution-time authority gate requires the exact current key epoch', async () => {
+  let effects = 0;
+  const admittingFingerprint = 'a'.repeat(64);
+  const tasks = [{
+    taskType: 'managed_ask',
+    request: {
+      ask: { prompt: 'Edit the phone configuration.' },
+      voiceAuthorization: {
+        authorization: {
+          capability_key_id: 'admitting-key',
+          capability_key_fingerprint: admittingFingerprint,
+        },
+      },
+    },
+  }, {
+    taskType: 'target_session_message',
+    request: {
+      targetAuthorization: {
+        authorization: {
+          capability_key_id: 'admitting-key',
+          capability_key_fingerprint: admittingFingerprint,
+        },
+      },
+    },
+  }];
+  for (const task of tasks) {
+    await assert.rejects(
+      executeWithCurrentApprovalAuthority({
+        task,
+        verifier: { keyFingerprint: () => 'b'.repeat(64) },
+        currentKeyId: 'admitting-key',
+        execute: async () => { effects += 1; },
+      }),
+      { code: 'VOICE_APPROVAL_AUTHORITY_REVOKED' }
+    );
+  }
+  assert.equal(effects, 0);
+
+  const result = await executeWithCurrentApprovalAuthority({
+    task: tasks[0],
+    verifier: { keyFingerprint: () => admittingFingerprint },
+    currentKeyId: 'admitting-key',
+    execute: async () => {
+      effects += 1;
+      return 'executed';
+    },
+  });
+  assert.equal(result, 'executed');
+  assert.equal(effects, 1);
+});
+
+test('execution-time authority gate preserves read-only provider work without a verifier', async () => {
+  let effects = 0;
+  const result = await executeWithCurrentApprovalAuthority({
+    task: {
+      taskType: 'managed_ask',
+      request: {
+        ask: { prompt: 'Inspect git status.' },
+        voiceAuthorization: { allowed: true, authorization: null },
+      },
+    },
+    verifier: null,
+    currentKeyId: '',
+    execute: async () => {
+      effects += 1;
+      return 'read-only';
+    },
+  });
+  assert.equal(result, 'read-only');
+  assert.equal(effects, 1);
 });
 
 test('managed mutation consumes one exact plan-bound capability', async () => {
@@ -89,6 +221,11 @@ test('managed mutation consumes one exact plan-bound capability', async () => {
   assert.equal(accepted.authorization.target, managedAgentTarget(sessionKey));
   assert.equal(accepted.authorization.provider, 'codex');
   assert.equal(accepted.authorization.profile, 'codex-sol');
+  assert.match(accepted.authorization.capability_key_fingerprint, /^[a-f0-9]{64}$/u);
+  assert.equal(
+    accepted.authorization.capability_key_fingerprint,
+    verifier.keyFingerprint('test-key')
+  );
   assert.equal(Object.hasOwn(accepted.authorization, 'capability'), false);
   assert.equal(Object.hasOwn(accepted.authorization, 'nonce'), false);
 
