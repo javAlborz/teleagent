@@ -44,7 +44,10 @@ function fixture(t) {
 set -euo pipefail
 root=\${TELEAGENT_SIP_FENCE_INSTALL_TEST_ROOT:?}
 case "\${1:-}" in
-  check) [[ ! -e "\${root}/fail-check" ]] ;;
+  check)
+    /usr/bin/touch "\${root}/check-observed"
+    [[ ! -e "\${root}/fail-check" ]]
+    ;;
   remove) /usr/bin/touch "\${root}/remove-observed" ;;
   *) exit 64 ;;
 esac
@@ -88,6 +91,35 @@ case "\${command}" in
     fi
     printf '%s\\n' not-found
     exit 4
+    ;;
+  show)
+    [[ "$#" -eq 2 ]]
+    [[ "\${1:-}" == '--property=LoadState,ActiveState,SubState,UnitFileState,FragmentPath,NeedDaemonReload,DropInPaths,User,Group' ]]
+    [[ "\${service}" == teleagent-sip-local-peer-fence.service ]]
+    fragment="\${root}/etc/systemd/system/\${service}"
+    reload=no
+    dropins=
+    user=root
+    group=root
+    [[ ! -e "\${root}/show-runtime-fragment" ]] || fragment="/run/systemd/generator/\${service}"
+    [[ ! -e "\${root}/show-drop-in" ]] || dropins="\${root}/etc/systemd/system/\${service}.d/override.conf"
+    [[ ! -e "\${root}/show-daemon-reload" ]] || reload=yes
+    [[ ! -e "\${root}/show-wrong-user" ]] || user=teleagent
+    [[ ! -e "\${root}/show-wrong-group" ]] || group=teleagent
+    if [[ -e "\${root}/show-oversized" ]]; then
+      /usr/bin/head -c 5000 /dev/zero | /usr/bin/tr '\\000' X
+      exit 0
+    fi
+    printf '%s\\n' \
+      'LoadState=loaded' \
+      'ActiveState=active' \
+      'SubState=running' \
+      'UnitFileState=enabled' \
+      "FragmentPath=\${fragment}" \
+      "NeedDaemonReload=\${reload}" \
+      "DropInPaths=\${dropins}" \
+      "User=\${user}" \
+      "Group=\${group}"
     ;;
   daemon-reload) exit 0 ;;
   enable)
@@ -169,6 +201,29 @@ test('SIP fence installer refuses indeterminate prior enablement before publishi
   assert.equal(fs.existsSync(paths.marker), false);
   assert.equal(fs.existsSync(paths.helper), false);
   assert.equal(fs.existsSync(paths.unit), false);
+});
+
+test('SIP fence check rejects loaded-unit identity drift before checking nftables', (t) => {
+  if (process.getuid() === 0) return t.skip('the installer fake lane rejects root');
+  for (const marker of [
+    'show-runtime-fragment',
+    'show-drop-in',
+    'show-daemon-reload',
+    'show-wrong-user',
+    'show-wrong-group',
+    'show-oversized',
+  ]) {
+    const current = fixture(t);
+    const installed = current.run('--install');
+    assert.equal(installed.status, 0, `${marker}: ${installed.stderr}`);
+    const helperObserved = path.join(current.directory, 'check-observed');
+    fs.rmSync(helperObserved);
+    fs.writeFileSync(path.join(current.directory, marker), '1\n');
+
+    const checked = current.run('--check');
+    assert.notEqual(checked.status, 0, marker);
+    assert.equal(fs.existsSync(helperObserved), false, marker);
+  }
 });
 
 test('SIP fence installer rolls back an explicit post-enable check failure', (t) => {

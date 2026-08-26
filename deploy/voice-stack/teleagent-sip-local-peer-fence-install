@@ -22,6 +22,7 @@ helper_pending=/usr/local/libexec/.teleagent-sip-local-peer-fence.installing
 unit_pending=/etc/systemd/system/.teleagent-sip-local-peer-fence.service.installing
 systemctl_bin=/usr/bin/systemctl
 flock_bin=/usr/bin/flock
+unit_properties=LoadState,ActiveState,SubState,UnitFileState,FragmentPath,NeedDaemonReload,DropInPaths,User,Group
 expected_uid=0
 expected_gid=0
 test_only=0
@@ -196,6 +197,74 @@ unit_enabled_state() {
     1:disabled|4:not-found) printf '%s\n' disabled ;;
     *) return 1 ;;
   esac
+}
+
+assert_live_unit_truth() {
+  local output line key value
+  local load_seen=0 active_seen=0 sub_seen=0 enabled_seen=0 fragment_seen=0
+  local reload_seen=0 dropin_seen=0 user_seen=0 group_seen=0
+
+  # Bound both the service-manager response time and the amount Bash may
+  # capture. pipefail turns an oversized response (and its resulting SIGPIPE)
+  # into a refusal; the explicit length check also covers a graceful writer.
+  if ! output=$(
+    /usr/bin/timeout --signal=TERM --kill-after=1s 5s \
+      "${systemctl_bin}" show --property="${unit_properties}" "${unit}" 2>/dev/null |
+      /usr/bin/head -c 4097
+  ); then
+    fail 'could not prove the loaded SIP fence unit identity'
+  fi
+  ((${#output} <= 4096)) || fail 'the loaded SIP fence unit identity response is oversized'
+
+  while IFS= read -r line; do
+    [[ "${line}" == *=* ]] || fail 'the loaded SIP fence unit identity is malformed'
+    key=${line%%=*}
+    value=${line#*=}
+    case "${key}" in
+      LoadState)
+        ((load_seen += 1))
+        [[ "${value}" == loaded ]] || fail 'the SIP fence unit is not loaded'
+        ;;
+      ActiveState)
+        ((active_seen += 1))
+        [[ "${value}" == active ]] || fail 'the SIP fence monitor is not active'
+        ;;
+      SubState)
+        ((sub_seen += 1))
+        [[ "${value}" == running ]] || fail 'the SIP fence monitor is not running'
+        ;;
+      UnitFileState)
+        ((enabled_seen += 1))
+        [[ "${value}" == enabled ]] || fail 'the SIP fence unit is not enabled'
+        ;;
+      FragmentPath)
+        ((fragment_seen += 1))
+        [[ "${value}" == "${target_unit}" ]] || fail 'the SIP fence loaded fragment drifted'
+        ;;
+      NeedDaemonReload)
+        ((reload_seen += 1))
+        [[ "${value}" == no ]] || fail 'the SIP fence unit needs a daemon reload'
+        ;;
+      DropInPaths)
+        ((dropin_seen += 1))
+        [[ -z "${value}" ]] || fail 'the SIP fence unit has an unreviewed drop-in'
+        ;;
+      User)
+        ((user_seen += 1))
+        [[ "${value}" == root ]] || fail 'the SIP fence unit user drifted'
+        ;;
+      Group)
+        ((group_seen += 1))
+        [[ "${value}" == root ]] || fail 'the SIP fence unit group drifted'
+        ;;
+      *) fail 'the loaded SIP fence unit identity contains an unexpected property' ;;
+    esac
+  done <<<"${output}"
+
+  ((load_seen == 1 && active_seen == 1 && sub_seen == 1 && enabled_seen == 1 &&
+    fragment_seen == 1 && reload_seen == 1 && dropin_seen == 1 &&
+    user_seen == 1 && group_seen == 1)) ||
+    fail 'the loaded SIP fence unit identity is incomplete or ambiguous'
 }
 
 tx_phase=
@@ -380,7 +449,7 @@ check_live() {
     fail 'installed helper metadata drifted'
   [[ "$(stat -c '%u:%g:%a' -- "${target_unit}")" == "${expected_uid}:${expected_gid}:644" ]] ||
     fail 'installed unit metadata drifted'
-  "${systemctl_bin}" is-active --quiet "${unit}" || fail 'SIP fence monitor is not active'
+  assert_live_unit_truth
   "${target_helper}" check
 }
 

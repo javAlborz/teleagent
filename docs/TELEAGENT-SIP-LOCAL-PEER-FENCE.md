@@ -30,8 +30,12 @@ back to the prior inactive and enabled/disabled state; after an untrappable
 before retrying. `--check` refuses an unresolved marker rather than claiming a
 partial activation is healthy.
 
-`--check` verifies source/install drift, monitor health, and the exact kernel
-table. `--remove` additionally requires Docker stopped; it is the only path
-that deletes the retained rules. The optional Hermes-wide Docker dependency
-drop-in remains infrastructure policy and is not installed by this application
-bundle.
+`--check` verifies source/install drift and then uses one time- and
+output-bounded service-manager query to bind the running monitor to the exact
+enabled `/etc/systemd/system/teleagent-sip-local-peer-fence.service` fragment.
+It requires loaded/active/running state, root user and group, no drop-ins, and
+no pending daemon reload before asking the helper to verify the exact kernel
+table. A runtime or generator fragment cannot satisfy this check. `--remove`
+additionally requires Docker stopped; it is the only path that deletes the
+retained rules. The optional Hermes-wide Docker dependency drop-in remains
+infrastructure policy and is not installed by this application bundle.
