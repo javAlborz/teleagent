@@ -3,11 +3,16 @@
 
 const { spawn } = require('node:child_process');
 const path = require('node:path');
+const { TextDecoder } = require('node:util');
 
 const CLIENT = '/usr/local/libexec/teleagent-provider-supervisor-client';
 const FIXED_WORKSPACE = '/srv/teleagent-agent-workspaces/phone';
 const EMPTY_MCP = '/etc/teleagent/provider-runtime/empty-mcp.json';
 const EMPTY_SETTINGS = '/etc/teleagent/provider-runtime/empty-settings.json';
+const CANARY_RESPONSE = 'PROVIDER_CANARY_OK';
+const MAX_COMBINED_OUTPUT_BYTES = 16 * 1024;
+const CANARY_DEADLINE_MS = 60 * 1000;
+const POST_KILL_CLOSE_MS = 2 * 1000;
 
 function buildCanaryInvocation(provider, workspaceInput) {
   const workspace = path.resolve(String(workspaceInput || ''));
@@ -44,22 +49,230 @@ function buildCanaryInvocation(provider, workspaceInput) {
   ];
 }
 
-async function run() {
-  const [provider, workspace] = process.argv.slice(2);
+function decodeUtf8(buffer) {
+  try {
+    return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(buffer);
+  } catch {
+    throw new Error('provider canary output was not valid UTF-8');
+  }
+}
+
+function parseClaudeCanaryOutput(stdout) {
+  let text = decodeUtf8(stdout);
+  if (text.endsWith('\r\n')) text = text.slice(0, -2);
+  else if (text.endsWith('\n')) text = text.slice(0, -1);
+  if (text !== CANARY_RESPONSE) {
+    throw new Error('Claude canary final response was not exact');
+  }
+  return true;
+}
+
+function parseCodexCanaryOutput(stdout) {
+  const text = decodeUtf8(stdout);
+  const rawLines = text.split('\n');
+  if (rawLines.at(-1) === '') rawLines.pop();
+  if (rawLines.length === 0 || rawLines.some((line) => line === '')) {
+    throw new Error('Codex canary JSONL was empty or malformed');
+  }
+  let threadStarted = false;
+  let turnStarted = false;
+  let finalMessages = 0;
+  let turnCompleted = false;
+  const itemLifecycles = new Map();
+  const validIdentity = (value) => (
+    typeof value === 'string' &&
+    /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value)
+  );
+  for (const rawLine of rawLines) {
+    if (turnCompleted) throw new Error('Codex canary emitted data after terminal evidence');
+    const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
+    let event;
+    try { event = JSON.parse(line); }
+    catch { throw new Error('Codex canary JSONL was malformed'); }
+    if (!event || typeof event !== 'object' || Array.isArray(event) ||
+        typeof event.type !== 'string') {
+      throw new Error('Codex canary event was malformed');
+    }
+    if (event.type === 'thread.started') {
+      if (threadStarted || turnStarted || finalMessages !== 0 ||
+          !validIdentity(event.thread_id)) {
+        throw new Error('Codex canary thread evidence was ambiguous');
+      }
+      threadStarted = true;
+      continue;
+    }
+    if (event.type === 'turn.started') {
+      if (!threadStarted || turnStarted || finalMessages !== 0) {
+        throw new Error('Codex canary turn evidence was ambiguous');
+      }
+      turnStarted = true;
+      continue;
+    }
+    if (event.type === 'item.started' || event.type === 'item.updated' ||
+        event.type === 'item.completed') {
+      if (!turnStarted || !event.item || typeof event.item !== 'object') {
+        throw new Error('Codex canary item evidence was malformed');
+      }
+      const { id, type, text: itemText } = event.item;
+      if (finalMessages !== 0 || !validIdentity(id) ||
+          !['reasoning', 'agent_message'].includes(type) ||
+          typeof itemText !== 'string') {
+        throw new Error('Codex canary emitted an unexpected item');
+      }
+      const prior = itemLifecycles.get(id);
+      if (event.type === 'item.started') {
+        if (prior) throw new Error('Codex canary item lifecycle was ambiguous');
+        itemLifecycles.set(id, { type, completed: false });
+        continue;
+      }
+      if (event.type === 'item.updated') {
+        if (!prior || prior.completed || prior.type !== type) {
+          throw new Error('Codex canary item lifecycle was ambiguous');
+        }
+        continue;
+      }
+      if (prior && (prior.completed || prior.type !== type)) {
+        throw new Error('Codex canary item lifecycle was ambiguous');
+      }
+      itemLifecycles.set(id, { type, completed: true });
+      if (type === 'reasoning') continue;
+      finalMessages += 1;
+      if (finalMessages !== 1 || itemText !== CANARY_RESPONSE) {
+        throw new Error('Codex canary final response was not exact');
+      }
+      continue;
+    }
+    if (event.type === 'turn.completed') {
+      const incompleteItem = [...itemLifecycles.values()]
+        .some((item) => item.completed !== true);
+      if (!turnStarted || finalMessages !== 1 || incompleteItem ||
+          event.error !== undefined) {
+        throw new Error('Codex canary successful terminal evidence was absent');
+      }
+      turnCompleted = true;
+      continue;
+    }
+    if (event.type === 'turn.failed' || event.type === 'error') {
+      throw new Error('Codex canary reported failure');
+    }
+    throw new Error('Codex canary emitted an unexpected event');
+  }
+  if (!threadStarted || !turnStarted || finalMessages !== 1 || !turnCompleted) {
+    throw new Error('Codex canary successful terminal evidence was absent');
+  }
+  return true;
+}
+
+function parseProviderCanaryOutput(provider, stdout) {
+  if (!Buffer.isBuffer(stdout)) throw new Error('provider canary output buffer was invalid');
+  if (provider === 'claude') return parseClaudeCanaryOutput(stdout);
+  if (provider === 'codex') return parseCodexCanaryOutput(stdout);
+  throw new Error('provider canary identity was invalid');
+}
+
+function captureProviderProcess(child, {
+  deadlineMs = CANARY_DEADLINE_MS,
+  maxCombinedOutputBytes = MAX_COMBINED_OUTPUT_BYTES,
+  postKillCloseMs = POST_KILL_CLOSE_MS,
+} = {}) {
+  if (!Number.isSafeInteger(deadlineMs) || deadlineMs <= 0 ||
+      !Number.isSafeInteger(maxCombinedOutputBytes) || maxCombinedOutputBytes <= 0 ||
+      !Number.isSafeInteger(postKillCloseMs) || postKillCloseMs <= 0 ||
+      !child?.stdout || !child?.stderr) {
+    return Promise.reject(new Error('provider canary capture boundary was invalid'));
+  }
+  return new Promise((resolve, reject) => {
+    const stdout = [];
+    const stderr = [];
+    let combinedBytes = 0;
+    let violation = null;
+    let settled = false;
+    let postKillTimer = null;
+    let deadlineTimer = null;
+    const clearTimers = () => {
+      clearTimeout(deadlineTimer);
+      clearTimeout(postKillTimer);
+    };
+    const terminate = (reason) => {
+      if (settled || violation !== null) return;
+      violation = reason;
+      // The killed supervisor client loses its control socket, which makes the
+      // supervisor reserve provider termination and verify the launch cgroup.
+      // This wrapper still fails after a bounded close fence and never claims
+      // that the provider cgroup is quiescent itself.
+      postKillTimer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        clearTimers();
+        reject(new Error('provider canary child did not close after termination'));
+      }, postKillCloseMs);
+      try { child.kill('SIGKILL'); } catch { /* the close fence remains authoritative */ }
+    };
+    deadlineTimer = setTimeout(() => terminate('deadline'), deadlineMs);
+    const capture = (target) => (chunk) => {
+      if (settled || violation !== null) return;
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      combinedBytes += buffer.length;
+      if (combinedBytes > maxCombinedOutputBytes) {
+        terminate('output-bound');
+        return;
+      }
+      target.push(buffer);
+    };
+    child.stdout.on('data', capture(stdout));
+    child.stderr.on('data', capture(stderr));
+    child.once('error', () => {
+      if (settled) return;
+      settled = true;
+      clearTimers();
+      reject(new Error('provider canary process could not be started'));
+    });
+    child.once('close', (code, signal) => {
+      if (settled) return;
+      settled = true;
+      clearTimers();
+      resolve({
+        code,
+        signal,
+        violation,
+        stdout: Buffer.concat(stdout),
+        stderrBytes: stderr.reduce((total, chunk) => total + chunk.length, 0),
+      });
+    });
+  });
+}
+
+async function executeProviderCanary(provider, workspace, {
+  spawnImpl = spawn,
+  deadlineMs = CANARY_DEADLINE_MS,
+  maxCombinedOutputBytes = MAX_COMBINED_OUTPUT_BYTES,
+  postKillCloseMs = POST_KILL_CLOSE_MS,
+} = {}) {
   const args = buildCanaryInvocation(provider, workspace);
-  const child = spawn(CLIENT, args, {
+  const child = spawnImpl(CLIENT, args, {
     cwd: '/',
     env: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8' },
-    stdio: ['pipe', 'inherit', 'inherit'],
+    stdio: ['pipe', 'pipe', 'pipe'],
     shell: false,
   });
+  child.stdin.on('error', () => {});
   child.stdin.end('Reply exactly PROVIDER_CANARY_OK.\n');
-  const result = await new Promise((resolve, reject) => {
-    child.once('error', reject);
-    child.once('close', (code, signal) => resolve({ code, signal }));
+  const result = await captureProviderProcess(child, {
+    deadlineMs,
+    maxCombinedOutputBytes,
+    postKillCloseMs,
   });
-  if (result.signal) process.kill(process.pid, result.signal);
-  process.exitCode = Number.isInteger(result.code) ? result.code : 1;
+  if (result.violation === 'deadline') throw new Error('provider canary exceeded its deadline');
+  if (result.violation === 'output-bound') throw new Error('provider canary output exceeded its bound');
+  if (result.signal || result.code !== 0) throw new Error('provider canary process did not exit successfully');
+  parseProviderCanaryOutput(provider, result.stdout);
+  return `PROVIDER_CANARY_ATTESTED ${provider}`;
+}
+
+async function run() {
+  const [provider, workspace] = process.argv.slice(2);
+  const attestation = await executeProviderCanary(provider, workspace);
+  process.stdout.write(`${attestation}\n`);
 }
 
 if (require.main === module) {
@@ -69,4 +282,13 @@ if (require.main === module) {
   });
 }
 
-module.exports = { buildCanaryInvocation };
+module.exports = {
+  CANARY_DEADLINE_MS,
+  CANARY_RESPONSE,
+  MAX_COMBINED_OUTPUT_BYTES,
+  POST_KILL_CLOSE_MS,
+  buildCanaryInvocation,
+  captureProviderProcess,
+  executeProviderCanary,
+  parseProviderCanaryOutput,
+};

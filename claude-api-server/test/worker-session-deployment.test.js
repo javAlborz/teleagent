@@ -314,6 +314,11 @@ test('activation verification requires clean provider homes, synthetic DAC denia
   assert.match(verifier, /stat -c '%U:%G:%a'.*teleagent-provider-launch/);
   assert.match(verifier, /\/usr\/local\/libexec\/teleagent-provider-canary claude "\$workspace"/);
   assert.match(verifier, /\/usr\/local\/libexec\/teleagent-provider-canary codex "\$workspace"/);
+  assert.match(verifier,
+    /grep -Fx -- 'PROVIDER_CANARY_ATTESTED claude'/);
+  assert.match(verifier,
+    /grep -Fx -- 'PROVIDER_CANARY_ATTESTED codex'/);
+  assert.doesNotMatch(verifier, /grep -q PROVIDER_CANARY_OK/);
   assert.doesNotMatch(verifier,
     /\/opt\/teleagent\/current\/deploy\/worker-session\/teleagent-provider-canary/);
 });
@@ -322,6 +327,16 @@ test('activation canaries use the exact production clean-config argument builder
   const canarySource = source('teleagent-provider-canary');
   assert.doesNotMatch(canarySource, /require\([^)]*agent-cli|\.\.\/\.\.\/claude-api-server/);
   assert.match(canarySource, /const FIXED_WORKSPACE = '\/srv\/teleagent-agent-workspaces\/phone'/);
+  assert.match(canarySource, /MAX_COMBINED_OUTPUT_BYTES = 16 \* 1024/);
+  assert.match(canarySource, /CANARY_DEADLINE_MS = 60 \* 1000/);
+  assert.match(canarySource, /POST_KILL_CLOSE_MS = 2 \* 1000/);
+  assert.match(canarySource, /stdio: \['pipe', 'pipe', 'pipe'\]/);
+  assert.doesNotMatch(canarySource, /stdio: \[[^\]]*'inherit'/);
+  assert.match(canarySource, /event\.type === 'item\.started'/);
+  assert.match(canarySource, /event\.type === 'item\.updated'/);
+  assert.match(canarySource, /event\.type === 'item\.completed'/);
+  assert.match(canarySource, /event\.type === 'turn\.completed'/);
+  assert.match(canarySource, /PROVIDER_CANARY_ATTESTED \$\{provider\}/);
   const workspace = '/srv/teleagent-agent-workspaces/phone';
   const claudeArgv = buildCanaryInvocation('claude', workspace);
   const codexArgv = buildCanaryInvocation('codex', workspace);

@@ -613,10 +613,10 @@ setTimeout(() => process.exit(1), 2000).unref();
 done
 /usr/bin/sudo -n -u "$controller_user" \
   /usr/local/libexec/teleagent-provider-canary claude "$workspace" \
-  | /usr/bin/grep -q PROVIDER_CANARY_OK
+  | /usr/bin/grep -Fx -- 'PROVIDER_CANARY_ATTESTED claude'
 /usr/bin/sudo -n -u "$controller_user" \
   /usr/local/libexec/teleagent-provider-canary codex "$workspace" \
-  | /usr/bin/grep -q PROVIDER_CANARY_OK
+  | /usr/bin/grep -Fx -- 'PROVIDER_CANARY_ATTESTED codex'
 cleanup_provider_probes
 trap - EXIT INT TERM
 

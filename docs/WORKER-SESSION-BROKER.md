@@ -150,6 +150,16 @@ zero-capability model runtime. Do not add provider workers to
 `teleagent-control` or `teleagent-provider-launch`, expose the root broker, copy
 provider credentials into worker homes, or make owner tmux sockets visible.
 
+Each provider canary captures rather than forwards provider stdout/stderr,
+enforces a 16 KiB combined-output ceiling and a 60-second absolute deadline,
+and accepts only the provider-specific final protocol evidence for the exact
+text `PROVIDER_CANARY_OK`. Successful verification receives only the fixed
+`PROVIDER_CANARY_ATTESTED <provider>` line. On a deadline or output violation,
+the canary kills its supervisor client and waits on a bounded close fence; the
+supervisor's established client-loss path reserves provider termination and
+checks the launch cgroup. A canary failure never claims that recovery or cgroup
+quiescence has completed.
+
 The local allowance is not actual token usage, dollar spend, or remaining
 OpenAI/Anthropic project balance. Provider billing dashboards remain
 authoritative; Teleagent reports only bounded local request and conservative
