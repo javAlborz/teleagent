@@ -153,6 +153,13 @@ drop-ins. The service mount namespace makes controller, worker/provider, privile
 and workspace state/runtime/config roots inaccessible. These masks are fail-closed: every protected
 peer path must exist before activation, even when its peer unit is dormant.
 
+The first systemd start command is the external host-owned
+`verify-teleagent-release-closure --check-start-gate`, invoked with an empty
+environment before the gateway's activation verifier. It cheaply binds the
+start to current-boot approval, the selected release/manifest identity, and
+installed runtime metadata; it never performs the serialized handoff's full
+release scan or binary content hashing.
+
 The release authentication closure must bind `package.json`, `package-lock.json`, every runtime
 import (`src/app.js`, `call-gateway.js`, `call-registry.js`, `config.js`, `gateway-singleton.js`,
 `gateway-state-store.js`, `http-server.js`, `index.js`, `logger.js`, `openai-call-service.js`,

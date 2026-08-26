@@ -17,6 +17,7 @@ User=root
 Group=root
 UMask=0077
 WorkingDirectory=/opt/teleagent/current
+ExecStartPre=+/usr/bin/env -i HOME=/var/empty PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 /usr/local/libexec/verify-teleagent-release-closure --check-start-gate
 ExecStartPre=/usr/local/libexec/verify-voice-stack-identity --installed-check
 ExecStart=/usr/local/libexec/teleagent-voice-stack-launch start
 ExecStop=/usr/local/libexec/teleagent-voice-stack-launch stop

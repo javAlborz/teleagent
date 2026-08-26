@@ -57,8 +57,10 @@ sudo /usr/local/libexec/verify-teleagent-control-plane --installed-check
 The digest-pinned installer transactionally installs only the two units,
 tmpfiles/sysusers declarations, manifest, installer, and verifier. It proves
 exact `LoadState=loaded`, `UnitFileState=static`, `ActiveState=inactive`, and
-`SubState=dead` after `daemon-reload`. It never invokes `start`, `enable`, or
-`restart`.
+`SubState=dead` after `daemon-reload`. Every loaded controller, broker, and
+worker/provider prerequisite must also use its exact `/etc/systemd/system`
+fragment (provider instances map to their reviewed template), with no drop-in
+and no pending daemon reload. It never invokes `start`, `enable`, or `restart`.
 
 On objectively empty mounted filesystems, the installer creates and fsyncs the
 two zero-length SQLite roots, the explicit canonical controller unlocked
@@ -93,6 +95,14 @@ The privileged policy and public/replay keys remain as documented in
 must not be added. The broker keeps primary group `root` for root-owned state
 and receives `teleagent-control` only as a supplementary group so it can
 publish the `0660` controller socket without `CAP_CHOWN`.
+
+At every controller or broker start, the first start command is the external,
+host-owned `verify-teleagent-release-closure --check-start-gate` under an empty
+environment. This cheap gate rechecks current-boot release approval, selector,
+manifest identity, and installed runtime metadata; it deliberately does not
+rescan or content-hash the full release. The serialized disabled host handoff
+retains the full `--check-runtime` verification. A failed start gate prevents
+the application-owned preflight and Node entrypoint from running.
 
 After the installed verifier is green:
 

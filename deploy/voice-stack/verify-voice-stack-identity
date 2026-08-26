@@ -7,6 +7,9 @@ const path = require('node:path');
 const SOURCE_ROOT = '/opt/teleagent/current/deploy/voice-stack';
 const RELEASE_PARENT = '/opt/teleagent/releases';
 const INSTALLED_VERIFIER = '/usr/local/libexec/verify-voice-stack-identity';
+const RELEASE_START_GATE = 'ExecStartPre=+/usr/bin/env -i HOME=/var/empty ' +
+  'PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 ' +
+  '/usr/local/libexec/verify-teleagent-release-closure --check-start-gate';
 const COLLISION_IDENTITIES = Object.freeze([
   'teleagent-control',
   'teleagent-session-broker',
@@ -178,6 +181,16 @@ function sourceCheck(sourceRoot = SOURCE_ROOT, { sourceUid = 0, sourceGid = 0 } 
   if (/^\[Install\]$/mu.test(service) || /^\[Install\]$/mu.test(slice) ||
       /^Environment=.*(?:TOKEN|PASSWORD|SECRET|API_KEY|PRIVATE_KEY)=/imu.test(service)) {
     refuse('the voice unit became enableable or embeds a credential');
+  }
+  const startCommands = service.split('\n').filter((line) => /^ExecStart(?:Pre)?=/u.test(line));
+  const releaseGateReferences = service.match(
+    /\/usr\/local\/libexec\/verify-teleagent-release-closure/gu,
+  ) ?? [];
+  if (/^ExecCondition=/mu.test(service) || /^ExecReload=/mu.test(service) ||
+      startCommands[0] !== RELEASE_START_GATE ||
+      startCommands.filter((line) => line === RELEASE_START_GATE).length !== 1 ||
+      releaseGateReferences.length !== 1) {
+    refuse('the trusted release start gate is absent, weakened, duplicated, or out of order');
   }
   exactlyOnce(service,
     /^ExecStartPre=\/usr\/local\/libexec\/verify-voice-stack-identity --installed-check$/gmu,

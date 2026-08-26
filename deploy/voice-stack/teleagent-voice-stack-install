@@ -1,6 +1,18 @@
 #!/bin/bash
 set -euo pipefail
 
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+unset ENV BASH_ENV CDPATH LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT GCONV_PATH \
+  NODE_OPTIONS NODE_PATH NODE_EXTRA_CA_CERTS NODE_TLS_REJECT_UNAUTHORIZED \
+  NODE_USE_ENV_PROXY PYTHONPATH PERL5LIB RUBYOPT SSLKEYLOGFILE SSL_CERT_FILE \
+  SSL_CERT_DIR HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy \
+  all_proxy no_proxy OPENAI_API_KEY OPENAI_WEBHOOK_SECRET SIP_PBX_AUTH_SECRET \
+  ANTHROPIC_API_KEY CLAUDE_API_KEY CLAUDE_API_TOKEN CODEX_API_KEY API_KEY \
+  API_TOKEN AUTH_TOKEN ACCESS_TOKEN PROVIDER_TOKEN PROVIDER_SECRET \
+  OPENAI_API_KEY_FILE OPENAI_WEBHOOK_SECRET_FILE SIP_PBX_AUTH_SECRET_FILE
+umask 077
+
 source_root=/opt/teleagent/current/deploy/voice-stack
 node_runtime=/usr/local/libexec/teleagent-node
 source_verifier=$source_root/verify-voice-stack-identity
@@ -10,92 +22,178 @@ slice_unit=teleagent-voice-containers.slice
 systemctl_bin=/usr/bin/systemctl
 sysusers_bin=/usr/bin/systemd-sysusers
 tmpfiles_bin=/usr/bin/systemd-tmpfiles
+root_prefix=
+test_only=0
+service_unit_properties=LoadState,ActiveState,SubState,UnitFileState,FragmentPath,NeedDaemonReload,DropInPaths,User,Group
+slice_unit_properties=LoadState,ActiveState,SubState,UnitFileState,FragmentPath,NeedDaemonReload,DropInPaths
 
 fail() {
   printf 'Voice stack installation refused: %s\n' "$1" >&2
   exit 77
 }
 
+validate_test_dependency() {
+  local filename=$1
+  [ -f "$filename" ] && [ ! -L "$filename" ] &&
+    [ "$(/usr/bin/readlink -f -- "$filename")" = "$filename" ] ||
+    fail 'a voice installer test dependency is unsafe'
+  [ "$(/usr/bin/stat -c '%u:%g:%a:%h' "$filename")" = \
+    "$(/usr/bin/id -u):$(/usr/bin/id -g):700:1" ] ||
+    fail 'a voice installer test dependency has unsafe metadata'
+  case "$filename" in "$root_prefix"/*) ;;
+    *) fail 'a voice installer test dependency escaped its fixture' ;;
+  esac
+}
+
+configure_environment() {
+  if [ "${TELEAGENT_VOICE_INSTALL_TEST_ONLY:-}" = 1 ]; then
+    [ "$(/usr/bin/id -u)" -ne 0 ] || fail 'the voice installer test lane forbids root'
+    root_prefix=$(/usr/bin/readlink -f -- "${TELEAGENT_VOICE_INSTALL_TEST_ROOT:-/nonexistent}")
+    case "$root_prefix" in /tmp/teleagent-voice-install-test-*) ;;
+      *) fail 'the voice installer test root is outside its fixed namespace' ;;
+    esac
+    [ -d "$root_prefix" ] && [ ! -L "$root_prefix" ] &&
+      [ "$(/usr/bin/stat -c '%u:%g:%a' "$root_prefix")" = \
+        "$(/usr/bin/id -u):$(/usr/bin/id -g):700" ] ||
+      fail 'the voice installer test root metadata is unsafe'
+    systemctl_bin=${TELEAGENT_VOICE_INSTALL_TEST_SYSTEMCTL:-}
+    installed_verifier=$root_prefix/usr/local/libexec/verify-voice-stack-identity
+    validate_test_dependency "$systemctl_bin"
+    validate_test_dependency "$installed_verifier"
+    test_only=1
+    return
+  fi
+  [ -z "${TELEAGENT_VOICE_INSTALL_TEST_ONLY:-}" ] &&
+    [ -z "${TELEAGENT_VOICE_INSTALL_TEST_ROOT:-}" ] &&
+    [ -z "${TELEAGENT_VOICE_INSTALL_TEST_SYSTEMCTL:-}" ] ||
+    fail 'voice installer test overrides require the isolated test lane'
+}
+
+host_path() {
+  printf '%s%s\n' "$root_prefix" "$1"
+}
+
+configure_environment
+systemctl_command=("$systemctl_bin")
+if [ "$test_only" -eq 0 ]; then
+  systemctl_command=(/usr/bin/env -i HOME=/var/empty PATH=/usr/sbin:/usr/bin:/sbin:/bin
+    LANG=C.UTF-8 LC_ALL=C.UTF-8 "$systemctl_bin")
+fi
+
+run_systemctl() {
+  "${systemctl_command[@]}" "$@"
+}
+
+target_unit=$(host_path /etc/systemd/system/teleagent-voice-stack.service)
+target_slice=$(host_path /etc/systemd/system/teleagent-voice-containers.slice)
+
 require_root() {
-  [ "$(id -u)" -eq 0 ] || fail 'root is required'
+  [ "$test_only" -eq 1 ] || [ "$(id -u)" -eq 0 ] || fail 'root is required'
+}
+
+assert_unit_truth() {
+  local queried_unit=$1 expected_fragment=$2 kind=$3 phase=$4 properties output
+  local capture capture_directory capture_status=0 capture_size
+  local last_byte unsafe_bytes
+  local -a query
+  local line key value load_state= active_state= sub_state= unit_file_state=
+  local fragment_path= need_reload= drop_in_paths= user= group=
+  local load_seen=0 active_seen=0 sub_seen=0 file_seen=0 fragment_seen=0
+  local reload_seen=0 dropin_seen=0 user_seen=0 group_seen=0 expected_counts
+  case "$kind" in
+    service) properties=$service_unit_properties; expected_counts=1:1:1:1:1:1:1:1:1 ;;
+    slice) properties=$slice_unit_properties; expected_counts=1:1:1:1:1:1:1:0:0 ;;
+    *) fail 'an internal voice unit kind is unreviewed' ;;
+  esac
+  if [ -n "$root_prefix" ]; then
+    capture_directory=$root_prefix
+  else
+    capture_directory=/run
+  fi
+  capture=$(/usr/bin/mktemp "$capture_directory/.teleagent-voice-unit-show.XXXXXX") ||
+    fail 'a voice unit state capture could not be created'
+  query=("${systemctl_command[@]}" show "$queried_unit" --property="$properties")
+  /usr/bin/timeout --signal=TERM --kill-after=1s 5s \
+    "${query[@]}" 2>/dev/null |
+    /usr/bin/head -c 4097 >"$capture" || capture_status=$?
+  capture_size=$(/usr/bin/stat -c '%s' -- "$capture")
+  if [ "$capture_size" -gt 4096 ]; then
+    /usr/bin/rm -f -- "$capture"
+    fail 'a voice unit state response is oversized'
+  fi
+  if [ "$capture_status" -ne 0 ]; then
+    /usr/bin/rm -f -- "$capture"
+    fail 'a voice unit state query failed'
+  fi
+  if [ "$capture_size" -eq 0 ]; then
+    /usr/bin/rm -f -- "$capture"
+    fail 'a voice unit state response is empty'
+  fi
+  last_byte=$(/usr/bin/od -An -tu1 -j "$((capture_size - 1))" -N 1 -- "$capture")
+  unsafe_bytes=$(LC_ALL=C /usr/bin/tr -d '\012\040-\176' <"$capture" | /usr/bin/wc -c)
+  if [ "$last_byte" -ne 10 ] || [ "$unsafe_bytes" -ne 0 ]; then
+    /usr/bin/rm -f -- "$capture"
+    fail 'a voice unit state response has unsafe framing'
+  fi
+  output=$(/usr/bin/cat -- "$capture")
+  /usr/bin/rm -f -- "$capture"
+  while IFS= read -r line; do
+    [ "${line#*=}" != "$line" ] || fail 'a voice unit state response is malformed'
+    key=${line%%=*}
+    value=${line#*=}
+    case "$key" in
+      LoadState) load_seen=$((load_seen + 1)); load_state=$value ;;
+      ActiveState) active_seen=$((active_seen + 1)); active_state=$value ;;
+      SubState) sub_seen=$((sub_seen + 1)); sub_state=$value ;;
+      UnitFileState) file_seen=$((file_seen + 1)); unit_file_state=$value ;;
+      FragmentPath) fragment_seen=$((fragment_seen + 1)); fragment_path=$value ;;
+      NeedDaemonReload) reload_seen=$((reload_seen + 1)); need_reload=$value ;;
+      DropInPaths) dropin_seen=$((dropin_seen + 1)); drop_in_paths=$value ;;
+      User) user_seen=$((user_seen + 1)); user=$value ;;
+      Group) group_seen=$((group_seen + 1)); group=$value ;;
+      *) fail 'a voice unit state response contains an unexpected property' ;;
+    esac
+  done <<<"$output"
+  [ "$load_seen:$active_seen:$sub_seen:$file_seen:$fragment_seen:$reload_seen:$dropin_seen:$user_seen:$group_seen" = \
+    "$expected_counts" ] || fail 'a voice unit state response is incomplete or ambiguous'
+  [ "$active_state:$sub_state" = inactive:dead ] ||
+    fail 'a voice unit is active, failed, or transitional'
+  case "$load_state:$phase" in
+    loaded:pre|loaded:installed)
+      [ "$unit_file_state" = static ] || fail 'a loaded voice unit is not static'
+      [ "$fragment_path" = "$expected_fragment" ] ||
+        fail 'a loaded voice unit uses an unreviewed fragment'
+      [ "$need_reload" = no ] || fail 'a loaded voice unit needs a daemon reload'
+      [ -z "$drop_in_paths" ] || fail 'a loaded voice unit has an unreviewed drop-in'
+      if [ "$kind" = service ]; then
+        [ "$user:$group" = root:root ] || fail 'the loaded voice service identity drifted'
+      fi
+      ;;
+    not-found:pre)
+      [ -z "$unit_file_state$fragment_path$drop_in_paths$user$group" ] &&
+        [ "$need_reload" = no ] || fail 'an absent voice unit has stale manager state'
+      [ ! -e "$expected_fragment" ] && [ ! -L "$expected_fragment" ] ||
+        fail 'an absent voice unit conflicts with an installed unit file'
+      ;;
+    *) fail 'a voice unit load state is unavailable or unsafe' ;;
+  esac
 }
 
 assert_inactive() {
-  local load_state active_state
-  load_state=$("$systemctl_bin" show "$unit" --property=LoadState --value) ||
-    fail 'the voice stack load state is unavailable'
-  active_state=$("$systemctl_bin" show "$unit" --property=ActiveState --value) ||
-    fail 'the voice stack active state is unavailable'
-  [ "$active_state" = inactive ] ||
-    fail 'the voice stack must remain exactly inactive'
-  case "$load_state" in
-    loaded) ;;
-    not-found)
-      [ ! -e /etc/systemd/system/teleagent-voice-stack.service ] &&
-        [ ! -L /etc/systemd/system/teleagent-voice-stack.service ] ||
-        fail 'the absent voice unit conflicts with an installed unit file'
-      ;;
-    *) fail 'the voice stack load state is unsafe' ;;
-  esac
+  assert_unit_truth "$unit" "$target_unit" service pre
   assert_slice_inactive_or_absent
 }
 
 assert_slice_inactive_or_absent() {
-  local load_state active_state unit_file_state
-  load_state=$("$systemctl_bin" show "$slice_unit" --property=LoadState --value) ||
-    fail 'the voice container slice load state is unavailable'
-  active_state=$("$systemctl_bin" show "$slice_unit" --property=ActiveState --value) ||
-    fail 'the voice container slice active state is unavailable'
-  [ "$active_state" = inactive ] ||
-    fail 'the voice container slice must remain exactly inactive'
-  case "$load_state" in
-    loaded)
-      unit_file_state=$("$systemctl_bin" show "$slice_unit" --property=UnitFileState --value) ||
-        fail 'the voice container slice unit-file state is unavailable'
-      [ "$unit_file_state" = static ] ||
-        fail 'the voice container slice must remain static'
-      ;;
-    not-found)
-      [ ! -e /etc/systemd/system/teleagent-voice-containers.slice ] &&
-        [ ! -L /etc/systemd/system/teleagent-voice-containers.slice ] ||
-        fail 'the absent voice container slice conflicts with an installed unit file'
-      ;;
-    *) fail 'the voice container slice load state is unsafe' ;;
-  esac
+  assert_unit_truth "$slice_unit" "$target_slice" slice pre
 }
 
 assert_slice_installed_dormant() {
-  local load_state active_state unit_file_state
-  load_state=$("$systemctl_bin" show "$slice_unit" --property=LoadState --value) ||
-    fail 'the installed voice container slice load state is unavailable'
-  active_state=$("$systemctl_bin" show "$slice_unit" --property=ActiveState --value) ||
-    fail 'the installed voice container slice active state is unavailable'
-  unit_file_state=$("$systemctl_bin" show "$slice_unit" --property=UnitFileState --value) ||
-    fail 'the installed voice container slice unit-file state is unavailable'
-  [ "$load_state" = loaded ] && [ "$active_state" = inactive ] &&
-    [ "$unit_file_state" = static ] ||
-    fail 'the installed voice container slice must be loaded, static, and inactive'
+  assert_unit_truth "$slice_unit" "$target_slice" slice installed
 }
 
 assert_disabled() {
-  local load_state
-  local active_state
-  local unit_file_state
-  load_state=$("$systemctl_bin" show "$unit" --property=LoadState --value) ||
-    fail 'the voice stack load state is unavailable'
-  active_state=$("$systemctl_bin" show "$unit" --property=ActiveState --value) ||
-    fail 'the voice stack active state is unavailable'
-  unit_file_state=$("$systemctl_bin" show "$unit" --property=UnitFileState --value) ||
-    fail 'the voice stack unit-file state is unavailable'
-  [ "$load_state" = loaded ] ||
-    fail 'the installed voice stack unit is not loaded'
-  [ "$active_state" = inactive ] ||
-    fail 'the voice stack must remain exactly inactive'
-  # A unit with no [Install] section is correctly reported as static, while the
-  # generic enablement query still returns success. Require the exact static
-  # state instead of interpreting that exit status as an enabled unit.
-  [ "$unit_file_state" = static ] ||
-    fail 'the dormant voice stack must remain a static unit'
+  assert_unit_truth "$unit" "$target_unit" service installed
   assert_slice_installed_dormant
 }
 
@@ -139,8 +237,8 @@ install_disabled() {
     "$source_root/teleagent-voice-stack-install"
   )
   local -a targets=(
-    /etc/systemd/system/teleagent-voice-stack.service
-    /etc/systemd/system/teleagent-voice-containers.slice
+    "$target_unit"
+    "$target_slice"
     /etc/sysusers.d/teleagent-voice-stack.conf
     /etc/tmpfiles.d/teleagent-voice-stack.conf
     /usr/local/libexec/teleagent-voice-stack-launch
@@ -169,7 +267,7 @@ install_disabled() {
           /usr/bin/rm -f -- "${targets[$index]}"
         fi
       done
-      "$systemctl_bin" daemon-reload >/dev/null 2>&1 || true
+      run_systemctl daemon-reload >/dev/null 2>&1 || true
     fi
     /usr/bin/rm -rf -- "$staging"
     exit "$status"
@@ -202,7 +300,7 @@ install_disabled() {
   # never provision, open, or print a credential file.
   "$sysusers_bin" /etc/sysusers.d/teleagent-voice-stack.conf
   "$tmpfiles_bin" --create /etc/tmpfiles.d/teleagent-voice-stack.conf
-  "$systemctl_bin" daemon-reload
+  run_systemctl daemon-reload
   "$installed_verifier" --installed-check | /usr/bin/grep -qx VOICE_STACK_IDENTITY_OK ||
     fail 'the installed voice identity did not verify'
   assert_disabled
@@ -217,6 +315,10 @@ check_installed() {
     fail 'the installed voice identity did not verify'
   printf 'VOICE_STACK_INSTALLED_DISABLED_OK\n'
 }
+
+if [ "$test_only" -eq 1 ] && [ "${1:-}" != --check ]; then
+  fail 'the isolated voice installer test lane permits only --check'
+fi
 
 case "${1:-}" in
   --source-check)

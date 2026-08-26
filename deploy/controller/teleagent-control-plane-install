@@ -16,6 +16,8 @@ sysusers_bin=/usr/bin/systemd-sysusers
 tmpfiles_bin=/usr/bin/systemd-tmpfiles
 id_bin=/usr/bin/id
 getent_bin=/usr/bin/getent
+release_preflight='ExecStartPre=+/usr/bin/env -i HOME=/var/empty PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 /usr/local/libexec/verify-teleagent-release-closure --check-start-gate'
+dormant_unit_properties=LoadState,ActiveState,SubState,UnitFileState,FragmentPath,NeedDaemonReload,DropInPaths
 test_source_root=
 test_state_mount=0
 test_state_capacity=
@@ -129,6 +131,16 @@ host_path() {
 }
 
 configure_environment
+systemctl_command=("$systemctl_bin")
+if [ -z "$root_prefix" ]; then
+  systemctl_command=(/usr/bin/env -i HOME=/var/empty PATH=/usr/sbin:/usr/bin:/sbin:/bin
+    LANG=C.UTF-8 LC_ALL=C.UTF-8 "$systemctl_bin")
+fi
+
+run_systemctl() {
+  "${systemctl_command[@]}" "$@"
+}
+
 self=$(/usr/bin/readlink -f -- "$0")
 installed_entrypoint=$(host_path /usr/local/libexec/teleagent-control-plane-install)
 if [ "$self" = "$installed_entrypoint" ]; then
@@ -227,6 +239,26 @@ load_manifest() {
   digests+=('')
 }
 
+assert_release_preflight() {
+  local service=$1 exact_count reference_count preflight_line first_boundary
+  ! /usr/bin/grep -Eq '^ExecCondition=|^ExecReload=' "$service" ||
+    fail 'a control-plane unit added an execution path that bypasses the start gate'
+  exact_count=$(/usr/bin/grep -Fxc "$release_preflight" "$service" || true)
+  reference_count=$(/usr/bin/grep -Fc \
+    '/usr/local/libexec/verify-teleagent-release-closure' "$service" || true)
+  [ "$exact_count" -eq 1 ] && [ "$reference_count" -eq 1 ] ||
+    fail 'a control-plane unit lost or weakened its exact release preflight'
+  preflight_line=$(/usr/bin/grep -nFx "$release_preflight" "$service" |
+    /usr/bin/cut -d: -f1)
+  first_boundary=$(/usr/bin/grep -nE '^ExecStart(Pre)?=' "$service" |
+    /usr/bin/sed -n '1s/:.*//p')
+  case "$preflight_line:$first_boundary" in *[!0-9:]*)
+    fail 'a control-plane unit start-command order is malformed' ;;
+  esac
+  [ "$preflight_line" -eq "$first_boundary" ] ||
+    fail 'the trusted release preflight is not the first start command'
+}
+
 source_check() {
   load_manifest
   local controller="$source_root/teleagent-agent-controller.service"
@@ -240,6 +272,8 @@ source_check() {
   [ "$(/usr/bin/grep -Fxc \
     'ConditionPathExists=/etc/teleagent/privileged-action/ENABLE' "$privileged" || true)" -eq 1 ] ||
     fail 'the privileged unit lost its exact activation sentinel'
+  assert_release_preflight "$controller"
+  assert_release_preflight "$privileged"
   ! /usr/bin/grep -Eq '^\[Install\][[:space:]]*$' "$controller" "$privileged" ||
     fail 'a dormant control-plane unit became enableable'
   ! /usr/bin/grep -Fq '/ENABLE' \
@@ -274,28 +308,82 @@ unit_file_target() {
 assert_unit_dormant() {
   local unit=$1
   local phase=$2
-  local target load_state active_state sub_state unit_file_state status
+  local target output capture capture_directory capture_status=0 capture_size
+  local last_byte unsafe_bytes line key value status
+  local -a query
+  local load_state= active_state= sub_state= unit_file_state= fragment_path=
+  local need_reload= drop_in_paths=
+  local load_seen=0 active_seen=0 sub_seen=0 file_seen=0 fragment_seen=0
+  local reload_seen=0 dropin_seen=0
   target=$(unit_file_target "$unit")
-  load_state=$("$systemctl_bin" show "$unit" --property=LoadState --value) ||
-    fail 'a control-plane unit load state is unavailable' 75
-  active_state=$("$systemctl_bin" show "$unit" --property=ActiveState --value) ||
-    fail 'a control-plane unit active state is unavailable' 75
-  sub_state=$("$systemctl_bin" show "$unit" --property=SubState --value) ||
-    fail 'a control-plane unit substate is unavailable' 75
+  if [ -n "$root_prefix" ]; then
+    capture_directory=$root_prefix
+  else
+    capture_directory=/run
+  fi
+  capture=$(/usr/bin/mktemp "$capture_directory/.teleagent-control-plane-show.XXXXXX") ||
+    fail 'a control-plane unit state capture could not be created' 75
+  query=("${systemctl_command[@]}" show "$unit" --property="$dormant_unit_properties")
+  /usr/bin/timeout --signal=TERM --kill-after=1s 5s \
+    "${query[@]}" 2>/dev/null |
+    /usr/bin/head -c 4097 >"$capture" || capture_status=$?
+  capture_size=$(/usr/bin/stat -c '%s' -- "$capture")
+  if [ "$capture_size" -gt 4096 ]; then
+    /usr/bin/rm -f -- "$capture"
+    fail 'a control-plane unit state response is oversized' 75
+  fi
+  if [ "$capture_status" -ne 0 ]; then
+    /usr/bin/rm -f -- "$capture"
+    fail 'a control-plane unit state is unavailable' 75
+  fi
+  if [ "$capture_size" -eq 0 ]; then
+    /usr/bin/rm -f -- "$capture"
+    fail 'a control-plane unit state response is empty' 75
+  fi
+  last_byte=$(/usr/bin/od -An -tu1 -j "$((capture_size - 1))" -N 1 -- "$capture")
+  unsafe_bytes=$(LC_ALL=C /usr/bin/tr -d '\012\040-\176' <"$capture" | /usr/bin/wc -c)
+  if [ "$last_byte" -ne 10 ] || [ "$unsafe_bytes" -ne 0 ]; then
+    /usr/bin/rm -f -- "$capture"
+    fail 'a control-plane unit state response has unsafe framing' 75
+  fi
+  output=$(/usr/bin/cat -- "$capture")
+  /usr/bin/rm -f -- "$capture"
+  while IFS= read -r line; do
+    [ "${line#*=}" != "$line" ] || fail 'a control-plane unit state is malformed' 75
+    key=${line%%=*}
+    value=${line#*=}
+    case "$key" in
+      LoadState) load_seen=$((load_seen + 1)); load_state=$value ;;
+      ActiveState) active_seen=$((active_seen + 1)); active_state=$value ;;
+      SubState) sub_seen=$((sub_seen + 1)); sub_state=$value ;;
+      UnitFileState) file_seen=$((file_seen + 1)); unit_file_state=$value ;;
+      FragmentPath) fragment_seen=$((fragment_seen + 1)); fragment_path=$value ;;
+      NeedDaemonReload) reload_seen=$((reload_seen + 1)); need_reload=$value ;;
+      DropInPaths) dropin_seen=$((dropin_seen + 1)); drop_in_paths=$value ;;
+      *) fail 'a control-plane unit state contains an unexpected property' 75 ;;
+    esac
+  done <<<"$output"
+  [ "$load_seen:$active_seen:$sub_seen:$file_seen:$fragment_seen:$reload_seen:$dropin_seen" = \
+    1:1:1:1:1:1:1 ] || fail 'a control-plane unit state is incomplete or ambiguous' 75
   [ "$active_state:$sub_state" = inactive:dead ] ||
     fail 'a control-plane unit is active, failed, or transitional' 75
   case "$load_state:$phase" in
     loaded:pre|loaded:installed|loaded:prerequisite)
-      unit_file_state=$("$systemctl_bin" show "$unit" \
-        --property=UnitFileState --value) ||
-        fail 'a control-plane unit-file state is unavailable' 75
       [ "$unit_file_state" = static ] ||
         fail 'a control-plane unit is not exactly static' 75
+      [ "$fragment_path" = "$target" ] ||
+        fail 'a control-plane unit loaded from an unreviewed fragment' 75
+      [ "$need_reload" = no ] ||
+        fail 'a control-plane unit has a pending daemon reload' 75
+      [ -z "$drop_in_paths" ] ||
+        fail 'a control-plane unit has an unreviewed drop-in' 75
       ;;
     not-found:pre)
+      [ -z "$unit_file_state$fragment_path$drop_in_paths" ] && [ "$need_reload" = no ] ||
+        fail 'a missing control-plane unit has stale manager state' 75
       [ ! -e "$target" ] && [ ! -L "$target" ] ||
         fail 'a missing control-plane unit conflicts with an installed file' 75
-      if "$systemctl_bin" is-enabled "$unit" >/dev/null 2>&1; then
+      if run_systemctl is-enabled "$unit" >/dev/null 2>&1; then
         fail 'a missing control-plane unit unexpectedly has enablement state' 75
       else
         status=$?
@@ -763,7 +851,7 @@ install_disabled() {
         fi
         /usr/bin/sync -d "$(/usr/bin/dirname -- "$rollback_target")"
       done
-      "$systemctl_bin" daemon-reload >/dev/null 2>&1
+      run_systemctl daemon-reload >/dev/null 2>&1
     fi
     /usr/bin/rm -rf -- "$install_staging"
     exit "$status"
@@ -799,7 +887,7 @@ install_disabled() {
   assert_distinct_state_mount_devices
   ensure_controller_state_initialized 1
   ensure_privileged_state_initialized 1
-  "$systemctl_bin" daemon-reload
+  run_systemctl daemon-reload
   assert_dormant installed
   check_installed_assets
   install_complete=1

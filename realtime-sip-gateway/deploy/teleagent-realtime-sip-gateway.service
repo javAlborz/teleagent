@@ -33,6 +33,7 @@ LoadCredential=OPENAI_WEBHOOK_SECRET:/etc/teleagent/credentials/openai-webhook-s
 LoadCredential=SIP_PBX_AUTH_SECRET:/etc/teleagent/credentials/sip-pbx-auth-secret
 LoadCredential=SIP_STATE_INITIALIZED:/etc/teleagent/realtime-sip-gateway/STATE_INITIALIZED
 UnsetEnvironment=ENV BASH_ENV CDPATH LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT GCONV_PATH NODE_OPTIONS NODE_PATH NODE_EXTRA_CA_CERTS NODE_TLS_REJECT_UNAUTHORIZED NODE_USE_ENV_PROXY PYTHONPATH PERL5LIB RUBYOPT SSLKEYLOGFILE SSL_CERT_FILE SSL_CERT_DIR HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy OPENAI_API_KEY OPENAI_WEBHOOK_SECRET SIP_PBX_AUTH_SECRET OPENAI_API_KEY_FILE OPENAI_WEBHOOK_SECRET_FILE SIP_PBX_AUTH_SECRET_FILE
+ExecStartPre=+/usr/bin/env -i HOME=/var/empty PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 /usr/local/libexec/verify-teleagent-release-closure --check-start-gate
 ExecStartPre=+/usr/local/libexec/verify-realtime-sip-gateway --activation-check
 ExecStart=/usr/local/libexec/teleagent-node /opt/teleagent/current/realtime-sip-gateway/src/index.js
 Restart=on-failure

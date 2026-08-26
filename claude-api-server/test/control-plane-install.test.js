@@ -67,8 +67,10 @@ set -u
 printf '%s\\n' "$*" >>"$FAKE_SYSTEMCTL_LOG"
 case "$1" in
   show)
+    [ "$#" -eq 3 ] || exit 64
     unit="$2"
     property="$3"
+    [ "$property" = --property=LoadState,ActiveState,SubState,UnitFileState,FragmentPath,NeedDaemonReload,DropInPaths ] || exit 64
     case "$unit" in
       teleagent-provider-supervisor@*.socket) filename=teleagent-provider-supervisor@.socket ;;
       *) filename="$unit" ;;
@@ -76,18 +78,39 @@ case "$1" in
     [ "\${FAKE_STATE_QUERY_FAILURE:-}" = "$unit" ] && exit 1
     installed=0
     [ -f "$TELEAGENT_CONTROL_PLANE_INSTALL_TEST_ROOT/etc/systemd/system/$filename" ] && installed=1
-    case "$property" in
-      --property=LoadState)
-        [ "$installed" -eq 1 ] && printf 'loaded\\n' || printf 'not-found\\n' ;;
-      --property=ActiveState)
-        [ "\${FAKE_ACTIVE_UNIT:-}" = "$unit" ] && printf 'active\\n' || printf 'inactive\\n' ;;
-      --property=SubState)
-        [ "\${FAKE_ACTIVE_UNIT:-}" = "$unit" ] && printf 'running\\n' || printf 'dead\\n' ;;
-      --property=UnitFileState)
-        [ "$installed" -eq 1 ] || exit 1
-        printf '%s\\n' "\${FAKE_UNIT_FILE_STATE:-static}" ;;
-      *) exit 64 ;;
-    esac
+    [ "$installed" -eq 1 ] && load=loaded || load=not-found
+    [ "\${FAKE_ACTIVE_UNIT:-}" = "$unit" ] && active=active || active=inactive
+    [ "$active" = active ] && sub=running || sub=dead
+    [ "$installed" -eq 1 ] && file_state="\${FAKE_UNIT_FILE_STATE:-static}" || file_state=
+    [ "$installed" -eq 1 ] && fragment="$TELEAGENT_CONTROL_PLANE_INSTALL_TEST_ROOT/etc/systemd/system/$filename" || fragment=
+    [ "\${FAKE_FRAGMENT_UNIT:-}" != "$unit" ] || fragment="/run/systemd/generator/$filename"
+    [ "\${FAKE_RUNTIME_FRAGMENT_UNIT:-}" != "$unit" ] || fragment="/run/systemd/transient/$filename"
+    reload=no
+    [ "\${FAKE_RELOAD_UNIT:-}" != "$unit" ] || reload=yes
+    dropins=
+    [ "\${FAKE_DROPIN_UNIT:-}" != "$unit" ] || dropins="/run/systemd/system/$filename.d/override.conf"
+    if [ "\${FAKE_OVERSIZED_UNIT:-}" = "$unit" ]; then
+      /usr/bin/printf '%05000d' 0
+      exit 0
+    fi
+    if [ "\${FAKE_UNFRAMED_UNIT:-}" = "$unit" ]; then
+      printf 'LoadState=%s\nActiveState=%s\nSubState=%s\nUnitFileState=%s\n' \
+        "$load" "$active" "$sub" "$file_state"
+      printf 'FragmentPath=%s\nNeedDaemonReload=%s\nDropInPaths=%s' \
+        "$fragment" "$reload" "$dropins"
+      exit 0
+    fi
+    if [ "\${FAKE_CONTROL_BYTE_UNIT:-}" = "$unit" ]; then
+      printf 'LoadState=%s\nActiveState=%s\nSubState=%s\nUnitFileState=%s\n' \
+        "$load" "$active" "$sub" "$file_state"
+      printf 'FragmentPath=%s\nNeedDaemonReload=%s\nDropInPaths=\\001\n' \
+        "$fragment" "$reload"
+      exit 0
+    fi
+    printf 'LoadState=%s\\nActiveState=%s\\nSubState=%s\\nUnitFileState=%s\\n' \
+      "$load" "$active" "$sub" "$file_state"
+    printf 'FragmentPath=%s\\nNeedDaemonReload=%s\\nDropInPaths=%s\\n' \
+      "$fragment" "$reload" "$dropins"
     ;;
   is-enabled) exit 4 ;;
   daemon-reload)
@@ -177,10 +200,13 @@ test('control-plane installer source has exact disabled activation truth', () =>
     'utf8',
   );
   assert.match(installer, /--source-check\|--install-disabled\|--check/);
-  assert.match(installer, /--property=LoadState --value/);
-  assert.match(installer, /--property=ActiveState --value/);
-  assert.match(installer, /--property=SubState --value/);
-  assert.match(installer, /--property=UnitFileState --value/);
+  assert.match(installer, /--property="\$dormant_unit_properties"/);
+  assert.match(installer, /FragmentPath/);
+  assert.match(installer, /NeedDaemonReload/);
+  assert.match(installer, /DropInPaths/);
+  assert.match(installer,
+    /\/usr\/bin\/env -i HOME=\/var\/empty PATH=\/usr\/sbin:\/usr\/bin:\/sbin:\/bin/);
+  assert.match(installer, /response has unsafe framing/);
   assert.doesNotMatch(installer, /"\$systemctl_bin"\s+(?:start|enable|restart)\b/);
   assert.doesNotMatch(installer, /(?:touch|install|cp|mv)[^\n]*\/ENABLE/);
 });
@@ -241,8 +267,10 @@ test('control-plane installer intentionally initializes fresh state unlocked and
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout, 'TELEAGENT_CONTROL_PLANE_INSTALLED_DISABLED_OK\n');
   const calls = fs.readFileSync(fixture.systemctlLog, 'utf8');
-  assert.match(calls, /^show teleagent-agent-controller\.service --property=SubState --value$/m);
-  assert.match(calls, /^show teleagent-privileged-action\.service --property=UnitFileState --value$/m);
+  assert.match(calls,
+    /^show teleagent-agent-controller\.service --property=LoadState,ActiveState,SubState,UnitFileState,FragmentPath,NeedDaemonReload,DropInPaths$/m);
+  assert.match(calls,
+    /^show teleagent-provider-supervisor@claude\.socket --property=LoadState,ActiveState,SubState,UnitFileState,FragmentPath,NeedDaemonReload,DropInPaths$/m);
   assert.doesNotMatch(calls, /^(?:start|enable|restart) /m);
   const dependencies = fs.readFileSync(fixture.dependencyLog, 'utf8');
   assert.match(dependencies, /^systemd-sysusers /m);
@@ -253,6 +281,21 @@ test('control-plane installer intentionally initializes fresh state unlocked and
   });
   assert.equal(result.status, 75);
   assert.match(result.stderr, /unit is active, failed, or transitional/);
+
+  for (const [variable, unit, expected] of [
+    ['FAKE_FRAGMENT_UNIT', 'teleagent-agent-controller.service', /unreviewed fragment/],
+    ['FAKE_FRAGMENT_UNIT', 'teleagent-provider-supervisor@claude.socket', /unreviewed fragment/],
+    ['FAKE_RUNTIME_FRAGMENT_UNIT', 'teleagent-privileged-action.service', /unreviewed fragment/],
+    ['FAKE_DROPIN_UNIT', 'teleagent-privileged-action.service', /unreviewed drop-in/],
+    ['FAKE_RELOAD_UNIT', 'teleagent-provider-model-apparmor.service', /pending daemon reload/],
+    ['FAKE_UNFRAMED_UNIT', 'teleagent-agent-controller.service', /unsafe framing/],
+    ['FAKE_CONTROL_BYTE_UNIT', 'teleagent-privileged-action.service', /unsafe framing/],
+    ['FAKE_OVERSIZED_UNIT', 'teleagent-agent-controller.service', /state (?:is unavailable|response is oversized)/],
+  ]) {
+    result = fixture.run(fixture.installedInstaller, '--check', { [variable]: unit });
+    assert.equal(result.status, 75, `${variable}:${unit} ${result.stderr}`);
+    assert.match(result.stderr, expected);
+  }
 
   fs.unlinkSync(stateFile);
   result = fixture.run(fixture.installedInstaller, '--install-disabled');

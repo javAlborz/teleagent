@@ -7,6 +7,9 @@ const test = require('node:test');
 
 const ROOT = path.join(__dirname, '..', '..');
 const DEPLOY = path.join(ROOT, 'deploy', 'controller');
+const RELEASE_START_GATE = 'ExecStartPre=+/usr/bin/env -i HOME=/var/empty ' +
+  'PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 ' +
+  '/usr/local/libexec/verify-teleagent-release-closure --check-start-gate';
 
 function source(filename) {
   return fs.readFileSync(path.join(DEPLOY, filename), 'utf8');
@@ -35,6 +38,11 @@ test('controller unit is dormant, exact-path, resource-capped, and isolated', ()
     /^Environment=EXECUTOR_TASK_DB_PATH=\/var\/lib\/teleagent-control\/executor-tasks\.sqlite$/m);
   assert.match(service,
     /^Environment=VOICE_EXECUTION_LOCK_FILE=\/var\/lib\/teleagent-control\/voice-execution\.lock\.json$/m);
+  assert.equal(service.split('\n').filter((line) => line === RELEASE_START_GATE).length, 1);
+  assert.equal((service.match(/verify-teleagent-release-closure/gu) ?? []).length, 1);
+  assert.equal(service.split('\n').filter((line) => /^ExecStart(?:Pre)?=/u.test(line))[0],
+    RELEASE_START_GATE);
+  assert.doesNotMatch(service, /^ExecCondition=|^ExecReload=/m);
   assert.match(service,
     /^ExecStart=\/opt\/teleagent\/node\/bin\/node \/opt\/teleagent\/current\/claude-api-server\/server\.js$/m);
   assert.match(service, /^Requires=.*teleagent-worker-session\.service/m);

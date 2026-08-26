@@ -28,7 +28,10 @@ const INSTALLED_UNIT = '/etc/systemd/system/teleagent-realtime-sip-gateway.servi
 const INSTALLED_INSTALLER = '/usr/local/libexec/teleagent-realtime-sip-gateway-install';
 const INSTALLED_MANIFEST = `${CONFIG_ROOT}/install.manifest`;
 const SYSTEMCTL = '/usr/bin/systemctl';
-const REVIEWED_SERVICE_SHA256 = 'e051ca98e9ee90af4abf84c4135b57b0fb4869194c0232c723df915e3453d2eb';
+const RELEASE_START_GATE = 'ExecStartPre=+/usr/bin/env -i HOME=/var/empty ' +
+  'PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 ' +
+  '/usr/local/libexec/verify-teleagent-release-closure --check-start-gate';
+const REVIEWED_SERVICE_SHA256 = 'ea37b1db1ef7ad278bf9bc5cafce20f8866690ec57c04fe5ddf249156bd043ed';
 const GIB = 1024n * 1024n * 1024n;
 const MIB = 1024n * 1024n;
 const DURABLE_FILESYSTEMS = new Set([
@@ -159,9 +162,20 @@ export function validateServiceSource(source) {
       'state marker credential'],
     [new RegExp(`^UnsetEnvironment=${UNSET_ENVIRONMENT.replaceAll('/', '\\/')}$`, 'gmu'),
       'final injection-variable removal'],
+    [/^ExecStartPre=\+\/usr\/bin\/env -i HOME=\/var\/empty PATH=\/usr\/sbin:\/usr\/bin:\/sbin:\/bin LANG=C\.UTF-8 LC_ALL=C\.UTF-8 \/usr\/local\/libexec\/verify-teleagent-release-closure --check-start-gate$/gmu,
+      'trusted release start gate'],
     [/^ExecStartPre=\+\/usr\/local\/libexec\/verify-realtime-sip-gateway --activation-check$/gmu,
       'activation-time installed verifier'],
   ]) exactlyOnce(source, expression, label);
+  const startCommands = String(source).split('\n')
+    .filter((line) => /^ExecStart(?:Pre)?=/u.test(line));
+  const releaseGateReferences = String(source).match(
+    /\/usr\/local\/libexec\/verify-teleagent-release-closure/gu,
+  ) ?? [];
+  if (/^ExecCondition=/mu.test(source) || /^ExecReload=/mu.test(source) ||
+      startCommands[0] !== RELEASE_START_GATE || releaseGateReferences.length !== 1) {
+    refuse('the trusted release start gate is weakened, duplicated, or out of order');
+  }
   for (const inaccessible of [
     '/var/lib/teleagent-provider-plane',
     '/var/lib/teleagent-worker-state',

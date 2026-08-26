@@ -17,6 +17,108 @@ const {
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const DEPLOY = path.join(ROOT, 'deploy', 'voice-stack');
+const VOICE_INSTALLER = path.join(DEPLOY, 'teleagent-voice-stack-install');
+const RELEASE_START_GATE = 'ExecStartPre=+/usr/bin/env -i HOME=/var/empty ' +
+  'PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 ' +
+  '/usr/local/libexec/verify-teleagent-release-closure --check-start-gate';
+
+function voiceInstallerFixture(t) {
+  const directory = fs.mkdtempSync('/tmp/teleagent-voice-install-test-');
+  fs.chmodSync(directory, 0o700);
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const systemd = path.join(directory, 'etc/systemd/system');
+  const libexec = path.join(directory, 'usr/local/libexec');
+  fs.mkdirSync(systemd, { recursive: true, mode: 0o755 });
+  fs.mkdirSync(libexec, { recursive: true, mode: 0o755 });
+  for (const unit of ['teleagent-voice-stack.service', 'teleagent-voice-containers.slice']) {
+    fs.writeFileSync(path.join(systemd, unit), '[Unit]\n', { mode: 0o644 });
+  }
+  const calls = path.join(directory, 'systemctl.calls');
+  const systemctl = path.join(directory, 'systemctl');
+  fs.writeFileSync(systemctl, [
+    '#!/bin/bash',
+    'set -euo pipefail',
+    'printf \'%s\\n\' "$*" >>"$FAKE_SYSTEMCTL_LOG"',
+    '[ "${1:-}" = show ] && [ "$#" -eq 3 ] || exit 64',
+    'unit=$2',
+    'root=$TELEAGENT_VOICE_INSTALL_TEST_ROOT',
+    '[ "${FAKE_QUERY_FAILURE:-}" != "$unit" ] || exit 70',
+    'service_properties=LoadState,ActiveState,SubState,UnitFileState,FragmentPath,NeedDaemonReload,DropInPaths,User,Group',
+    'slice_properties=LoadState,ActiveState,SubState,UnitFileState,FragmentPath,NeedDaemonReload,DropInPaths',
+    'case "$unit:$3" in',
+    '  teleagent-voice-stack.service:--property=$service_properties) kind=service ;;',
+    '  teleagent-voice-containers.slice:--property=$slice_properties) kind=slice ;;',
+    '  *) exit 64 ;;',
+    'esac',
+    'active=inactive; sub=dead; fragment="$root/etc/systemd/system/$unit"',
+    'reload=no; dropins=; user=root; group=root',
+    '[ "${FAKE_TRANSITIONAL_UNIT:-}" != "$unit" ] || { active=activating; sub=start-pre; }',
+    '[ "${FAKE_FRAGMENT_UNIT:-}" != "$unit" ] || fragment="/run/systemd/generator/$unit"',
+    '[ "${FAKE_RUNTIME_FRAGMENT_UNIT:-}" != "$unit" ] || fragment="/run/systemd/transient/$unit"',
+    '[ "${FAKE_RELOAD_UNIT:-}" != "$unit" ] || reload=yes',
+    '[ "${FAKE_DROPIN_UNIT:-}" != "$unit" ] || dropins="/run/systemd/system/$unit.d/override.conf"',
+    '[ "${FAKE_WRONG_USER_UNIT:-}" != "$unit" ] || user=teleagent-voice',
+    '[ "${FAKE_WRONG_GROUP_UNIT:-}" != "$unit" ] || group=teleagent-voice',
+    'if [ "${FAKE_OVERSIZED_UNIT:-}" = "$unit" ]; then',
+    '  /usr/bin/printf \'%05000d\' 0',
+    '  exit 0',
+    'fi',
+    'if [ "${FAKE_UNFRAMED_UNIT:-}" = "$unit" ]; then',
+    '  printf \'LoadState=loaded\\nActiveState=%s\\nSubState=%s\\nUnitFileState=static\\n\' "$active" "$sub"',
+    '  if [ "$kind" = service ]; then',
+    '    printf \'FragmentPath=%s\\nNeedDaemonReload=%s\\nDropInPaths=%s\\nUser=%s\\nGroup=%s\' "$fragment" "$reload" "$dropins" "$user" "$group"',
+    '  else',
+    '    printf \'FragmentPath=%s\\nNeedDaemonReload=%s\\nDropInPaths=%s\' "$fragment" "$reload" "$dropins"',
+    '  fi',
+    '  exit 0',
+    'fi',
+    'if [ "${FAKE_CONTROL_BYTE_UNIT:-}" = "$unit" ]; then',
+    '  printf \'LoadState=loaded\\nActiveState=%s\\nSubState=%s\\nUnitFileState=static\\n\' "$active" "$sub"',
+    '  printf \'FragmentPath=%s\\nNeedDaemonReload=%s\\nDropInPaths=\\001\\n\' "$fragment" "$reload"',
+    '  [ "$kind" != service ] || printf \'User=%s\\nGroup=%s\\n\' "$user" "$group"',
+    '  exit 0',
+    'fi',
+    'printf \'LoadState=loaded\\nActiveState=%s\\nSubState=%s\\nUnitFileState=static\\n\' "$active" "$sub"',
+    'printf \'FragmentPath=%s\\nNeedDaemonReload=%s\\nDropInPaths=%s\\n\' "$fragment" "$reload" "$dropins"',
+    'if [ "$kind" = service ]; then',
+    '  printf \'User=%s\\n\' "$user"',
+    '  [ "${FAKE_MISSING_UNIT:-}" = "$unit" ] || printf \'Group=%s\\n\' "$group"',
+    'fi',
+    '[ "${FAKE_DUPLICATE_UNIT:-}" != "$unit" ] || printf \'LoadState=loaded\\n\'',
+    '[ "${FAKE_MALFORMED_UNIT:-}" != "$unit" ] || printf \'Unexpected=value\\n\'',
+    '',
+  ].join('\n'), { mode: 0o700 });
+  fs.chmodSync(systemctl, 0o700);
+  const verifier = path.join(libexec, 'verify-voice-stack-identity');
+  fs.writeFileSync(verifier, [
+    '#!/bin/bash',
+    'set -euo pipefail',
+    '[ "$*" = --installed-check ]',
+    'touch "$TELEAGENT_VOICE_INSTALL_TEST_ROOT/verifier-observed"',
+    'printf \'VOICE_STACK_IDENTITY_OK\\n\'',
+    '',
+  ].join('\n'), { mode: 0o700 });
+  fs.chmodSync(verifier, 0o700);
+  const environment = {
+    PATH: '/usr/sbin:/usr/bin:/sbin:/bin',
+    LANG: 'C.UTF-8',
+    LC_ALL: 'C.UTF-8',
+    TELEAGENT_VOICE_INSTALL_TEST_ONLY: '1',
+    TELEAGENT_VOICE_INSTALL_TEST_ROOT: directory,
+    TELEAGENT_VOICE_INSTALL_TEST_SYSTEMCTL: systemctl,
+    FAKE_SYSTEMCTL_LOG: calls,
+  };
+  return {
+    calls,
+    directory,
+    run: (additions = {}) => spawnSync(VOICE_INSTALLER, ['--check'], {
+      cwd: '/',
+      encoding: 'utf8',
+      env: { ...environment, ...additions },
+      timeout: 10_000,
+    }),
+  };
+}
 
 function identityFixture({
   voiceUser = 'teleagent-voice:x:991:991:Teleagent:/var/lib/teleagent-voice:/usr/sbin/nologin',
@@ -48,6 +150,11 @@ test('voice deployment source is dormant and contains only the reviewed identity
     sourceGid: process.getgid(),
   }), true);
   const unit = fs.readFileSync(path.join(DEPLOY, 'teleagent-voice-stack.service'), 'utf8');
+  assert.equal(unit.split('\n').filter((line) => line === RELEASE_START_GATE).length, 1);
+  assert.equal((unit.match(/verify-teleagent-release-closure/gu) ?? []).length, 1);
+  assert.equal(unit.split('\n').filter((line) => /^ExecStart(?:Pre)?=/u.test(line))[0],
+    RELEASE_START_GATE);
+  assert.doesNotMatch(unit, /^ExecCondition=|^ExecReload=/m);
   assert.match(unit,
     /^ExecStartPre=\/usr\/local\/libexec\/verify-voice-stack-identity --installed-check$/m);
   assert.match(unit,
@@ -126,7 +233,7 @@ test('voice source check resolves current once to one stable immutable release',
   for (const releaseRoot of releaseRoots) {
     const voiceRoot = path.join(releaseRoot, 'deploy', 'voice-stack');
     fs.mkdirSync(voiceRoot, { recursive: true, mode: 0o755 });
-    for (const [sourceName, _target, mode] of REVIEWED_ASSETS) {
+    for (const [sourceName, , mode] of REVIEWED_ASSETS) {
       fs.copyFileSync(path.join(DEPLOY, sourceName), path.join(voiceRoot, sourceName));
       fs.chmodSync(path.join(voiceRoot, sourceName), mode & 0o555);
     }
@@ -247,26 +354,45 @@ test('metadata verifier rejects symlink, hardlink, and mode substitution', (t) =
 
 test('voice installer can only install or check a disabled stack and never provisions secrets', () => {
   const installer = fs.readFileSync(path.join(DEPLOY, 'teleagent-voice-stack-install'), 'utf8');
+  assert.match(installer, /^PATH=\/usr\/sbin:\/usr\/bin:\/sbin:\/bin\nexport PATH$/m);
+  assert.match(installer, /^umask 077$/m);
+  const scrubbed = new Set((/^unset ([\s\S]*?)\numask 077$/mu.exec(installer)?.[1] ?? '')
+    .replaceAll('\\\n', ' ')
+    .trim()
+    .split(/\s+/u));
+  for (const variable of [
+    'ENV', 'BASH_ENV', 'CDPATH', 'LD_PRELOAD', 'LD_LIBRARY_PATH', 'LD_AUDIT',
+    'GCONV_PATH', 'NODE_OPTIONS', 'NODE_PATH', 'NODE_EXTRA_CA_CERTS',
+    'NODE_TLS_REJECT_UNAUTHORIZED', 'NODE_USE_ENV_PROXY', 'PYTHONPATH', 'PERL5LIB',
+    'RUBYOPT', 'SSLKEYLOGFILE', 'SSL_CERT_FILE', 'SSL_CERT_DIR', 'HTTP_PROXY',
+    'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'all_proxy',
+    'no_proxy', 'OPENAI_API_KEY', 'OPENAI_WEBHOOK_SECRET', 'SIP_PBX_AUTH_SECRET',
+    'ANTHROPIC_API_KEY', 'CLAUDE_API_KEY', 'CLAUDE_API_TOKEN', 'CODEX_API_KEY',
+    'API_KEY', 'API_TOKEN', 'AUTH_TOKEN', 'ACCESS_TOKEN', 'PROVIDER_TOKEN',
+    'PROVIDER_SECRET', 'OPENAI_API_KEY_FILE', 'OPENAI_WEBHOOK_SECRET_FILE',
+    'SIP_PBX_AUTH_SECRET_FILE',
+  ]) assert.equal(scrubbed.has(variable), true, variable);
+  assert.equal(scrubbed.has('TELEAGENT_VOICE_INSTALL_TEST_ONLY'), false);
+  assert.equal(scrubbed.has('FAKE_SYSTEMCTL_LOG'), false);
   assert.match(installer, /--source-check\|--install-disabled\|--check/);
   assert.match(installer, /systemd-sysusers/);
   assert.match(installer, /systemd-tmpfiles/);
   assert.match(installer, /^slice_unit=teleagent-voice-containers\.slice$/m);
   assert.doesNotMatch(installer, /is-active --quiet/);
-  assert.match(installer, /--property=LoadState --value/);
-  assert.match(installer, /--property=ActiveState --value/);
-  assert.match(installer, /--property=UnitFileState --value/);
+  assert.match(installer, /^service_unit_properties=.*FragmentPath,NeedDaemonReload,DropInPaths,User,Group$/m);
+  assert.match(installer, /^slice_unit_properties=.*FragmentPath,NeedDaemonReload,DropInPaths$/m);
+  assert.match(installer, /assert_unit_truth "\$unit" "\$target_unit" service installed/);
+  assert.match(installer, /assert_unit_truth "\$slice_unit" "\$target_slice" slice installed/);
+  assert.match(installer, /\/usr\/bin\/timeout --signal=TERM --kill-after=1s 5s/);
   assert.match(installer,
-    /load_state=\$\("\$systemctl_bin" show[^\n]+--property=LoadState --value\) \|\|\n\s+fail/);
-  assert.match(installer,
-    /active_state=\$\("\$systemctl_bin" show[^\n]+--property=ActiveState --value\) \|\|\n\s+fail/);
-  assert.match(installer, /not-found\)[\s\S]*teleagent-voice-stack\.service/);
-  assert.match(installer, /\[ "\$load_state" = loaded \]/);
-  assert.match(installer, /\[ "\$active_state" = inactive \]/);
+    /\/usr\/bin\/env -i HOME=\/var\/empty PATH=\/usr\/sbin:\/usr\/bin:\/sbin:\/bin/);
+  assert.match(installer, /response has unsafe framing/);
+  assert.match(installer, /not-found:pre\)/);
+  assert.match(installer, /loaded:pre\|loaded:installed/);
+  assert.match(installer, /inactive:dead/);
   assert.match(installer, /\[ "\$unit_file_state" = static \]/);
   assert.match(installer,
-    /installed voice container slice must be loaded, static, and inactive/);
-  assert.match(installer,
-    /absent voice container slice conflicts with an installed unit file/);
+    /an absent voice unit conflicts with an installed unit file/);
   assert.match(installer, /assert_slice_inactive_or_absent/);
   assert.match(installer, /assert_slice_installed_dormant/);
   assert.doesNotMatch(installer, /is-enabled(?:\s|$)/);
@@ -281,6 +407,44 @@ test('voice installer can only install or check a disabled stack and never provi
   assert.match(installer, /"0:0:\$\{mode\}:1"\|"0:0:\$\{immutable_mode\}:1"/);
   assert.match(installer, /rollback\(\)/);
 });
+
+test('voice installed check rejects stale loaded service and slice policy before identity check',
+  (t) => {
+    if (process.getuid() === 0) return t.skip('the isolated installer lane rejects root');
+    const healthy = voiceInstallerFixture(t);
+    let result = healthy.run();
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, 'VOICE_STACK_INSTALLED_DISABLED_OK\n');
+    assert.equal(fs.existsSync(path.join(healthy.directory, 'verifier-observed')), true);
+    const calls = fs.readFileSync(healthy.calls, 'utf8').trim().split('\n');
+    assert.equal(calls.length, 2);
+    assert.equal(calls.every((line) => /^show teleagent-voice-(?:stack\.service|containers\.slice) --property=LoadState,ActiveState,SubState,UnitFileState,FragmentPath,NeedDaemonReload,DropInPaths(?:,User,Group)?$/u
+      .test(line)), true);
+
+    for (const [variable, unit] of [
+      ['FAKE_TRANSITIONAL_UNIT', 'teleagent-voice-stack.service'],
+      ['FAKE_FRAGMENT_UNIT', 'teleagent-voice-stack.service'],
+      ['FAKE_FRAGMENT_UNIT', 'teleagent-voice-containers.slice'],
+      ['FAKE_RUNTIME_FRAGMENT_UNIT', 'teleagent-voice-stack.service'],
+      ['FAKE_DROPIN_UNIT', 'teleagent-voice-stack.service'],
+      ['FAKE_DROPIN_UNIT', 'teleagent-voice-containers.slice'],
+      ['FAKE_RELOAD_UNIT', 'teleagent-voice-stack.service'],
+      ['FAKE_RELOAD_UNIT', 'teleagent-voice-containers.slice'],
+      ['FAKE_WRONG_USER_UNIT', 'teleagent-voice-stack.service'],
+      ['FAKE_WRONG_GROUP_UNIT', 'teleagent-voice-stack.service'],
+      ['FAKE_MALFORMED_UNIT', 'teleagent-voice-containers.slice'],
+      ['FAKE_DUPLICATE_UNIT', 'teleagent-voice-stack.service'],
+      ['FAKE_MISSING_UNIT', 'teleagent-voice-stack.service'],
+      ['FAKE_UNFRAMED_UNIT', 'teleagent-voice-containers.slice'],
+      ['FAKE_CONTROL_BYTE_UNIT', 'teleagent-voice-stack.service'],
+      ['FAKE_OVERSIZED_UNIT', 'teleagent-voice-containers.slice'],
+    ]) {
+      const drifted = voiceInstallerFixture(t);
+      result = drifted.run({ [variable]: unit });
+      assert.equal(result.status, 77, `${variable}:${unit} ${result.stderr}`);
+      assert.equal(fs.existsSync(path.join(drifted.directory, 'verifier-observed')), false);
+    }
+  });
 
 test('SIP fence atomically reconciles, detects drift, and removes through a non-root fake nft', (t) => {
   if (process.getuid() === 0) {

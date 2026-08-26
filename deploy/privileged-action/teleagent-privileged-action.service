@@ -27,6 +27,7 @@ Environment=PRIVILEGED_ACTION_REPLAY_KEY_FILE=%d/replay-fingerprint-key
 LoadCredential=approval-public-key:/etc/teleagent/privileged-action/approval-public.pem
 LoadCredential=replay-fingerprint-key:/etc/teleagent/privileged-action/replay-fingerprint.key
 UnsetEnvironment=LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT GCONV_PATH NODE_OPTIONS NODE_PATH NODE_EXTRA_CA_CERTS NODE_TLS_REJECT_UNAUTHORIZED NODE_USE_ENV_PROXY SSLKEYLOGFILE SSL_CERT_FILE SSL_CERT_DIR HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy OPENAI_API_KEY ANTHROPIC_API_KEY CLAUDE_API_KEY CLAUDE_API_TOKEN CODEX_API_KEY API_KEY API_TOKEN AUTH_TOKEN ACCESS_TOKEN PROVIDER_TOKEN PROVIDER_SECRET
+ExecStartPre=+/usr/bin/env -i HOME=/var/empty PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 /usr/local/libexec/verify-teleagent-release-closure --check-start-gate
 ExecStart=/opt/teleagent/node/bin/node --jitless /opt/teleagent/current/privileged-action-broker/index.js
 Restart=on-failure
 RestartSec=2s

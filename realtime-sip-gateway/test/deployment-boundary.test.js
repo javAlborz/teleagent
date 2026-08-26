@@ -31,6 +31,9 @@ import {
 const packageRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const deployRoot = path.join(packageRoot, 'deploy');
 const GIB = 1024n * 1024n * 1024n;
+const RELEASE_START_GATE = 'ExecStartPre=+/usr/bin/env -i HOME=/var/empty ' +
+  'PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 ' +
+  '/usr/local/libexec/verify-teleagent-release-closure --check-start-gate';
 
 function source(name) {
   return readFileSync(path.join(deployRoot, name), 'utf8');
@@ -79,7 +82,22 @@ const validGroup = [
 ].join('\n');
 
 test('source policy is static, sentinel-gated, bounded, and creates no activation material', () => {
-  assert.equal(validateServiceSource(source('teleagent-realtime-sip-gateway.service')), true);
+  const service = source('teleagent-realtime-sip-gateway.service');
+  assert.equal(validateServiceSource(service), true);
+  assert.equal(service.split('\n').filter((line) => line === RELEASE_START_GATE).length, 1);
+  assert.equal(service.split('\n').filter((line) => /^ExecStart(?:Pre)?=/u.test(line))[0],
+    RELEASE_START_GATE);
+  for (const weakened of [
+    service.replace('--check-start-gate', '--check-runtime'),
+    service.replace('/usr/bin/env -i', '/usr/bin/env'),
+    service.replace(`${RELEASE_START_GATE}\n`, `${RELEASE_START_GATE}\n${RELEASE_START_GATE}\n`),
+    service.replace(
+      `${RELEASE_START_GATE}\nExecStartPre=+/usr/local/libexec/verify-realtime-sip-gateway --activation-check`,
+      `ExecStartPre=+/usr/local/libexec/verify-realtime-sip-gateway --activation-check\n${RELEASE_START_GATE}`,
+    ),
+    `${service}ExecCondition=/bin/true\n`,
+    `${service}ExecReload=/usr/local/libexec/reload-from-release\n`,
+  ]) assert.throws(() => validateServiceSource(weakened), /release start gate|reviewed/u);
   assert.equal(validateSysusersSource(source('teleagent-realtime-sip-gateway.sysusers')), true);
   assert.equal(validateTmpfilesSource(source('teleagent-realtime-sip-gateway.tmpfiles')), true);
 
@@ -323,10 +341,13 @@ test('systemd accepts the static hardened unit in an offline fixture', {
   for (const directoryName of [
     'etc/systemd/system',
     'etc/teleagent/realtime-sip-gateway',
+    'usr/bin',
     'usr/local/libexec',
     'opt/teleagent/current/realtime-sip-gateway/src',
     'var/lib/teleagent-sip-gateway',
   ]) makeDirectory(directoryName);
+  writeFileSync(path.join(root, 'usr/bin/env'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  chmodSync(path.join(root, 'usr/bin/env'), 0o755);
   copyFileSync(
     path.join(deployRoot, 'teleagent-realtime-sip-gateway.service'),
     path.join(root, 'etc/systemd/system/teleagent-realtime-sip-gateway.service'),

@@ -190,6 +190,14 @@ together at three CPUs, 3 GiB memory, zero swap, and 1024 tasks; the launcher
 first requires canonical Docker evidence for the `systemd` cgroup driver and
 cgroup v2. It then inspects every exact project container after startup and refuses activation if
 its cgroup parent or durable activation-generation label differs. The
+external host-owned release verifier is the first start command, before the
+application identity check or launcher. Its empty-environment
+`--check-start-gate` cheaply revalidates current-boot approval, selected
+release/manifest identity, and installed runtime metadata without rescanning
+or content-hashing the release; the serialized disabled host handoff retains
+the full `--check-runtime` pass. The standalone installer also requires the
+loaded service and container slice to use their exact `/etc/systemd/system`
+fragments, with no drop-ins or pending daemon reload. The
 no-network credential preflight is separately capped at 0.5 CPU, 256 MiB, and
 64 tasks, mounts durable voice state read-only, and cannot consume swap. Every
 Compose service uses the bounded local log driver with three 10 MiB files, so a

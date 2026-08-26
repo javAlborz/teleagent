@@ -24,6 +24,7 @@ expected_uid=0
 expected_gid=0
 test_lane=0
 release_node=
+release_start_gate='ExecStartPre=+/usr/bin/env -i HOME=/var/empty PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 /usr/local/libexec/verify-teleagent-release-closure --check-start-gate'
 
 fail() {
   local message=$1
@@ -259,10 +260,21 @@ source_check() {
     'Environment=SIP_STATE_DATABASE=/var/lib/teleagent-sip-gateway/gateway-state.sqlite3' \
     'Environment=SIP_STATE_MARKER_FILE=%d/SIP_STATE_INITIALIZED' \
     'LoadCredential=SIP_STATE_INITIALIZED:/etc/teleagent/realtime-sip-gateway/STATE_INITIALIZED' \
+    "$release_start_gate" \
     'ExecStartPre=+/usr/local/libexec/verify-realtime-sip-gateway --activation-check'; do
     [ "$(/usr/bin/grep -Fxc "$required" "$service" || true)" -eq 1 ] ||
       fail 'the unit resource or storage contract drifted'
   done
+  [ "$(/usr/bin/grep -Fc \
+    '/usr/local/libexec/verify-teleagent-release-closure' "$service" || true)" -eq 1 ] ||
+    fail 'the trusted release start gate was duplicated or weakened'
+  ! /usr/bin/grep -Eq '^ExecCondition=|^ExecReload=' "$service" ||
+    fail 'the unit added an execution path that bypasses the trusted start gate'
+  [ "$(/usr/bin/grep -nE '^ExecStart(Pre)?=' "$service" |
+      /usr/bin/sed -n '1s/:.*//p')" = \
+    "$(/usr/bin/grep -nFx "$release_start_gate" "$service" |
+      /usr/bin/cut -d: -f1)" ] ||
+    fail 'the trusted release start gate is not the first start command'
   for inaccessible in \
     /var/lib/teleagent-provider-plane \
     /var/lib/teleagent-worker-state \

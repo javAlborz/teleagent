@@ -141,6 +141,12 @@ Before activation, a root operator must:
    check succeeds;
 8. create the `ENABLE` sentinel and start the unit explicitly.
 
+The broker's first start command is the external host-owned release
+`--check-start-gate`, invoked with an empty environment before Node. It cheaply
+revalidates the current-boot approval/gate, selected release and manifest
+identity, plus installed runtime metadata; full release scanning remains the
+serialized disabled-handoff responsibility.
+
 The unit is `User=root`, `Group=root`, with only `teleagent-control` as a
 supplementary group. There is deliberately no `RuntimeDirectory=`: tmpfiles is
 the sole owner of the socket-directory metadata. The broker has explicit CPU,
