@@ -237,19 +237,21 @@ VOICE_INSPECTION_ROOTS=/var/lib/teleagent-control
 VOICE_APP_UID=<id -u teleagent-voice>
 VOICE_APP_GID=<id -g teleagent-voice>
 VOICE_STATE_DIR=/var/lib/teleagent-voice
-VOICE_STATE_DB_PATH=/app/state/voice-state.sqlite
 VOICE_APPROVAL_TTL_SECONDS=300
 VOICE_APPROVAL_MARKER_TIMEOUT_MS=30000
-WS_HOST=127.0.0.1
-WS_CONNECT_HOST=127.0.0.1
-WS_NON_LOOPBACK_ENABLED=false
-WS_ALLOWED_PEERS=
 VOICE_APPROVAL_CAPABILITY_ENABLED=false
 VOICE_APPROVAL_SIGNING_KEY_FILE=/run/secrets/teleagent-approval-private.pem
 VOICE_APPROVAL_SIGNING_KEY_ID=controller-2026-01
 VOICE_APPROVAL_CAPABILITY_TTL_SECONDS=120
 VOICE_AGENT_RECENT_OUTPUT_MS=5000
 ```
+
+The database and execution-lock paths are fixed application constants at
+`/app/state/voice-state.sqlite` and
+`/app/state/voice-execution.lock.json`. Voice HTTP and AudioFork hosts are fixed
+to `127.0.0.1`, non-loopback modes are fixed off, and the peer override is fixed
+empty. Omit all of those path/listener settings from the host environment; the
+launcher and application both reject missing or drifted container projections.
 
 The caller number is hashed before use as `OpenAI-Safety-Identifier`. Keep the
 dedicated Realtime key, API bridge token, and explicit salt in the server-side

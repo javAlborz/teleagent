@@ -5,8 +5,11 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const {
+  assertVoiceAppRuntimeEnvironment,
+  VOICE_EXECUTION_LOCK_FILE,
   VOICE_APP_FIXED_ENV,
   VOICE_APP_RUNTIME_ENV_KEYS,
+  VOICE_STATE_DB_PATH,
 } = require('../../lib/voice-app-runtime-env');
 
 const REPOSITORY_ROOT = path.resolve(__dirname, '../..');
@@ -68,6 +71,43 @@ function environmentEntries(service) {
   );
 }
 
+test('voice state and listener invariants are exact application constants', () => {
+  assert.equal(VOICE_STATE_DB_PATH, '/app/state/voice-state.sqlite');
+  assert.equal(VOICE_EXECUTION_LOCK_FILE, '/app/state/voice-execution.lock.json');
+  assert.deepEqual(assertVoiceAppRuntimeEnvironment({ ...VOICE_APP_FIXED_ENV }), {
+    stateDbPath: '/app/state/voice-state.sqlite',
+    executionLockFile: '/app/state/voice-execution.lock.json',
+    httpHost: '127.0.0.1',
+    wsHost: '127.0.0.1',
+    wsConnectHost: '127.0.0.1',
+    wsAllowedPeers: '',
+    wsNonLoopbackEnabled: false,
+  });
+
+  const rejected = {
+    VOICE_STATE_DB_PATH: [undefined, '', '/tmp/teleagent/voice-state.sqlite', '/app/state/other.sqlite'],
+    VOICE_APP_EXECUTION_LOCK_FILE: [undefined, '', '/tmp/voice.lock', '/app/state/other.lock'],
+    HTTP_HOST: [undefined, '', '0.0.0.0', '::'],
+    WS_HOST: [undefined, '', '0.0.0.0', '::'],
+    WS_CONNECT_HOST: [undefined, '', '10.0.0.8', 'localhost'],
+    WS_ALLOWED_PEERS: [undefined, '127.0.0.1', '10.0.0.8'],
+    WS_NON_LOOPBACK_ENABLED: [undefined, '', 'true', 'False'],
+    OUTBOUND_API_NON_LOOPBACK_ENABLED: [undefined, '', 'true', 'False'],
+  };
+  for (const [name, values] of Object.entries(rejected)) {
+    for (const value of values) {
+      const environment = { ...VOICE_APP_FIXED_ENV };
+      if (value === undefined) delete environment[name];
+      else environment[name] = value;
+      assert.throws(
+        () => assertVoiceAppRuntimeEnvironment(environment),
+        { code: 'VOICE_APP_RUNTIME_CONTRACT_INVALID' },
+        `${name}=${String(value)}`,
+      );
+    }
+  }
+});
+
 test('production voice environment references are closed over the Compose allowlist', () => {
   const referenced = collectEnvironmentReferences();
   const configured = new Set([
@@ -125,6 +165,15 @@ test('canonical Compose exposes exactly the reviewed voice-app runtime environme
   assert.equal(entries.get('DRACHTIO_PORT'), '"9022"');
   assert.equal(entries.get('FREESWITCH_HOST'), '"127.0.0.1"');
   assert.equal(entries.get('FREESWITCH_PORT'), '"8021"');
+  assert.equal(entries.get('HTTP_HOST'), '"127.0.0.1"');
+  assert.equal(entries.get('OUTBOUND_API_NON_LOOPBACK_ENABLED'), '"false"');
+  assert.equal(entries.get('VOICE_APP_EXECUTION_LOCK_FILE'),
+    '"/app/state/voice-execution.lock.json"');
+  assert.equal(entries.get('VOICE_STATE_DB_PATH'), '"/app/state/voice-state.sqlite"');
+  assert.equal(entries.get('WS_ALLOWED_PEERS'), '""');
+  assert.equal(entries.get('WS_CONNECT_HOST'), '"127.0.0.1"');
+  assert.equal(entries.get('WS_HOST'), '"127.0.0.1"');
+  assert.equal(entries.get('WS_NON_LOOPBACK_ENABLED'), '"false"');
   for (const secretName of [
     'DRACHTIO_SECRET',
     'EXECUTOR_API_TOKEN',
@@ -147,4 +196,26 @@ test('canonical Compose exposes exactly the reviewed voice-app runtime environme
   assert.ok(!entries.has('AGENT_WORKER_HOME'));
   assert.ok(!entries.has('CODEX_COMMAND'));
   assert.ok(!entries.has('CLAUDE_COMMAND'));
+});
+
+test('voice runtime proves fixed state/listener values before state or network initialization', () => {
+  const source = fs.readFileSync(path.join(VOICE_APP_ROOT, 'index.js'), 'utf8');
+  const validation = source.indexOf(
+    'voiceAppRuntimeContract.assertVoiceAppRuntimeEnvironment(process.env)'
+  );
+  const capacityAdmission = source.indexOf('var startupCapacityHealth = stateCapacityGuard.check()');
+  const ownerFence = source.indexOf('outboundRuntimeFence = new OutboundRuntimeFence({');
+  const stateOpen = source.indexOf('var runtimeState = openVoiceRuntimeState({');
+  const executionLock = source.indexOf('new VoiceExecutionControl({');
+  const sipConnect = source.indexOf('srf.connect({');
+
+  assert.ok(validation > 0);
+  assert.ok(validation < source.indexOf('var Srf = require("drachtio-srf")'));
+  assert.ok(validation < capacityAdmission);
+  assert.ok(capacityAdmission < ownerFence);
+  assert.ok(ownerFence < sipConnect);
+  assert.ok(capacityAdmission < stateOpen);
+  assert.ok(stateOpen < executionLock);
+  assert.doesNotMatch(source, /process\.env\.(?:VOICE_STATE_DB_PATH|VOICE_APP_EXECUTION_LOCK_FILE)/);
+  assert.doesNotMatch(source, /\/tmp\/teleagent\/voice-state\.sqlite/);
 });

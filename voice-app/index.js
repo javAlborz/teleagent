@@ -4,6 +4,14 @@
  */
 
 if (process.env.NODE_ENV !== 'production') require("dotenv").config();
+var voiceAppRuntimeContract = require("../lib/voice-app-runtime-env");
+var fixedRuntimeEnvironment = null;
+try {
+  fixedRuntimeEnvironment = voiceAppRuntimeContract.assertVoiceAppRuntimeEnvironment(process.env);
+} catch (error) {
+  console.error("[CONFIG] Voice state/listener boundary failed: " + error.message);
+  process.exit(1);
+}
 var Srf = require("drachtio-srf");
 var Mrf = require("drachtio-fsmrf");
 
@@ -78,18 +86,16 @@ var config = {
     port: null,
     secret: null
   },
-  http_host: process.env.HTTP_HOST || "127.0.0.1",
+  http_host: fixedRuntimeEnvironment.httpHost,
   http_port: parseInt(process.env.HTTP_PORT) || 3000,
-  ws_host: process.env.WS_HOST || "127.0.0.1",
-  ws_connect_host: process.env.WS_CONNECT_HOST || "127.0.0.1",
-  ws_non_loopback_enabled: String(process.env.WS_NON_LOOPBACK_ENABLED || "false")
-    .trim().toLowerCase() === "true",
-  ws_allowed_peers: process.env.WS_ALLOWED_PEERS || "",
+  ws_host: fixedRuntimeEnvironment.wsHost,
+  ws_connect_host: fixedRuntimeEnvironment.wsConnectHost,
+  ws_non_loopback_enabled: fixedRuntimeEnvironment.wsNonLoopbackEnabled,
+  ws_allowed_peers: fixedRuntimeEnvironment.wsAllowedPeers,
   ws_port: parseInt(process.env.WS_PORT) || 3001,
   audio_dir: process.env.AUDIO_DIR || "/tmp/voice-audio",
-  voice_state_db_path: process.env.VOICE_STATE_DB_PATH || "/tmp/teleagent/voice-state.sqlite",
-  voice_execution_lock_path: process.env.VOICE_APP_EXECUTION_LOCK_FILE ||
-    require("path").join(require("path").dirname(process.env.VOICE_STATE_DB_PATH || "/tmp/teleagent/voice-state.sqlite"), "voice-execution.lock.json")
+  voice_state_db_path: fixedRuntimeEnvironment.stateDbPath,
+  voice_execution_lock_path: fixedRuntimeEnvironment.executionLockFile
 };
 
 try {
@@ -192,6 +198,12 @@ console.log("\nWaiting for connections...\n");
 // Fence the whole voice process before it registers SIP devices, connects a
 // media worker, opens state, or reconciles interrupted work. A replacement may
 // start only after the old process and all of those planes have stopped.
+stateCapacityGuard = new VoiceStateCapacityGuard();
+var startupCapacityHealth = stateCapacityGuard.check();
+if (!startupCapacityHealth.ok) {
+  console.error("[CONFIG] Durable voice state capacity boundary is unavailable");
+  process.exit(1);
+}
 outboundRuntimeFence = new OutboundRuntimeFence({
   stateDbPath: config.voice_state_db_path
 });
@@ -255,16 +267,15 @@ function initializeServers() {
     fs.mkdirSync(config.audio_dir, { recursive: true });
   }
 
+  var initialCapacityHealth = stateCapacityGuard.check();
+  if (!initialCapacityHealth.ok) {
+    throw new Error("Durable voice state capacity boundary is unavailable");
+  }
   var runtimeState = openVoiceRuntimeState({
     dbPath: config.voice_state_db_path,
     runtimeFence: outboundRuntimeFence
   });
   voiceStateStore = runtimeState.stateStore;
-  stateCapacityGuard = new VoiceStateCapacityGuard();
-  var initialCapacityHealth = stateCapacityGuard.check();
-  if (!initialCapacityHealth.ok) {
-    throw new Error("Durable voice state capacity boundary is unavailable");
-  }
   var voiceExecutionControl = new VoiceExecutionControl({ lockFile: config.voice_execution_lock_path });
   var privilegedActionBridge = config.privileged_actions.enabled
     ? new PrivilegedActionBridge({ apiToken: config.privileged_actions.apiToken })

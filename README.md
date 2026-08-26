@@ -236,7 +236,6 @@ VOICE_INSPECTION_ROOTS=/var/lib/teleagent-control
 VOICE_APP_UID=<id -u teleagent-voice>
 VOICE_APP_GID=<id -g teleagent-voice>
 VOICE_STATE_DIR=/var/lib/teleagent-voice
-VOICE_STATE_DB_PATH=/app/state/voice-state.sqlite
 VOICE_APPROVAL_CAPABILITY_ENABLED=false
 VOICE_APPROVAL_SIGNING_KEY_FILE=/run/secrets/teleagent-approval-private.pem
 VOICE_APPROVAL_SIGNING_KEY_ID=controller-2026-01
@@ -245,6 +244,14 @@ VOICE_APPROVAL_KEY_ID=controller-2026-01
 VOICE_APPROVAL_PUBLIC_KEY_FILE=/secure/executor/teleagent-approval-public.pem
 EXECUTOR_TASK_DB_PATH=/var/lib/teleagent-control/executor-tasks.sqlite
 ```
+
+The mounted host state directory remains explicit, but its in-container
+database and execution-lock files are application constants:
+`/app/state/voice-state.sqlite` and
+`/app/state/voice-execution.lock.json`. The HTTP and AudioFork listeners are
+likewise fixed to `127.0.0.1`. Host environment files must omit the corresponding
+path, host, peer, and non-loopback variables; the launcher rejects them even
+when their value happens to match the fixed contract.
 
 Mutating voice work uses short-lived Ed25519 capabilities bound to the approved
 job, request and execution-plan hashes, target, provider, and profile. Keep the

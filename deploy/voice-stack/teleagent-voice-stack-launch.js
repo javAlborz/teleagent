@@ -36,6 +36,16 @@ const MIB = 1024n * 1024n;
 const MIN_STATE_CAPACITY_BYTES = 4n * GIB;
 const MAX_STATE_CAPACITY_BYTES = 8n * GIB;
 const MIN_STATE_FREE_BYTES = 512n * MIB;
+const FIXED_VOICE_APP_BOUNDARY_ENV = Object.freeze({
+  HTTP_HOST: '127.0.0.1',
+  OUTBOUND_API_NON_LOOPBACK_ENABLED: 'false',
+  VOICE_APP_EXECUTION_LOCK_FILE: '/app/state/voice-execution.lock.json',
+  VOICE_STATE_DB_PATH: '/app/state/voice-state.sqlite',
+  WS_ALLOWED_PEERS: '',
+  WS_CONNECT_HOST: '127.0.0.1',
+  WS_HOST: '127.0.0.1',
+  WS_NON_LOOPBACK_ENABLED: 'false',
+});
 
 const ACTIVATION_PHASES = new Set([
   'starting',
@@ -306,11 +316,44 @@ function openCredential(filename, { gid, kind }) {
   }
 }
 
-function readEnvironmentFile(identity) {
-  inspectRootPath(ENV_FILE, { mode: 0o600 });
-  const source = fs.readFileSync(ENV_FILE, 'utf8');
+function verifyVoiceAppRuntimeContract(runtimeContract) {
+  if (!runtimeContract || typeof runtimeContract !== 'object' ||
+      typeof runtimeContract.assertVoiceAppRuntimeEnvironment !== 'function' ||
+      !runtimeContract.VOICE_APP_FIXED_ENV ||
+      !Array.isArray(runtimeContract.VOICE_APP_RUNTIME_ENV_KEYS) ||
+      runtimeContract.VOICE_STATE_DB_PATH !== FIXED_VOICE_APP_BOUNDARY_ENV.VOICE_STATE_DB_PATH ||
+      runtimeContract.VOICE_EXECUTION_LOCK_FILE !==
+        FIXED_VOICE_APP_BOUNDARY_ENV.VOICE_APP_EXECUTION_LOCK_FILE) {
+    refuse('the voice application runtime contract is incomplete');
+  }
+  for (const [name, expected] of Object.entries(FIXED_VOICE_APP_BOUNDARY_ENV)) {
+    if (runtimeContract.VOICE_APP_FIXED_ENV[name] !== expected ||
+        runtimeContract.VOICE_APP_RUNTIME_ENV_KEYS.includes(name)) {
+      refuse('the voice application fixed state/listener contract drifted');
+    }
+  }
+  let proven;
+  try {
+    proven = runtimeContract.assertVoiceAppRuntimeEnvironment(
+      runtimeContract.VOICE_APP_FIXED_ENV
+    );
+  } catch {
+    refuse('the voice application fixed state/listener contract is invalid');
+  }
+  if (proven?.stateDbPath !== FIXED_VOICE_APP_BOUNDARY_ENV.VOICE_STATE_DB_PATH ||
+      proven?.executionLockFile !==
+        FIXED_VOICE_APP_BOUNDARY_ENV.VOICE_APP_EXECUTION_LOCK_FILE ||
+      proven?.httpHost !== '127.0.0.1' || proven?.wsHost !== '127.0.0.1' ||
+      proven?.wsConnectHost !== '127.0.0.1' || proven?.wsAllowedPeers !== '' ||
+      proven?.wsNonLoopbackEnabled !== false) {
+    refuse('the voice application fixed state/listener result drifted');
+  }
+  return true;
+}
+
+function parseVoiceEnvironmentFile(source, identity, runtimeContract) {
   if (/\r|\0/u.test(source)) refuse('the voice environment file has invalid encoding');
-  const runtimeContract = require(`${APP_ROOT}/lib/voice-app-runtime-env.js`);
+  verifyVoiceAppRuntimeContract(runtimeContract);
   const allowed = new Set([
     ...runtimeContract.VOICE_APP_RUNTIME_ENV_KEYS,
     'VOICE_APP_UID', 'VOICE_APP_GID', 'DEVICE_CONFIG_DIR', 'VOICE_STATE_DIR',
@@ -337,6 +380,13 @@ function readEnvironmentFile(identity) {
     refuse('the voice environment identity or path contract drifted');
   }
   return settings;
+}
+
+function readEnvironmentFile(identity) {
+  inspectRootPath(ENV_FILE, { mode: 0o600 });
+  const source = fs.readFileSync(ENV_FILE, 'utf8');
+  const runtimeContract = require(`${APP_ROOT}/lib/voice-app-runtime-env.js`);
+  return parseVoiceEnvironmentFile(source, identity, runtimeContract);
 }
 
 function readCredentialSet(identity, settings) {
@@ -1064,6 +1114,7 @@ module.exports = {
   cleanupExactProject,
   cleanupRequiresPanicRecovery,
   normalizeVoiceImageManifest,
+  parseVoiceEnvironmentFile,
   parseExactProjectContainerIds,
   requestJson,
   renderTemplate,
@@ -1071,7 +1122,9 @@ module.exports = {
   runOfflineRecovery,
   startFailureDisposition,
   verifyBoundedHostStateFilesystem,
+  verifyVoiceAppRuntimeContract,
   verifyVoiceImage,
+  FIXED_VOICE_APP_BOUNDARY_ENV,
   MAX_CONTROL_RESPONSE_BYTES,
 };
 

@@ -16,15 +16,19 @@ const {
   cleanupExactProject,
   cleanupRequiresPanicRecovery,
   normalizeVoiceImageManifest,
+  parseVoiceEnvironmentFile,
   parseExactProjectContainerIds,
   requestJson,
   renderTemplateContents,
   runOfflineRecovery,
   startFailureDisposition,
   verifyBoundedHostStateFilesystem,
+  verifyVoiceAppRuntimeContract,
   verifyVoiceImage,
+  FIXED_VOICE_APP_BOUNDARY_ENV,
   MAX_CONTROL_RESPONSE_BYTES,
 } = require('../../deploy/voice-stack/teleagent-voice-stack-launch');
+const voiceAppRuntimeContract = require('../../lib/voice-app-runtime-env');
 
 const IMAGE_MANIFEST = Object.freeze({
   version: 1,
@@ -92,6 +96,70 @@ test('root launcher requires the exact voice-state path to be a bounded submount
   assert.throws(() => verifyBoundedHostStateFilesystem({ uid: 989, gid: 989 }, {
     fsModule: hostStateFilesystem({ replacementInode: 99 }),
   }), /changed during verification/);
+});
+
+test('root launcher closes fixed voice state/listener values against host overrides', () => {
+  assert.equal(verifyVoiceAppRuntimeContract(voiceAppRuntimeContract), true);
+  assert.deepEqual(FIXED_VOICE_APP_BOUNDARY_ENV, {
+    HTTP_HOST: '127.0.0.1',
+    OUTBOUND_API_NON_LOOPBACK_ENABLED: 'false',
+    VOICE_APP_EXECUTION_LOCK_FILE: '/app/state/voice-execution.lock.json',
+    VOICE_STATE_DB_PATH: '/app/state/voice-state.sqlite',
+    WS_ALLOWED_PEERS: '',
+    WS_CONNECT_HOST: '127.0.0.1',
+    WS_HOST: '127.0.0.1',
+    WS_NON_LOOPBACK_ENABLED: 'false',
+  });
+
+  assert.throws(() => verifyVoiceAppRuntimeContract({
+    ...voiceAppRuntimeContract,
+    VOICE_APP_FIXED_ENV: {
+      ...voiceAppRuntimeContract.VOICE_APP_FIXED_ENV,
+      VOICE_STATE_DB_PATH: '/tmp/teleagent/voice-state.sqlite',
+    },
+  }), /fixed state\/listener contract drifted/);
+  assert.throws(() => verifyVoiceAppRuntimeContract({
+    ...voiceAppRuntimeContract,
+    VOICE_APP_RUNTIME_ENV_KEYS: [
+      ...voiceAppRuntimeContract.VOICE_APP_RUNTIME_ENV_KEYS,
+      'HTTP_HOST',
+    ],
+  }), /fixed state\/listener contract drifted/);
+
+  const identity = { uid: 989, gid: 990 };
+  const base = [
+    'VOICE_APP_UID=989',
+    'VOICE_APP_GID=990',
+    'DEVICE_CONFIG_DIR=/etc/teleagent-voice/config',
+    'VOICE_STATE_DIR=/var/lib/teleagent-voice',
+    '',
+  ].join('\n');
+  assert.deepEqual(parseVoiceEnvironmentFile(base, identity, voiceAppRuntimeContract), {
+    VOICE_APP_UID: '989',
+    VOICE_APP_GID: '990',
+    DEVICE_CONFIG_DIR: '/etc/teleagent-voice/config',
+    VOICE_STATE_DIR: '/var/lib/teleagent-voice',
+  });
+  for (const [name, values] of Object.entries({
+    VOICE_STATE_DB_PATH: ['', '/app/state/voice-state.sqlite', '/tmp/voice-state.sqlite'],
+    VOICE_APP_EXECUTION_LOCK_FILE: ['', '/app/state/voice-execution.lock.json', '/tmp/voice.lock'],
+    HTTP_HOST: ['', '127.0.0.1', '0.0.0.0'],
+    WS_HOST: ['', '127.0.0.1', '0.0.0.0'],
+    WS_CONNECT_HOST: ['', '127.0.0.1', '10.0.0.8'],
+    WS_ALLOWED_PEERS: ['', '127.0.0.1', '10.0.0.8'],
+    WS_NON_LOOPBACK_ENABLED: ['', 'false', 'true'],
+    OUTBOUND_API_NON_LOOPBACK_ENABLED: ['', 'false', 'true'],
+  })) {
+    for (const value of values) {
+      assert.throws(
+        () => parseVoiceEnvironmentFile(
+          `${base}${name}=${value}\n`, identity, voiceAppRuntimeContract
+        ),
+        /unreviewed setting/,
+        `${name}=${value}`,
+      );
+    }
+  }
 });
 
 test('stack shutdown refuses persisted-but-unquiesced panic and forced exits', () => {

@@ -157,7 +157,14 @@ container. `AGENT_API_TOKEN` and `CLAUDE_API_TOKEN` are fixed empty,
 sensitive bridge logging is fixed off, and
 `VOICE_APPROVAL_SIGNING_KEY_FILE` is fixed to
 `/run/secrets/teleagent-approval-private.pem`; only the separate host mount
-source is configurable. The CLI-generated Compose uses the same contract.
+source is configurable. The SQLite and execution-lock paths are likewise fixed
+to `/app/state/voice-state.sqlite` and
+`/app/state/voice-execution.lock.json`. HTTP and AudioFork hosts are fixed to
+`127.0.0.1`, non-loopback modes are fixed off, and the AudioFork peer override
+is fixed empty. The protected host environment must omit all of those fixed
+settings; the root launcher rejects even matching-value entries, and voice-app
+rejects a missing, blank, or alternate container projection before opening
+SQLite or a listener. The CLI-generated Compose uses the same contract.
 The two SIP-trunk credentials likewise use fixed in-container paths and only
 their host sources are configurable. They are never process environment
 variables.
@@ -211,7 +218,8 @@ freeswitch:
 
 ### Environment Variables
 
-Key environment variables in the generated `.env`:
+Key runtime settings (rows marked fixed must be absent from the generated host
+environment):
 
 | Variable | Purpose |
 |----------|---------|
@@ -230,10 +238,10 @@ Key environment variables in the generated `.env`:
 | `AGENT_DURABLE_EXECUTOR_ENABLED` | Require idempotent durable execution for phone managed-agent queries (default `true`); disabling it blocks voice execution rather than falling back to `/ask` |
 | `AGENT_DURABLE_EXECUTOR_POLL_MS` | Durable task polling interval (default `500`, bounded to 10-5000 ms) |
 | `AGENT_DURABLE_EXECUTOR_SUBMIT_TIMEOUT_MS` | Initial durable submit timeout (default `10000`, bounded to 1-30 seconds) |
-| `WS_HOST` | AudioFork bind address; defaults to `127.0.0.1` |
-| `WS_CONNECT_HOST` | Concrete address placed in the FreeSWITCH callback URL; defaults to `127.0.0.1` |
-| `WS_NON_LOOPBACK_ENABLED` | Explicit reviewed opt-in required for any non-loopback AudioFork bind/connect address |
-| `WS_ALLOWED_PEERS` | Exact comma-separated source IP allowlist, mandatory in non-loopback mode; no CIDRs or wildcards |
+| `WS_HOST` | Fixed application constant `127.0.0.1`; forbidden in the host environment |
+| `WS_CONNECT_HOST` | Fixed application constant `127.0.0.1`; forbidden in the host environment |
+| `WS_NON_LOOPBACK_ENABLED` | Fixed application constant `false`; forbidden in the host environment |
+| `WS_ALLOWED_PEERS` | Fixed application constant empty; forbidden in the host environment and resolved to loopback peers |
 | `TTS_BASE_URL` | OpenAI-compatible TTS base URL |
 | `TTS_VOICE` | Default TTS voice name/id |
 | `STT_BASE_URL` | OpenAI-compatible Whisper base URL |
@@ -255,7 +263,7 @@ Key environment variables in the generated `.env`:
 | `VOICE_INSPECTION_ROOTS` | Host roots available to authenticated bounded read-only inspection |
 | `VOICE_STATE_DIR` | Host directory mounted read/write for durable Realtime state |
 | `VOICE_APP_UID` / `VOICE_APP_GID` | Required numeric IDs of the exact dedicated `teleagent-voice` account; no owner/1000 fallback |
-| `VOICE_STATE_DB_PATH` | SQLite path inside `voice-app` |
+| `VOICE_STATE_DB_PATH` | Fixed application constant `/app/state/voice-state.sqlite`; forbidden in the host environment |
 | `VOICE_APPROVAL_TTL_SECONDS` | Maximum age of an unconfirmed pound scope; defaults to 300 seconds |
 | `VOICE_APPROVAL_MARKER_TIMEOUT_MS` | Maximum wait for the exact FreeSWITCH downstream `playout` marker; defaults to 30 seconds and never authorizes on timeout |
 | `VOICE_APPROVAL_CAPABILITY_ENABLED` | Enables controller signing; when false, read-only jobs work and mutating/tmux jobs fail closed |
@@ -266,7 +274,7 @@ Key environment variables in the generated `.env`:
 | `VOICE_APPROVAL_PUBLIC_KEY_FILE` | Executor-only Ed25519 public-key file; unsafe ownership, writes, and symlinks are rejected |
 | `EXECUTOR_TASK_DB_PATH` | Executor SQLite DB where task creation and replay nonce consumption commit atomically |
 | `VOICE_AGENT_RECENT_OUTPUT_MS` | Provider-log freshness window used for the `generating` activity signal |
-| `VOICE_APP_EXECUTION_LOCK_FILE` | Optional in-container emergency-stop lock path; defaults beside the SQLite state |
+| `VOICE_APP_EXECUTION_LOCK_FILE` | Fixed application constant `/app/state/voice-execution.lock.json`; forbidden in the host environment |
 | `VOICE_EXECUTION_LOCK_FILE` | Optional host bridge lock path; defaults to `voice-app/state/voice-execution.lock.json` |
 | `VOICE_CONTROL_TOKEN` | Mandatory distinct bearer for status, unlock, and privileged operator routes; no general-token fallback |
 | `SIP_DOMAIN` | 3CX server FQDN |
