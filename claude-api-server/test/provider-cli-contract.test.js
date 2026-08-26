@@ -40,9 +40,13 @@ test('provider CLI artifacts and capture versions are exact and mutually consist
 
 test('checked-in wire capture keeps unobserved routes fail closed', () => {
   const capture = readJson('provider-cli-wire-capture.json');
-  assert.equal(capture.captureMode, 'clean-home-loopback-fake-upstream-initial-request');
+  assert.equal(
+    capture.captureMode,
+    'clean-home-loopback-fake-upstream-initial-and-tool-roundtrip'
+  );
   assert.equal(capture.credentials, 'synthetic-local-sentinel-only');
   assert.equal(capture.clients.codex.responsesCompactObserved, false);
+  assert.equal(capture.clients.claude.countTokensObserved, false);
   assert.ok(capture.promotionLimitations.some((entry) => entry.includes('/v1/responses/compact')));
 
   const codexModels = capture.clients.codex.requests.map((entry) => [
@@ -65,4 +69,17 @@ test('checked-in wire capture keeps unobserved routes fail closed', () => {
   assert.deepEqual(capture.clients.claude.requests.map((entry) => entry.model), [
     'claude-haiku-4-5-20251001', 'claude-sonnet-5', 'claude-opus-5',
   ]);
+  assert.deepEqual(capture.clients.claude.toolRoundTrip.continuationMessageTypes, [
+    ['text', 'text'], ['tool_use:Read'], ['tool_result'],
+  ]);
+  assert.equal(capture.clients.claude.toolRoundTrip.correlationVerified, true);
+  assert.deepEqual(capture.clients.codex.toolRoundTrip.continuationInputSuffix, [
+    'custom_tool_call', 'custom_tool_call_output',
+  ]);
+  assert.equal(capture.clients.codex.toolRoundTrip.correlationVerified, true);
+  assert.deepEqual(capture.clients.codex.compactionProbe.continuationInputSuffix, [
+    'custom_tool_call', 'custom_tool_call_output', 'compaction_trigger',
+  ]);
+  assert.equal(capture.clients.codex.compactionProbe.correlationVerified, true);
+  assert.equal(capture.clients.codex.compactionProbe.responsesCompactPathObserved, false);
 });

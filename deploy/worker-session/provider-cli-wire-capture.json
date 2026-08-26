@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "capturedAt": "2026-08-26T00:00:00Z",
-  "captureMode": "clean-home-loopback-fake-upstream-initial-request",
+  "capturedAt": "2026-08-26T12:57:48Z",
+  "captureMode": "clean-home-loopback-fake-upstream-initial-and-tool-roundtrip",
   "credentials": "synthetic-local-sentinel-only",
   "clients": {
     "claude": {
@@ -40,7 +40,19 @@
           "thinking": { "type": "adaptive", "display": "omitted" },
           "outputConfig": { "effort": "high" }
         }
-      ]
+      ],
+      "toolRoundTrip": {
+        "scenario": "synthetic-read-only-file",
+        "requestPaths": ["/v1/messages?beta=true", "/v1/messages?beta=true"],
+        "continuationMessageTypes": [
+          ["text", "text"],
+          ["tool_use:Read"],
+          ["tool_result"]
+        ],
+        "correlationVerified": true,
+        "networkBoundary": "provider-base-and-proxies-loopback-only"
+      },
+      "countTokensObserved": false
     },
     "codex": {
       "version": "codex-cli 0.149.1",
@@ -65,13 +77,33 @@
         "clientMetadataKeys": ["thread_id", "root_turn_id", "turn_id", "session_id", "x-codex-turn-metadata", "x-codex-window-id", "x-codex-installation-id"],
         "firstInputType": "additional_tools"
       },
+      "toolRoundTrip": {
+        "scenario": "synthetic-side-effect-free-custom-tool",
+        "requestPaths": ["/v1/responses", "/v1/responses"],
+        "continuationInputSuffix": ["custom_tool_call", "custom_tool_call_output"],
+        "customToolName": "functions.exec",
+        "correlationVerified": true,
+        "networkBoundary": "provider-base-and-proxies-loopback-only"
+      },
+      "compactionProbe": {
+        "providerNameSemanticOverride": "OpenAI",
+        "forcedAtTokenLimit": 1,
+        "reportedInputTokens": 4096,
+        "requestPaths": ["/v1/responses", "/v1/responses"],
+        "continuationInputSuffix": [
+          "custom_tool_call",
+          "custom_tool_call_output",
+          "compaction_trigger"
+        ],
+        "correlationVerified": true,
+        "responsesCompactPathObserved": false
+      },
       "responsesCompactObserved": false
     }
   },
   "promotionLimitations": [
-    "The fake upstream capture stops after the initial inference request.",
-    "Claude count_tokens and client-tool round trips are not yet captured.",
-    "Codex function/custom-tool result round trips and forced compaction are not yet captured.",
+    "Claude count_tokens is not reproducibly emitted by the pinned clean-home print-mode client and remains separately schema-constrained.",
+    "Codex 0.149.1 emitted a compaction_trigger through /v1/responses rather than calling /v1/responses/compact in the forced probe.",
     "The /v1/responses/compact route remains denied until a reproducible pinned-client capture exists."
   ]
 }

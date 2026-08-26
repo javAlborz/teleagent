@@ -58,9 +58,12 @@ function parseOptions(argv) {
   const command = path.resolve(String(options['--command'] || ''));
   const model = String(options['--model'] || '');
   const effort = String(options['--effort'] || 'low');
+  const scenario = String(options['--scenario'] || 'initial');
   if (!['claude', 'codex'].includes(provider) || !model || !path.isAbsolute(command) ||
-      !fs.existsSync(command)) {
-    fail('use --provider claude|codex --command ABSOLUTE_PATH --model MODEL [--effort EFFORT]');
+      !fs.existsSync(command) || !['initial', 'tool', 'compact'].includes(scenario) ||
+      (scenario === 'compact' && provider !== 'codex')) {
+    fail('use --provider claude|codex --command ABSOLUTE_PATH --model MODEL '
+      + '[--effort EFFORT] [--scenario initial|tool|compact]');
   }
   const metadata = fs.lstatSync(command);
   if ((!metadata.isFile() && !metadata.isSymbolicLink()) || (metadata.mode & 0o111) === 0) {
@@ -71,6 +74,7 @@ function parseOptions(argv) {
     command,
     model,
     effort,
+    scenario,
     summary: options['--output'] === 'summary',
   };
 }
@@ -130,12 +134,45 @@ function summarizeInputItem(item) {
   };
 }
 
+function summarizeMessage(message) {
+  if (!message || typeof message !== 'object') return { valueType: typeof message };
+  return {
+    role: message.role || null,
+    contentTypes: Array.isArray(message.content)
+      ? message.content.map((entry) => entry?.type || typeof entry)
+      : [],
+    toolNames: Array.isArray(message.content)
+      ? message.content.map((entry) => entry?.name).filter(Boolean)
+      : [],
+  };
+}
+
+function verifiedClaudeToolCorrelation(body) {
+  const blocks = (body?.messages || []).flatMap((message) => (
+    Array.isArray(message?.content) ? message.content : []
+  ));
+  const call = blocks.find((entry) => entry?.type === 'tool_use');
+  const result = blocks.find((entry) => entry?.type === 'tool_result');
+  return call?.name === 'Read' && typeof call.id === 'string' &&
+    call.id.length > 0 && result?.tool_use_id === call.id;
+}
+
+function verifiedCodexToolCorrelation(body) {
+  const input = Array.isArray(body?.input) ? body.input : [];
+  const call = input.find((entry) => entry?.type === 'custom_tool_call');
+  const result = input.find((entry) => entry?.type === 'custom_tool_call_output');
+  return call?.name === 'functions.exec' && typeof call.call_id === 'string' &&
+    call.call_id.length > 0 && result?.call_id === call.call_id;
+}
+
 function summarizeCapture(captured) {
   return {
     version: captured.version,
     provider: captured.provider,
     model: captured.model,
     reasoningEffort: captured.reasoningEffort,
+    scenario: captured.scenario,
+    correlationVerified: captured.correlationVerified,
     requests: captured.requests.map((request) => ({
       method: request.method,
       path: request.path,
@@ -160,10 +197,155 @@ function summarizeCapture(captured) {
         input: Array.isArray(request.body?.input)
           ? request.body.input.map(summarizeInputItem)
           : [],
+        messages: Array.isArray(request.body?.messages)
+          ? request.body.messages.map(summarizeMessage)
+          : [],
       },
     })),
     cliExit: captured.cliExit,
   };
+}
+
+function sendJson(response, status, value) {
+  const body = Buffer.from(JSON.stringify(value));
+  response.writeHead(status, {
+    'content-type': 'application/json',
+    'content-length': body.length,
+    connection: 'close',
+  });
+  response.end(body);
+}
+
+function sendSse(response, events, { doneSentinel = true } = {}) {
+  response.writeHead(200, {
+    'content-type': 'text/event-stream',
+    'cache-control': 'no-cache',
+    connection: 'close',
+  });
+  for (const event of events) {
+    response.write(`event: ${event.type}\n`);
+    response.write(`data: ${JSON.stringify(event)}\n\n`);
+  }
+  if (doneSentinel) response.write('data: [DONE]\n\n');
+  response.end();
+}
+
+function sendClaudeToolUse(response, filePath, model) {
+  const messageId = 'msg_offline_capture_1';
+  const toolId = 'toolu_offline_capture_1';
+  const input = JSON.stringify({ file_path: filePath });
+  sendSse(response, [
+    {
+      type: 'message_start',
+      message: {
+        id: messageId,
+        type: 'message',
+        role: 'assistant',
+        model,
+        content: [],
+        stop_reason: null,
+        stop_sequence: null,
+        usage: { input_tokens: 32, output_tokens: 1 },
+      },
+    },
+    {
+      type: 'content_block_start',
+      index: 0,
+      content_block: { type: 'tool_use', id: toolId, name: 'Read', input: {} },
+    },
+    {
+      type: 'content_block_delta',
+      index: 0,
+      delta: { type: 'input_json_delta', partial_json: input },
+    },
+    { type: 'content_block_stop', index: 0 },
+    {
+      type: 'message_delta',
+      delta: { stop_reason: 'tool_use', stop_sequence: null },
+      usage: { output_tokens: 16 },
+    },
+    { type: 'message_stop' },
+  ], { doneSentinel: false });
+}
+
+function codexResponse({ model, effort, item, inputTokens = 32 }) {
+  return {
+    id: 'resp_offline_capture_1',
+    object: 'response',
+    created_at: 0,
+    status: 'completed',
+    error: null,
+    incomplete_details: null,
+    instructions: null,
+    max_output_tokens: null,
+    model,
+    output: [item],
+    parallel_tool_calls: false,
+    previous_response_id: null,
+    reasoning: { effort, summary: null },
+    store: false,
+    text: { format: { type: 'text' }, verbosity: 'low' },
+    tool_choice: 'auto',
+    tools: [],
+    usage: {
+      input_tokens: inputTokens,
+      input_tokens_details: { cached_tokens: 0 },
+      output_tokens: 1,
+      output_tokens_details: { reasoning_tokens: 0 },
+      total_tokens: inputTokens + 1,
+    },
+    metadata: {},
+  };
+}
+
+function sendCodexToolUse(response, model, effort, inputTokens) {
+  const item = {
+    id: 'ctc_offline_capture_1',
+    type: 'custom_tool_call',
+    status: 'completed',
+    call_id: 'call_offline_capture_1',
+    input: 'text("OFFLINE_TOOL_OK")',
+    name: 'functions.exec',
+  };
+  const completed = codexResponse({ model, effort, item, inputTokens });
+  sendSse(response, [
+    {
+      type: 'response.created',
+      response: { ...completed, status: 'in_progress', output: [], usage: null },
+      sequence_number: 0,
+    },
+    {
+      type: 'response.output_item.added',
+      response_id: completed.id,
+      output_index: 0,
+      item: { ...item, status: 'in_progress', input: '' },
+      sequence_number: 1,
+    },
+    {
+      type: 'response.custom_tool_call_input.delta',
+      response_id: completed.id,
+      item_id: item.id,
+      output_index: 0,
+      delta: item.input,
+      sequence_number: 2,
+    },
+    {
+      type: 'response.custom_tool_call_input.done',
+      response_id: completed.id,
+      item_id: item.id,
+      output_index: 0,
+      input: item.input,
+      sequence_number: 3,
+    },
+    {
+      type: 'response.output_item.done',
+      response_id: completed.id,
+      output_index: 0,
+      item,
+      sequence_number: 4,
+    },
+    { type: 'response.completed', response: completed, sequence_number: 5 },
+  ]);
 }
 
 function signalChildTree(child, signal) {
@@ -214,17 +396,26 @@ async function main() {
   fs.mkdirSync(path.join(home, '.codex'), { mode: 0o700 });
   fs.writeFileSync(path.join(temporaryRoot, 'empty-settings.json'), '{}\n', { mode: 0o600 });
   fs.writeFileSync(path.join(temporaryRoot, 'empty-mcp.json'), '{"mcpServers":{}}\n', { mode: 0o600 });
+  const toolFixture = path.join(workspace, 'offline-tool-fixture.txt');
+  fs.writeFileSync(toolFixture, 'OFFLINE_TOOL_OK\n', { mode: 0o600 });
 
   const captured = {
     version: 1,
     provider: options.provider,
     model: options.model,
     reasoningEffort: options.provider === 'codex' ? options.effort : null,
+    scenario: options.scenario,
+    correlationVerified: options.scenario === 'initial' ? null : false,
     requests: [],
   };
-  let terminalCaptured = false;
+  let captureFinished = false;
   let captureResolve;
   const capturedPromise = new Promise((resolve) => { captureResolve = resolve; });
+  const finishCapture = () => {
+    if (captureFinished) return;
+    captureFinished = true;
+    captureResolve(captured);
+  };
   const server = http.createServer((request, response) => {
     const chunks = [];
     let length = 0;
@@ -251,31 +442,48 @@ async function main() {
         body: sanitizeBody(body),
       });
       if (parsedUrl.pathname.endsWith('/messages/count_tokens')) {
-        const countBody = Buffer.from('{"input_tokens":1}');
-        response.writeHead(200, {
-          'content-type': 'application/json',
-          'content-length': countBody.length,
-          connection: 'close',
-        });
-        response.end(countBody);
+        sendJson(response, 200, { input_tokens: 1 });
         return;
       }
-      const isTerminalRoute = parsedUrl.pathname.endsWith('/messages') ||
-        parsedUrl.pathname.endsWith('/responses') ||
-        parsedUrl.pathname.endsWith('/responses/compact');
-      if (isTerminalRoute && !terminalCaptured) {
-        terminalCaptured = true;
-        captureResolve(captured);
+
+      if (parsedUrl.pathname.endsWith('/responses/compact')) {
+        if (options.scenario === 'compact') {
+          captured.correlationVerified = verifiedCodexToolCorrelation(body);
+        }
+        finishCapture();
+      } else if (parsedUrl.pathname.endsWith('/messages')) {
+        const requestCount = captured.requests.filter((entry) => (
+          entry.path.endsWith('/messages')
+        )).length;
+        if (options.scenario === 'tool' && requestCount === 1) {
+          sendClaudeToolUse(response, toolFixture, options.model);
+          return;
+        }
+        if (options.scenario === 'tool') {
+          captured.correlationVerified = verifiedClaudeToolCorrelation(body);
+        }
+        finishCapture();
+      } else if (parsedUrl.pathname.endsWith('/responses')) {
+        const requestCount = captured.requests.filter((entry) => (
+          entry.path.endsWith('/responses')
+        )).length;
+        if (options.scenario !== 'initial' && requestCount === 1) {
+          sendCodexToolUse(
+            response,
+            options.model,
+            options.effort,
+            options.scenario === 'compact' ? 4096 : 32,
+          );
+          return;
+        }
+        if (options.scenario !== 'initial') {
+          captured.correlationVerified = verifiedCodexToolCorrelation(body);
+        }
+        finishCapture();
       }
-      const errorBody = Buffer.from(JSON.stringify({
+      sendJson(response, 422, {
         error: { type: 'offline_capture_complete', message: 'Synthetic upstream stopped after capture.' },
-      }));
-      response.writeHead(422, {
-        'content-type': 'application/json',
-        'content-length': errorBody.length,
-        connection: 'close',
       });
-      response.end(errorBody);
     });
   });
   await new Promise((resolve, reject) => {
@@ -285,6 +493,16 @@ async function main() {
   const address = server.address();
   const baseUrl = `http://127.0.0.1:${address.port}`;
   const safePath = `${path.dirname(options.command)}:/usr/local/bin:/usr/bin:/bin`;
+  const loopbackOnlyNetwork = {
+    HTTP_PROXY: baseUrl,
+    HTTPS_PROXY: baseUrl,
+    ALL_PROXY: baseUrl,
+    NO_PROXY: '127.0.0.1,localhost',
+    http_proxy: baseUrl,
+    https_proxy: baseUrl,
+    all_proxy: baseUrl,
+    no_proxy: '127.0.0.1,localhost',
+  };
   let args;
   let environment;
   if (options.provider === 'claude') {
@@ -312,16 +530,25 @@ async function main() {
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
       DISABLE_AUTOUPDATER: '1',
       DISABLE_TELEMETRY: '1',
+      ...loopbackOnlyNetwork,
     };
   } else {
-    args = [
+    const providerArgs = [
       '-c', 'model_provider="teleagent-capture"',
-      '-c', 'model_providers.teleagent-capture.name="Teleagent offline capture"',
+      '-c', `model_providers.teleagent-capture.name="${
+        options.scenario === 'compact' ? 'OpenAI' : 'Teleagent offline capture'
+      }"`,
       '-c', `model_providers.teleagent-capture.base_url="${baseUrl}/v1"`,
       '-c', 'model_providers.teleagent-capture.wire_api="responses"',
       '-c', 'model_providers.teleagent-capture.env_key="TELEAGENT_LOCAL_PROVIDER_KEY"',
       '-c', 'model_providers.teleagent-capture.requires_openai_auth=false',
       '-c', 'model_providers.teleagent-capture.supports_websockets=false',
+    ];
+    args = [
+      ...providerArgs,
+      ...(options.scenario === 'compact' ? [
+        '-c', 'model_auto_compact_token_limit=1',
+      ] : []),
       ...buildCodexArgs({
         model: options.model,
         reasoningEffort: options.effort,
@@ -339,6 +566,9 @@ async function main() {
       LC_ALL: 'C.UTF-8',
       CODEX_HOME: path.join(home, '.codex'),
       TELEAGENT_LOCAL_PROVIDER_KEY: 'teleagent-local-provider-key',
+      OPENAI_API_KEY: 'teleagent-local-provider-key',
+      OPENAI_BASE_URL: `${baseUrl}/v1`,
+      ...loopbackOnlyNetwork,
     };
   }
 
@@ -363,6 +593,9 @@ async function main() {
   });
   try {
     await Promise.race([capturedPromise, captureTimeout]);
+    if (options.scenario !== 'initial' && !captured.correlationVerified) {
+      throw new Error('the CLI did not preserve the synthetic tool-call correlation');
+    }
     signalChildTree(child, 'SIGTERM');
     const exit = await waitForExit(child, 2000);
     captured.cliExit = exit;

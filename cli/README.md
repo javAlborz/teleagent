@@ -154,8 +154,9 @@ Compose uses it only to resolve an explicit, source-tested voice runtime
 allowlist. General Claude/Codex bridge bearers remain empty in the container,
 sensitive bridge logging is forced off, and the approval signer always uses
 the fixed read-only `/run/secrets/teleagent-approval-private.pem` mount. Start
-the generated stack through the CLI, or run Compose from `~/.claude-phone`, so
-the protected `.env` is used for interpolation.
+only through the CLI, which delegates to the root-owned guarded unit. Running
+Compose from `~/.claude-phone` is unsupported because it bypasses the immutable
+image, credential, panic, activation-state, and crash-cleanup gates.
 
 ### Config Structure
 

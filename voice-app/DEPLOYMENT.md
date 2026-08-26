@@ -2,6 +2,15 @@
 
 Guide for deploying Teleagent in production environments.
 
+> **Production activation contract:** build and attest the voice image in a
+> release pipeline, install the reviewed tree at `/opt/teleagent/current`, and
+> activate only through `teleagent-voice-stack.service`. The service accepts an
+> exact OCI digest from the root-owned
+> `/etc/teleagent-voice/voice-image.manifest.json` and runs Compose with
+> `--no-build --pull never`. Direct `docker compose up`, a local build context,
+> and split-host voice/controller operation are development or migration
+> history and are not supported production paths.
+
 ## Architecture Overview
 
 Teleagent consists of three long-running Docker containers, a one-shot
@@ -29,7 +38,8 @@ The legacy call path sends completed utterances to separate STT and TTS
 services. The OpenAI Realtime path streams 24 kHz PCM bidirectionally between
 FreeSWITCH and OpenAI and uses the bridge only for Claude/Codex agent jobs.
 
-Normal Compose startup validates `DRACHTIO_SECRET` and `FREESWITCH_SECRET`
+The guarded voice-stack launcher validates `DRACHTIO_SECRET` and
+`FREESWITCH_SECRET`
 before either control daemon is allowed to start. Both must be distinct,
 base64url-safe random values of 32-128 characters; empty values, committed
 examples, low-diversity strings, and reuse are fatal. The voice process repeats
@@ -79,11 +89,14 @@ The `EXTERNAL_IP` setting must be your server's LAN IP that can receive RTP pack
 
 ## Docker Configuration
 
-The CLI generates `~/.claude-phone/docker-compose.yml` from the repository-root
-build context so the image includes the shared authorization modules. The
-generated services retain the canonical memory/CPU/PID ceilings, dropped
-capabilities, no-new-privileges setting, read-only voice root filesystem,
-dedicated non-root voice UID, and loopback Drachtio/audio-control defaults.
+The CLI may render `~/.claude-phone/docker-compose.yml`, but production treats
+that file as declarative input to the root-owned launcher, never as an
+independent activation path. Both the preflight and voice-app services consume
+the same exact `${TELEAGENT_VOICE_IMAGE}` digest injected only after the
+launcher verifies its image ID, OCI source-revision label, and root-owned
+release manifest. The generated services retain the canonical memory/CPU/PID
+ceilings, dropped capabilities, no-new-privileges setting, read-only voice root
+filesystem, dedicated non-root voice UID, and loopback control defaults.
 
 Voice deployments require the exact `teleagent-voice` system user and primary
 group. It must use `/var/lib/teleagent-voice` as its home, a `nologin` shell,
@@ -117,8 +130,10 @@ source is configurable. The CLI-generated Compose uses the same contract.
 The two SIP-trunk credentials likewise use fixed in-container paths and only
 their host sources are configurable. They are never process environment
 variables.
-Run generated Compose through `claude-phone` (or from `~/.claude-phone`) so its
-mode-`0600` `.env` is the interpolation source.
+Run the generated stack only through `claude-phone start`, which delegates to
+`teleagent-voice-stack.service`. Never invoke Compose from
+`~/.claude-phone`; doing so bypasses the image, dependency, credential,
+activation-state, panic, and crash-cleanup gates.
 
 The contract lives in `lib/voice-app-runtime-env.js`. A regression derives all
 production `voice-app` environment references and fails when a new key has no
@@ -255,59 +270,15 @@ AudioFork callback credential. A broad wildcard is accepted only with the
 complete `-drachtio:*` exclusion; keep SIP and FreeSWITCH protocol tracing
 disabled in production.
 
-## Split Deployment
+## Deployment Topology
 
-### Voice Server (Pi/Linux)
-
-Requirements:
-- Docker and Docker Compose
-- Network access to 3CX and API server
-- Static IP recommended
-
-The voice server runs Docker containers and connects to a remote API server:
-
-```bash
-claude-phone setup    # Select "Voice Server"
-claude-phone start
-```
-
-### API Server (Mac/Linux with Claude Code and/or Codex)
-
-Requirements:
-- Node.js 24+
-- At least one configured and authenticated agent CLI
-- A reviewed private route from the voice server
-
-```bash
-claude-phone api-server --port 3333
-```
-
-The secure default remains loopback-only. A split-host controller will refuse
-to bind externally until its protected interface is configured explicitly and
-`server.agentApiNonLoopbackEnabled` is set to `true`; apply host firewall or
-equivalent network policy before that opt-in. Do not publish port 3333 to the
-Internet.
-
-The voice and controller configurations must also share the exact
-`EXECUTOR_API_TOKEN`, `VOICE_CONTROL_TOKEN`, and
-`PRIVILEGED_ACTION_API_TOKEN`. Provision those three values through protected
-environment variables before running setup on each host; the CLI validates and
-persists them with mode `0600` while independently generating the controller's
-general token and the voice host's outbound token. Never copy the entire
-configuration file or print the values into a terminal transcript. A split
-deployment with independently generated scoped tokens must be treated as
-unpaired and will receive `401` from the controller.
-
-For persistent operation, use a process manager:
-
-```bash
-# Using pm2
-npm install -g pm2
-pm2 start "claude-phone api-server" --name claude-api
-
-# Using systemd (Linux)
-# Create /etc/systemd/system/claude-api.service
-```
+Production is co-located: the credential-bearing voice stack reaches the
+durable controller only on fixed loopback, while provider jobs execute through
+the isolated worker-session plane and private provider sockets. The CLI rejects
+the former `voice-server` and `pi-split` modes. A separate staging machine or
+VM must reproduce this topology with independent PBX routes, credentials,
+budgets, state, and ports; do not simulate staging beside the live Hermes
+listeners.
 
 ## Monitoring
 
@@ -320,9 +291,10 @@ claude-phone status
 # Comprehensive diagnostics
 claude-phone doctor
 
-# Container health
-docker ps
-docker compose logs -f
+# Guarded unit and exact project containers
+systemctl status teleagent-voice-stack.service
+docker container ls --all --filter label=com.docker.compose.project=teleagent-voice
+journalctl -u teleagent-voice-stack.service -f
 
 # Realtime readiness and durable-state health
 curl -fsS http://127.0.0.1:3000/api/realtime-health
@@ -411,12 +383,12 @@ chmod 0440 /etc/teleagent-voice/credentials/voice-approval-private.pem
 chmod 0444 /secure/executor/teleagent-approval-public.pem
 ```
 
-Add a read-only bind mount for the controller key to the `voice-app` service:
-
-```yaml
-volumes:
-  - /etc/teleagent-voice/credentials/voice-approval-private.pem:/run/secrets/teleagent-approval-private.pem:ro
-```
+Configure the protected host credential source expected by the launcher. On
+each activation it opens and validates the source, copies it into the private
+`/run/teleagent-voice-stack/voice-secrets` runtime directory, mounts that
+directory read-only, and removes the copy during unconditional cleanup. Do not
+add a direct host credential bind or edit generated Compose at deployment
+time.
 
 Configure the executor with `VOICE_APPROVAL_KEY_ID`,
 `VOICE_APPROVAL_PUBLIC_KEY_FILE`, and `EXECUTOR_TASK_DB_PATH` before setting
@@ -442,9 +414,10 @@ five-minute maximum token lifetime, then removing the old public key.
   provider-log fingerprint. Voice cannot cancel a job; the owner must press
   `*`, while `9` remains the global emergency stop.
 - Claude/Codex execution plus filesystem/Git/tmux inspection requires the
-  dedicated `teleagent-worker` launcher and worker-session broker. There is no
-  controller-UID execution fallback. Only the worker tmux socket is visible;
-  owner/alborz sessions such as `main:phone` are intentionally out of scope.
+  worker-session broker, separate provider supervisors/workers, and private
+  egress identities. There is no persistent shared worker home and no
+  controller-UID execution fallback. Owner/alborz sessions such as
+  `main:phone` are intentionally out of scope.
 - The Realtime model has bounded read-only inspection tools, not arbitrary
   shell or HTTP access. Credential paths and secret-like filenames are denied.
 - Root actions use the dormant-by-default private broker documented in
@@ -496,7 +469,9 @@ five-minute maximum token lifetime, then removing the old public key.
 1. Verify `OPENAI_REALTIME_API_KEY` is present in the `voice-app` environment
 2. Check `curl -fsS http://127.0.0.1:3000/api/realtime-health`
 3. Confirm outbound HTTPS/WSS access to `api.openai.com`
-4. Inspect `docker compose logs voice-app` for Realtime session errors
+4. Inspect `journalctl -u teleagent-voice-stack.service` and the exact
+   `teleagent-voice` project container logs for Realtime session errors; do not
+   start or recreate containers manually
 
 The Realtime path does not depend on `TTS_BASE_URL` or `STT_BASE_URL`. An outage
 of those services affects the legacy extensions but not Realtime extensions.
