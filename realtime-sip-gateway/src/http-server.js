@@ -42,13 +42,17 @@ export function createHttpServer({ config, webhookHandler, callGateway, stateSto
       const url = new URL(request.url, 'http://localhost');
       if (request.method === 'GET' && url.pathname === '/healthz') {
         const summary = callGateway.registry.summary();
-        const healthy = stateStore.healthy && !(summary.states.outcome_unknown > 0);
+        const capacityAvailable = stateStore.capacityAvailable === true;
+        const healthy = stateStore.healthy
+          && capacityAvailable
+          && !(summary.states.outcome_unknown > 0);
         writeJson(response, healthy ? 200 : 503, {
           status: healthy ? 'ok' : 'degraded',
           mode: config.mode,
           activeCalls: summary.active,
           trackedCalls: summary.tracked,
           durableState: stateStore.healthy ? 'ok' : 'degraded',
+          durableStateAdmission: capacityAvailable ? 'admitted' : 'exhausted',
           uncertainCalls: summary.states.outcome_unknown ?? 0,
         });
         return;

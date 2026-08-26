@@ -8,6 +8,12 @@ import { GatewayStateStore } from '../src/gateway-state-store.js';
 
 export const testPbxSecret = 'Q7m2N9x4R6k1W8z3C5b0D2f7H4j9K6p3T8y1U5i0O2s7V4a9';
 
+export const alwaysAdmittedStorageGuard = Object.freeze({
+  assertOpen() {},
+  assertNewRecord() {},
+  inspect: () => ({ admitted: true }),
+});
+
 export function makeConfig(overrides = {}) {
   return {
     host: '127.0.0.1',
@@ -37,11 +43,16 @@ export function makeConfig(overrides = {}) {
   };
 }
 
-export async function makeRegistry(context, { filePath, clock } = {}) {
+export async function makeRegistry(context, {
+  filePath,
+  clock,
+  storageGuard = alwaysAdmittedStorageGuard,
+} = {}) {
   const directory = filePath ? null : await mkdtemp(path.join(os.tmpdir(), 'sip-state-'));
   const stateStore = new GatewayStateStore({
     filePath: filePath ?? path.join(directory, 'gateway-state.sqlite3'),
     clock,
+    storageGuard,
   });
   await stateStore.init();
   if (context) context.after(() => stateStore.close());

@@ -1,0 +1,2 @@
+d /etc/teleagent/realtime-sip-gateway 0700 root root - -
+d /var/lib/teleagent-sip-gateway 0700 teleagent-sip-gateway teleagent-sip-gateway - -

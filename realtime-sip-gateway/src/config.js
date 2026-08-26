@@ -7,9 +7,12 @@ import {
 } from 'node:fs';
 import path from 'node:path';
 
+import { SIP_STATE_DATABASE } from './state-storage-boundary.js';
+
 const OFFICIAL_API_BASE = 'https://api.openai.com/v1';
 const OFFICIAL_REALTIME_WS = 'wss://api.openai.com/v1/realtime';
 const MAX_SECRET_BYTES = 8_192;
+export const SIP_STATE_BOUNDARY_VARIABLE = 'TELEAGENT_SIP_STATE_BOUNDARY';
 const PLACEHOLDER_SECRET_PATTERNS = Object.freeze([
   /(?:^|[-_.])change[-_.]?me(?:$|[-_.])/iu,
   /(?:^|[-_.])replace[-_.]?with(?:$|[-_.])/iu,
@@ -212,13 +215,14 @@ export function loadConfig(env = process.env) {
     );
   }
 
-  const stateDatabasePath = path.resolve(
-    stringValue(
-      env,
-      'SIP_STATE_DATABASE',
-      '/var/lib/teleagent-sip-gateway/gateway-state.sqlite3',
-    ),
-  );
+  if (env[SIP_STATE_BOUNDARY_VARIABLE] !== 'required') {
+    throw new ConfigError(`${SIP_STATE_BOUNDARY_VARIABLE} must be exactly required`);
+  }
+  const stateDatabaseValue = stringValue(env, 'SIP_STATE_DATABASE', SIP_STATE_DATABASE);
+  if (stateDatabaseValue !== SIP_STATE_DATABASE || path.resolve(stateDatabaseValue) !== SIP_STATE_DATABASE) {
+    throw new ConfigError('SIP_STATE_DATABASE must use the fixed durable-state path');
+  }
+  const stateDatabasePath = SIP_STATE_DATABASE;
   const host = stringValue(env, 'SIP_GATEWAY_HOST', '127.0.0.1');
   const allowNonLoopbackBind = booleanValue(env, 'SIP_ALLOW_NON_LOOPBACK_BIND', false);
   if (!allowNonLoopbackBind && !['127.0.0.1', '::1', 'localhost'].includes(host.toLowerCase())) {

@@ -5,6 +5,10 @@ import { acquireGatewaySingleton } from './gateway-singleton.js';
 import { createHttpServer } from './http-server.js';
 import { createLogger } from './logger.js';
 import { OpenAICallService } from './openai-call-service.js';
+import {
+  createSipStateStorageGuard,
+  SIP_STATE_DATABASE,
+} from './state-storage-boundary.js';
 import { OpenAIWebhookHandler } from './webhook-handler.js';
 
 // A failed initialization/close must not let V8 garbage collection release the
@@ -39,10 +43,26 @@ export async function createApp({
   callService,
   stateStore,
   callGateway,
+  storageGuard = null,
+  createStorageGuard = createSipStateStorageGuard,
 } = {}) {
   if (!config) throw new TypeError('Realtime SIP gateway configuration is required');
+  const expectedUid = typeof process.geteuid === 'function' ? process.geteuid() : null;
+  const expectedGid = typeof process.getegid === 'function' ? process.getegid() : null;
+  const durableStorage = storageGuard ?? createStorageGuard({
+    databasePath: config.stateDatabasePath,
+    expectedUid,
+    expectedGid,
+  });
+  // This must precede both the lifetime-lock SQLite open and the state-store
+  // open. A low-space restart must not create either file or begin recovery.
+  durableStorage.assertOpen();
   const singleton = acquireGatewaySingleton({
     stateDatabasePath: config.stateDatabasePath,
+    expectedUid,
+    expectedGid,
+    requireExisting: config.stateDatabasePath === SIP_STATE_DATABASE,
+    storageGuard: durableStorage,
   });
   let resolvedCallService;
   let resolvedStateStore;
@@ -59,6 +79,10 @@ export async function createApp({
     resolvedCallService = callService ?? new OpenAICallService({ config });
     resolvedStateStore = stateStore ?? new GatewayStateStore({
       filePath: config.stateDatabasePath,
+      expectedUid,
+      expectedGid,
+      strictOwnership: true,
+      storageGuard: durableStorage,
     });
     ownership.stateStore = resolvedStateStore;
     await resolvedStateStore.init();

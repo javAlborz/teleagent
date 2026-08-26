@@ -1,10 +1,28 @@
 import assert from 'node:assert/strict';
-import { linkSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  linkSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { ConfigError, loadConfig } from '../src/config.js';
+import {
+  ConfigError,
+  loadConfig as loadProductionConfig,
+  SIP_STATE_BOUNDARY_VARIABLE,
+} from '../src/config.js';
+
+function loadConfig(environment) {
+  return loadProductionConfig({
+    [SIP_STATE_BOUNDARY_VARIABLE]: 'required',
+    ...environment,
+  });
+}
 
 const secrets = {
   OPENAI_API_KEY: 'sk-proj-A9v2Q7m4N8x6R3k1W5z0',
@@ -22,6 +40,24 @@ test('reject mode is the default and uses official endpoints', () => {
   assert.equal(
     config.stateDatabasePath,
     '/var/lib/teleagent-sip-gateway/gateway-state.sqlite3',
+  );
+});
+
+test('production requires the exact dedicated durable-state contract and path', () => {
+  assert.throws(
+    () => loadProductionConfig(secrets),
+    /TELEAGENT_SIP_STATE_BOUNDARY must be exactly required/u,
+  );
+  assert.throws(
+    () => loadProductionConfig({
+      ...secrets,
+      [SIP_STATE_BOUNDARY_VARIABLE]: 'optional',
+    }),
+    /TELEAGENT_SIP_STATE_BOUNDARY must be exactly required/u,
+  );
+  assert.throws(
+    () => loadConfig({ ...secrets, SIP_STATE_DATABASE: '/tmp/gateway-state.sqlite3' }),
+    /fixed durable-state path/u,
   );
 });
 
@@ -233,6 +269,7 @@ test('secret files reject group-readable credentials and hard links', (context) 
   context.after(() => rmSync(credentialsDirectory, { recursive: true, force: true }));
   const looseFile = path.join(credentialsDirectory, 'loose-api-key');
   writeFileSync(looseFile, secrets.OPENAI_API_KEY, { mode: 0o440 });
+  chmodSync(looseFile, 0o440);
   assert.throws(
     () => loadConfig({
       OPENAI_API_KEY_FILE: looseFile,

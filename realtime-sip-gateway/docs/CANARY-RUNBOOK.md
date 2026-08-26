@@ -9,24 +9,64 @@ Before adding public ingress:
 
 1. Create a dedicated `teleagent-sip-gateway` system identity with no login shell, sudo, Docker,
    SSH-agent, or agent-worker group membership.
-2. Install this package outside `/home/alborz`, for example under
-   `/opt/teleagent/realtime-sip-gateway`, owned by root and not writable by the service user.
+2. Install the authenticated release at `/opt/teleagent/current`; the component path is
+   `/opt/teleagent/current/realtime-sip-gateway`, owned by root and not writable by the service
+   user.
 3. Provision a reviewed root-owned Node 24+ binary at
    `/usr/local/libexec/teleagent-node`. The candidate is the existing Node 24.13.0 runtime copied
    as an ordinary root-owned, non-group/world-writable file after recording its version and
    checksum. Do not execute the owner's NVM path at runtime: it is intentionally inaccessible
    under `ProtectHome=true`.
-4. Create `/var/lib/teleagent-sip-gateway` owned by `teleagent-sip-gateway`, mode `0700`.
-5. Keep non-secret settings in `/etc/teleagent/realtime-sip-gateway.env`, owned by root and
-   readable only by the controller group. Put `OPENAI_API_KEY`, `OPENAI_WEBHOOK_SECRET`, and a
+4. Provision an exact dedicated durable local filesystem at
+   `/var/lib/teleagent-sip-gateway`. It must be 1-4 GiB, use ext4/XFS/Btrfs/F2FS/ZFS, have a
+   different device from `/var/lib`, be owned by `teleagent-sip-gateway`, mode `0700`, and have at
+   least `max(20%, 512 MiB)` free. The component installer deliberately does not format or mount
+   storage; the authenticated host handoff must establish and persist this mount first.
+5. Build `/etc/teleagent/realtime-sip-gateway/config.env` from `.env.example`, owned by root and
+   mode `0600` in its mode-`0700` parent. Keep only unique, unquoted, nonempty assignments from the
+   fixed non-secret allowlist. Unknown/duplicate keys, loader or Node hooks, direct secrets,
+   `*_FILE`, credential-directory, state-boundary, and custom-endpoint overrides refuse activation.
+   Put `OPENAI_API_KEY`, `OPENAI_WEBHOOK_SECRET`, and a
    separately generated 32+-random-byte `SIP_PBX_AUTH_SECRET`, encoded as 43-128 base64url
    characters (64 hex characters is suitable), in distinct root-owned
    mode-`0400` source files and pass them with systemd `LoadCredential`.
 6. Confirm Codex/Claude worker identities cannot read those credential sources, the systemd
    credential directory, the SQLite state database, or the controller process environment.
 
-The example systemd unit remains source material only. Review and install it through the homelab
-infrastructure repository rather than copying it into production ad hoc.
+Run the component installer only after the external release-v2 authentication gate and exact mount
+provisioning:
+
+```bash
+/opt/teleagent/current/realtime-sip-gateway/deploy/teleagent-realtime-sip-gateway-install --source-check
+# exact stdout: SIP_GATEWAY_SOURCE_OK
+/opt/teleagent/current/realtime-sip-gateway/deploy/teleagent-realtime-sip-gateway-install --install-disabled
+# exact stdout: SIP_GATEWAY_INSTALLED_DISABLED
+/usr/local/libexec/teleagent-realtime-sip-gateway-install --check
+# exact stdout: SIP_GATEWAY_INSTALLED_DISABLED_OK
+```
+
+The installer is independently idempotent and transactionally publishes its six policy assets. It installs
+only a static, inactive `teleagent-realtime-sip-gateway.service`, identity/directory policy,
+manifest, verifier, and itself. It never creates configuration, credentials, or
+`/etc/teleagent/realtime-sip-gateway/ENABLE`, and it never enables, starts, or restarts the unit.
+Any active/transitional unit, systemd query failure, identity collision, metadata drift, ordinary
+root-backed state directory, out-of-range filesystem, or exhausted reserve fails closed.
+Its pre-runtime source check uses only the authenticated `<release-root>/runtime/node/bin/node`;
+installed modes use only `/usr/local/libexec/teleagent-node`. Release orchestration separately
+requires exact `SIP_GATEWAY_SOURCE_OK` and `SIP_GATEWAY_IDENTITY_SOURCE_OK` attestations.
+
+Fresh disabled installation accepts only an objectively empty exact mount (an empty root-owned
+`lost+found` is the sole filesystem exception). It creates zero-length, service-owned mode-`0600`
+main and lifetime-lock database files with no-replace opens and fsync, then atomically publishes
+the root-owned mode-`0444` `STATE_INITIALIZED` marker in the protected config directory. That
+marker binds the mount device, fixed paths, inode birth identity, and service UID/GID. A reinstall
+preserves a marked nonempty ledger. Missing/replaced files, marker drift, or nonempty unmarked state
+refuses and requires explicit recovery; the installer never treats loss of durable truth as a new
+deployment.
+The marker is also a read-only service credential. Runtime rebinds both fixed database paths to its
+device/inode/birth/owner identity immediately around the native SQLite opens; the singleton's
+checked descriptor remains open through its SQLite open and is revalidated before the exclusive
+lock is acquired.
 
 ## 2. Start in reject mode on loopback
 
@@ -40,6 +80,9 @@ SIP_MAX_ACTIVE_CALLS=1
 SIP_MAX_HTTP_CONNECTIONS=32
 ```
 
+The reviewed unit alone fixes the state boundary, database path, and marker credential. Do not
+repeat or override them in `config.env`.
+
 Check locally:
 
 ```bash
@@ -48,6 +91,24 @@ curl --fail --silent http://127.0.0.1:3107/healthz
 
 Expected: HTTP 200 with `"mode":"reject"`. Never paste secrets into a shell command, unit, or
 environment file; load them through the service credential directory.
+
+Activation is a separate operator-controlled step after `--check`: provision the root-owned
+mode-`0600` non-secret `config.env`, the three root-owned mode-`0400` single-link credential source
+files, and finally a root-owned mode-`0600` regular single-link `ENABLE` sentinel. Only then may the
+static unit be started explicitly. Its `--activation-check` preflight verifies those metadata,
+identity, state marker/files, mount bounds, and reserve without reading credential contents. Remove
+the sentinel to make a later start fail closed; the installer never creates or removes it.
+Preflight also proves the loaded systemd fragment is the exact static installed unit, with no
+pending daemon reload or drop-ins and the dedicated user/group. The unit removes reviewed
+loader/Node/proxy/direct-secret/file-override variables after loading `config.env`, before the
+privileged verifier starts. Protected peer roots use fail-closed `InaccessiblePaths=`; provision
+them first or activation intentionally refuses instead of silently omitting a mask.
+
+The gateway returns HTTP 503 for health and for a genuinely new signed webhook after free space
+falls below `max(20%, 512 MiB)`. Exact already-admitted webhook/call retries and recovery,
+`outcome_unknown`, hangup-confirmation, cancellation, and closure writes continue below the
+admission reserve. Restore headroom before admitting new calls; do not remove durable rows merely
+to turn health green.
 
 The service also creates a mode-`0600` lifetime-lock database beside the configured state
 database. Do not delete or rotate that file during service operation. A second process using the
@@ -183,3 +244,18 @@ and durable executor protocol are operational.
 4. Keep extension 9 and all existing routes unchanged.
 5. Preserve the SQLite state database and sanitized logs for diagnosis; rotate the webhook or PBX
    secret if either may have been exposed.
+
+## Durable-state archival and compaction (not yet implemented)
+
+There is intentionally no automatic delete or VACUUM path in this canary. The dedicated mount and
+admission reserve contain disk exhaustion without discarding crash truth. Until a separately
+reviewed P2 archival tool exists, preserve the entire ledger.
+
+The only candidate rows for future offline archival are completed non-call/ignored webhooks older
+than the measured OpenAI retry horizon, and call/webhook pairs whose call is `rejected` or `closed`,
+has `hangup_confirmed=1`, and whose webhook is completed. Never compact `verified`, `processing`,
+active, `outcome_unknown`, hangup-unconfirmed, or otherwise unresolved rows. Stop the static unit,
+prove no lifetime-lock owner, copy the candidate rows to an immutable hashed archive, test restore,
+then delete the call/webhook pair in one transaction and checkpoint incrementally. A retention
+window must be based on documented or measured provider retry behavior, not an assumed number of
+days.

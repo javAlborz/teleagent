@@ -1,6 +1,7 @@
 import OpenAI from 'openai';
 
 import { assertCallId } from './sip-event.js';
+import { SipStateStorageError } from './state-storage-boundary.js';
 
 function firstHeader(headers, name) {
   const value = headers?.[name] ?? headers?.[name.toLowerCase()];
@@ -76,6 +77,15 @@ export class OpenAIWebhookHandler {
       }
       return response(event?.type === 'realtime.call.incoming' ? 200 : 204);
     } catch (error) {
+      if (error instanceof SipStateStorageError) {
+        this.#logger.warn('Refused new OpenAI webhook at durable-state boundary', {
+          webhookId,
+          reason: error.code === 'SIP_STATE_CAPACITY_EXHAUSTED'
+            ? 'durable_state_capacity_exhausted'
+            : 'durable_state_boundary_invalid',
+        });
+        return response(503, 'Durable state unavailable');
+      }
       if (error instanceof TypeError) {
         this.#logger.warn('Rejected malformed signed OpenAI webhook', {
           webhookId,

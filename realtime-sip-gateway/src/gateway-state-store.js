@@ -2,6 +2,7 @@ import {
   chmodSync,
   lstatSync,
   mkdirSync,
+  realpathSync,
   statSync,
 } from 'node:fs';
 import path from 'node:path';
@@ -42,34 +43,46 @@ function safeOutcome(value) {
   return value;
 }
 
-function validateStateDirectory(directory) {
-  mkdirSync(directory, { recursive: true, mode: 0o700 });
+function validateStateDirectory(directory, { expectedUid, expectedGid, strictOwnership }) {
+  if (!strictOwnership) mkdirSync(directory, { recursive: true, mode: 0o700 });
   const pathMetadata = lstatSync(directory);
-  if (pathMetadata.isSymbolicLink()) {
+  if (pathMetadata.isSymbolicLink() || realpathSync(directory) !== directory) {
     throw new Error('SIP state directory must not be a symbolic link');
   }
   const metadata = statSync(directory);
-  const effectiveUid = typeof process.geteuid === 'function' ? process.geteuid() : metadata.uid;
-  if (!metadata.isDirectory() || (metadata.mode & 0o077) !== 0) {
+  if (!metadata.isDirectory() || (metadata.mode & 0o7777) !== 0o700) {
     throw new Error('SIP state directory must be a private mode-0700 directory');
   }
-  if (metadata.uid !== 0 && metadata.uid !== effectiveUid) {
+  if (strictOwnership && (metadata.uid !== expectedUid || metadata.gid !== expectedGid)) {
+    throw new Error('SIP state directory must be owned by the exact service identity');
+  }
+  if (!strictOwnership && metadata.uid !== 0 && metadata.uid !== expectedUid) {
     throw new Error('SIP state directory must be owned by root or the service user');
   }
 }
 
-function validateExistingStateFile(filePath) {
+function validateExistingStateFile(
+  filePath,
+  { expectedUid, expectedGid, strictOwnership },
+  { required = false } = {},
+) {
   try {
     const metadata = lstatSync(filePath);
-    if (!metadata.isFile() || metadata.isSymbolicLink()) {
+    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1
+        || realpathSync(filePath) !== filePath) {
       throw new Error('SIP state database files must be regular, non-symlink files');
     }
-    const effectiveUid = typeof process.geteuid === 'function' ? process.geteuid() : metadata.uid;
-    if ((metadata.mode & 0o077) !== 0 || (metadata.uid !== 0 && metadata.uid !== effectiveUid)) {
+    if ((metadata.mode & 0o7777) !== 0o600) {
+      throw new Error('SIP state database files must be private mode-0600 files');
+    }
+    if (strictOwnership && (metadata.uid !== expectedUid || metadata.gid !== expectedGid)) {
+      throw new Error('SIP state database files must be owned by the exact service identity');
+    }
+    if (!strictOwnership && metadata.uid !== 0 && metadata.uid !== expectedUid) {
       throw new Error('SIP state database files must be private and owned by root or the service user');
     }
   } catch (error) {
-    if (error.code !== 'ENOENT') throw error;
+    if (error.code !== 'ENOENT' || required) throw error;
   }
 }
 
@@ -97,11 +110,36 @@ export class GatewayStateStore {
   #db = null;
   #healthy = true;
   #reserveCallTransaction = null;
+  #expectedUid;
+  #expectedGid;
+  #strictOwnership;
+  #storageGuard;
+  #databaseFactory;
 
-  constructor({ filePath, clock = () => Date.now() }) {
+  constructor({
+    filePath,
+    clock = () => Date.now(),
+    expectedUid = typeof process.geteuid === 'function' ? process.geteuid() : 0,
+    expectedGid = typeof process.getegid === 'function' ? process.getegid() : 0,
+    strictOwnership = false,
+    storageGuard = null,
+    databaseFactory = (filename, options) => new Database(filename, options),
+  }) {
     if (!path.isAbsolute(filePath)) throw new TypeError('State database path must be absolute');
+    if (strictOwnership && !storageGuard) {
+      throw new TypeError('Production SIP state requires a durable-storage guard');
+    }
     this.#filePath = filePath;
     this.#clock = clock;
+    this.#expectedUid = expectedUid;
+    this.#expectedGid = expectedGid;
+    this.#strictOwnership = strictOwnership;
+    this.#storageGuard = storageGuard ?? Object.freeze({
+      assertOpen() {},
+      assertNewRecord() {},
+      inspect: () => ({ admitted: true }),
+    });
+    this.#databaseFactory = databaseFactory;
   }
 
   get healthy() {
@@ -112,19 +150,42 @@ export class GatewayStateStore {
     return this.#filePath;
   }
 
+  get capacityAvailable() {
+    try {
+      return this.#storageGuard.inspect()?.admitted === true;
+    } catch {
+      return false;
+    }
+  }
+
   async init() {
     if (this.#db) return;
+    // Admission must run before mkdir, SQLite, WAL, schema, or any other
+    // persistent open. createApp also runs it before the lifetime lock.
+    this.#storageGuard.assertOpen();
     const directory = path.dirname(this.#filePath);
-    validateStateDirectory(directory);
-    for (const candidate of [this.#filePath, `${this.#filePath}-wal`, `${this.#filePath}-shm`]) {
-      validateExistingStateFile(candidate);
+    const ownership = {
+      expectedUid: this.#expectedUid,
+      expectedGid: this.#expectedGid,
+      strictOwnership: this.#strictOwnership,
+    };
+    validateStateDirectory(directory, ownership);
+    validateExistingStateFile(this.#filePath, ownership, { required: this.#strictOwnership });
+    for (const candidate of [`${this.#filePath}-wal`, `${this.#filePath}-shm`]) {
+      validateExistingStateFile(candidate, ownership);
     }
 
     try {
-      this.#db = new Database(this.#filePath, {
+      // The root-authored initialization marker is re-bound on both sides of
+      // the path-only SQLite API open. Holding this private directory and
+      // checking the marker again closes direct/replacement starts; the only
+      // residual is a same-UID race inside the native open itself.
+      this.#storageGuard.assertFileIdentity?.(this.#filePath);
+      this.#db = this.#databaseFactory(this.#filePath, {
         timeout: 5_000,
-        fileMustExist: false,
+        fileMustExist: this.#strictOwnership,
       });
+      this.#storageGuard.assertFileIdentity?.(this.#filePath);
       this.#db.pragma('journal_mode = WAL');
       this.#db.pragma('synchronous = FULL');
       this.#db.pragma('foreign_keys = ON');
@@ -164,6 +225,9 @@ export class GatewayStateStore {
       `);
       chmodSync(this.#filePath, 0o600);
       this.#hardenSidecarFiles();
+      for (const candidate of [this.#filePath, `${this.#filePath}-wal`, `${this.#filePath}-shm`]) {
+        validateExistingStateFile(candidate, ownership);
+      }
       this.#reserveCallTransaction = this.#db.transaction((parameters) => (
         this.#reserveCall(parameters)
       ));
@@ -199,6 +263,7 @@ export class GatewayStateStore {
         };
       }
 
+      this.#storageGuard.assertNewRecord();
       const now = this.#clock();
       this.#db.prepare(`
         INSERT INTO webhook_events (
@@ -242,7 +307,9 @@ export class GatewayStateStore {
           updated_at = ?
       WHERE webhook_id = ?
     `).run(now, webhookId);
-    if (existing) return { inserted: false, record: databaseRecord(existing) };
+    if (existing) {
+      return { inserted: false, record: databaseRecord(existing) };
+    }
 
     let durableDecision = reason;
     let state;
@@ -264,6 +331,10 @@ export class GatewayStateStore {
       throw new TypeError('Call decision must be accept or reject');
     }
 
+    // This assertion is inside the transaction and immediately precedes the
+    // first new call identity. Throwing rolls back the webhook state update;
+    // existing-call retries and later recovery updates do not pass this gate.
+    this.#storageGuard.assertNewRecord();
     this.#db.prepare(`
       INSERT INTO calls (
         call_id, webhook_id, authenticated_principal, decision, state,
@@ -414,6 +485,11 @@ export class GatewayStateStore {
           throw error;
         }
         chmodSync(filePath, 0o600);
+        validateExistingStateFile(filePath, {
+          expectedUid: this.#expectedUid,
+          expectedGid: this.#expectedGid,
+          strictOwnership: this.#strictOwnership,
+        });
       } catch (error) {
         if (error.code !== 'ENOENT') throw error;
       }

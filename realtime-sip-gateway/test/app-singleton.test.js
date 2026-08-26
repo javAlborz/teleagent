@@ -7,8 +7,14 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import { createApp } from '../src/app.js';
-import { acquireGatewaySingleton } from '../src/gateway-singleton.js';
-import { makeConfig, silentLogger } from './helpers.js';
+import { acquireGatewaySingleton, gatewaySingletonPath } from '../src/gateway-singleton.js';
+import {
+  createSipStateStorageGuard,
+  SipStateStorageError,
+  SIP_STATE_DATABASE,
+  SIP_STATE_MARKER_CREDENTIAL,
+} from '../src/state-storage-boundary.js';
+import { alwaysAdmittedStorageGuard, makeConfig, silentLogger } from './helpers.js';
 
 const testDirectory = path.dirname(fileURLToPath(import.meta.url));
 
@@ -61,6 +67,7 @@ test('a duplicate app is fenced before state init, recovery, or provider activit
     callService: {},
     stateStore: fakeStateStore(firstCounters),
     callGateway: fakeGateway(firstCounters),
+    storageGuard: alwaysAdmittedStorageGuard,
   });
   t.after(() => first.close());
 
@@ -77,6 +84,7 @@ test('a duplicate app is fenced before state init, recovery, or provider activit
       }),
       stateStore: fakeStateStore(duplicateCounters),
       callGateway: fakeGateway(duplicateCounters),
+      storageGuard: alwaysAdmittedStorageGuard,
     }),
     /kernel-backed singleton lock/u,
   );
@@ -90,10 +98,65 @@ test('a duplicate app is fenced before state init, recovery, or provider activit
     callService: {},
     stateStore: fakeStateStore(replacementCounters),
     callGateway: fakeGateway(replacementCounters),
+    storageGuard: alwaysAdmittedStorageGuard,
   });
   assert.equal(replacementCounters.init, 1);
   assert.equal(replacementCounters.recover, 1);
   await replacement.close();
+});
+
+test('capacity refusal precedes the lifetime lock, state init, and recovery', async (t) => {
+  const stateDatabasePath = temporaryState(t);
+  const counters = {};
+  await assert.rejects(() => createApp({
+    config: makeConfig({ stateDatabasePath }),
+    logger: silentLogger,
+    callService: {},
+    stateStore: fakeStateStore(counters),
+    callGateway: fakeGateway(counters),
+    storageGuard: {
+      assertOpen() {
+        throw new SipStateStorageError(
+          'SIP_STATE_CAPACITY_EXHAUSTED',
+          'test capacity refusal',
+          { phase: 'sqlite_open' },
+        );
+      },
+      assertNewRecord() { assert.fail('new-record admission must not run'); },
+      inspect: () => ({ admitted: false }),
+    },
+  }), { code: 'SIP_STATE_CAPACITY_EXHAUSTED' });
+  assert.equal(fs.existsSync(gatewaySingletonPath(stateDatabasePath)), false);
+  assert.deepEqual(counters, {});
+});
+
+test('direct production startup refuses a missing initialization marker before provider activity', async () => {
+  const counters = {};
+  await assert.rejects(() => createApp({
+    config: makeConfig({ stateDatabasePath: SIP_STATE_DATABASE }),
+    logger: silentLogger,
+    callService: new Proxy({}, {
+      get() {
+        counters.providerAccess = (counters.providerAccess ?? 0) + 1;
+        return undefined;
+      },
+    }),
+    stateStore: fakeStateStore(counters),
+    callGateway: fakeGateway(counters),
+    createStorageGuard: () => createSipStateStorageGuard({
+      expectedUid: 991,
+      expectedGid: 992,
+      markerPath: SIP_STATE_MARKER_CREDENTIAL,
+      inspect: () => ({ admitted: true }),
+      inspectInitialization: () => {
+        throw new SipStateStorageError(
+          'SIP_STATE_INITIALIZATION_INVALID',
+          'root-authored initialization marker is absent',
+        );
+      },
+    }),
+  }), { code: 'SIP_STATE_INITIALIZATION_INVALID' });
+  assert.deepEqual(counters, {});
 });
 
 test('a process crash releases the kernel singleton for exactly one replacement', async (t) => {
@@ -114,6 +177,55 @@ test('a process crash releases the kernel singleton for exactly one replacement'
 
   const replacement = acquireGatewaySingleton({ stateDatabasePath });
   replacement.release();
+});
+
+test('production singleton mode refuses a missing initialized lock instead of recreating it', (t) => {
+  const stateDatabasePath = temporaryState(t);
+  const lockPath = gatewaySingletonPath(stateDatabasePath);
+  assert.throws(
+    () => acquireGatewaySingleton({ stateDatabasePath, requireExisting: true }),
+    { code: 'ENOENT' },
+  );
+  assert.equal(fs.existsSync(lockPath), false);
+});
+
+test('singleton replacement between checked descriptor and SQLite open is refused', (t) => {
+  const stateDatabasePath = temporaryState(t);
+  const lockPath = gatewaySingletonPath(stateDatabasePath);
+  fs.writeFileSync(lockPath, '', { mode: 0o600 });
+  fs.chmodSync(lockPath, 0o600);
+  const replacementPath = `${lockPath}.replacement`;
+  fs.writeFileSync(replacementPath, '', { mode: 0o600 });
+  fs.chmodSync(replacementPath, 0o600);
+  const initialized = fs.statSync(lockPath, { bigint: true });
+  let databaseClosed = false;
+  const storageGuard = {
+    assertFileIdentity() {
+      const current = fs.statSync(lockPath, { bigint: true });
+      if (current.ino !== initialized.ino) {
+        throw new SipStateStorageError(
+          'SIP_STATE_INITIALIZATION_INVALID',
+          'singleton replacement detected',
+        );
+      }
+      return initialized;
+    },
+  };
+
+  assert.throws(() => acquireGatewaySingleton({
+    stateDatabasePath,
+    expectedUid: process.getuid(),
+    expectedGid: process.getgid(),
+    requireExisting: true,
+    storageGuard,
+    databaseFactory() {
+      fs.renameSync(replacementPath, lockPath);
+      return {
+        close() { databaseClosed = true; },
+      };
+    },
+  }), /singleton replacement detected|changed during SQLite open/u);
+  assert.equal(databaseClosed, true);
 });
 
 test('a failed close retains ownership and is retryable before replacement starts', async (t) => {
@@ -137,6 +249,7 @@ test('a failed close retains ownership and is retryable before replacement start
     callService: {},
     stateStore,
     callGateway: gateway,
+    storageGuard: alwaysAdmittedStorageGuard,
   });
 
   await assert.rejects(() => app.close(), /cleanup is unconfirmed/u);

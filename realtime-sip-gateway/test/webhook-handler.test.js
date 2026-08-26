@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { OpenAIWebhookHandler } from '../src/webhook-handler.js';
+import { SipStateStorageError } from '../src/state-storage-boundary.js';
 import { incomingEvent, makeRegistry, silentLogger } from './helpers.js';
 
 test('handler verifies exact raw bytes before durable dedupe and dispatches once', async (t) => {
@@ -136,4 +137,56 @@ test('handler rejects a signed incoming event with a malformed call ID', async (
   });
   assert.equal(result.statusCode, 400);
   assert.equal(stateStore.getWebhook('wh_malformed'), null);
+});
+
+test('low reserve returns 503 for new signed events but preserves exact durable retries', async (t) => {
+  let admitted = true;
+  const storageGuard = {
+    assertOpen() {},
+    assertNewRecord() {
+      if (!admitted) {
+        throw new SipStateStorageError(
+          'SIP_STATE_CAPACITY_EXHAUSTED',
+          'test capacity refusal',
+          { phase: 'new_record' },
+        );
+      }
+    },
+    inspect: () => ({ admitted }),
+  };
+  const { stateStore } = await makeRegistry(t, { storageGuard });
+  let dispatches = 0;
+  const handler = new OpenAIWebhookHandler({
+    callService: {
+      async verifyWebhook(_body, headers) {
+        return incomingEvent({
+          id: `evt_${headers['webhook-id']}`,
+          data: {
+            ...incomingEvent().data,
+            call_id: headers['webhook-id'] === 'wh_existing'
+              ? 'rtc_existing'
+              : 'rtc_new',
+          },
+        });
+      },
+    },
+    callGateway: {
+      async handleIncoming() {
+        dispatches += 1;
+        return { outcome: 'accepted' };
+      },
+    },
+    stateStore,
+    logger: silentLogger,
+  });
+  const existing = { headers: { 'webhook-id': 'wh_existing' }, rawBody: Buffer.from('{}') };
+  assert.equal((await handler.handle(existing)).statusCode, 200);
+  admitted = false;
+  assert.equal((await handler.handle(existing)).statusCode, 200);
+
+  const fresh = { headers: { 'webhook-id': 'wh_new' }, rawBody: Buffer.from('{}') };
+  const refused = await handler.handle(fresh);
+  assert.deepEqual(refused, { statusCode: 503, body: 'Durable state unavailable' });
+  assert.equal(stateStore.getWebhook('wh_new'), null);
+  assert.equal(dispatches, 1);
 });

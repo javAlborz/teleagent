@@ -21,7 +21,7 @@ test('HTTP server exposes a secret-free health endpoint and preserves webhook by
       },
     },
     callGateway: { registry: { summary: () => ({ active: 0, tracked: 0, states: {} }) } },
-    stateStore: { healthy: true },
+    stateStore: { healthy: true, capacityAvailable: true },
     logger: silentLogger,
   });
   t.after(() => new Promise((resolve) => server.close(resolve)));
@@ -37,6 +37,7 @@ test('HTTP server exposes a secret-free health endpoint and preserves webhook by
     activeCalls: 0,
     trackedCalls: 0,
     durableState: 'ok',
+    durableStateAdmission: 'admitted',
     uncertainCalls: 0,
   });
   assert.equal(JSON.stringify(healthBody).includes('sk-test'), false);
@@ -57,7 +58,7 @@ test('HTTP server rejects incorrect content type before webhook processing', asy
     config: makeConfig(),
     webhookHandler: { async handle() { handled = true; } },
     callGateway: { registry: { summary: () => ({ active: 0, tracked: 0, states: {} }) } },
-    stateStore: { healthy: true },
+    stateStore: { healthy: true, capacityAvailable: true },
     logger: silentLogger,
   });
   t.after(() => new Promise((resolve) => server.close(resolve)));
@@ -80,7 +81,7 @@ test('health fails closed while a durable call outcome is unknown', async (t) =>
         summary: () => ({ active: 1, tracked: 1, states: { outcome_unknown: 1 } }),
       },
     },
-    stateStore: { healthy: true },
+    stateStore: { healthy: true, capacityAvailable: true },
     logger: silentLogger,
   });
   t.after(() => new Promise((resolve) => server.close(resolve)));
@@ -90,4 +91,20 @@ test('health fails closed while a durable call outcome is unknown', async (t) =>
   const body = await response.json();
   assert.equal(body.uncertainCalls, 1);
   assert.equal(body.activeCalls, 1);
+});
+
+test('health fails closed when the durable-state admission reserve is exhausted', async (t) => {
+  const server = createHttpServer({
+    config: makeConfig(),
+    webhookHandler: { async handle() { throw new Error('must not dispatch'); } },
+    callGateway: {
+      registry: { summary: () => ({ active: 0, tracked: 4, states: { closed: 4 } }) },
+    },
+    stateStore: { healthy: true, capacityAvailable: false },
+    logger: silentLogger,
+  });
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const response = await fetch(`${await listen(server)}/healthz`);
+  assert.equal(response.status, 503);
+  assert.equal((await response.json()).durableStateAdmission, 'exhausted');
 });

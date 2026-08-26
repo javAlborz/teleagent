@@ -1,6 +1,6 @@
 # OpenAI Realtime SIP gateway canary
 
-This directory is an isolated, **not deployed** native-SIP canary for Teleagent. It receives a
+This directory is an isolated, **not activated** native-SIP canary for Teleagent. It receives a
 signed OpenAI `realtime.call.incoming` webhook, accepts or rejects the call, and attaches a
 server-side WebSocket to the existing Realtime call by `call_id`. OpenAI carries the SIP media;
 this process receives control events, including raw Realtime events and SIP DTMF.
@@ -59,6 +59,13 @@ path.
 - Verified webhook metadata, authenticated PBX principal, call admission, remote-action intents,
   sideband state, and call closure are persisted in a mode-`0600` SQLite database using WAL and
   `synchronous=FULL`.
+- Production accepts only `/var/lib/teleagent-sip-gateway/gateway-state.sqlite3` on the exact
+  service-owned `/var/lib/teleagent-sip-gateway` mount. The reviewed durable local filesystem must
+  be 1-4 GiB and must not share a device with `/var/lib`.
+- Startup and every genuinely new webhook or call row require at least the greater of 20% free or
+  512 MiB. At that reserve the health endpoint and new signed deliveries return HTTP 503, while an
+  exact already-admitted retry and crash-truth, cancellation, hangup, and closure updates remain
+  writable. Capacity refusal never marks the SQLite database corrupt.
 - Before opening that state or performing recovery, the gateway acquires a separate mode-`0600`
   SQLite lifetime lock in the private state directory. A duplicate process cannot inspect, adopt,
   or hang up the live owner's call; a crash releases the kernel lock so exactly one replacement can
@@ -90,22 +97,76 @@ npm test
 npm run test:coverage
 ```
 
-The tests use injected SDK and WebSocket fakes and make no OpenAI API calls.
+The tests use injected SDK, WebSocket, filesystem, identity, and systemd fakes and make no OpenAI
+API calls or host service changes.
 
-Starting the server requires real, server-side credentials:
+The source-owned component installer has three exact modes:
 
 ```bash
-cp .env.example /secure/location/realtime-sip-gateway.env
-node --env-file=/secure/location/realtime-sip-gateway.env src/index.js
+/opt/teleagent/current/realtime-sip-gateway/deploy/teleagent-realtime-sip-gateway-install --source-check
+# SIP_GATEWAY_SOURCE_OK
+/opt/teleagent/current/realtime-sip-gateway/deploy/teleagent-realtime-sip-gateway-install --install-disabled
+# SIP_GATEWAY_INSTALLED_DISABLED
+/usr/local/libexec/teleagent-realtime-sip-gateway-install --check
+# SIP_GATEWAY_INSTALLED_DISABLED_OK
 ```
 
-Do not put the real environment file in this repository. Direct secret environment variables are
-supported for local development only. Production loads `OPENAI_API_KEY`,
+`--install-disabled` requires the exact durable mount to have been provisioned already. It installs
+the root-owned static unit, sysusers/tmpfiles policy, verifier, manifest, and installer, but never
+creates `ENABLE`, configuration, or credentials and never enables, starts, or restarts the unit.
+All three modes reject source/installed drift; install and check also reject an active,
+transitional, enableable, or unverifiable unit.
+Source check executes the source verifier with only the authenticated immutable
+`<release-root>/runtime/node/bin/node`; it never selects an owner's Node, `PATH` entry, or caller
+override. Installed modes require `/usr/local/libexec/teleagent-node`.
+
+On a fresh objectively empty mount, disabled installation creates the zero-length main and lifetime
+lock database files with no-replace opens, service ownership, mode `0600`, and file/directory fsync,
+then publishes the root-owned mode-`0444`
+`/etc/teleagent/realtime-sip-gateway/STATE_INITIALIZED` marker. The marker binds both fixed paths,
+mount device, inode birth identity, and service UID/GID. Systemd also supplies it to the service as
+a read-only credential; the runtime compares it immediately before and after both path-only SQLite
+opens. The singleton keeps its checked descriptor through the native open and rechecks it before
+acquiring the SQLite lock. Reinstallation preserves marked nonempty state. A missing/replaced
+database, tampered marker, or nonempty unmarked mount refuses instead of silently constructing a
+fresh ledger. The remaining native SQLite path-open window is limited to a same-UID race inside the
+API; the unique service identity and mode-`0700` mount exclude other host identities, and both
+surrounding checks fail closed.
+
+`.env.example` is the production-compatible template for the root-owned non-secret `config.env`.
+It deliberately contains no secrets, file overrides, loader/Node hooks, credential-directory,
+state-boundary, or custom-endpoint overrides. Activation accepts only its fixed non-secret keys as
+unique, unquoted, nonempty, single-line assignments. Unknown, duplicate, malformed, loader,
+credential, and boundary assignments fail closed. Direct secret environment variables are
+supported for isolated local tests only. Production loads `OPENAI_API_KEY`,
 `OPENAI_WEBHOOK_SECRET`, and `SIP_PBX_AUTH_SECRET` from hardened absolute files or systemd's
-`$CREDENTIALS_DIRECTORY`. Accept mode refuses to start without the PBX credential. The example service in
-[`deploy/realtime-sip-gateway.service.example`](deploy/realtime-sip-gateway.service.example)
-uses `LoadCredential`, an absent-by-default activation sentinel, and the dedicated,
-public-edge-only `teleagent-sip-gateway` identity.
+`$CREDENTIALS_DIRECTORY`. Accept mode refuses to start without the PBX credential. The static
+[`teleagent-realtime-sip-gateway.service`](deploy/teleagent-realtime-sip-gateway.service) uses
+`LoadCredential`, the absent-by-default `/etc/teleagent/realtime-sip-gateway/ENABLE` sentinel,
+bounded CPU/memory/swap/tasks/file size, and the dedicated public-edge-only
+`teleagent-sip-gateway` identity. Its root-only activation preflight revalidates the installed
+policy, identity, initialized state, exact mount/reserve, sentinel, non-secret config, and credential
+metadata without reading credential contents. A final `UnsetEnvironment=` removes loader, Node,
+proxy, direct-secret, and secret-file override variables before privileged preflight. Activation
+also binds the loaded static fragment to the exact installed unit, with no pending daemon reload or
+drop-ins. The service mount namespace makes controller, worker/provider, privileged-action, voice,
+and workspace state/runtime/config roots inaccessible. These masks are fail-closed: every protected
+peer path must exist before activation, even when its peer unit is dormant.
+
+The release authentication closure must bind `package.json`, `package-lock.json`, every runtime
+import (`src/app.js`, `call-gateway.js`, `call-registry.js`, `config.js`, `gateway-singleton.js`,
+`gateway-state-store.js`, `http-server.js`, `index.js`, `logger.js`, `openai-call-service.js`,
+`sideband-session.js`, `sip-event.js`, `state-storage-boundary.js`, and `webhook-handler.js`), plus
+the unit, sysusers, tmpfiles, verifier, component manifest, and installer under `deploy/`. The
+component manifest pins every installed/root-executed policy asset including the installer; the
+external release manifest binds the component manifest itself.
+
+The ledger currently has no automatic retention job. Do not delete or VACUUM it under pressure.
+Active, processing, `outcome_unknown`, and hangup-unconfirmed records are durable safety truth.
+Archival/compaction is a P2 follow-up limited to completed ignored webhook rows older than a
+reviewed provider retry horizon, plus `rejected` or `closed` calls with confirmed hangup and their
+completed webhook rows. It must run offline, archive and hash rows first, prove restore, delete
+call/webhook pairs in one transaction, and preserve the configured reserve throughout.
 
 ## HTTP surface
 
