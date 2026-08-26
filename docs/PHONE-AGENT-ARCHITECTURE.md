@@ -260,6 +260,10 @@ The installer accepts each root-owned, single-link release source only at its
 exact installed mode (`0644` or `0755`) or the corresponding immutable release
 mode (`0444` or `0555`). It rejects every other mode and always normalizes the
 installed policy and executable copies back to their exact target modes.
+The source verifier resolves `/opt/teleagent/current` once to the exact
+`/opt/teleagent/releases/sha256-<manifest-digest>` tree, proves stable directory
+and verifier identity, and performs the whole source check through that resolved
+immutable root; a moving or chained release selector cannot mix source trees.
 
 The unconditional `ExecStopPost` removes only containers bearing the exact
 `com.docker.compose.project=teleagent-voice` label and proves none remain before

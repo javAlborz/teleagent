@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const SOURCE_ROOT = '/opt/teleagent/current/deploy/voice-stack';
+const RELEASE_PARENT = '/opt/teleagent/releases';
 const INSTALLED_VERIFIER = '/usr/local/libexec/verify-voice-stack-identity';
 const COLLISION_IDENTITIES = Object.freeze([
   'teleagent-control',
@@ -42,8 +43,10 @@ function exactlyOnce(source, expression, label) {
   if (matches.length !== 1) refuse(`${label} must occur exactly once`);
 }
 
-function inspectSourceAsset(filename, { uid = 0, gid = 0, mode }) {
-  const metadata = fs.lstatSync(filename);
+function inspectSourceAsset(filename, { uid = 0, gid = 0, mode }, {
+  lstat = fs.lstatSync,
+} = {}) {
+  const metadata = lstat(filename);
   if (![0o644, 0o755].includes(mode)) {
     refuse(`reviewed source asset ${path.basename(filename)} has an unsupported target mode`);
   }
@@ -55,6 +58,78 @@ function inspectSourceAsset(filename, { uid = 0, gid = 0, mode }) {
     refuse(`reviewed source asset ${path.basename(filename)} has unsafe metadata`);
   }
   return metadata;
+}
+
+function sameSourceIdentity(left, right) {
+  return ['dev', 'ino', 'mode', 'uid', 'gid', 'nlink', 'size']
+    .every((field) => left?.[field] === right?.[field]);
+}
+
+function resolveSourceBundle(sourceRoot = SOURCE_ROOT, {
+  releaseParent = RELEASE_PARENT,
+  sourceUid = 0,
+  sourceGid = 0,
+  lstat = fs.lstatSync,
+  realpath = fs.realpathSync,
+  readlink = fs.readlinkSync,
+} = {}) {
+  const selector = path.resolve(sourceRoot, '..', '..');
+  const selectorBefore = lstat(selector);
+  const literalTarget = readlink(selector);
+  const rootBefore = lstat(sourceRoot);
+  const resolvedRoot = realpath(sourceRoot);
+  const rootResolved = lstat(resolvedRoot);
+  const rootAfter = lstat(sourceRoot);
+  const selectorAfter = lstat(selector);
+  const releaseRoot = path.resolve(resolvedRoot, '..', '..');
+  const relative = path.relative(releaseParent, resolvedRoot).split(path.sep);
+  if (sourceRoot !== path.join(selector, 'deploy', 'voice-stack') ||
+      !selectorBefore.isSymbolicLink() || selectorBefore.uid !== sourceUid ||
+      selectorBefore.gid !== sourceGid || selectorBefore.nlink !== 1 ||
+      !sameSourceIdentity(selectorBefore, selectorAfter) ||
+      !rootBefore.isDirectory() || rootBefore.isSymbolicLink() ||
+      rootBefore.uid !== sourceUid || rootBefore.gid !== sourceGid ||
+      (rootBefore.mode & 0o7777) !== 0o555 ||
+      !sameSourceIdentity(rootBefore, rootResolved) ||
+      !sameSourceIdentity(rootBefore, rootAfter) ||
+      realpath(resolvedRoot) !== resolvedRoot ||
+      realpath(releaseParent) !== releaseParent ||
+      relative.length !== 3 || !/^sha256-[a-f0-9]{64}$/.test(relative[0]) ||
+      relative[1] !== 'deploy' || relative[2] !== 'voice-stack' ||
+      releaseRoot !== path.join(releaseParent, relative[0]) ||
+      literalTarget !== releaseRoot) {
+    refuse('the reviewed voice source bundle changed or resolved outside the immutable release');
+  }
+  const releaseMetadata = lstat(releaseRoot);
+  if (!releaseMetadata.isDirectory() || releaseMetadata.isSymbolicLink() ||
+      releaseMetadata.uid !== sourceUid || releaseMetadata.gid !== sourceGid ||
+      (releaseMetadata.mode & 0o7777) !== 0o555 || realpath(releaseRoot) !== releaseRoot) {
+    refuse('the reviewed voice release root has unsafe metadata');
+  }
+
+  const verifierPath = path.join(resolvedRoot, 'verify-voice-stack-identity');
+  const verifierBefore = inspectSourceAsset(verifierPath, {
+    uid: sourceUid,
+    gid: sourceGid,
+    mode: 0o755,
+  }, { lstat });
+  const resolvedVerifier = realpath(verifierPath);
+  const verifierResolved = inspectSourceAsset(resolvedVerifier, {
+    uid: sourceUid,
+    gid: sourceGid,
+    mode: 0o755,
+  }, { lstat });
+  const verifierAfter = inspectSourceAsset(verifierPath, {
+    uid: sourceUid,
+    gid: sourceGid,
+    mode: 0o755,
+  }, { lstat });
+  if (resolvedVerifier !== verifierPath ||
+      !sameSourceIdentity(verifierBefore, verifierResolved) ||
+      !sameSourceIdentity(verifierBefore, verifierAfter)) {
+    refuse('the reviewed voice source verifier changed while it was resolved');
+  }
+  return Object.freeze({ sourceRoot: resolvedRoot, verifierPath: resolvedVerifier, releaseRoot });
 }
 
 function sourceCheck(sourceRoot = SOURCE_ROOT, { sourceUid = 0, sourceGid = 0 } = {}) {
@@ -256,16 +331,17 @@ function main() {
     refuse('usage: verify-voice-stack-identity --source-check|--installed-check');
   }
   const invoked = fs.realpathSync(process.argv[1]);
+  const sourceBundle = resolveSourceBundle();
   if (mode === '--installed-check') {
     if (invoked !== INSTALLED_VERIFIER) refuse('use the fixed installed verifier entrypoint');
-    installedCheck();
+    installedCheck({ sourceRoot: sourceBundle.sourceRoot });
     process.stdout.write('VOICE_STACK_IDENTITY_OK\n');
   } else {
-    if (invoked !== path.join(SOURCE_ROOT, 'verify-voice-stack-identity') &&
+    if (invoked !== sourceBundle.verifierPath &&
         invoked !== INSTALLED_VERIFIER) {
       refuse('source check must use a reviewed fixed entrypoint');
     }
-    sourceCheck();
+    sourceCheck(sourceBundle.sourceRoot);
     process.stdout.write('VOICE_STACK_SOURCE_OK\n');
   }
 }
@@ -282,6 +358,7 @@ module.exports = {
   REVIEWED_ASSETS,
   inspectPath,
   inspectSourceAsset,
+  resolveSourceBundle,
   sourceCheck,
   validateIdentityRecords,
 };

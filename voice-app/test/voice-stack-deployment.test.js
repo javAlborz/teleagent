@@ -7,8 +7,10 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const test = require('node:test');
 const {
+  REVIEWED_ASSETS,
   inspectPath,
   inspectSourceAsset,
+  resolveSourceBundle,
   sourceCheck,
   validateIdentityRecords,
 } = require('../../deploy/voice-stack/verify-voice-stack-identity');
@@ -109,6 +111,80 @@ test('voice source assets accept only installed or immutable read-only modes', (
     ...expected,
     mode: 0o644,
   }), /unsafe metadata/);
+});
+
+test('voice source check resolves current once to one stable immutable release', (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'voice-release-symlink-'));
+  const releaseParent = path.join(directory, 'releases');
+  const releaseIds = [
+    `sha256-${'a'.repeat(64)}`,
+    `sha256-${'b'.repeat(64)}`,
+  ];
+  const releaseRoots = releaseIds.map((id) => path.join(releaseParent, id));
+  const voiceRoots = [];
+  fs.mkdirSync(releaseParent, { recursive: true, mode: 0o755 });
+  for (const releaseRoot of releaseRoots) {
+    const voiceRoot = path.join(releaseRoot, 'deploy', 'voice-stack');
+    fs.mkdirSync(voiceRoot, { recursive: true, mode: 0o755 });
+    for (const [sourceName, _target, mode] of REVIEWED_ASSETS) {
+      fs.copyFileSync(path.join(DEPLOY, sourceName), path.join(voiceRoot, sourceName));
+      fs.chmodSync(path.join(voiceRoot, sourceName), mode & 0o555);
+    }
+    fs.copyFileSync(
+      path.join(ROOT, 'docker-compose.yml'),
+      path.join(releaseRoot, 'docker-compose.yml'),
+    );
+    fs.chmodSync(path.join(releaseRoot, 'docker-compose.yml'), 0o444);
+    fs.chmodSync(voiceRoot, 0o555);
+    fs.chmodSync(path.join(releaseRoot, 'deploy'), 0o555);
+    fs.chmodSync(releaseRoot, 0o555);
+    voiceRoots.push(voiceRoot);
+  }
+  t.after(() => {
+    for (const releaseRoot of releaseRoots) {
+      fs.chmodSync(releaseRoot, 0o755);
+      fs.chmodSync(path.join(releaseRoot, 'deploy'), 0o755);
+      fs.chmodSync(path.join(releaseRoot, 'deploy', 'voice-stack'), 0o755);
+    }
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+  const current = path.join(directory, 'current');
+  fs.symlinkSync(releaseRoots[0], current);
+  const sourceRoot = path.join(current, 'deploy', 'voice-stack');
+  const identity = { sourceUid: process.getuid(), sourceGid: process.getgid() };
+  const resolved = resolveSourceBundle(sourceRoot, { releaseParent, ...identity });
+  assert.deepEqual(resolved, {
+    sourceRoot: voiceRoots[0],
+    verifierPath: path.join(voiceRoots[0], 'verify-voice-stack-identity'),
+    releaseRoot: releaseRoots[0],
+  });
+  assert.equal(sourceCheck(resolved.sourceRoot, identity), true);
+
+  fs.unlinkSync(current);
+  fs.symlinkSync(releaseRoots[0], current);
+  let switched = false;
+  assert.throws(() => resolveSourceBundle(sourceRoot, {
+    releaseParent,
+    ...identity,
+    realpath: (filename) => {
+      const result = fs.realpathSync(filename);
+      if (filename === sourceRoot && !switched) {
+        switched = true;
+        fs.unlinkSync(current);
+        fs.symlinkSync(releaseRoots[1], current);
+      }
+      return result;
+    },
+  }), /changed or resolved outside/);
+
+  fs.unlinkSync(current);
+  const chained = path.join(directory, 'chained-release');
+  fs.symlinkSync(releaseRoots[0], chained);
+  fs.symlinkSync(chained, current);
+  assert.throws(() => resolveSourceBundle(sourceRoot, {
+    releaseParent,
+    ...identity,
+  }), /changed or resolved outside/);
 });
 
 test('voice identity accepts one private nologin account with no ID reuse or supplementary group', () => {
