@@ -1,0 +1,102 @@
+#!/usr/local/libexec/teleagent-node
+'use strict';
+
+const crypto = require('node:crypto');
+const fs = require('node:fs');
+const { spawnSync } = require('node:child_process');
+
+const MANIFEST = '/usr/local/libexec/teleagent-provider-cli.manifest.json';
+const PROVIDERS = new Set(['claude', 'codex']);
+
+function fail(message) {
+  process.stderr.write(`Provider CLI check refused: ${message}\n`);
+  process.exit(77);
+}
+
+function exactKeys(value, expected) {
+  return value && typeof value === 'object' && !Array.isArray(value) &&
+    Object.keys(value).sort().join('\n') === [...expected].sort().join('\n');
+}
+
+async function digestFile(filename) {
+  const hash = crypto.createHash('sha256');
+  const stream = fs.createReadStream(filename, { flags: fs.constants.O_RDONLY });
+  for await (const chunk of stream) hash.update(chunk);
+  return hash.digest('hex');
+}
+
+function readManifest() {
+  const metadata = fs.lstatSync(MANIFEST);
+  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.uid !== 0 ||
+      metadata.gid !== 0 || (metadata.mode & 0o777) !== 0o444 || metadata.nlink !== 1 ||
+      metadata.size > 32768 || fs.realpathSync(MANIFEST) !== MANIFEST) {
+    fail('the root-owned CLI manifest is unsafe');
+  }
+  let manifest;
+  try { manifest = JSON.parse(fs.readFileSync(MANIFEST, 'utf8')); }
+  catch { fail('the CLI manifest is invalid JSON'); }
+  if (!exactKeys(manifest, ['version', 'artifacts']) || manifest.version !== 1 ||
+      !Array.isArray(manifest.artifacts) || manifest.artifacts.length !== 3) {
+    fail('the CLI manifest schema is invalid');
+  }
+  const ids = new Set();
+  for (const artifact of manifest.artifacts) {
+    if (!exactKeys(artifact, [
+      'id', 'provider', 'path', 'source', 'sha256', 'size', 'mode',
+      'versionArgs', 'versionStdout',
+    ]) || ids.has(artifact.id) || !PROVIDERS.has(artifact.provider) ||
+        !/^[-a-z]+$/.test(artifact.id) ||
+        !artifact.path.startsWith('/opt/teleagent/agent-tools/') ||
+        artifact.path.includes('/../') || artifact.mode !== '0755' ||
+        !/^[a-f0-9]{64}$/.test(artifact.sha256) ||
+        !Number.isSafeInteger(artifact.size) || artifact.size <= 0 ||
+        !Array.isArray(artifact.versionArgs) || artifact.versionArgs.length !== 1 ||
+        artifact.versionArgs[0] !== '--version' ||
+        !/^(?:2\.1\.246 \(Claude Code\)|codex-cli 0\.149\.1)$/.test(artifact.versionStdout)) {
+      fail('the CLI manifest artifact schema is invalid');
+    }
+    ids.add(artifact.id);
+  }
+  if (ids.size !== 3 || !ids.has('claude') || !ids.has('codex-wrapper') ||
+      !ids.has('codex-vendor')) fail('the CLI manifest artifact set is incomplete');
+  return manifest;
+}
+
+async function checkArtifact(artifact) {
+  const metadata = fs.lstatSync(artifact.path);
+  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.uid !== 0 ||
+      metadata.gid !== 0 || (metadata.mode & 0o777) !== 0o755 || metadata.nlink !== 1 ||
+      metadata.size !== artifact.size || fs.realpathSync(artifact.path) !== artifact.path) {
+    fail('a pinned provider CLI artifact has unsafe metadata');
+  }
+  if (await digestFile(artifact.path) !== artifact.sha256) {
+    fail('a pinned provider CLI artifact digest drifted');
+  }
+  const result = spawnSync(artifact.path, artifact.versionArgs, {
+    cwd: '/',
+    encoding: 'utf8',
+    timeout: 5000,
+    maxBuffer: 4096,
+    env: { PATH: '/opt/teleagent/agent-tools:/usr/bin:/bin', LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8' },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  if (result.error || result.status !== 0 || result.signal ||
+      result.stdout.trim() !== artifact.versionStdout) {
+    fail('a pinned provider CLI version drifted');
+  }
+}
+
+async function main() {
+  if (process.geteuid() !== 0 || process.execArgv.length !== 0 ||
+      fs.realpathSync(process.argv[1] || '') !== '/usr/local/libexec/teleagent-provider-cli-check' ||
+      process.argv.length !== 4 || process.argv[2] !== '--provider' ||
+      !PROVIDERS.has(process.argv[3])) fail('use the fixed root CLI checker entrypoint');
+  const provider = process.argv[3];
+  const manifest = readManifest();
+  for (const artifact of manifest.artifacts.filter((entry) => entry.provider === provider)) {
+    await checkArtifact(artifact);
+  }
+  process.stdout.write(`PROVIDER_CLI_OK ${provider}\n`);
+}
+
+main().catch(() => fail('the pinned provider CLI could not be verified'));

@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+runtime=/usr/local/libexec/teleagent-node
+client=/opt/teleagent/current/claude-api-server/provider-supervisor-client.js
+for target in "$runtime" "$client"; do
+  owner_mode=$(/usr/bin/stat -Lc '%u:%a' "$target")
+  case "$owner_mode" in
+    0:755|0:555|0:644|0:444) ;;
+    *) echo "provider client trust path is unsafe" >&2; exit 77 ;;
+  esac
+done
+exec "$runtime" "$client" "$@"

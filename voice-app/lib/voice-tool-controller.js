@@ -216,6 +216,31 @@ class VoiceToolController {
             return result;
           }
 
+        case 'start_privileged_action':
+          return this.jobBroker.startPrivilegedAction({
+            voiceThreadId: this.voiceThreadId,
+            realtimeSessionId: this.realtimeSessionId,
+            toolCallId: context.callId,
+            action: {
+              adapter: args.adapter,
+              action: args.action,
+              unit: args.unit,
+              lines: args.lines,
+              host: args.host,
+              remoteAction: args.remote_action,
+              operation: args.operation,
+              namespace: args.namespace,
+              kind: args.kind,
+              name: args.name,
+              replicas: args.replicas,
+              argv: args.argv,
+              remoteArgv: args.remote_argv,
+              cwd: args.cwd,
+              timeoutSeconds: args.timeout_seconds,
+            },
+            notificationMode: args.notify_when_complete || 'in_call',
+          });
+
         case 'get_agent_task':
           return this.jobBroker.getAgentTask(this.voiceThreadId, args.job_id);
         case 'cancel_agent_task':
@@ -244,18 +269,32 @@ class VoiceToolController {
             },
             tmux: {
               ...tmux,
-              meaning: 'Live tmux-attached processes on Hermes; process mapping is authoritative even when pane text looks idle.',
+              meaning: 'Tmux-attached processes on Hermes. agent_running means process presence only; use get_agent_activity for one exact pane when current provider activity is needed.',
             },
           };
         }
 
         case 'get_voice_history': {
           const role = args.user_only ? 'user' : (args.role || null);
+          const requestedLimit = Math.max(1, Math.min(Number.parseInt(args.limit, 10) || 20, 50));
+          const currentRequest = this.stateStore.getLatestUserEvent(this.voiceThreadId);
           const events = this.stateStore.listCallerEvents(this.callerId, {
-            limit: Math.max(1, Math.min(Number.parseInt(args.limit, 10) || 20, 50)),
+            limit: 200,
             role,
-          });
-          return { success: true, events: voiceSafeSessionHistory(events), audio_recorded: false };
+          })
+            .filter((event) => event.kind === 'transcript' && event.id !== currentRequest?.id)
+            .slice(-requestedLimit);
+          const safeEvents = voiceSafeSessionHistory(events);
+          return {
+            success: true,
+            events: safeEvents,
+            exact_text: safeEvents
+              .map((event, index) => `${index + 1}. ${event.role}: ${event.text}`)
+              .join('\n'),
+            current_request_excluded: true,
+            suppressed_audio_fragments_excluded: true,
+            audio_recorded: false,
+          };
         }
 
         case 'get_voice_usage':
@@ -362,6 +401,12 @@ class VoiceToolController {
             ...history,
             latest_message: history.messages?.[0] || null,
           };
+        }
+        case 'get_agent_activity': {
+          const target = this._stableTarget(args.target);
+          const activity = await this._inspect('inspect_agent_activity', { target });
+          this._rememberTargetBindings(activity, args.target);
+          return activity;
         }
         case 'continue_agent_session_history': {
           if (!this.agentHistoryContinuation) {

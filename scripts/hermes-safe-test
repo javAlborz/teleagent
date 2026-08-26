@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Run one Teleagent validation command in Hermes' canonical resource-isolated
+# development scope. This is intentionally stricter than the host-wide guard.
+set -euo pipefail
+
+if [ "$#" -eq 0 ]; then
+  printf 'usage: scripts/hermes-safe-test <command> [args...]\n' >&2
+  exit 64
+fi
+
+if ! command -v hermes-dev-test >/dev/null 2>&1; then
+  printf 'hermes-safe-test: hermes-dev-test is not installed\n' >&2
+  exit 69
+fi
+
+timeout_seconds="${HERMES_SAFE_TEST_TIMEOUT_SECONDS:-300}"
+case "$timeout_seconds" in
+  ''|*[!0-9]*)
+    printf 'hermes-safe-test: timeout must be an integer from 1 to 900 seconds\n' >&2
+    exit 64
+    ;;
+esac
+if [ "$timeout_seconds" -lt 1 ] || [ "$timeout_seconds" -gt 900 ]; then
+  printf 'hermes-safe-test: timeout must be an integer from 1 to 900 seconds\n' >&2
+  exit 64
+fi
+
+exec env \
+  HERMES_DEV_TEST_CPU_QUOTA=100% \
+  HERMES_DEV_TEST_MEMORY_MAX=1536M \
+  HERMES_DEV_TEST_MEMORY_SWAP_MAX=128M \
+  HERMES_DEV_TEST_TASKS_MAX=192 \
+  hermes-dev-test \
+    timeout --signal=TERM --kill-after=10s "${timeout_seconds}s" \
+    nice -n 15 ionice -c 3 \
+    "$@"

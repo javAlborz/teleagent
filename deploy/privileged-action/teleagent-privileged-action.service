@@ -1,0 +1,48 @@
+[Unit]
+Description=Teleagent one-time privileged action broker
+Documentation=file:/opt/teleagent/current/docs/PRIVILEGED-ACTIONS.md
+After=local-fs.target network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/teleagent/privileged-action/ENABLE
+
+[Service]
+Type=simple
+User=root
+Group=teleagent-control
+UMask=0077
+RuntimeDirectory=teleagent-privileged-action
+RuntimeDirectoryMode=0750
+StateDirectory=teleagent-privileged-action
+StateDirectoryMode=0700
+WorkingDirectory=/opt/teleagent/current
+Environment=PRIVILEGED_ACTION_SOCKET_PATH=/run/teleagent-privileged-action/broker.sock
+Environment=PRIVILEGED_ACTION_DB_PATH=/var/lib/teleagent-privileged-action/actions.sqlite
+Environment=PRIVILEGED_ACTION_POLICY_FILE=/etc/teleagent/privileged-action/policy.json
+Environment=PRIVILEGED_ACTION_APPROVAL_KEY_ID=controller-2026-01
+Environment=PRIVILEGED_ACTION_APPROVAL_PUBLIC_KEY_FILE=%d/approval-public-key
+Environment=PRIVILEGED_ACTION_REPLAY_KEY_FILE=%d/replay-fingerprint-key
+LoadCredential=approval-public-key:/etc/teleagent/privileged-action/approval-public.pem
+LoadCredential=replay-fingerprint-key:/etc/teleagent/privileged-action/replay-fingerprint.key
+ExecStart=/opt/teleagent/node/bin/node /opt/teleagent/current/privileged-action-broker/index.js
+Restart=on-failure
+RestartSec=2s
+KillMode=control-group
+TimeoutStopSec=15s
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+# Deliberately no [Install] section: source deployment is dormant until a root
+# operator installs policy/keys, creates ENABLE, and starts the unit explicitly.

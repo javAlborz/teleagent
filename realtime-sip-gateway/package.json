@@ -1,0 +1,27 @@
+{
+  "name": "@teleagent/realtime-sip-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Isolated OpenAI Realtime native-SIP sideband canary",
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test --test-concurrency=1 test/*.test.js",
+    "test:coverage": "node --test --experimental-test-coverage test/*.test.js",
+    "lint": "eslint .",
+    "check": "npm run lint && node --test test/*.test.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^13.0.3",
+    "openai": "^7.5.0",
+    "ws": "^8.21.3"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.9.1",
+    "globals": "^17.11.0"
+  }
+}

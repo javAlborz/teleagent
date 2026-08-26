@@ -1,0 +1,17 @@
+{
+  "name": "teleagent-privileged-action-broker",
+  "private": true,
+  "version": "0.1.0",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "test": "node --test --test-concurrency=1 test/**/*.test.js",
+    "lint": "cd .. && eslint privileged-action-broker/"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "dependencies": {
+    "better-sqlite3": "12.11.1"
+  }
+}

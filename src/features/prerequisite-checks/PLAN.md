@@ -90,9 +90,9 @@ export async function check(platform) {
   return {
     name: 'Node.js',
     passed: true,
-    version: '20.11.0',
-    required: '>=18.0.0',
-    message: 'Node.js v20.11.0 (requires ≥18)',
+    version: '24.13.0',
+    required: '>=24.0.0',
+    message: 'Node.js v24.13.0 (requires ≥24 for deployed services)',
     canAutoFix: true,
   };
 }
@@ -191,7 +191,7 @@ export async function installNode(platform) {
 }
 
 async function installNodeApt() {
-  const script = 'https://deb.nodesource.com/setup_20.x';
+  const script = 'https://deb.nodesource.com/setup_24.x';
   const tempFile = '/tmp/nodesource_setup.sh';
 
   // Download, preview, confirm, execute

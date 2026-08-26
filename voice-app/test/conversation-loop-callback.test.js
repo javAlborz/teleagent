@@ -1,4 +1,6 @@
 const assert = require('node:assert/strict');
+const { TEST_RUNTIME_SECRETS, installTestRuntimeSecrets } = require('./runtime-secrets-fixture');
+installTestRuntimeSecrets();
 const test = require('node:test');
 
 const {
@@ -35,10 +37,14 @@ test('detectCallbackRequest ignores non-callback phrasing', () => {
   assert.equal(result, null);
 });
 
-test('queueRuntimeCallback posts to the local outbound API with auth when configured', async () => {
+test('queueRuntimeCallback posts locally without propagating SIP routes or transcript logs', async (t) => {
   const originalFetch = global.fetch;
   const originalToken = process.env.OUTBOUND_API_TOKEN;
   const calls = [];
+  const logs = [];
+  const logger = require('../lib/logger');
+  t.mock.method(logger, 'info', (...args) => logs.push(JSON.stringify(args)));
+  t.mock.method(logger, 'warn', (...args) => logs.push(JSON.stringify(args)));
 
   process.env.OUTBOUND_API_TOKEN = 'test-token';
   global.fetch = async (url, options) => {
@@ -48,6 +54,7 @@ test('queueRuntimeCallback posts to the local outbound API with auth when config
       status: 200,
       json: async () => ({
         success: true,
+        queued: true,
         callId: 'test-call-id',
       }),
     };
@@ -61,7 +68,7 @@ test('queueRuntimeCallback posts to the local outbound API with auth when config
       deviceName: 'Opus',
       dialUri: 'sip:1001@100.101.120.26:52596',
       callUuid: 'test-call-uuid',
-      transcript: 'call me when done',
+      transcript: 'SENTINEL call me when done',
       reason: 'unit_test',
     });
 
@@ -70,14 +77,20 @@ test('queueRuntimeCallback posts to the local outbound API with auth when config
     assert.equal(calls.length, 1);
     assert.match(calls[0].url, /\/api\/outbound-call$/);
     assert.equal(calls[0].options.method, 'POST');
-    assert.equal(calls[0].options.headers.Authorization, 'Bearer test-token');
+    assert.equal(
+      calls[0].options.headers.Authorization,
+      `Bearer ${TEST_RUNTIME_SECRETS.outboundApiToken}`,
+    );
+    assert.equal(calls[0].options.headers['Idempotency-Key'], 'callback:test-call-uuid');
 
     const payload = JSON.parse(calls[0].options.body);
     assert.equal(payload.to, '1001');
     assert.equal(payload.mode, 'announce');
     assert.equal(payload.device, 'Opus');
-    assert.equal(payload.dialUri, 'sip:1001@100.101.120.26:52596');
+    assert.equal(Object.hasOwn(payload, 'dialUri'), false);
     assert.equal(payload.message, 'Your homelab is healthy and all nodes are ready.');
+    assert.equal(payload.idempotencyKey, 'callback:test-call-uuid');
+    assert.equal(logs.join('\n').includes('SENTINEL'), false);
   } finally {
     global.fetch = originalFetch;
     if (originalToken === undefined) {

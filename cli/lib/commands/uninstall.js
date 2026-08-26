@@ -139,7 +139,8 @@ export async function uninstallCommand() {
     await stopContainers();
     spinner.succeed('Docker containers stopped');
   } catch (error) {
-    spinner.warn(`Could not stop containers: ${error.message}`);
+    spinner.fail(`Could not safely stop the guarded voice stack: ${error.message}`);
+    throw error;
   }
 
   // Step 2: Remove configuration directory

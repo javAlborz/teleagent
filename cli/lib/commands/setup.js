@@ -11,12 +11,8 @@ import {
   configExists
 } from '../config.js';
 import {
-  validateTtsEndpoint,
-  validateSttEndpoint,
-  validateTtsVoice,
   validateExtension,
-  validateIP,
-  validateHostname
+  validateIP
 } from '../validators.js';
 import { getLocalIP, getProjectRoot } from '../utils.js';
 import { isRaspberryPi } from '../platform.js';
@@ -29,6 +25,7 @@ import {
   getAgentProfileChoices,
   normalizeAgentConfig
 } from '../agents.js';
+import { resolveVoiceRuntimeIdentityForInstallation } from '../voice-runtime-identity.js';
 
 /**
  * Prompt for installation type
@@ -110,6 +107,9 @@ export async function setupCommand(options = {}) {
   const installationType = await promptInstallationType(
     existingConfig ? existingConfig.installationType : 'both'
   );
+  // Resolve before the wizard saves or mutates any voice deployment state.
+  // API-only setup has no voice identity dependency; every voice mode does.
+  resolveVoiceRuntimeIdentityForInstallation(installationType);
 
   // Detect platform (for Pi split-mode detection)
   const isPi = await isRaspberryPi();
@@ -218,7 +218,7 @@ async function setupInstallationType(installationType, existingConfig, isPi, opt
       if (!fs.existsSync(nodeModulesPath)) {
         const installSpinner = ora('Installing API server dependencies...').start();
         try {
-          execSync('npm install', {
+          execSync('npm ci --omit=dev', {
             cwd: apiServerPath,
             stdio: 'pipe'
           });
@@ -226,7 +226,7 @@ async function setupInstallationType(installationType, existingConfig, isPi, opt
         } catch (error) {
           installSpinner.fail(`Failed to install dependencies: ${error.message}`);
           console.log(chalk.yellow('\nYou can install manually with:'));
-          console.log(chalk.cyan(`  cd ${apiServerPath} && npm install\n`));
+          console.log(chalk.cyan(`  cd ${apiServerPath} && npm ci --omit=dev\n`));
         }
       }
     }
@@ -307,14 +307,6 @@ async function setupApiServer(config) {
  * @returns {Promise<object>} Updated config
  */
 async function setupVoiceServer(config) {
-  // Ensure secrets exist
-  if (!config.secrets) {
-    config.secrets = {
-      drachtio: generateSecret(),
-      freeswitch: generateSecret()
-    };
-  }
-
   // Set deployment mode
   if (!config.deployment) {
     config.deployment = { mode: 'voice-server' };
@@ -322,11 +314,7 @@ async function setupVoiceServer(config) {
     config.deployment.mode = 'voice-server';
   }
 
-  // Step 1: 3CX/SIP Configuration
-  console.log(chalk.bold('\n☎️  SIP Configuration'));
-  config = await setupSIP(config);
-
-  // Step 2: API Server Connection
+  // Step 1: API Server Connection
   console.log(chalk.bold('\n🖥️  API Server Connection'));
   const apiServerAnswers = await inquirer.prompt([
     {
@@ -366,15 +354,15 @@ async function setupVoiceServer(config) {
   // Record which profiles are available on the remote agent bridge.
   config = await setupAgentProviders(config, { configureRuntime: false });
 
-  // Step 3: API Keys (for TTS/STT)
+  // Step 2: API Keys (for TTS/STT)
   console.log(chalk.bold('\n📡 API Configuration'));
   config = await setupAPIKeys(config);
 
-  // Step 4: Device Configuration
+  // Step 3: Device Configuration
   console.log(chalk.bold('\n🤖 Device Configuration'));
   config = await setupDevice(config);
 
-  // Step 5: Server Configuration (IP only, no API port)
+  // Step 4: Server Configuration (IP only, no API port)
   console.log(chalk.bold('\n⚙️  Server Configuration'));
   const localIp = getLocalIP();
   const serverAnswers = await inquirer.prompt([
@@ -420,14 +408,6 @@ async function setupVoiceServer(config) {
  * @returns {Promise<object>} Updated config
  */
 async function setupBoth(config) {
-  // Ensure secrets exist for existing configs (backwards compatibility)
-  if (!config.secrets) {
-    config.secrets = {
-      drachtio: generateSecret(),
-      freeswitch: generateSecret()
-    };
-  }
-
   // Ensure deployment mode exists
   if (!config.deployment) {
     config.deployment = { mode: 'both' };
@@ -443,15 +423,11 @@ async function setupBoth(config) {
   console.log(chalk.bold('\n📡 API Configuration'));
   config = await setupAPIKeys(config);
 
-  // Step 3: 3CX/SIP Configuration
-  console.log(chalk.bold('\n☎️  SIP Configuration'));
-  config = await setupSIP(config);
-
-  // Step 4: Device Configuration
+  // Step 3: Device Configuration
   console.log(chalk.bold('\n🤖 Device Configuration'));
   config = await setupDevice(config);
 
-  // Step 5: Server Configuration
+  // Step 4: Server Configuration
   console.log(chalk.bold('\n⚙️  Server Configuration'));
   config = await setupServer(config);
 
@@ -512,14 +488,6 @@ async function setupPi(config) {
   if (!allPrereqsPassed) {
     console.log(chalk.red('\n✗ Prerequisites missing. Install them before continuing.\n'));
     process.exit(1);
-  }
-
-  // Ensure secrets exist
-  if (!config.secrets) {
-    config.secrets = {
-      drachtio: generateSecret(),
-      freeswitch: generateSecret()
-    };
   }
 
   // Initialize deployment config
@@ -634,15 +602,11 @@ async function setupPi(config) {
   console.log(chalk.bold('\n📡 API Configuration'));
   config = await setupAPIKeys(config);
 
-  // Step 2: 3CX SBC Configuration (Pi mode uses SBC)
-  console.log(chalk.bold('\n📡 3CX SBC Connection'));
-  config = await setupSBC(config);
-
-  // Step 3: Device Configuration
+  // Step 2: Device Configuration
   console.log(chalk.bold('\n🤖 Device Configuration'));
   config = await setupDevice(config);
 
-  // Step 4: Server Configuration (Pi-specific)
+  // Step 3: Server Configuration (Pi-specific)
   console.log(chalk.bold('\n⚙️  Server Configuration'));
   config = await setupPiServer(config);
 
@@ -764,7 +728,7 @@ async function setupAgentProviders(config, { configureRuntime = true } = {}) {
 }
 
 /**
- * Generate a random secret for Docker services
+ * Generate random local configuration entropy.
  * @returns {string} Random 32-character hex string
  */
 function generateSecret() {
@@ -781,17 +745,7 @@ function createDefaultConfig() {
     agents: createDefaultAgentConfig(),
     api: {
       tts: {
-        baseUrl: 'http://127.0.0.1:18000/v1',
-        apiKey: 'not-needed',
-        model: 'kokoro',
-        defaultVoice: 'af_bella',
-        validated: false
-      },
-      stt: {
-        baseUrl: 'http://127.0.0.1:18001/v1',
-        apiKey: 'not-needed',
-        model: 'whisper-1',
-        validated: false
+        defaultVoice: 'af_bella'
       },
       realtime: {
         enabled: false,
@@ -802,20 +756,14 @@ function createDefaultConfig() {
         safetyIdentifierSalt: generateSecret()
       }
     },
-    sip: {
-      domain: '',
-      registrar: '',
-      transport: 'udp'
-    },
     server: {
       claudeApiPort: 3333,
       httpPort: 3000,
-      externalIp: 'auto'
+      externalIp: 'auto',
+      agentApiBindHost: '127.0.0.1',
+      agentApiNonLoopbackEnabled: false
     },
-    secrets: {
-      drachtio: generateSecret(),
-      freeswitch: generateSecret()
-    },
+    secrets: {},
     devices: [],
     paths: {
       voiceApp: path.join(getProjectRoot(), 'voice-app'),
@@ -824,135 +772,8 @@ function createDefaultConfig() {
   };
 }
 
-/**
- * Setup TTS/STT endpoints with validation
- * @param {object} config - Current config
- * @returns {Promise<object>} Updated config
- */
+/** Configure the production OpenAI Realtime voice path. */
 async function setupAPIKeys(config) {
-  const ttsAnswers = await inquirer.prompt([
-    {
-      type: 'input',
-      name: 'baseUrl',
-      message: 'TTS endpoint URL (Kokoro/OpenAI-compatible):',
-      default: config.api.tts.baseUrl,
-      validate: (input) => {
-        if (!input || input.trim() === '') {
-          return 'Endpoint URL is required';
-        }
-        return true;
-      }
-    }
-  ]);
-
-  const ttsBaseUrl = ttsAnswers.baseUrl;
-  const spinner = ora('Validating TTS endpoint...').start();
-  const ttsResult = await validateTtsEndpoint(ttsBaseUrl, config.api.tts.apiKey);
-
-  if (!ttsResult.valid) {
-    spinner.fail(`TTS endpoint validation failed: ${ttsResult.error}`);
-    console.log(chalk.yellow('\n⚠️  You can continue setup, but the endpoint may not work.'));
-    const { continueAnyway } = await inquirer.prompt([
-      {
-        type: 'confirm',
-        name: 'continueAnyway',
-        message: 'Continue anyway?',
-        default: false
-      }
-    ]);
-
-    if (!continueAnyway) {
-      throw new Error('Setup cancelled due to invalid TTS endpoint');
-    }
-
-    config.api.tts = { ...config.api.tts, baseUrl: ttsBaseUrl, validated: false };
-  } else {
-    spinner.succeed('TTS endpoint validated');
-    config.api.tts = { ...config.api.tts, baseUrl: ttsBaseUrl, validated: true };
-  }
-
-  const voiceIdAnswers = await inquirer.prompt([
-    {
-      type: 'input',
-      name: 'voiceId',
-      message: 'Default TTS voice (for all devices):',
-      default: config.api.tts.defaultVoice || '',
-      validate: (input) => {
-        if (!input || input.trim() === '') {
-          return 'Voice ID is required';
-        }
-        return true;
-      }
-    }
-  ]);
-
-  const defaultVoiceId = voiceIdAnswers.voiceId;
-  const voiceSpinner = ora('Validating TTS voice...').start();
-  const voiceValidation = await validateTtsVoice(ttsBaseUrl, config.api.tts.apiKey, defaultVoiceId);
-
-  if (!voiceValidation.valid) {
-    voiceSpinner.fail(`Voice ID validation failed: ${voiceValidation.error}`);
-    console.log(chalk.yellow('\n⚠️  You can continue setup, but the voice ID may not work.'));
-    const { continueAnyway } = await inquirer.prompt([
-      {
-        type: 'confirm',
-        name: 'continueAnyway',
-        message: 'Continue anyway?',
-        default: false
-      }
-    ]);
-
-    if (!continueAnyway) {
-      throw new Error('Setup cancelled due to invalid voice ID');
-    }
-
-    config.api.tts.defaultVoice = defaultVoiceId;
-  } else {
-    voiceSpinner.succeed(`Voice ID validated: ${voiceValidation.name}`);
-    config.api.tts.defaultVoice = defaultVoiceId;
-  }
-
-  const sttAnswers = await inquirer.prompt([
-    {
-      type: 'input',
-      name: 'baseUrl',
-      message: 'STT endpoint URL (Whisper/OpenAI-compatible):',
-      default: config.api.stt.baseUrl,
-      validate: (input) => {
-        if (!input || input.trim() === '') {
-          return 'Endpoint URL is required';
-        }
-        return true;
-      }
-    }
-  ]);
-
-  const sttBaseUrl = sttAnswers.baseUrl;
-  const sttSpinner = ora('Validating STT endpoint...').start();
-  const sttResult = await validateSttEndpoint(sttBaseUrl, config.api.stt.apiKey);
-
-  if (!sttResult.valid) {
-    sttSpinner.fail(`STT endpoint validation failed: ${sttResult.error}`);
-    console.log(chalk.yellow('\n⚠️  You can continue setup, but the endpoint may not work.'));
-    const { continueAnyway } = await inquirer.prompt([
-      {
-        type: 'confirm',
-        name: 'continueAnyway',
-        message: 'Continue anyway?',
-        default: false
-      }
-    ]);
-
-    if (!continueAnyway) {
-      throw new Error('Setup cancelled due to invalid STT endpoint');
-    }
-
-    config.api.stt = { ...config.api.stt, baseUrl: sttBaseUrl, validated: false };
-  } else {
-    sttSpinner.succeed('STT endpoint validated');
-    config.api.stt = { ...config.api.stt, baseUrl: sttBaseUrl, validated: true };
-  }
-
   const currentRealtime = config.api.realtime || {};
   const { enableRealtime } = await inquirer.prompt([{
     type: 'confirm',
@@ -1014,87 +835,6 @@ async function setupAPIKeys(config) {
 }
 
 /**
- * Setup SIP configuration (standard mode)
- * @param {object} config - Current config
- * @returns {Promise<object>} Updated config
- */
-async function setupSIP(config) {
-  const answers = await inquirer.prompt([
-    {
-      type: 'input',
-      name: 'domain',
-      message: '3CX domain (e.g., your-3cx.3cx.us):',
-      default: config.sip.domain,
-      validate: (input) => {
-        if (!input || input.trim() === '') {
-          return 'SIP domain is required';
-        }
-        if (!validateHostname(input)) {
-          return 'Invalid hostname format';
-        }
-        return true;
-      }
-    },
-    {
-      type: 'input',
-      name: 'registrar',
-      message: '3CX registrar IP (e.g., 192.168.1.100):',
-      default: config.sip.registrar,
-      validate: (input) => {
-        if (!input || input.trim() === '') {
-          return 'SIP registrar IP is required';
-        }
-        if (!validateIP(input)) {
-          return 'Invalid IP address format';
-        }
-        return true;
-      }
-    }
-  ]);
-
-  config.sip.domain = answers.domain;
-  config.sip.registrar = answers.registrar;
-
-  return config;
-}
-
-/**
- * Setup SBC configuration (Pi mode only)
- * @param {object} config - Current config
- * @returns {Promise<object>} Updated config
- */
-async function setupSBC(config) {
-  // Display pre-requisite information
-  console.log(chalk.cyan('\nℹ️  Pre-requisite: You must create an SBC in 3CX Admin first'));
-  console.log(chalk.gray('   (Admin → Settings → SBC → Add SBC → Raspberry Pi)\n'));
-
-  const answers = await inquirer.prompt([
-    {
-      type: 'input',
-      name: 'fqdn',
-      message: '3CX FQDN (e.g., mycompany.3cx.us):',
-      default: config.sip.domain,
-      validate: (input) => {
-        if (!input || input.trim() === '') {
-          return '3CX FQDN is required';
-        }
-        if (!validateHostname(input)) {
-          return 'Invalid hostname format';
-        }
-        return true;
-      }
-    }
-  ]);
-
-  // Domain is the 3CX FQDN (for From/To SIP headers)
-  config.sip.domain = answers.fqdn;
-  // Registrar is the LOCAL SBC (drachtio registers with local SBC, not cloud)
-  config.sip.registrar = '127.0.0.1';
-
-  return config;
-}
-
-/**
  * Setup device configuration
  * @param {object} config - Current config
  * @returns {Promise<object>} Updated config
@@ -1138,30 +878,6 @@ async function setupDevice(config) {
     },
     {
       type: 'input',
-      name: 'authId',
-      message: 'SIP auth ID:',
-      default: existingDevice?.authId || '',
-      validate: (input) => {
-        if (!input || input.trim() === '') {
-          return 'Auth ID is required';
-        }
-        return true;
-      }
-    },
-    {
-      type: 'password',
-      name: 'password',
-      message: 'SIP password:',
-      default: existingDevice?.password || '',
-      validate: (input) => {
-        if (!input || input.trim() === '') {
-          return 'Password is required';
-        }
-        return true;
-      }
-    },
-    {
-      type: 'input',
       name: 'voiceId',
       message: 'TTS voice name/ID:',
       default: existingDevice?.voiceId || config.api.tts.defaultVoice || '',
@@ -1186,37 +902,12 @@ async function setupDevice(config) {
     }
   ]);
 
-  // Validate voice ID with the configured TTS endpoint
-  const voiceSpinner = ora('Validating TTS voice...').start();
-  const voiceValidation = await validateTtsVoice(config.api.tts.baseUrl, config.api.tts.apiKey, answers.voiceId);
-
-  if (!voiceValidation.valid) {
-    voiceSpinner.fail(`Voice ID validation failed: ${voiceValidation.error}`);
-    console.log(chalk.yellow('\n⚠️  You can continue setup, but the voice ID may not work.'));
-    const { continueAnyway } = await inquirer.prompt([
-      {
-        type: 'confirm',
-        name: 'continueAnyway',
-        message: 'Continue anyway?',
-        default: false
-      }
-    ]);
-
-    if (!continueAnyway) {
-      // Let user re-enter voice ID
-      console.log(chalk.gray('\nReturning to device setup...'));
-      return setupDevice(config);
-    }
-  } else {
-    voiceSpinner.succeed(`Voice ID validated: ${voiceValidation.name}`);
-  }
-
   const device = {
-    ...(existingDevice || {}),
+    ...Object.fromEntries(Object.entries(existingDevice || {}).filter(([key]) => (
+      !['authId', 'authPassword', 'password'].includes(key)
+    ))),
     name: answers.name,
     extension: answers.extension,
-    authId: answers.authId,
-    password: answers.password,
     voiceId: answers.voiceId,
     sessionType: answers.sessionType,
     prompt: answers.prompt

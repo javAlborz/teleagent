@@ -36,7 +36,11 @@ test('config module', async (t) => {
       api: {
         elevenlabs: { apiKey: 'test-key-123', defaultVoiceId: 'legacy-voice', validated: true },
         openai: { apiKey: 'legacy-openai-key', validated: false }
-      }
+      },
+      secrets: {
+        drachtio: 'retired-drachtio-secret',
+        freeswitch: 'retired-freeswitch-secret',
+      },
     };
 
     await saveConfig(config);
@@ -52,9 +56,12 @@ test('config module', async (t) => {
   await t.test('loadConfig reads saved config', async () => {
     const config = await loadConfig();
     assert.strictEqual(config.version, '1.0.0');
-    assert.strictEqual(config.api.tts.apiKey, 'test-key-123');
+    assert.strictEqual(config.api.tts.apiKey, undefined);
     assert.strictEqual(config.api.tts.defaultVoice, 'legacy-voice');
-    assert.strictEqual(config.api.stt.apiKey, 'legacy-openai-key');
+    assert.strictEqual(config.api.stt, undefined);
+    assert.strictEqual(config.api.openai, undefined);
+    assert.strictEqual(config.secrets.drachtio, undefined);
+    assert.strictEqual(config.secrets.freeswitch, undefined);
     assert.strictEqual(config.api.realtime.enabled, false);
     assert.strictEqual(config.api.realtime.model, 'gpt-realtime-2.1-mini');
     assert.deepStrictEqual(config.agents.providers, ['claude']);
@@ -87,9 +94,10 @@ test('config module', async (t) => {
 
     await saveConfig(updated);
     const config = await loadConfig();
-    assert.strictEqual(config.api.tts.baseUrl, 'http://127.0.0.1:18080/v1');
+    assert.strictEqual(config.api.tts.baseUrl, undefined);
+    assert.strictEqual(config.api.tts.apiKey, undefined);
     assert.strictEqual(config.api.tts.defaultVoice, 'af_sky');
-    assert.strictEqual(config.api.stt.baseUrl, 'http://127.0.0.1:18001/v1');
+    assert.strictEqual(config.api.stt, undefined);
   });
 
   await t.test('config with deployment.mode defaults to standard', async () => {

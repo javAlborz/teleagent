@@ -55,6 +55,34 @@ test('invalid lock files fail closed until an explicit unlock', (t) => {
   assert.equal(control.getStatus().locked, false);
 });
 
+test('remote panic must be durably confirmed before the lock can be cleared', (t) => {
+  const { control, lockFile } = createFixture(t);
+  const pending = control.lock({
+    reason: 'panic stop',
+    source: 'asterisk 1001',
+    remotePanicPending: true,
+  });
+  assert.equal(pending.remotePanicPending, true);
+
+  const reopened = new VoiceExecutionControl({
+    lockFile,
+    now: () => '2026-08-13T12:05:00.000Z',
+  });
+  assert.equal(reopened.getStatus().remotePanicPending, true);
+  const refused = reopened.unlock({ source: 'operator cli' });
+  assert.equal(refused.locked, true);
+  assert.equal(refused.error, 'remote_panic_unconfirmed');
+  assert.equal(fs.existsSync(lockFile), true);
+
+  const confirmed = reopened.confirmRemotePanic({ source: 'voice app retry' });
+  assert.equal(confirmed.remotePanicPending, false);
+  assert.equal(confirmed.remotePanicConfirmedAt, '2026-08-13T12:05:00.000Z');
+  assert.equal(new VoiceExecutionControl({ lockFile }).getStatus().remotePanicPending, false);
+
+  assert.equal(reopened.unlock({ source: 'operator cli' }).locked, false);
+  assert.equal(fs.existsSync(lockFile), false);
+});
+
 test('control labels are bounded and contain no shell syntax', () => {
   assert.equal(cleanLabel(' asterisk; rm -rf / ', 'fallback'), 'asterisk_rm_-rf_');
   assert.equal(cleanLabel('', 'fallback'), 'fallback');

@@ -1,0 +1,242 @@
+#!/usr/local/libexec/teleagent-node
+'use strict';
+
+const fs = require('node:fs');
+const path = require('node:path');
+
+const SOURCE_ROOT = '/opt/teleagent/current/deploy/voice-stack';
+const INSTALLED_VERIFIER = '/usr/local/libexec/verify-voice-stack-identity';
+const COLLISION_IDENTITIES = Object.freeze([
+  'teleagent-control',
+  'teleagent-session-broker',
+  'teleagent-claude-supervisor',
+  'teleagent-codex-supervisor',
+  'teleagent-claude-worker',
+  'teleagent-codex-worker',
+  'teleagent-claude-shim',
+  'teleagent-codex-shim',
+  'teleagent-claude-egress',
+  'teleagent-codex-egress',
+]);
+const REVIEWED_ASSETS = Object.freeze([
+  ['teleagent-voice-stack.service', '/etc/systemd/system/teleagent-voice-stack.service', 0o644],
+  ['teleagent-voice-stack.sysusers', '/etc/sysusers.d/teleagent-voice-stack.conf', 0o644],
+  ['teleagent-voice-stack.tmpfiles', '/etc/tmpfiles.d/teleagent-voice-stack.conf', 0o644],
+  ['teleagent-voice-stack-launch.js', '/usr/local/libexec/teleagent-voice-stack-launch', 0o755],
+  ['verify-voice-stack-identity', INSTALLED_VERIFIER, 0o755],
+  ['teleagent-voice-stack-install', '/usr/local/libexec/teleagent-voice-stack-install', 0o755],
+]);
+
+function refuse(message) {
+  throw new Error(`Voice identity verification refused: ${message}`);
+}
+
+function meaningfulLines(source) {
+  return String(source).split('\n').map((line) => line.trim())
+    .filter((line) => line && !line.startsWith('#'));
+}
+
+function exactlyOnce(source, expression, label) {
+  const matches = String(source).match(expression) || [];
+  if (matches.length !== 1) refuse(`${label} must occur exactly once`);
+}
+
+function sourceCheck(sourceRoot = SOURCE_ROOT) {
+  for (const [sourceName, _target, mode] of REVIEWED_ASSETS) {
+    const metadata = fs.lstatSync(path.join(sourceRoot, sourceName));
+    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1 ||
+        (metadata.mode & 0o777) !== mode || (metadata.mode & 0o022) !== 0) {
+      refuse(`reviewed source asset ${sourceName} has unsafe metadata`);
+    }
+  }
+  const sysusers = fs.readFileSync(path.join(sourceRoot, 'teleagent-voice-stack.sysusers'), 'utf8');
+  const tmpfiles = fs.readFileSync(path.join(sourceRoot, 'teleagent-voice-stack.tmpfiles'), 'utf8');
+  const service = fs.readFileSync(path.join(sourceRoot, 'teleagent-voice-stack.service'), 'utf8');
+  if (JSON.stringify(meaningfulLines(sysusers)) !== JSON.stringify([
+    'g teleagent-voice -',
+    'u teleagent-voice - "Teleagent private voice orchestrator" /var/lib/teleagent-voice /usr/sbin/nologin',
+  ])) refuse('the sysusers identity contract drifted');
+  if (JSON.stringify(meaningfulLines(tmpfiles)) !== JSON.stringify([
+    'd /etc/teleagent-voice 0750 root teleagent-voice -',
+    'd /etc/teleagent-voice/config 0750 root teleagent-voice -',
+    'd /etc/teleagent-voice/credentials 0750 root teleagent-voice -',
+    'd /var/lib/teleagent-voice 0700 teleagent-voice teleagent-voice -',
+    'd /var/lib/teleagent-voice-stack 0700 root root -',
+    'd /run/teleagent-voice-stack 0700 root root -',
+  ])) refuse('the tmpfiles directory contract drifted');
+  if (/^\[Install\]$/mu.test(service) ||
+      /^Environment=.*(?:TOKEN|PASSWORD|SECRET|API_KEY|PRIVATE_KEY)=/imu.test(service)) {
+    refuse('the voice unit became enableable or embeds a credential');
+  }
+  exactlyOnce(service,
+    /^ExecStartPre=\/usr\/local\/libexec\/verify-voice-stack-identity --installed-check$/gmu,
+    'the installed identity gate');
+  exactlyOnce(service,
+    /^ExecStart=\/usr\/local\/libexec\/teleagent-voice-stack-launch start$/gmu,
+    'the fixed start command');
+  exactlyOnce(service,
+    /^ExecStop=\/usr\/local\/libexec\/teleagent-voice-stack-launch stop$/gmu,
+    'the fixed stop command');
+  exactlyOnce(service,
+    /^ExecStopPost=\/usr\/local\/libexec\/teleagent-voice-stack-launch cleanup$/gmu,
+    'the unconditional cleanup command');
+  exactlyOnce(service, /^User=root$/gmu, 'the root orchestrator user');
+  exactlyOnce(service, /^Group=root$/gmu, 'the root orchestrator group');
+  for (const dependency of [
+    'teleagent-sip-local-peer-fence.service',
+    'teleagent-agent-controller.service',
+    'teleagent-worker-session.service',
+    'teleagent-provider-model-apparmor.service',
+  ]) {
+    if (!service.includes(dependency)) refuse(`required unit dependency ${dependency} is absent`);
+  }
+  return true;
+}
+
+function parseDatabase(source, expectedFields, label) {
+  const rows = [];
+  for (const line of String(source).split('\n')) {
+    if (!line || line.startsWith('#')) continue;
+    const fields = line.split(':');
+    if (fields.length !== expectedFields) refuse(`${label} contains a malformed record`);
+    rows.push(fields);
+  }
+  return rows;
+}
+
+function uniqueNamed(rows, name, label) {
+  const matches = rows.filter((fields) => fields[0] === name);
+  if (matches.length !== 1) refuse(`${label} must contain exactly one ${name} record`);
+  return matches[0];
+}
+
+function numericId(value, label) {
+  if (!/^[0-9]+$/u.test(String(value))) refuse(`${label} is not numeric`);
+  const result = Number(value);
+  if (!Number.isSafeInteger(result)) refuse(`${label} is outside the safe integer range`);
+  return result;
+}
+
+function validateIdentityRecords(passwdSource, groupSource) {
+  const passwd = parseDatabase(passwdSource, 7, 'passwd');
+  const groups = parseDatabase(groupSource, 4, 'group');
+  const user = uniqueNamed(passwd, 'teleagent-voice', 'passwd');
+  const group = uniqueNamed(groups, 'teleagent-voice', 'group');
+  const uid = numericId(user[2], 'teleagent-voice uid');
+  const gid = numericId(user[3], 'teleagent-voice primary gid');
+  const groupGid = numericId(group[2], 'teleagent-voice group gid');
+  if (uid <= 0 || gid <= 0 || uid === 1000 || gid === 1000 || gid !== groupGid ||
+      user[5] !== '/var/lib/teleagent-voice' ||
+      !['/usr/sbin/nologin', '/sbin/nologin'].includes(user[6]) || group[3] !== '') {
+    refuse('the teleagent-voice account contract is unsafe');
+  }
+  if (passwd.some((candidate) => candidate !== user && (
+    numericId(candidate[2], 'passwd uid') === uid || numericId(candidate[3], 'passwd gid') === gid
+  )) || groups.some((candidate) => candidate !== group && numericId(candidate[2], 'group gid') === gid)) {
+    refuse('the teleagent-voice numeric identity is reused');
+  }
+  if (groups.some((candidate) => candidate[3].split(',').filter(Boolean).includes('teleagent-voice'))) {
+    refuse('teleagent-voice has a stale supplementary group');
+  }
+  for (const name of COLLISION_IDENTITIES) {
+    for (const candidate of passwd.filter((fields) => fields[0] === name)) {
+      if (numericId(candidate[2], `${name} uid`) === uid ||
+          numericId(candidate[3], `${name} gid`) === gid) {
+        refuse('a split runtime identity collides with teleagent-voice');
+      }
+    }
+    for (const candidate of groups.filter((fields) => fields[0] === name)) {
+      if (numericId(candidate[2], `${name} group gid`) === gid) {
+        refuse('a split runtime group collides with teleagent-voice');
+      }
+    }
+  }
+  return Object.freeze({ uid, gid });
+}
+
+function inspectPath(filename, { type, uid, gid, mode, nlink = null }) {
+  const metadata = fs.lstatSync(filename);
+  const correctType = type === 'directory' ? metadata.isDirectory() : metadata.isFile();
+  if (metadata.isSymbolicLink() || !correctType || metadata.uid !== uid || metadata.gid !== gid ||
+      (metadata.mode & 0o777) !== mode || (nlink !== null && metadata.nlink !== nlink)) {
+    refuse(`unsafe metadata for ${filename}`);
+  }
+  return metadata;
+}
+
+function inspectRootDatabase(filename) {
+  const metadata = fs.lstatSync(filename);
+  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.uid !== 0 ||
+      (metadata.mode & 0o022) !== 0 || metadata.nlink !== 1 || metadata.size > 4 * 1024 * 1024) {
+    refuse('the system identity database is unsafe');
+  }
+  return fs.readFileSync(filename, 'utf8');
+}
+
+function compareInstalledAssets(sourceRoot = SOURCE_ROOT) {
+  for (const [sourceName, target, mode] of REVIEWED_ASSETS) {
+    const source = path.join(sourceRoot, sourceName);
+    inspectPath(source, { type: 'file', uid: 0, gid: 0, mode, nlink: 1 });
+    inspectPath(target, { type: 'file', uid: 0, gid: 0, mode, nlink: 1 });
+    if (!fs.readFileSync(source).equals(fs.readFileSync(target))) {
+      refuse(`installed asset ${path.basename(target)} differs from reviewed source`);
+    }
+  }
+}
+
+function installedCheck({
+  sourceRoot = SOURCE_ROOT,
+  passwdPath = '/etc/passwd',
+  groupPath = '/etc/group',
+} = {}) {
+  if (process.getuid() !== 0) refuse('the installed check requires root');
+  sourceCheck(sourceRoot);
+  const identity = validateIdentityRecords(
+    inspectRootDatabase(passwdPath), inspectRootDatabase(groupPath)
+  );
+  compareInstalledAssets(sourceRoot);
+  for (const [filename, uid, gid, mode] of [
+    ['/etc/teleagent-voice', 0, identity.gid, 0o750],
+    ['/etc/teleagent-voice/config', 0, identity.gid, 0o750],
+    ['/etc/teleagent-voice/credentials', 0, identity.gid, 0o750],
+    ['/var/lib/teleagent-voice', identity.uid, identity.gid, 0o700],
+    ['/var/lib/teleagent-voice-stack', 0, 0, 0o700],
+    ['/run/teleagent-voice-stack', 0, 0, 0o700],
+  ]) inspectPath(filename, { type: 'directory', uid, gid, mode });
+  return true;
+}
+
+function main() {
+  const mode = process.argv[2];
+  if (process.argv.length !== 3 || !['--source-check', '--installed-check'].includes(mode)) {
+    refuse('usage: verify-voice-stack-identity --source-check|--installed-check');
+  }
+  const invoked = fs.realpathSync(process.argv[1]);
+  if (mode === '--installed-check') {
+    if (invoked !== INSTALLED_VERIFIER) refuse('use the fixed installed verifier entrypoint');
+    installedCheck();
+    process.stdout.write('VOICE_STACK_IDENTITY_OK\n');
+  } else {
+    if (invoked !== path.join(SOURCE_ROOT, 'verify-voice-stack-identity') &&
+        invoked !== INSTALLED_VERIFIER) {
+      refuse('source check must use a reviewed fixed entrypoint');
+    }
+    sourceCheck();
+    process.stdout.write('VOICE_STACK_SOURCE_OK\n');
+  }
+}
+
+if (require.main === module) {
+  try { main(); } catch (error) {
+    process.stderr.write(`${error.message}\n`);
+    process.exit(77);
+  }
+}
+
+module.exports = {
+  COLLISION_IDENTITIES,
+  REVIEWED_ASSETS,
+  inspectPath,
+  sourceCheck,
+  validateIdentityRecords,
+};

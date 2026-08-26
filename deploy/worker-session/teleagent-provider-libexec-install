@@ -1,0 +1,89 @@
+#!/bin/sh
+set -eu
+
+app_root=/opt/teleagent/current
+manifest="$app_root/deploy/worker-session/provider-libexec.manifest"
+target_root=/usr/local/libexec
+installed_manifest=/etc/teleagent/provider-runtime/provider-libexec.manifest
+
+if [ "$(id -u)" -ne 0 ]; then
+  echo "provider libexec installation requires root" >&2
+  exit 77
+fi
+
+# No root wrapper may be replaced while a caller or transient provider cgroup
+# can execute it. Socket units are included to close activation during the
+# short atomic installation window.
+for unit in \
+  teleagent-provider-supervisor@claude.service \
+  teleagent-provider-supervisor@codex.service \
+  teleagent-provider-supervisor@claude.socket \
+  teleagent-provider-supervisor@codex.socket; do
+  if systemctl is-active --quiet "$unit"; then
+    echo "provider libexec update requires stopped supervisor planes" >&2
+    exit 75
+  fi
+done
+if systemctl list-units --all --plain --no-legend \
+  'teleagent-provider-launch-*.service' | grep -q '[^[:space:]]'; then
+  echo "provider libexec update requires zero transient launch units" >&2
+  exit 75
+fi
+
+if [ "$(stat -Lc '%U:%G:%a' "$manifest")" != root:root:444 ] || [ -L "$manifest" ]; then
+  echo "provider libexec manifest metadata is unsafe" >&2
+  exit 77
+fi
+
+stage=$(mktemp -d "$target_root/.teleagent-provider-libexec.XXXXXX")
+cleanup() {
+  rm -rf "$stage"
+}
+trap cleanup EXIT INT TERM
+
+while IFS=' ' read -r digest source target mode extra; do
+  case "$digest:$source:$target:$mode:$extra" in
+    [0-9a-f][0-9a-f]*:deploy/*:teleagent-provider-*:0755: | \
+    [0-9a-f][0-9a-f]*:deploy/*:teleagent-provider-*:0444: | \
+    [0-9a-f][0-9a-f]*:claude-api-server/*:teleagent-provider-*:0755: ) ;;
+    *) echo "provider libexec manifest entry is invalid" >&2; exit 77 ;;
+  esac
+  if [ "${#digest}" -ne 64 ] || [ "$(basename "$target")" != "$target" ]; then
+    echo "provider libexec manifest identity is invalid" >&2
+    exit 77
+  fi
+  source_path="$app_root/$source"
+  if [ ! -f "$source_path" ] || [ -L "$source_path" ] ||
+     [ "$(stat -Lc '%U:%G' "$source_path")" != root:root ] ||
+     find "$source_path" -maxdepth 0 -perm /022 | grep -q .; then
+    echo "provider libexec source metadata is unsafe" >&2
+    exit 77
+  fi
+  actual=$(sha256sum "$source_path" | awk '{print $1}')
+  if [ "$actual" != "$digest" ]; then
+    echo "provider libexec source digest is unreviewed" >&2
+    exit 77
+  fi
+  install -o root -g root -m "$mode" "$source_path" "$stage/$target"
+  staged=$(sha256sum "$stage/$target" | awk '{print $1}')
+  if [ "$staged" != "$digest" ]; then
+    echo "provider libexec staged digest mismatch" >&2
+    exit 77
+  fi
+done < "$manifest"
+
+while IFS=' ' read -r digest _source target mode _extra; do
+  mv -f "$stage/$target" "$target_root/$target"
+  sync -d "$target_root/$target"
+  installed=$(sha256sum "$target_root/$target" | awk '{print $1}')
+  if [ "$installed" != "$digest" ] ||
+     [ "$(stat -Lc '%U:%G:%a' "$target_root/$target")" != "root:root:${mode#0}" ] ||
+     [ -L "$target_root/$target" ]; then
+    echo "installed provider libexec boundary is unsafe" >&2
+    exit 77
+  fi
+done < "$manifest"
+install -o root -g root -m 0444 "$manifest" "$installed_manifest"
+sync -d "$target_root" "$installed_manifest"
+trap - EXIT INT TERM
+rmdir "$stage"

@@ -1,0 +1,52 @@
+[Unit]
+Description=Teleagent guarded voice and SIP stack
+Documentation=file:/opt/teleagent/current/docs/PHONE-AGENT-ARCHITECTURE.md
+Requires=docker.service teleagent-sip-local-peer-fence.service teleagent-agent-controller.service
+Requires=teleagent-worker-session.service teleagent-provider-model-apparmor.service
+After=local-fs.target network-online.target docker.service
+After=teleagent-sip-local-peer-fence.service teleagent-agent-controller.service
+After=teleagent-worker-session.service teleagent-provider-model-apparmor.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=root
+Group=root
+UMask=0077
+WorkingDirectory=/opt/teleagent/current
+ExecStartPre=/usr/local/libexec/verify-voice-stack-identity --installed-check
+ExecStart=/usr/local/libexec/teleagent-voice-stack-launch start
+ExecStop=/usr/local/libexec/teleagent-voice-stack-launch stop
+ExecStopPost=/usr/local/libexec/teleagent-voice-stack-launch cleanup
+TimeoutStartSec=120s
+TimeoutStopSec=150s
+KillMode=control-group
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictRealtime=yes
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadOnlyPaths=/opt/teleagent/current /etc/teleagent-voice /etc/teleagent/provider-runtime
+ReadOnlyPaths=/usr/local/libexec /sys/kernel/security/apparmor/profiles
+ReadWritePaths=/run/teleagent-voice-stack /var/lib/teleagent-voice
+ReadWritePaths=/var/lib/teleagent-voice-stack
+InaccessiblePaths=/etc/teleagent/provider-egress-secrets /etc/teleagent/privileged-action
+InaccessiblePaths=/var/lib/teleagent-provider-plane /var/lib/teleagent-session-broker
+
+# Deliberately no [Install] section. A root operator must complete every
+# activation canary and start this dormant unit explicitly.

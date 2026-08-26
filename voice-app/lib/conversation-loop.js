@@ -17,6 +17,7 @@
 const logger = require('./logger');
 const fs = require('fs');
 const path = require('path');
+const { redactAudioForkSecrets } = require('./audio-fork');
 const {
   getAgentTimeoutSeconds,
   getHoldMusicEnabled,
@@ -173,11 +174,11 @@ async function queueRuntimeCallback({
   message,
   mode = 'announce',
   deviceName = null,
-  dialUri = null,
   callUuid,
   transcript,
   reason,
   voiceThreadId = null,
+  idempotencyKey = null,
 }) {
   if (!target || !message) {
     return {
@@ -189,7 +190,20 @@ async function queueRuntimeCallback({
   const headers = {
     'Content-Type': 'application/json',
   };
-  const outboundApiToken = String(process.env.OUTBOUND_API_TOKEN || '').trim();
+  const durableIdempotencyKey = String(
+    idempotencyKey || (callUuid ? `callback:${callUuid}` : '')
+  ).trim();
+  if (!durableIdempotencyKey || durableIdempotencyKey.length > 200 ||
+      /[\u0000-\u001F\u007F]/.test(durableIdempotencyKey)) {
+    return {
+      queued: false,
+      reason: 'missing_or_invalid_idempotency_key',
+    };
+  }
+  headers['Idempotency-Key'] = durableIdempotencyKey;
+  const outboundApiToken = String(
+    require('./runtime-secrets').getRuntimeSecret('outboundApiToken')
+  ).trim();
 
   if (outboundApiToken) {
     headers.Authorization = `Bearer ${outboundApiToken}`;
@@ -199,14 +213,11 @@ async function queueRuntimeCallback({
     to: String(target),
     message: trimWords(message, 60),
     mode,
+    idempotencyKey: durableIdempotencyKey,
   };
 
   if (deviceName) {
     payload.device = deviceName;
-  }
-
-  if (dialUri) {
-    payload.dialUri = String(dialUri);
   }
 
   if (voiceThreadId) {
@@ -221,15 +232,14 @@ async function queueRuntimeCallback({
     });
     const data = await response.json().catch(() => ({}));
 
-    if (!response.ok || !data.success) {
+    if (!response.ok || !data.success || data.queued !== true) {
       logger.warn('Runtime callback queue failed', {
         callUuid,
         target,
         mode,
         reason,
-        transcript,
+        transcriptLength: String(transcript || '').length,
         status: response.status,
-        error: data.error || data.message || response.statusText,
       });
       return {
         queued: false,
@@ -245,7 +255,7 @@ async function queueRuntimeCallback({
       mode,
       deviceName: deviceName || null,
       reason,
-      transcript,
+      transcriptLength: String(transcript || '').length,
     });
 
     return {
@@ -258,8 +268,8 @@ async function queueRuntimeCallback({
       target,
       mode,
       reason,
-      transcript,
-      error: error.message,
+      transcriptLength: String(transcript || '').length,
+      errorCode: error.code || 'CALLBACK_REQUEST_FAILED',
     });
     return {
       queued: false,
@@ -334,7 +344,7 @@ async function watchForSpokenCancel({
 
       logger.info('Spoken cancel candidate', {
         callUuid,
-        transcript: normalized,
+        transcriptLength: normalized.length,
         reason: utterance.reason,
       });
 
@@ -344,7 +354,7 @@ async function watchForSpokenCancel({
 
       logger.info('Spoken cancel phrase detected', {
         callUuid,
-        transcript: normalized,
+        transcriptLength: normalized.length,
       });
 
       const canceled = await onCancel(normalized);
@@ -427,7 +437,6 @@ function extractVoiceLine(response) {
  * @param {Object} options.whisperClient - Whisper transcription client
  * @param {Object} options.claudeBridge - Claude/Codex API bridge
  * @param {Object} options.ttsService - TTS service
- * @param {number} options.wsPort - WebSocket port
  * @param {string} [options.initialContext] - Context for outbound calls (why we're calling)
  * @param {boolean} [options.skipGreeting=false] - Skip greeting (for outbound, greeting already played)
  * @param {number} [options.maxTurns=20] - Maximum conversation turns
@@ -435,7 +444,6 @@ function extractVoiceLine(response) {
  * @param {number} [options.sessionEndPreserveSeconds=0] - Preserve the agent session after hangup for this many seconds
  * @param {string} [options.startupAnnouncement] - Optional message to play before the normal greeting
  * @param {string} [options.callbackTarget] - Number or extension to call back if the user hangs up before the result is spoken
- * @param {string} [options.callbackDialUri] - Last-seen SIP contact URI for immediate callbacks to the same handset
  * @param {Function} [options.onSessionEnded] - Callback invoked with end-session result
  * @returns {Promise<void>}
  */
@@ -445,7 +453,6 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
     whisperClient,
     claudeBridge,
     ttsService,
-    wsPort,
     initialContext = null,
     skipGreeting = false,
     deviceConfig = null,
@@ -454,7 +461,6 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
     sessionEndPreserveSeconds = 0,
     startupAnnouncement = null,
     callbackTarget = null,
-    callbackDialUri = null,
     onSessionEnded = null,
   } = options;
 
@@ -537,27 +543,34 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
       return;
     }
 
-    // Start audio fork for entire call
-    const wsUrl = `ws://127.0.0.1:${wsPort}/${encodeURIComponent(callUuid)}`;
-
     // Use try-catch for expectSession to handle race conditions
-    let sessionPromise;
+    let audioExpectation;
     try {
-      sessionPromise = audioForkServer.expectSession(callUuid, { timeoutMs: 10000 });
+      audioExpectation = audioForkServer.expectSession(callUuid, { timeoutMs: 10000 });
     } catch (err) {
       logger.warn('Failed to set up session expectation', { callUuid, error: err.message });
       return;
     }
 
-    await endpoint.forkAudioStart({
-      wsUrl,
-      mixType: 'mono',
-      sampling: '16k'
-    });
+    try {
+      await endpoint.forkAudioStart({
+        wsUrl: audioExpectation.connectionUrl,
+        mixType: 'mono',
+        sampling: '16k'
+      });
+    } catch (error) {
+      audioForkServer.cancelExpectation?.(callUuid);
+      await audioExpectation.session.catch(() => {});
+      const sanitized = new Error(
+        'Authenticated audio fork start failed: ' + redactAudioForkSecrets(error?.message)
+      );
+      sanitized.code = error?.code || 'AUDIO_FORK_START_FAILED';
+      throw sanitized;
+    }
     forkRunning = true;
 
     try {
-      session = await sessionPromise;
+      session = await audioExpectation.session;
       logger.info('Audio fork connected', { callUuid });
     } catch (err) {
       logger.warn('Audio fork session failed', { callUuid, error: err.message });
@@ -801,7 +814,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
         sampleRate: 16000
       });
 
-      logger.info('Transcribed', { callUuid, transcript });
+      logger.info('Transcribed', { callUuid, transcriptLength: String(transcript || '').length });
 
       const callbackRequest = detectCallbackRequest(transcript);
       if (callbackRequest) {
@@ -811,12 +824,12 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
             callUuid,
             target: callbackTarget,
             mode: callbackRequest.mode,
-            transcript: callbackRequest.normalizedTranscript,
+            transcriptLength: callbackRequest.normalizedTranscript.length,
           });
         } else {
           logger.warn('Runtime callback requested without callback target', {
             callUuid,
-            transcript: callbackRequest.normalizedTranscript,
+            transcriptLength: callbackRequest.normalizedTranscript.length,
           });
         }
       }
@@ -873,9 +886,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
               !cancelRequested &&
               !spokenCancelState.stopped
             ),
-            onCancel: (spokenTranscript) => requestCancel('spoken_cancel', 'spoken', {
-              transcript: spokenTranscript,
-            }),
+            onCancel: () => requestCancel('spoken_cancel', 'spoken'),
           }).catch((error) => {
             logger.warn('Spoken cancel watcher failed', {
               callUuid,
@@ -933,7 +944,6 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
               message: claudeResult.userMessage || 'I hit a problem finishing that request.',
               mode: pendingCallbackRequest.mode,
               deviceName: deviceConfig?.name || null,
-              dialUri: callbackDialUri,
               callUuid,
               transcript: pendingCallbackRequest.normalizedTranscript,
               reason: 'call_ended_before_error_playback',
@@ -957,7 +967,6 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
               message: claudeResult.userMessage || 'I hit a problem finishing that request.',
               mode: pendingCallbackRequest.mode,
               deviceName: deviceConfig?.name || null,
-              dialUri: callbackDialUri,
               callUuid,
               transcript: pendingCallbackRequest.normalizedTranscript,
               reason: 'call_ended_during_error_playback',
@@ -975,7 +984,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
 
       // 5. Extract and play voice line
       const voiceLine = extractVoiceLine(claudeResult.response);
-      logger.info('Voice line', { callUuid, voiceLine });
+      logger.info('Voice line prepared', { callUuid, characterCount: voiceLine.length });
 
       if (!callActive) {
         if (pendingCallbackRequest && callbackTarget) {
@@ -984,7 +993,6 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
             message: voiceLine,
             mode: pendingCallbackRequest.mode,
             deviceName: deviceConfig?.name || null,
-            dialUri: callbackDialUri,
             callUuid,
             transcript: pendingCallbackRequest.normalizedTranscript,
             reason: 'call_ended_before_result_playback',
@@ -1005,7 +1013,6 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
             message: voiceLine,
             mode: pendingCallbackRequest.mode,
             deviceName: deviceConfig?.name || null,
-            dialUri: callbackDialUri,
             callUuid,
             transcript: pendingCallbackRequest.normalizedTranscript,
             reason: 'call_ended_during_result_playback',

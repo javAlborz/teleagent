@@ -33,49 +33,6 @@ function extractDialedExtension(req) {
   return null;
 }
 
-function extractContactUri(req) {
-  const contact = req.get('Contact') || '';
-  const bracketMatch = contact.match(/<\s*(sip:[^>]+)\s*>/i);
-  if (bracketMatch && bracketMatch[1]) {
-    return normalizeCallbackContactUri(bracketMatch[1]);
-  }
-
-  const inlineMatch = contact.match(/\b(sip:[^;>\s]+)/i);
-  if (inlineMatch && inlineMatch[1]) {
-    return normalizeCallbackContactUri(inlineMatch[1]);
-  }
-
-  return null;
-}
-
-function normalizeCallbackContactUri(contactUri) {
-  const uri = String(contactUri || '').trim();
-  if (!uri) return null;
-
-  const uriMatch = uri.match(/^sip:([^@]+)@([^;>]+)(.*)$/i);
-  if (!uriMatch) return null;
-
-  const user = uriMatch[1].toLowerCase();
-  const hostPort = uriMatch[2].toLowerCase();
-
-  // Inbound requests from Asterisk expose its own contact header on loopback.
-  // Using that as a callback target causes voice-app to call back into Asterisk
-  // itself instead of the handset.
-  if (
-    user === 'asterisk' ||
-    user === 'claude-phone' ||
-    hostPort === '127.0.0.1' ||
-    hostPort.startsWith('127.0.0.1:') ||
-    hostPort === 'localhost' ||
-    hostPort.startsWith('localhost:')
-  ) {
-    return null;
-  }
-
-  return uri;
-}
-
-
 /**
  * Strip video tracks from SDP (FreeSWITCH doesn't support H.261 and rejects with 488)
  * Keeps only audio tracks to ensure codec negotiation succeeds
@@ -115,10 +72,19 @@ function stripVideoFromSdp(sdp) {
  */
 async function handleInvite(req, res, options) {
   const { mediaServer, deviceRegistry } = options;
+  const signal = options.signal || null;
+
+  // The outer SIP listener authenticates the exact Asterisk trunk before it
+  // enters the active-call registry. Consume that one-use in-process admission
+  // here before reading caller identity or touching device, media, thread, or
+  // approval state. Direct/internal calls to this handler therefore fail closed.
+  if (!options.inboundTrunkAuthenticator?.consumeAdmission?.(options.inboundAdmission)) {
+    try { res.send(403); } catch {}
+    return { callerId: null, callUuid: null, unauthorized: true };
+  }
 
   const callerId = extractCallerId(req);
   const dialedExt = extractDialedExtension(req);
-  const callbackDialUri = extractContactUri(req);
   let sessionKey = null;
   let startupAnnouncement = null;
   let sessionEndPreserveSeconds = 0;
@@ -126,6 +92,32 @@ async function handleInvite(req, res, options) {
   let skipGreeting = false;
   let realtimeResume = false;
   let isRealtimeVoice = false;
+  let endpoint = null;
+  let dialog = null;
+  let cleanupPromise = null;
+
+  const cleanupCallResources = async () => {
+    if (cleanupPromise) return cleanupPromise;
+    cleanupPromise = (async () => {
+      const failures = [];
+      if (dialog && !dialog.destroyed && typeof dialog.destroy === 'function') {
+        try { await dialog.destroy(); } catch (error) { failures.push(error); }
+      }
+      if (endpoint && !endpoint.destroyed && typeof endpoint.destroy === 'function') {
+        try { await endpoint.destroy(); } catch (error) { failures.push(error); }
+      }
+      if (failures.length > 0) {
+        throw new AggregateError(failures, 'Inbound SIP/media cleanup failed');
+      }
+      return { success: true };
+    })();
+    return cleanupPromise;
+  };
+
+  if (signal?.aborted) {
+    try { res.send(503); } catch (error) {}
+    return { callerId, callUuid: null, aborted: true };
+  }
 
   // Look up device config using deviceRegistry.get() (works with name OR extension)
   let deviceConfig = null;
@@ -186,11 +178,9 @@ async function handleInvite(req, res, options) {
   }
 
   console.log('[' + new Date().toISOString() + '] CALL Incoming from: ' + callerId + ' to ext: ' + (dialedExt || 'unknown'));
-  if (callbackDialUri) {
-    console.log('[' + new Date().toISOString() + '] CALL Callback contact: ' + callbackDialUri);
-  }
 
   try {
+    if (signal?.aborted) throw new Error('inbound_call_aborted');
     // Strip video from SDP to avoid FreeSWITCH 488 error with unsupported video codecs
     const originalSdp = req.body;
     const audioOnlySdp = stripVideoFromSdp(originalSdp);
@@ -199,7 +189,13 @@ async function handleInvite(req, res, options) {
     }
 
     const result = await mediaServer.connectCaller(req, res, { remoteSdp: audioOnlySdp });
-    const { endpoint, dialog } = result;
+    endpoint = result.endpoint;
+    dialog = result.dialog;
+    options.onResources?.({ endpoint, dialog, cleanup: cleanupCallResources });
+    if (signal?.aborted) {
+      await cleanupCallResources();
+      return { callerId, callUuid: endpoint?.uuid || null, aborted: true };
+    }
     const callUuid = endpoint.uuid;
     sessionKey = sessionKey || callUuid;
 
@@ -212,7 +208,7 @@ async function handleInvite(req, res, options) {
 
     dialog.on('destroy', function() {
       console.log('[' + new Date().toISOString() + '] CALL Ended');
-      if (endpoint) endpoint.destroy().catch(function() {});
+      void cleanupCallResources().catch(function() {});
     });
 
     if (isRealtimeVoice) {
@@ -223,7 +219,6 @@ async function handleInvite(req, res, options) {
         jobBroker: options.agentJobBroker,
         callerId,
         callbackTarget: callerId,
-        callbackDialUri,
         resume: realtimeResume,
         startupAnnouncement,
         defaultProfile: deviceConfig?.defaultAgentProfile || 'codex-terra',
@@ -242,7 +237,6 @@ async function handleInvite(req, res, options) {
         sessionEndPreserveSeconds,
         startupAnnouncement,
         callbackTarget: callerId,
-        callbackDialUri,
         skipGreeting,
         onSessionEnded: async (endSessionResult) => {
           if (!endSessionResult?.hadSession || !endSessionResult?.preserved || !resumeCacheExtension) {
@@ -267,15 +261,15 @@ async function handleInvite(req, res, options) {
         }
       });
     }
-    try {
-      if (!dialog.destroyed) {
-        await dialog.destroy();
-      }
-    } catch (e) {}
+    await cleanupCallResources();
     return { endpoint: endpoint, dialog: dialog, callerId: callerId, callUuid: callUuid };
 
   } catch (error) {
     console.error('[' + new Date().toISOString() + '] CALL Error:', error.message);
+    try { await cleanupCallResources(); } catch (cleanupError) {}
+    if (signal?.aborted) {
+      return { endpoint, dialog, callerId, callUuid: endpoint?.uuid || null, aborted: true };
+    }
     try { res.send(500); } catch (e) {}
     throw error;
   }
@@ -285,6 +279,4 @@ module.exports = {
   handleInvite: handleInvite,
   extractCallerId: extractCallerId,
   extractDialedExtension: extractDialedExtension,
-  extractContactUri,
-  normalizeCallbackContactUri,
 };

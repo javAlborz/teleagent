@@ -5,7 +5,12 @@ module.exports = [
       'node_modules/**',
       'voice-app/node_modules/**',
       'claude-api-server/node_modules/**',
+      'privileged-action-broker/node_modules/**',
+      'realtime-sip-gateway/node_modules/**',
       'cli/node_modules/**',
+      // This ESM package owns a pinned ESLint toolchain/config. The root lint
+      // script invokes it separately after linting the CommonJS tree.
+      'realtime-sip-gateway/**',
       'voice-app/audio/**',
       '*.md',
       '**/INTEGRATION-EXAMPLE.js'  // Example snippets, not complete code
@@ -41,11 +46,16 @@ module.exports = [
       'semi': ['warn', 'always']
     }
   },
-  // voice-app and claude-api-server use ES5-style CommonJS
+  // Runtime services use CommonJS
   {
-    files: ['voice-app/**/*.js', 'claude-api-server/**/*.js'],
+    files: [
+      'voice-app/**/*.js',
+      'claude-api-server/**/*.js',
+      'privileged-action-broker/**/*.js',
+      'lib/**/*.js',
+    ],
     languageOptions: {
-      ecmaVersion: 2020,
+      ecmaVersion: 2022,
       sourceType: 'commonjs',
       globals: {
         // Node.js globals
@@ -61,7 +71,15 @@ module.exports = [
         clearInterval: 'readonly',
         setTimeout: 'readonly',
         clearTimeout: 'readonly',
-        fetch: 'readonly'  // Node 18+ global fetch
+        setImmediate: 'readonly',
+        queueMicrotask: 'readonly',
+        fetch: 'readonly',  // Deployed Node 24 global fetch
+        FormData: 'readonly',
+        Blob: 'readonly',
+        AbortSignal: 'readonly',
+        AbortController: 'readonly',
+        structuredClone: 'readonly',
+        URL: 'readonly'
       }
     },
     rules: {

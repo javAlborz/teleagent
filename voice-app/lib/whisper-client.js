@@ -3,31 +3,12 @@
  * Converts audio buffers (L16 PCM from FreeSWITCH) to text.
  */
 
-const OpenAI = require("openai");
 const WaveFile = require("wavefile").WaveFile;
-const fs = require("fs");
-const path = require("path");
+const { loadLegacySpeechConfig, requireLegacySpeechConfig } = require('./legacy-speech-config');
 
-// Lazy-initialized OpenAI client
-let openai = null;
-
-const DEFAULT_STT_BASE_URL = "http://127.0.0.1:18001/v1";
-const DEFAULT_STT_MODEL = process.env.STT_MODEL || "whisper-1";
-
-function normalizeBaseUrl(rawUrl) {
-  const trimmed = (rawUrl || DEFAULT_STT_BASE_URL).trim().replace(/\/+$/, "");
-  return trimmed.endsWith("/v1") ? trimmed : `${trimmed}/v1`;
-}
-
-function getOpenAIClient() {
-  if (!openai) {
-    openai = new OpenAI({
-      apiKey: process.env.STT_API_KEY || "not-needed",
-      baseURL: normalizeBaseUrl(process.env.STT_BASE_URL || DEFAULT_STT_BASE_URL)
-    });
-  }
-  return openai;
-}
+const MAX_STT_AUDIO_BYTES = 10 * 1024 * 1024;
+const MAX_STT_RESPONSE_BYTES = 64 * 1024;
+const STT_TIMEOUT_MS = 30000;
 
 /**
  * Convert L16 PCM buffer to WAV format for Whisper API
@@ -63,9 +44,12 @@ async function transcribe(audioBuffer, options = {}) {
     language = "en"
   } = options;
 
-  const client = getOpenAIClient();
-  if (!client) {
-    throw new Error("STT client not configured");
+  const config = requireLegacySpeechConfig();
+  const fetchImpl = options.fetchImpl || globalThis.fetch;
+  if (typeof fetchImpl !== 'function') throw new Error('The local STT fetch client is unavailable');
+  if (!Buffer.isBuffer(audioBuffer) || audioBuffer.length === 0 ||
+      audioBuffer.length > MAX_STT_AUDIO_BYTES) {
+    throw new Error('STT audio must be a non-empty bounded Buffer');
   }
 
   // Convert PCM to WAV if needed
@@ -76,30 +60,38 @@ async function transcribe(audioBuffer, options = {}) {
     wavBuffer = audioBuffer;
   }
 
-  // Write to temp file (Whisper API requires a file)
-  const tempFile = path.join("/tmp", "whisper-" + Date.now() + ".wav");
-  fs.writeFileSync(tempFile, wavBuffer);
-
-  try {
-    const transcription = await client.audio.transcriptions.create({
-      file: fs.createReadStream(tempFile),
-      model: DEFAULT_STT_MODEL,
-      language: language,
-      response_format: "text"
-    });
-
-    const timestamp = new Date().toISOString();
-    console.log("[" + timestamp + "] WHISPER Transcribed: " + transcription.substring(0, 100) + (transcription.length > 100 ? "..." : ""));
-
-    return transcription;
-  } finally {
-    // Clean up temp file
-    try {
-      fs.unlinkSync(tempFile);
-    } catch (e) {
-      // Ignore cleanup errors
-    }
+  if (wavBuffer.length > MAX_STT_AUDIO_BYTES) {
+    throw new Error('Encoded STT audio exceeds the local request limit');
   }
+
+  const form = new FormData();
+  form.append('file', new Blob([wavBuffer], { type: 'audio/wav' }), 'utterance.wav');
+  form.append('model', config.sttModel);
+  form.append('language', language);
+  form.append('response_format', 'text');
+
+  const response = await fetchImpl(`${config.sttBaseUrl}/audio/transcriptions`, {
+    method: 'POST',
+    body: form,
+    redirect: 'error',
+    signal: AbortSignal.timeout(STT_TIMEOUT_MS),
+  });
+  if (!response?.ok) {
+    throw new Error(`Local STT endpoint failed with status ${Number(response?.status) || 0}`);
+  }
+  const advertisedLength = Number.parseInt(response.headers?.get?.('content-length') || '', 10);
+  if (Number.isFinite(advertisedLength) && advertisedLength > MAX_STT_RESPONSE_BYTES) {
+    throw new Error('Local STT response exceeded the size limit');
+  }
+  const transcription = String(await response.text());
+  if (Buffer.byteLength(transcription, 'utf8') > MAX_STT_RESPONSE_BYTES) {
+    throw new Error('Local STT response exceeded the size limit');
+  }
+
+  console.log(
+    `[${new Date().toISOString()}] WHISPER Transcribed chars=${transcription.length}`
+  );
+  return transcription;
 }
 
 /**
@@ -107,11 +99,13 @@ async function transcribe(audioBuffer, options = {}) {
  * @returns {boolean} True if an endpoint URL is available
  */
 function isAvailable() {
-  return !!normalizeBaseUrl(process.env.STT_BASE_URL || DEFAULT_STT_BASE_URL);
+  return loadLegacySpeechConfig().enabled;
 }
 
 module.exports = {
   transcribe,
   pcmToWav,
-  isAvailable
+  isAvailable,
+  MAX_STT_AUDIO_BYTES,
+  MAX_STT_RESPONSE_BYTES,
 };

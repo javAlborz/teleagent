@@ -3,6 +3,7 @@
 const crypto = require('node:crypto');
 const fsNative = require('node:fs');
 const fs = require('node:fs/promises');
+const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { promisify } = require('node:util');
 const { execFile } = require('node:child_process');
@@ -14,10 +15,14 @@ const {
   extractCodexMessage,
   redactSensitiveText,
 } = require('./operator-inspector');
+const { targetSessionOperationMarker } = require('../lib/voice-authorization-plan');
+const {
+  MAX_TARGET_SESSION_MESSAGE_CHARS,
+  canonicalizeTargetSessionMessage,
+} = require('../lib/target-session-message');
 
 const execFileAsync = promisify(execFile);
 const EXACT_TMUX_TARGET = /^(?:%[0-9]+|[A-Za-z0-9_.+-]+:[A-Za-z0-9_.+-]+(?:\.[0-9]+)?)$/;
-const MAX_TARGET_MESSAGE_CHARS = 4000;
 const MAX_WATCH_CHUNK_BYTES = 1024 * 1024;
 const MAX_WATCH_LINE_CHARS = 4 * 1024 * 1024;
 const MAX_SESSION_LOG_BYTES = 256 * 1024 * 1024;
@@ -27,16 +32,13 @@ function codedError(message, code) {
 }
 
 function normalizeTargetMessage(message) {
-  const value = String(message || '').trim();
-  if (!value) throw codedError('A message for the target agent session is required.', 'TARGET_MESSAGE_REQUIRED');
-  if (value.includes('\0')) throw codedError('The target message contains unsupported control data.', 'INVALID_TARGET_MESSAGE');
-  if (value.length > MAX_TARGET_MESSAGE_CHARS) {
+  try { return canonicalizeTargetSessionMessage(message); }
+  catch (error) {
     throw codedError(
-      `The target message exceeds ${MAX_TARGET_MESSAGE_CHARS} characters.`,
-      'TARGET_MESSAGE_TOO_LONG'
+      `The target message must be one visible line no longer than ${MAX_TARGET_SESSION_MESSAGE_CHARS} characters.`,
+      error.code || 'INVALID_TARGET_MESSAGE'
     );
   }
-  return value;
 }
 
 function normalizeMessageForMatch(message) {
@@ -45,6 +47,12 @@ function normalizeMessageForMatch(message) {
     .replaceAll(/[\u200B-\u200D\uFEFF]/g, '')
     .replaceAll(/\s+/g, ' ')
     .trim();
+}
+
+function targetMessageWithOperationMarker(message, operationId = null) {
+  const normalizedMessage = normalizeTargetMessage(message);
+  if (!operationId) return normalizedMessage;
+  return `${normalizedMessage}\n\n${targetSessionOperationMarker(operationId)}`;
 }
 
 function clipVerifiedResponse(message, max = 8000) {
@@ -108,27 +116,38 @@ function finalProviderMessage(record, provider) {
 
 function updateProviderActivityState(state, record, provider) {
   const next = state || { busy: false, observed: false };
+  const recordTimestamp = record?.timestamp || record?.message?.timestamp || null;
+  if (recordTimestamp && Number.isFinite(Date.parse(recordTimestamp))) {
+    next.lastRecordAt = new Date(recordTimestamp).toISOString();
+  }
+  const markTransition = () => {
+    if (next.lastRecordAt) next.lastTransitionAt = next.lastRecordAt;
+  };
   if (provider === 'codex') {
     const eventType = record?.type === 'event_msg' ? record.payload?.type : null;
     if (eventType === 'task_started') {
       next.busy = true;
       next.observed = true;
       next.taskMarkersObserved = true;
+      markTransition();
       return next;
     }
     if (['task_complete', 'turn_aborted', 'task_canceled', 'task_cancelled'].includes(eventType)) {
       next.busy = false;
       next.observed = true;
       next.taskMarkersObserved = true;
+      markTransition();
       return next;
     }
     const message = extractCodexMessage(record);
     if (message?.role === 'user') {
       next.busy = true;
       next.observed = true;
+      markTransition();
     } else if (!next.taskMarkersObserved && finalProviderMessage(record, provider)) {
       next.busy = false;
       next.observed = true;
+      markTransition();
     }
     return next;
   }
@@ -137,9 +156,11 @@ function updateProviderActivityState(state, record, provider) {
   if (message?.role === 'user') {
     next.busy = true;
     next.observed = true;
+    markTransition();
   } else if (message?.role === 'assistant') {
     next.busy = record.message?.stop_reason !== 'end_turn';
     next.observed = true;
+    markTransition();
   }
   return next;
 }
@@ -152,7 +173,14 @@ async function readProviderActivityState(filename, provider) {
   if (stat.size > MAX_SESSION_LOG_BYTES) {
     throw codedError('The provider session log exceeds the activity-check limit.', 'SESSION_LOG_TOO_LARGE');
   }
-  const state = { busy: false, observed: false, taskMarkersObserved: false, parseErrors: 0 };
+  const state = {
+    busy: false,
+    observed: false,
+    taskMarkersObserved: false,
+    parseErrors: 0,
+    lastRecordAt: null,
+    lastTransitionAt: null,
+  };
   const stream = fsNative.createReadStream(filename, { encoding: 'utf8' });
   const lines = readline.createInterface({ input: stream, crlfDelay: Infinity });
   try {
@@ -168,7 +196,69 @@ async function readProviderActivityState(filename, provider) {
     lines.close();
     stream.destroy();
   }
-  return { ...state, offset: stat.size };
+  return {
+    ...state,
+    offset: stat.size,
+    logUpdatedAt: new Date(stat.mtimeMs).toISOString(),
+    millisecondsSinceLogUpdate: Math.max(0, Date.now() - stat.mtimeMs),
+  };
+}
+
+async function readProviderOperationOutcome(filename, provider, expectedMessage) {
+  const stat = await fs.stat(filename);
+  if (!stat.isFile()) {
+    throw codedError('The provider session log is unavailable.', 'SESSION_LOG_NOT_FOUND');
+  }
+  if (stat.size > MAX_SESSION_LOG_BYTES) {
+    throw codedError('The provider session log exceeds the reconciliation limit.', 'SESSION_LOG_TOO_LARGE');
+  }
+  const expected = normalizeMessageForMatch(expectedMessage);
+  let delivered = null;
+  let finalMessage = null;
+  let lastAssistantMessage = null;
+  let parseErrors = 0;
+  const stream = fsNative.createReadStream(filename, { encoding: 'utf8' });
+  const lines = readline.createInterface({ input: stream, crlfDelay: Infinity });
+  try {
+    for await (const line of lines) {
+      if (!line || line.length > MAX_WATCH_LINE_CHARS) continue;
+      let record;
+      try {
+        record = JSON.parse(line);
+      } catch {
+        parseErrors += 1;
+        continue;
+      }
+      const extracted = provider === 'codex'
+        ? extractCodexMessage(record)
+        : extractClaudeMessage(record);
+      if (extracted?.role === 'user') {
+        if (normalizeMessageForMatch(extracted.text) === expected) {
+          delivered = { at: extracted.at || null };
+          finalMessage = null;
+          lastAssistantMessage = null;
+          continue;
+        }
+        if (delivered) break;
+      }
+      if (!delivered) continue;
+      if (extracted?.role === 'assistant') lastAssistantMessage = extracted;
+      const exactFinal = finalProviderMessage(record, provider);
+      if (exactFinal?.text) {
+        finalMessage = exactFinal;
+        break;
+      }
+      if (provider === 'codex' && record?.type === 'event_msg' &&
+          record.payload?.type === 'task_complete' && lastAssistantMessage?.text) {
+        finalMessage = lastAssistantMessage;
+        break;
+      }
+    }
+  } finally {
+    lines.close();
+    stream.destroy();
+  }
+  return { delivered, finalMessage, parseErrors };
 }
 
 class JsonlAppendReader {
@@ -221,12 +311,18 @@ class TmuxAgentController {
     execFileImpl = execFileAsync,
     inputCommandImpl = spawnWithInput,
     pollIntervalMs = 250,
+    tmuxSocketPath = null,
   } = {}) {
     if (!inspector) throw new Error('TmuxAgentController requires an OperatorInspector');
     this.inspector = inspector;
     this.execFile = execFileImpl;
     this.inputCommand = inputCommandImpl;
+    this.tmuxSocketPath = tmuxSocketPath ? path.resolve(String(tmuxSocketPath)) : null;
     this.pollIntervalMs = Math.max(25, Number.parseInt(pollIntervalMs, 10) || 250);
+  }
+
+  _tmuxArgs(args) {
+    return this.tmuxSocketPath ? ['-S', this.tmuxSocketPath, ...args] : args;
   }
 
   _validateTarget(target) {
@@ -267,14 +363,14 @@ class TmuxAgentController {
     const bufferName = `teleagent-${crypto.randomBytes(8).toString('hex')}`;
     let loaded = false;
     try {
-      await this.inputCommand('tmux', ['load-buffer', '-b', bufferName, '-'], message, { timeoutMs: 5000 });
+      await this.inputCommand('tmux', this._tmuxArgs(['load-buffer', '-b', bufferName, '-']), message, { timeoutMs: 5000 });
       loaded = true;
-      await this.execFile('tmux', ['paste-buffer', '-p', '-b', bufferName, '-t', target], {
+      await this.execFile('tmux', this._tmuxArgs(['paste-buffer', '-p', '-b', bufferName, '-t', target]), {
         timeout: 5000,
         maxBuffer: 4096,
       });
       await delay(75);
-      await this.execFile('tmux', ['send-keys', '-t', target, 'Enter'], {
+      await this.execFile('tmux', this._tmuxArgs(['send-keys', '-t', target, 'Enter']), {
         timeout: 5000,
         maxBuffer: 4096,
       });
@@ -288,7 +384,7 @@ class TmuxAgentController {
     } finally {
       if (loaded) {
         try {
-          await this.execFile('tmux', ['delete-buffer', '-b', bufferName], {
+          await this.execFile('tmux', this._tmuxArgs(['delete-buffer', '-b', bufferName]), {
             timeout: 5000,
             maxBuffer: 4096,
           });
@@ -302,7 +398,7 @@ class TmuxAgentController {
   async interrupt(target) {
     const exactTarget = this._validateTarget(target);
     try {
-      await this.execFile('tmux', ['send-keys', '-t', exactTarget, 'C-c'], {
+      await this.execFile('tmux', this._tmuxArgs(['send-keys', '-t', exactTarget, 'C-c']), {
         timeout: 5000,
         maxBuffer: 4096,
       });
@@ -312,14 +408,71 @@ class TmuxAgentController {
     }
   }
 
+  async reconcileOperation({
+    target,
+    message,
+    operationId,
+    sessionFingerprint,
+  } = {}) {
+    const prepared = await this.prepare({ target });
+    if (!sessionFingerprint || prepared.session_fingerprint !== sessionFingerprint) {
+      return { status: 'unknown', reason: 'target_session_changed' };
+    }
+    const stableTarget = prepared.stable_target || prepared.target;
+    const targetSession = await this.inspector.resolveAgentSessionTarget(stableTarget);
+    if (targetSession.sessionFingerprint !== sessionFingerprint) {
+      return { status: 'unknown', reason: 'target_session_changed' };
+    }
+    const provider = targetSession.inspected.pane.agent;
+    const expectedMessage = targetMessageWithOperationMarker(message, operationId);
+    const outcome = await readProviderOperationOutcome(
+      targetSession.resolved.filename,
+      provider,
+      expectedMessage
+    );
+    if (!outcome.delivered) {
+      return { status: 'unknown', reason: 'operation_marker_not_observed', provider };
+    }
+    if (!outcome.finalMessage?.text) {
+      return {
+        status: 'in_progress',
+        reason: 'delivery_observed_without_verified_response',
+        provider,
+        delivered: true,
+        delivered_at: outcome.delivered.at,
+      };
+    }
+    return {
+      status: 'completed',
+      result: {
+        success: true,
+        target: targetSession.inspected.pane.target,
+        stable_target: stableTarget,
+        named_target: targetSession.inspected.pane.named_target || prepared.named_target || null,
+        conversation_name: prepared.conversation_name || null,
+        provider,
+        delivered: true,
+        delivered_at: outcome.delivered.at,
+        response_verified: true,
+        response: clipVerifiedResponse(outcome.finalMessage.text),
+        response_at: outcome.finalMessage.at || null,
+        reconciled_after_restart: true,
+        duration_ms: null,
+        parse_errors: outcome.parseErrors,
+      },
+    };
+  }
+
   async send({
     target,
     message,
     sessionFingerprint,
     timeoutMs = 1800000,
     signal = null,
+    operationId = null,
+    onBeforeSubmit = null,
   } = {}) {
-    const normalizedMessage = normalizeTargetMessage(message);
+    const normalizedMessage = targetMessageWithOperationMarker(message, operationId);
     const safeTimeoutMs = Math.max(30000, Math.min(Number.parseInt(timeoutMs, 10) || 1800000, 3600000));
     const deadline = Date.now() + safeTimeoutMs;
     const startedAt = Date.now();
@@ -457,10 +610,55 @@ class TmuxAgentController {
           parse_errors: reader.parseErrors,
         };
       }
+      if (submitted) {
+        throw Object.assign(
+          codedError(
+            'Cancellation arrived after target-session delivery became possible, and the exact outcome could not be verified.',
+            'TARGET_DELIVERY_OUTCOME_UNKNOWN'
+          ),
+          {
+            originalCode: 'TARGET_MESSAGE_CANCELED',
+            deliveryAttempted: true,
+          }
+        );
+      }
       throw codedError('The target-session operation was canceled before delivery.', 'TARGET_MESSAGE_CANCELED');
     };
 
-    await this._pasteAndSubmit(stableTarget, normalizedMessage);
+    let deliveryAttemptStarted = false;
+    if (typeof onBeforeSubmit === 'function') {
+      await onBeforeSubmit({
+        stableTarget,
+        provider,
+        operationMarker: operationId ? targetSessionOperationMarker(operationId) : null,
+      });
+      deliveryAttemptStarted = true;
+    }
+    if (deliveryAttemptStarted && signal?.aborted) {
+      throw Object.assign(
+        codedError(
+          'Cancellation arrived after the durable delivery boundary; the exact target outcome requires reconciliation.',
+          'TARGET_DELIVERY_OUTCOME_UNKNOWN'
+        ),
+        { originalCode: 'TARGET_MESSAGE_CANCELED', deliveryAttempted: true }
+      );
+    }
+    try {
+      await this._pasteAndSubmit(stableTarget, normalizedMessage);
+    } catch (error) {
+      if (!deliveryAttemptStarted) throw error;
+      throw Object.assign(
+        codedError(
+          'Target submission failed after the durable delivery boundary; the exact outcome requires reconciliation.',
+          'TARGET_DELIVERY_OUTCOME_UNKNOWN'
+        ),
+        {
+          originalCode: error?.code || 'TARGET_MESSAGE_SUBMIT_FAILED',
+          deliveryAttempted: true,
+          cause: error,
+        }
+      );
+    }
     submitted = true;
     if (signal?.aborted) return reconcileCancellation();
 
@@ -477,14 +675,27 @@ class TmuxAgentController {
     }
 
     if (!delivered) {
-      throw codedError(
-        `The message was not verified in provider history for ${prepared.target}.`,
-        'TARGET_DELIVERY_TIMEOUT'
+      throw Object.assign(
+        codedError(
+          `The message was not verified in provider history for ${prepared.target}; delivery may still have occurred.`,
+          'TARGET_DELIVERY_OUTCOME_UNKNOWN'
+        ),
+        {
+          originalCode: 'TARGET_DELIVERY_TIMEOUT',
+          deliveryAttempted: true,
+        }
       );
     }
-    throw codedError(
-      `The message reached ${prepared.target}, but no final provider response was verified before timeout.`,
-      'TARGET_RESPONSE_TIMEOUT'
+    throw Object.assign(
+      codedError(
+        `The message reached ${prepared.target}, but no final provider response was verified before timeout.`,
+        'TARGET_DELIVERY_OUTCOME_UNKNOWN'
+      ),
+      {
+        originalCode: 'TARGET_RESPONSE_TIMEOUT',
+        deliveryAttempted: true,
+        delivered: true,
+      }
     );
   }
 }
@@ -492,12 +703,14 @@ class TmuxAgentController {
 module.exports = {
   EXACT_TMUX_TARGET,
   JsonlAppendReader,
-  MAX_TARGET_MESSAGE_CHARS,
+  MAX_TARGET_MESSAGE_CHARS: MAX_TARGET_SESSION_MESSAGE_CHARS,
   TmuxAgentController,
   finalProviderMessage,
   normalizeMessageForMatch,
   normalizeTargetMessage,
   readProviderActivityState,
+  readProviderOperationOutcome,
   spawnWithInput,
+  targetMessageWithOperationMarker,
   updateProviderActivityState,
 };

@@ -1,11 +1,14 @@
 #!/bin/bash
 set -e
 
-# Keep ESL loopback-only; Hermes does not need remote FreeSWITCH control.
-sed -i -e 's/name="listen-ip" value=".*"/name="listen-ip" value="127.0.0.1"/g' \
-  /usr/local/freeswitch/conf/autoload_configs/event_socket.conf.xml
-sed -i -e 's/name="apply-inbound-acl" value=".*"/name="apply-inbound-acl" value="loopback.auto"/g' \
-  /usr/local/freeswitch/conf/autoload_configs/event_socket.conf.xml
+# The complete event-socket configuration, including its credential and
+# loopback ACL, is rendered into a protected host runtime directory and mounted
+# read-only. Never accept the credential in argv or environment variables.
+event_socket_config=/usr/local/freeswitch/conf/autoload_configs/event_socket.conf.xml
+if [ ! -f "$event_socket_config" ] || [ -L "$event_socket_config" ]; then
+  echo 'Protected FreeSWITCH event-socket configuration is missing or unsafe.' >&2
+  exit 1
+fi
 
 if [ "$1" = 'freeswitch' ]; then
   shift
@@ -41,12 +44,8 @@ if [ "$1" = 'freeswitch' ]; then
       ;;
 
     -e|--event-socket-port)
-      if [ -n "$2" ]; then
-        sed -i -e "s/name=\"listen-port\" value=\"8021\"/name=\"listen-port\" value=\"$2\"/g" \
-          /usr/local/freeswitch/conf/autoload_configs/event_socket.conf.xml
-      fi
-      shift
-      shift
+      echo 'FreeSWITCH event-socket settings must come from the protected fixed configuration.' >&2
+      exit 1
       ;;
 
     -a|--rtp-range-start)
@@ -84,12 +83,8 @@ if [ "$1" = 'freeswitch' ]; then
       ;;
 
     -p|--password)
-      if [ -n "$2" ]; then
-        sed -i -e "s/name=\"password\" value=\"JambonzR0ck\\$\"/name=\"password\" value=\"$2\"/g" \
-          /usr/local/freeswitch/conf/autoload_configs/event_socket.conf.xml
-      fi
-      shift
-      shift
+      echo 'FreeSWITCH credentials are forbidden in process arguments.' >&2
+      exit 1
       ;;
 
     --codec-answer-generous)

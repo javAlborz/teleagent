@@ -66,10 +66,23 @@ test('targeted session messages and ambiguous session listings use their dedicat
   const runtime = await controller.handle('list_runtime_sessions', { session: 'main' }, { callId: 'runtime-list' });
   assert.equal(runtime.success, true);
   assert.match(runtime.managed.meaning, /Teleagent-managed/);
-  assert.match(runtime.tmux.meaning, /process mapping is authoritative/i);
+  assert.match(runtime.tmux.meaning, /agent_running means process presence/i);
+  assert.match(runtime.tmux.meaning, /get_agent_activity/i);
   assert.deepEqual(inspections.at(-1), {
     action: 'list_tmux_sessions',
     args: { session: 'main' },
+  });
+});
+
+test('current activity uses the dedicated provider-log inspector', async (t) => {
+  const { controller, inspections } = createController(t);
+  const activity = await controller.handle('get_agent_activity', {
+    target: 'main:phone',
+  }, { callId: 'activity-tool' });
+  assert.equal(activity.success, true);
+  assert.deepEqual(inspections.at(-1), {
+    action: 'inspect_agent_activity',
+    args: { target: 'main:phone' },
   });
 });
 
@@ -204,9 +217,14 @@ test('history reads exact caller events and inspection actions stay bounded by t
   const { controller, inspections, stateStore, thread } = createController(t);
   stateStore.appendEvent({ voiceThreadId: thread.id, role: 'user', kind: 'transcript', content: 'exact phrase one' });
   stateStore.appendEvent({ voiceThreadId: thread.id, role: 'assistant', kind: 'transcript', content: 'exact phrase two' });
+  stateStore.appendEvent({ voiceThreadId: thread.id, role: 'user', kind: 'suppressed_transcript', content: 'Mm-hmm' });
+  stateStore.appendEvent({ voiceThreadId: thread.id, role: 'user', kind: 'transcript', content: 'What were my last messages?' });
 
   const history = await controller.handle('get_voice_history', { limit: 10 }, { callId: 'history-1' });
   assert.deepEqual(history.events.map((event) => event.text), ['exact phrase one', 'exact phrase two']);
+  assert.equal(history.exact_text, '1. user: exact phrase one\n2. assistant: exact phrase two');
+  assert.equal(history.current_request_excluded, true);
+  assert.equal(history.suppressed_audio_fragments_excluded, true);
   assert.equal(history.audio_recorded, false);
 
   const inspected = await controller.handle('read_text_file', { path: '/approved/README.md' }, { callId: 'inspect-1' });

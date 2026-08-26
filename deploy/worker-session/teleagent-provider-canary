@@ -1,0 +1,68 @@
+#!/usr/local/libexec/teleagent-node
+'use strict';
+
+const { spawn } = require('node:child_process');
+const path = require('node:path');
+const {
+  buildClaudeArgs,
+  buildCodexArgs,
+} = require('../../claude-api-server/agent-cli');
+
+const CLIENT = '/usr/local/libexec/teleagent-provider-supervisor-client';
+const WORKSPACE_ROOT = '/srv/teleagent-agent-workspaces';
+
+function buildCanaryInvocation(provider, workspaceInput) {
+  const workspace = path.resolve(String(workspaceInput || ''));
+  const relative = path.relative(WORKSPACE_ROOT, workspace);
+  if (!['claude', 'codex'].includes(provider) || !relative ||
+      relative.startsWith('..') || path.isAbsolute(relative)) {
+    throw new Error('Provider canary requires an exact provider workspace');
+  }
+  const args = provider === 'claude'
+    ? buildClaudeArgs({
+      // Sonnet 5 is the only Claude model whose pinned CLI wire envelope is
+      // currently captured and admitted by provider-egress. A cheaper model
+      // is not a valid canary if its protocol shape is intentionally blocked.
+      model: 'claude-sonnet-5', permissionMode: 'dontAsk',
+      tools: ['Read', 'Glob', 'Grep'], allowedTools: ['Read', 'Glob', 'Grep'],
+    })
+    : buildCodexArgs({
+      model: 'gpt-5.6-luna', reasoningEffort: 'low', sandbox: 'read-only',
+      approvalPolicy: 'never', workingDirectory: workspace,
+    });
+  return [
+    '--provider', provider,
+    '--mode', 'managed',
+    '--access-mode', 'read-only',
+    '--workspace', workspace,
+    '--task-id', `provider_canary_${provider}`,
+    '--', ...args,
+  ];
+}
+
+async function run() {
+  const [provider, workspace] = process.argv.slice(2);
+  const args = buildCanaryInvocation(provider, workspace);
+  const child = spawn(CLIENT, args, {
+    cwd: '/',
+    env: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8' },
+    stdio: ['pipe', 'inherit', 'inherit'],
+    shell: false,
+  });
+  child.stdin.end('Reply exactly PROVIDER_CANARY_OK.\n');
+  const result = await new Promise((resolve, reject) => {
+    child.once('error', reject);
+    child.once('close', (code, signal) => resolve({ code, signal }));
+  });
+  if (result.signal) process.kill(process.pid, result.signal);
+  process.exitCode = Number.isInteger(result.code) ? result.code : 1;
+}
+
+if (require.main === module) {
+  run().catch((error) => {
+    process.stderr.write(`Provider canary refused: ${error.message}\n`);
+    process.exit(77);
+  });
+}
+
+module.exports = { buildCanaryInvocation };

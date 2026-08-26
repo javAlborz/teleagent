@@ -1,0 +1,165 @@
+# Privileged phone actions
+
+This path is a separate two-phase control plane. The Realtime conversational
+worker and the Claude/Codex workers never receive root, sudo, the broker Unix
+socket, the Ed25519 private key, or a reusable privileged bearer.
+
+## Request and approval flow
+
+1. The voice controller turns a typed request into one canonical action plan:
+   exact argv array (never a shell string), target, cwd, timeout, impact/risk,
+   and expected observable result.
+2. The phone speaks the stored exact approval prompt. `#` is ignored until a
+   completed, unclipped Realtime response and its exact response/item
+   transcript match, then FreeSWITCH acknowledges the unique job-bound marker
+   queued after that exact audio at the media-server queue boundary. This is
+   not proof that the physical handset rendered or the caller heard it. A
+   cleared, missing, spoofed, or timed-out marker leaves the approval unarmed.
+3. The controller issues a short-lived Ed25519 capability bound to the full
+   canonical plan hash, call/job, target, provider/profile, method, timestamps,
+   and a random nonce.
+4. Voice-app sends one authenticated POST to the loopback host controller using
+   the dedicated `PRIVILEGED_ACTION_API_TOKEN`. The host controller forwards it
+   over `/run/teleagent-privileged-action/broker.sock`. Voice-app and the public
+   SIP gateway never receive that socket or membership in `teleagent-control`.
+5. The root broker verifies policy and signature, atomically consumes a keyed
+   replay fingerprint and inserts the durable action/audit/outbox records, then
+   executes the exact argv without a shell. It never stores the capability,
+   bearer, raw nonce, or reusable token digest.
+6. Ambiguous POST outcomes are recovered only with GET by idempotency key. The
+   one-time capability is never POSTed again.
+
+Early `#`, interrupted/clipped speech, transcript normalization, response/item
+mismatch, and expired approvals all remain blocked. A disconnected call leaves
+an unarmed approval that extension 77 can replay exactly until its TTL. Three
+unverifiable replay attempts cancel it without execution.
+
+## Supported plans
+
+- `systemctl` and `journalctl` use fixed local executable paths and root policy
+  unit/action allowlists.
+- `ssh` reaches Hera directly. Aphrodite, Dionysus, Prometheus, Atlas,
+  Hephaestus, and Zeus use the fixed Hermes -> Hera -> named-host route. Zeus is
+  explicitly Windows; Linux-only uptime/systemd actions are rejected for it.
+- `kubectl` uses the approved SSH route to Hera and fixed
+  `/usr/local/bin/kubectl` path.
+- `argv` is a deliberately disabled-by-default exact-rule adapter. It accepts
+  an argv array only when the entire canonical argv and cwd match a root-owned,
+  pre-reviewed rule: no shell, eval, PATH lookup, whitespace-bearing tokens,
+  metacharacters, shells/interpreters/env/sudo, credential flags/headers,
+  sensitive trust/key operands, or command dispatchers such as `find`,
+  `xargs`, and `systemd-run`. At execution time the executable must still be a
+  canonical root-owned, non-group/world-writable regular file below an
+  explicitly allowed root.
+
+There is no spontaneous or "unlisted" argv mode. A local rule is exact:
+
+```json
+{
+  "enabled": true,
+  "allowed_executable_roots": ["/usr/bin", "/usr/local/bin"],
+  "exact_rules": [
+    { "argv": ["/usr/bin/systemctl", "is-active", "example.service"], "cwd": "/" }
+  ]
+}
+```
+
+Named-host exact argv similarly requires a complete host-specific `exact_rules`
+entry. Remote sudo, when explicitly enabled for a Linux host, accepts only the
+fixed `/usr/bin/sudo -n <canonical executable> ...` prefix and the complete
+resulting argv must match the rule. Legacy unlisted-mode policy fields are
+rejected if enabled.
+
+Privileged stdout and stderr are never persisted or returned to voice/OpenAI.
+The broker stores only bounded byte/line counts, truncation metadata, and a
+SHA-256 digest after applying its streaming bounds. This digest-only rule also
+applies to typed read adapters such as `systemctl status` and `journalctl`,
+whose otherwise arbitrary output can contain credentials. The canonical safe
+expected-result description is spoken on success; detailed output remains
+available only through a separate, locally reviewed operator workflow.
+
+## Truthful crash and cancellation semantics
+
+- Cancellation while still queued is terminal `canceled`; no process ran.
+- Once execution intent/process spawn is durable, timeout, cancellation,
+  nonzero exit, broker shutdown, or restart without a verified postcondition is
+  terminal `outcome_unknown`. The action is never resent.
+- Observation failure after an exit-zero action is also `outcome_unknown`.
+- Before every spawn the broker durably records a one-use process-marker hash;
+  after spawn it also records the exact Linux PID, `/proc` start time, and
+  process group. On restart, a persistent recovery panic is established before
+  the Unix socket listens or any new claim is possible. The broker binds only
+  matching marker/identity records, sends TERM then KILL to their exact process
+  groups, and waits for verified zero. Ambiguous identity or an unreadable
+  process leaves recovery blocked and health at 503. Even successful cleanup
+  leaves ordinary panic locked for root-local review.
+- `KillMode=control-group` kills surviving descendants on service failure as a
+  second containment boundary, but that does not prove whether a side effect
+  occurred. Linux `/proc` process identity and process-group semantics are a
+  required activation boundary; the broker fails closed elsewhere.
+- Panic atomically cancels queued work and requests cancellation of running
+  work. The controller persists its voice/executor lock before forwarding the
+  root panic, and privileged submission refuses either controller lock. The
+  root panic also fences the precheck/submit race atomically. Dial 9 reports
+  STOPPED only after both executor and root planes report quiescence; otherwise
+  it remains locked and reports PARTIAL. There is intentionally no
+  phone/network root-panic unlock endpoint.
+
+## Dormant source deployment
+
+The tracked unit has no `[Install]` section and requires an absent-by-default
+`/etc/teleagent/privileged-action/ENABLE` sentinel. No source checkout action
+installs, enables, starts, or creates a secret.
+
+Artifacts:
+
+- `deploy/privileged-action/teleagent-privileged-action.service`
+- `deploy/privileged-action/teleagent-privileged-action.sysusers`
+- `deploy/privileged-action/teleagent-privileged-action.tmpfiles`
+- `deploy/privileged-action/policy.example.json`
+- `privileged-action-broker/`
+
+Before activation, a root operator must:
+
+1. Install the pinned broker dependencies with its `package-lock.json` into the
+   root-owned deployment tree.
+2. install the sysusers/tmpfiles/unit files and verify
+   `/run/teleagent-privileged-action` is `0750 root:teleagent-control`;
+3. install a reviewed `0600 root:root` policy and explicitly choose every
+   allowed unit, namespace/resource, host/action, and exact argv rule;
+4. install the matching approval public key and an independent 32-byte replay
+   fingerprint key as `root:root 0400/0600` files;
+5. place one distinct 32–4096 byte `PRIVILEGED_ACTION_API_TOKEN` in the private
+   voice/controller secret stores (never reuse agent or executor tokens);
+6. set controller `PRIVILEGED_ACTION_PROXY_ENABLED=true`, its exact socket path,
+   and voice `VOICE_PRIVILEGED_ACTIONS_ENABLED=true` only after the broker health
+   check succeeds;
+7. create the `ENABLE` sentinel and start the unit explicitly.
+
+Do not mount the socket into Docker or add `teleagent-sip-gateway`/voice-app to
+`teleagent-control`.
+
+## Root-local panic recovery
+
+Stop the broker and inspect local status first:
+
+```sh
+sudo systemctl stop teleagent-privileged-action.service
+sudo env PRIVILEGED_ACTION_DB_PATH=/var/lib/teleagent-privileged-action/actions.sqlite \
+  /opt/teleagent/node/bin/node /opt/teleagent/current/privileged-action-broker/control.js status
+```
+
+After investigating every `outcome_unknown`, unlock only with the local command:
+
+```sh
+sudo env PRIVILEGED_ACTION_DB_PATH=/var/lib/teleagent-privileged-action/actions.sqlite \
+  /opt/teleagent/node/bin/node /opt/teleagent/current/privileged-action-broker/control.js unlock-panic
+```
+
+The broker must first complete its startup child-recovery pass. The local
+command never kills or guesses about an orphan itself: it refuses a live broker
+socket, a persistent recovery barrier, an unverifiable `/proc` scan, any marked
+privileged child, any unresolved durable process record, or any durable
+running/cancel-requested action. It conservatively terminalizes otherwise
+stranded execution intent as `outcome_unknown` and appends the unlock
+audit/outbox record.

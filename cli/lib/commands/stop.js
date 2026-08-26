@@ -69,6 +69,7 @@ async function stopVoiceServer() {
     spinner.succeed('Docker containers stopped');
   } catch (error) {
     spinner.fail(`Failed to stop containers: ${error.message}`);
+    throw error;
   }
 }
 
@@ -97,5 +98,6 @@ async function stopBoth() {
     spinner.succeed('Docker containers stopped');
   } catch (error) {
     spinner.fail(`Failed to stop containers: ${error.message}`);
+    throw error;
   }
 }

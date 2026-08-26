@@ -132,8 +132,5 @@ async function showVoiceServerStatus(config, isPiSplit, installationType) {
     console.log(chalk.gray(`  External IP: ${config.server.externalIp}`));
   }
 
-  if (config.sip) {
-    console.log(chalk.gray(`  SIP Domain: ${config.sip.domain}`));
-    console.log(chalk.gray(`  SIP Registrar: ${config.sip.registrar}`));
-  }
+  console.log(chalk.gray('  SIP: fixed mutually authenticated local Asterisk trunk'));
 }

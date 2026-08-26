@@ -2,21 +2,12 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { normalizeAgentConfig } from './agents.js';
+import { ensureRuntimeSecrets } from './runtime-security.js';
 
 function getDefaultApiConfig() {
   return {
     tts: {
-      baseUrl: 'http://127.0.0.1:18000/v1',
-      apiKey: 'not-needed',
-      model: 'kokoro',
       defaultVoice: 'af_bella',
-      validated: false
-    },
-    stt: {
-      baseUrl: 'http://127.0.0.1:18001/v1',
-      apiKey: 'not-needed',
-      model: 'whisper-1',
-      validated: false
     },
     realtime: {
       enabled: false,
@@ -33,22 +24,13 @@ function migrateApiConfig(config) {
   const defaults = getDefaultApiConfig();
   const api = config.api || {};
   const legacyTts = api.elevenlabs || {};
-  const legacyStt = api.openai || {};
 
   config.api = {
     ...api,
     tts: {
       ...defaults.tts,
-      ...(legacyTts.apiKey ? { apiKey: legacyTts.apiKey } : {}),
       ...(legacyTts.defaultVoiceId ? { defaultVoice: legacyTts.defaultVoiceId } : {}),
-      ...(legacyTts.validated !== undefined ? { validated: legacyTts.validated } : {}),
-      ...(api.tts || {})
-    },
-    stt: {
-      ...defaults.stt,
-      ...(legacyStt.apiKey ? { apiKey: legacyStt.apiKey } : {}),
-      ...(legacyStt.validated !== undefined ? { validated: legacyStt.validated } : {}),
-      ...(api.stt || {})
+      ...((api.tts || {}).defaultVoice ? { defaultVoice: api.tts.defaultVoice } : {})
     },
     realtime: {
       ...defaults.realtime,
@@ -59,8 +41,41 @@ function migrateApiConfig(config) {
 
   delete config.api.elevenlabs;
   delete config.api.openai;
+  delete config.api.stt;
 
   return config;
+}
+
+function removeLegacySipRegistration(config) {
+  let changed = false;
+  if (Object.hasOwn(config, 'sip')) {
+    delete config.sip;
+    changed = true;
+  }
+  if (Array.isArray(config.devices)) {
+    for (const device of config.devices) {
+      if (!device || typeof device !== 'object') continue;
+      for (const key of ['authId', 'authPassword', 'password']) {
+        if (Object.hasOwn(device, key)) {
+          delete device[key];
+          changed = true;
+        }
+      }
+    }
+  }
+  return changed;
+}
+
+function removeLegacyMediaControlSecrets(config) {
+  if (!config.secrets || typeof config.secrets !== 'object') return false;
+  let changed = false;
+  for (const key of ['drachtio', 'freeswitch']) {
+    if (Object.hasOwn(config.secrets, key)) {
+      delete config.secrets[key];
+      changed = true;
+    }
+  }
+  return changed;
 }
 
 /**
@@ -107,10 +122,24 @@ export async function loadConfig() {
   }
 
   migrateApiConfig(config);
+  const removedLegacySipAuthentication = removeLegacySipRegistration(config);
+  const removedLegacyMediaControlCredentials = removeLegacyMediaControlSecrets(config);
   config.agents = normalizeAgentConfig(config.agents, {
     // Existing configurations historically implied Claude-only operation.
     defaultProviders: ['claude']
   });
+
+  // Migrate older configs before any controller or voice process is started.
+  // Without persisted shared credentials, separate CLI invocations would
+  // generate different bearers and either fail open or make the stack unusable.
+  const runtimeSecrets = ensureRuntimeSecrets(config);
+  if (runtimeSecrets.changed || removedLegacySipAuthentication ||
+      removedLegacyMediaControlCredentials) {
+    // Do not make a second on-disk copy of retired SIP registration secrets.
+    await saveConfig(config, {
+      backup: !removedLegacySipAuthentication && !removedLegacyMediaControlCredentials,
+    });
+  }
 
   return config;
 }
@@ -129,9 +158,11 @@ export function getInstallationType(config) {
  * @param {object} config - Configuration object
  * @returns {Promise<void>}
  */
-export async function saveConfig(config) {
+export async function saveConfig(config, { backup = true } = {}) {
   const configDir = getConfigDir();
   const configPath = getConfigPath();
+
+  ensureRuntimeSecrets(config);
 
   // Create directory if it doesn't exist
   if (!fs.existsSync(configDir)) {
@@ -139,20 +170,29 @@ export async function saveConfig(config) {
   }
 
   // Backup existing config if it exists
-  if (fs.existsSync(configPath)) {
+  if (backup && fs.existsSync(configPath)) {
     const backupPath = configPath + '.backup';
     await fs.promises.copyFile(configPath, backupPath);
+    await fs.promises.chmod(backupPath, 0o600);
   }
 
   // Add security warning to config
   const configWithWarning = {
-    _WARNING: 'DO NOT SHARE THIS FILE - Contains API keys and passwords',
+    _WARNING: 'DO NOT SHARE THIS FILE - Contains API keys and scoped runtime credentials',
     ...config
   };
 
   // Write config file
   const data = JSON.stringify(configWithWarning, null, 2);
-  await fs.promises.writeFile(configPath, data, { mode: 0o600 });
+  const temporaryPath = `${configPath}.tmp-${process.pid}-${Date.now()}`;
+  try {
+    await fs.promises.writeFile(temporaryPath, data, { mode: 0o600, flag: 'wx' });
+    await fs.promises.rename(temporaryPath, configPath);
+    await fs.promises.chmod(configPath, 0o600);
+  } catch (error) {
+    await fs.promises.unlink(temporaryPath).catch(() => {});
+    throw error;
+  }
 }
 
 /**

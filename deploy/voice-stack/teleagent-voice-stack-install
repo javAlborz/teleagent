@@ -1,0 +1,155 @@
+#!/bin/bash
+set -euo pipefail
+
+source_root=/opt/teleagent/current/deploy/voice-stack
+node_runtime=/usr/local/libexec/teleagent-node
+source_verifier=$source_root/verify-voice-stack-identity
+installed_verifier=/usr/local/libexec/verify-voice-stack-identity
+unit=teleagent-voice-stack.service
+systemctl_bin=/usr/bin/systemctl
+sysusers_bin=/usr/bin/systemd-sysusers
+tmpfiles_bin=/usr/bin/systemd-tmpfiles
+
+fail() {
+  printf 'Voice stack installation refused: %s\n' "$1" >&2
+  exit 77
+}
+
+require_root() {
+  [ "$(id -u)" -eq 0 ] || fail 'root is required'
+}
+
+assert_disabled() {
+  if "$systemctl_bin" is-active --quiet "$unit"; then
+    fail 'the voice stack must remain inactive during installation'
+  fi
+  if "$systemctl_bin" is-enabled --quiet "$unit"; then
+    fail 'the dormant voice stack must not be enabled'
+  fi
+}
+
+source_check() {
+  [ -x "$node_runtime" ] || fail 'the fixed Node runtime is unavailable'
+  [ -f "$source_verifier" ] && [ ! -L "$source_verifier" ] ||
+    fail 'the source identity verifier is unsafe'
+  "$node_runtime" "$source_verifier" --source-check |
+    /usr/bin/grep -qx VOICE_STACK_SOURCE_OK || fail 'the source bundle failed review checks'
+}
+
+assert_source_file() {
+  local filename=$1
+  local mode=$2
+  [ -f "$filename" ] && [ ! -L "$filename" ] || fail 'a reviewed source asset is absent'
+  [ "$(stat -c '%u:%g:%a:%h' "$filename")" = "0:0:${mode}:1" ] ||
+    fail 'a reviewed source asset has unsafe metadata'
+}
+
+install_disabled() {
+  require_root
+  assert_disabled
+  source_check
+
+  local -a sources=(
+    "$source_root/teleagent-voice-stack.service"
+    "$source_root/teleagent-voice-stack.sysusers"
+    "$source_root/teleagent-voice-stack.tmpfiles"
+    "$source_root/teleagent-voice-stack-launch.js"
+    "$source_root/verify-voice-stack-identity"
+    "$source_root/teleagent-voice-stack-install"
+  )
+  local -a targets=(
+    /etc/systemd/system/teleagent-voice-stack.service
+    /etc/sysusers.d/teleagent-voice-stack.conf
+    /etc/tmpfiles.d/teleagent-voice-stack.conf
+    /usr/local/libexec/teleagent-voice-stack-launch
+    /usr/local/libexec/verify-voice-stack-identity
+    /usr/local/libexec/teleagent-voice-stack-install
+  )
+  local -a modes=(644 644 644 755 755 755)
+  local staging
+  staging=$(/usr/bin/mktemp -d /run/teleagent-voice-install.XXXXXX)
+  chmod 0700 "$staging"
+  local committed=0
+  local complete=0
+
+  rollback() {
+    local status=$?
+    trap - EXIT INT TERM
+    for ((index = 0; index < ${#targets[@]}; index += 1)); do
+      /usr/bin/rm -f -- "${targets[$index]}.new-$$"
+    done
+    if [ "$complete" -ne 1 ] && [ "$committed" -eq 1 ]; then
+      for ((index = ${#targets[@]} - 1; index >= 0; index -= 1)); do
+        if [ -f "$staging/backup-$index" ]; then
+          /usr/bin/install -o root -g root -m "${modes[$index]}" \
+            "$staging/backup-$index" "${targets[$index]}"
+        else
+          /usr/bin/rm -f -- "${targets[$index]}"
+        fi
+      done
+      "$systemctl_bin" daemon-reload >/dev/null 2>&1 || true
+    fi
+    /usr/bin/rm -rf -- "$staging"
+    exit "$status"
+  }
+  trap rollback EXIT INT TERM
+
+  for ((index = 0; index < ${#sources[@]}; index += 1)); do
+    assert_source_file "${sources[$index]}" "${modes[$index]}"
+    /usr/bin/mkdir -p -- "$(dirname "${targets[$index]}")"
+    if [ -e "${targets[$index]}" ] || [ -L "${targets[$index]}" ]; then
+      [ -f "${targets[$index]}" ] && [ ! -L "${targets[$index]}" ] ||
+        fail 'an installed voice asset has an unsafe type'
+      [ "$(stat -c '%u:%g:%a:%h' "${targets[$index]}")" = \
+        "0:0:${modes[$index]}:1" ] || fail 'an installed voice asset has unsafe metadata'
+      /usr/bin/cp --preserve=mode,ownership,timestamps -- \
+        "${targets[$index]}" "$staging/backup-$index"
+    fi
+    /usr/bin/install -o root -g root -m "${modes[$index]}" -- \
+      "${sources[$index]}" "${targets[$index]}.new-$$"
+    /usr/bin/sync -f "${targets[$index]}.new-$$"
+  done
+
+  committed=1
+  for ((index = 0; index < ${#targets[@]}; index += 1)); do
+    /usr/bin/mv -f -- "${targets[$index]}.new-$$" "${targets[$index]}"
+    /usr/bin/sync -d "$(dirname "${targets[$index]}")"
+  done
+
+  # These tools create only the reviewed identity and empty directories. They
+  # never provision, open, or print a credential file.
+  "$sysusers_bin" /etc/sysusers.d/teleagent-voice-stack.conf
+  "$tmpfiles_bin" --create /etc/tmpfiles.d/teleagent-voice-stack.conf
+  "$systemctl_bin" daemon-reload
+  "$installed_verifier" --installed-check | /usr/bin/grep -qx VOICE_STACK_IDENTITY_OK ||
+    fail 'the installed voice identity did not verify'
+  assert_disabled
+  complete=1
+  printf 'VOICE_STACK_INSTALLED_DISABLED\n'
+}
+
+check_installed() {
+  require_root
+  assert_disabled
+  "$installed_verifier" --installed-check | /usr/bin/grep -qx VOICE_STACK_IDENTITY_OK ||
+    fail 'the installed voice identity did not verify'
+  printf 'VOICE_STACK_INSTALLED_DISABLED_OK\n'
+}
+
+case "${1:-}" in
+  --source-check)
+    [ "$#" -eq 1 ] || fail 'unexpected arguments'
+    source_check
+    ;;
+  --install-disabled)
+    [ "$#" -eq 1 ] || fail 'unexpected arguments'
+    install_disabled
+    ;;
+  --check)
+    [ "$#" -eq 1 ] || fail 'unexpected arguments'
+    check_installed
+    ;;
+  *)
+    fail 'usage: teleagent-voice-stack-install --source-check|--install-disabled|--check'
+    ;;
+esac

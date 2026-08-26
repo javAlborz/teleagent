@@ -1,0 +1,4 @@
+# Dedicated private voice-orchestrator identity. Provider/model processes must
+# never share this group because it reads the approval signer and SIP trunks.
+g teleagent-voice -
+u teleagent-voice - "Teleagent private voice orchestrator" /var/lib/teleagent-voice /usr/sbin/nologin

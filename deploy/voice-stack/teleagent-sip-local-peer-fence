@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+unset BASH_ENV CDPATH ENV GLOBIGNORE
+umask 0077
+
+nft_bin=/usr/sbin/nft
+flock_bin=/usr/bin/flock
+lock_file=/run/teleagent-sip-local-peer-fence/operation.lock
+table_family=inet
+table_name=teleagent_sip_local_peer_fence
+
+fail() {
+  printf 'Teleagent SIP local-peer fence: %s\n' "$*" >&2
+  exit 1
+}
+
+# A non-root-only fake dependency lane exercises atomic reconciliation in CI
+# without CAP_NET_ADMIN or any host firewall mutation. Root execution always
+# uses the fixed production nft binary and lock path.
+if [[ "${TELEAGENT_SIP_FENCE_TEST_ONLY:-}" == 1 ]]; then
+  [[ "${EUID}" -ne 0 ]] || fail 'the fake nft lane is forbidden for root'
+  nft_bin=${TELEAGENT_SIP_FENCE_TEST_NFT:-}
+  lock_file=${TELEAGENT_SIP_FENCE_TEST_LOCK:-}
+  [[ "${nft_bin}" == /* && -f "${nft_bin}" && ! -L "${nft_bin}" && -x "${nft_bin}" ]] ||
+    fail 'the fake nft dependency is unsafe'
+  [[ "$(stat -c '%u' "${nft_bin}")" == "${EUID}" ]] || fail 'the fake nft dependency owner is unsafe'
+  ! find "${nft_bin}" -maxdepth 0 -perm /022 | grep -q . ||
+    fail 'the fake nft dependency is writable by another identity'
+  test_root=$(dirname "${lock_file}")
+  [[ "${lock_file}" == /* && "${test_root}" != / && -d "${test_root}" && ! -L "${test_root}" ]] ||
+    fail 'the fake lock path is unsafe'
+  [[ "$(stat -c '%u:%a' "${test_root}")" == "${EUID}:700" ]] ||
+    fail 'the fake lock directory is unsafe'
+else
+  [[ -z "${TELEAGENT_SIP_FENCE_TEST_NFT:-}" && -z "${TELEAGENT_SIP_FENCE_TEST_LOCK:-}" ]] ||
+    fail 'test dependency overrides require the non-root fake lane'
+fi
+
+render_ruleset() {
+  cat <<EOF
+add table ${table_family} ${table_name}
+add chain ${table_family} ${table_name} output { type filter hook output priority -200; policy accept; }
+add rule ${table_family} ${table_name} output ip daddr 127.0.0.1 udp dport 5060 meta skuid != 0 reject with icmp type port-unreachable comment "teleagent-voice-only"
+add rule ${table_family} ${table_name} output ip daddr 127.0.0.1 udp dport 5070 meta skuid != 0 reject with icmp type port-unreachable comment "teleagent-pbx-only"
+EOF
+}
+
+with_lock() {
+  local callback="$1"
+  shift
+  (
+    exec 9>"${lock_file}"
+    "${flock_bin}" --exclusive --timeout 10 9 \
+      || fail 'timed out acquiring the root-owned reconciliation lock'
+    "${callback}" "$@"
+  )
+}
+
+table_exists_locked() {
+  "${nft_bin}" -nnnnn list table "${table_family}" "${table_name}" >/dev/null 2>&1
+}
+
+check_rules_locked() {
+  local actual expected
+  actual="$(
+    "${nft_bin}" -nnnnn list table "${table_family}" "${table_name}" 2>/dev/null \
+      | /usr/bin/sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^$/d'
+  )" || return 1
+  expected="$(cat <<'EOF'
+table inet teleagent_sip_local_peer_fence {
+chain output {
+type filter hook output priority -200; policy accept;
+ip daddr 127.0.0.1 udp dport 5060 meta skuid != 0 reject with icmp 3 comment "teleagent-voice-only"
+ip daddr 127.0.0.1 udp dport 5070 meta skuid != 0 reject with icmp 3 comment "teleagent-pbx-only"
+}
+}
+EOF
+  )"
+  [[ "${actual}" == "${expected}" ]]
+}
+
+reconcile_rules_locked() {
+  local ruleset
+  ruleset="$(render_ruleset)"
+  if table_exists_locked; then
+    ruleset="delete table ${table_family} ${table_name}"$'\n'"${ruleset}"
+  fi
+  # One nft input batch is an atomic replace; there is no delete/add gap.
+  printf '%s\n' "${ruleset}" | "${nft_bin}" -f -
+  check_rules_locked || fail 'atomic reconciliation did not produce the exact private table'
+}
+
+remove_rules_locked() {
+  if table_exists_locked; then
+    printf 'delete table %s %s\n' "${table_family}" "${table_name}" | "${nft_bin}" -f -
+  fi
+  ! table_exists_locked || fail 'managed nftables table still exists after removal'
+}
+
+monitor_rules() {
+  # Stop/restart retains the last exact kernel rules. Only the guarded
+  # installer remove path invokes the explicit remove action.
+  trap 'exit 0' TERM INT
+  with_lock reconcile_rules_locked
+  while /usr/bin/sleep 1; do
+    with_lock check_rules_locked || with_lock reconcile_rules_locked
+  done
+}
+
+case "${1:-}" in
+  reconcile) with_lock reconcile_rules_locked ;;
+  check) with_lock check_rules_locked || fail 'the exact managed nftables table is missing or has drifted' ;;
+  remove) with_lock remove_rules_locked ;;
+  monitor) monitor_rules ;;
+  *) fail 'usage: teleagent-sip-local-peer-fence {reconcile|check|remove|monitor}' ;;
+esac

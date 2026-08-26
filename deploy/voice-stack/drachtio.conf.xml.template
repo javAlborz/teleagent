@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<drachtio>
+  <admin port="9022" secret="__DRACHTIO_SECRET__">127.0.0.1</admin>
+  <sip>
+    <contacts>
+      <contact external-ip="__DRACHTIO_EXTERNAL_IP__">sip:127.0.0.1:__DRACHTIO_SIP_PORT__;transport=__DRACHTIO_SIP_TRANSPORT__</contact>
+    </contacts>
+  </sip>
+  <cdrs>false</cdrs>
+  <logging>
+    <console/>
+    <sofia-loglevel>3</sofia-loglevel>
+    <loglevel>info</loglevel>
+  </logging>
+</drachtio>

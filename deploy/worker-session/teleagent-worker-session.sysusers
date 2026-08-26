@@ -1,0 +1,21 @@
+g teleagent-agent-workspace -
+g teleagent-provider-launch -
+g teleagent-claude-egress-client -
+g teleagent-codex-egress-client -
+u teleagent-control - "Teleagent private controller" /var/lib/teleagent-control /usr/sbin/nologin
+u teleagent-session-broker - "Teleagent isolated session broker" /var/lib/teleagent-session-broker /usr/sbin/nologin
+u teleagent-claude-supervisor - "Teleagent Claude provider supervisor" /var/lib/teleagent-claude-supervisor /usr/sbin/nologin
+u teleagent-codex-supervisor - "Teleagent Codex provider supervisor" /var/lib/teleagent-codex-supervisor /usr/sbin/nologin
+u teleagent-claude-worker - "Teleagent ephemeral Claude worker" /nonexistent/teleagent-claude-worker /usr/sbin/nologin
+u teleagent-codex-worker - "Teleagent ephemeral Codex worker" /nonexistent/teleagent-codex-worker /usr/sbin/nologin
+u teleagent-claude-shim - "Teleagent Claude private-network egress shim" /nonexistent /usr/sbin/nologin
+u teleagent-codex-shim - "Teleagent Codex private-network egress shim" /nonexistent /usr/sbin/nologin
+u teleagent-claude-egress - "Teleagent Claude credential egress broker" /var/lib/teleagent-claude-egress /usr/sbin/nologin
+u teleagent-codex-egress - "Teleagent Codex credential egress broker" /var/lib/teleagent-codex-egress /usr/sbin/nologin
+m teleagent-session-broker teleagent-agent-workspace
+m teleagent-session-broker teleagent-provider-launch
+m teleagent-control teleagent-provider-launch
+m teleagent-claude-worker teleagent-agent-workspace
+m teleagent-codex-worker teleagent-agent-workspace
+m teleagent-claude-shim teleagent-claude-egress-client
+m teleagent-codex-shim teleagent-codex-egress-client

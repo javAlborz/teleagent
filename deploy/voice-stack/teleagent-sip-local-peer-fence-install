@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+unset BASH_ENV CDPATH ENV GLOBIGNORE
+umask 0077
+
+app_root=/opt/teleagent/current
+source_helper=${app_root}/deploy/voice-stack/teleagent-sip-local-peer-fence
+source_unit=${app_root}/deploy/voice-stack/teleagent-sip-local-peer-fence.service
+target_helper=/usr/local/libexec/teleagent-sip-local-peer-fence
+target_unit=/etc/systemd/system/teleagent-sip-local-peer-fence.service
+unit=teleagent-sip-local-peer-fence.service
+
+fail() {
+  printf 'Teleagent SIP fence install: %s\n' "$*" >&2
+  exit 1
+}
+
+validate_source() {
+  for filename in "${source_helper}" "${source_unit}"; do
+    [[ -f "${filename}" && ! -L "${filename}" ]] || fail 'a source artifact is missing or unsafe'
+    [[ "$(stat -c '%U:%G' "${filename}")" == root:root ]] || fail 'source ownership is unsafe'
+    ! find "${filename}" -maxdepth 0 -perm /022 | grep -q . || fail 'source is writable by an untrusted identity'
+  done
+  bash -n "${source_helper}"
+  grep -Fqx 'Before=teleagent-voice-stack.service' "${source_unit}" || fail 'unit ordering drifted'
+  grep -Fqx 'CapabilityBoundingSet=CAP_NET_ADMIN' "${source_unit}" || fail 'unit capability boundary drifted'
+}
+
+require_root() {
+  [[ "$(id -u)" == 0 ]] || fail 'live operations require root'
+}
+
+require_known_or_absent() {
+  local source="$1" target="$2"
+  if [[ -e "${target}" || -L "${target}" ]]; then
+    [[ -f "${target}" && ! -L "${target}" ]] || fail 'an install target is unsafe'
+    cmp -s "${source}" "${target}" || fail 'refusing to overwrite an unknown install target'
+  fi
+}
+
+check_live() {
+  cmp -s "${source_helper}" "${target_helper}" || fail 'installed helper drifted'
+  cmp -s "${source_unit}" "${target_unit}" || fail 'installed unit drifted'
+  [[ "$(stat -c '%U:%G:%a' "${target_helper}")" == root:root:755 ]] || fail 'installed helper metadata drifted'
+  [[ "$(stat -c '%U:%G:%a' "${target_unit}")" == root:root:644 ]] || fail 'installed unit metadata drifted'
+  systemctl is-active --quiet "${unit}" || fail 'SIP fence monitor is not active'
+  "${target_helper}" check
+}
+
+validate_source
+case "${1:---source-check}" in
+  --source-check)
+    [[ $# -le 1 ]] || fail 'select exactly one mode'
+    printf '%s\n' 'PASS Teleagent SIP fence source is exact and inactive'
+    ;;
+  --check)
+    [[ $# == 1 ]] || fail 'select exactly one mode'
+    require_root
+    check_live
+    printf '%s\n' 'PASS Teleagent SIP fence is installed and exact'
+    ;;
+  --install)
+    [[ $# == 1 ]] || fail 'select exactly one mode'
+    require_root
+    ! systemctl is-active --quiet teleagent-voice-stack.service || fail 'stop the voice stack before changing its SIP fence'
+    require_known_or_absent "${source_helper}" "${target_helper}"
+    require_known_or_absent "${source_unit}" "${target_unit}"
+    install -d -o root -g root -m 0755 /usr/local/libexec
+    install -o root -g root -m 0755 "${source_helper}" "${target_helper}"
+    install -o root -g root -m 0644 "${source_unit}" "${target_unit}"
+    systemctl daemon-reload
+    "${target_helper}" reconcile
+    systemctl enable --now "${unit}"
+    check_live
+    ;;
+  --remove)
+    [[ $# == 1 ]] || fail 'select exactly one mode'
+    require_root
+    ! systemctl is-active --quiet teleagent-voice-stack.service || fail 'stop the voice stack before removing its SIP fence'
+    ! systemctl is-active --quiet docker.service || fail 'stop Docker before removing its SIP fence'
+    check_live
+    systemctl disable --now "${unit}"
+    "${target_helper}" remove
+    rm -f "${target_helper}" "${target_unit}"
+    systemctl daemon-reload
+    ;;
+  *) fail 'usage: teleagent-sip-local-peer-fence-install {--source-check|--check|--install|--remove}' ;;
+esac

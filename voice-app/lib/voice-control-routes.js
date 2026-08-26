@@ -1,7 +1,74 @@
 'use strict';
 
+const { createHash, timingSafeEqual } = require('node:crypto');
 const express = require('express');
 const logger = require('./logger');
+const { getRuntimeSecret } = require('./runtime-secrets');
+
+const OTHER_VOICE_SCOPE_TOKENS = Object.freeze([
+  'AGENT_API_TOKEN',
+  'CLAUDE_API_TOKEN',
+  'EXECUTOR_API_TOKEN',
+  'OUTBOUND_API_TOKEN',
+  'PRIVILEGED_ACTION_API_TOKEN',
+]);
+
+class VoiceControlAuthConfigError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.name = 'VoiceControlAuthConfigError';
+    this.code = code;
+  }
+}
+
+function normalizeVoiceControlToken(value) {
+  const token = typeof value === 'string' ? value : '';
+  const byteLength = Buffer.byteLength(token, 'utf8');
+  if (byteLength < 32 || byteLength > 4096 ||
+      !/^[\x21-\x7E]+$/.test(token) ||
+      /(?:replace|change)[-_ ]?with|placeholder|example|changeme/i.test(token)) {
+    return '';
+  }
+  return token;
+}
+
+function timingSafeTokenEqual(provided, expected) {
+  const left = createHash('sha256').update(String(provided || ''), 'utf8').digest();
+  const right = createHash('sha256').update(String(expected || ''), 'utf8').digest();
+  return timingSafeEqual(left, right);
+}
+
+function loadVoiceControlAuthConfig({ env: suppliedSettings = null, runtimeSecrets = null } = {}) {
+  const apiToken = normalizeVoiceControlToken(
+    runtimeSecrets?.voiceControlToken ||
+      (suppliedSettings ? suppliedSettings.VOICE_CONTROL_TOKEN : getRuntimeSecret('voiceControlToken'))
+  );
+  if (!apiToken) {
+    throw new VoiceControlAuthConfigError(
+      'VOICE_CONTROL_AUTH_NOT_CONFIGURED',
+      'VOICE_CONTROL_TOKEN must be a clean non-placeholder ASCII token from 32 to 4096 bytes.'
+    );
+  }
+  for (const name of OTHER_VOICE_SCOPE_TOKENS) {
+    const runtimeName = {
+      EXECUTOR_API_TOKEN: 'executorApiToken',
+      OUTBOUND_API_TOKEN: 'outboundApiToken',
+      PRIVILEGED_ACTION_API_TOKEN: 'privilegedActionApiToken',
+    }[name];
+    const other = String(
+      suppliedSettings ? suppliedSettings[name] : (runtimeName
+        ? (runtimeSecrets?.[runtimeName] || getRuntimeSecret(runtimeName, { required: false }))
+        : '')
+    ).trim();
+    if (other && timingSafeTokenEqual(apiToken, other)) {
+      throw new VoiceControlAuthConfigError(
+        'VOICE_CONTROL_TOKEN_REUSED',
+        `VOICE_CONTROL_TOKEN must be distinct from ${name}.`
+      );
+    }
+  }
+  return Object.freeze({ apiToken });
+}
 
 function isLoopbackAddress(address) {
   const value = String(address || '').toLowerCase();
@@ -16,29 +83,29 @@ function requireLoopback(req, res, next) {
 function getProvidedToken(req) {
   const authHeader = req.get('authorization') || '';
   const bearerMatch = authHeader.match(/^Bearer\s+(.+)$/i);
-  return bearerMatch ? bearerMatch[1].trim() : (req.get('x-api-key') || '').trim();
+  return bearerMatch ? bearerMatch[1].trim() : '';
 }
 
-function requireUnlockAuthorization(req, res, next) {
-  const configuredToken = String(
-    process.env.VOICE_CONTROL_TOKEN ||
-    process.env.OUTBOUND_API_TOKEN ||
-    process.env.AGENT_API_TOKEN ||
-    process.env.CLAUDE_API_TOKEN ||
-    ''
-  ).trim();
-
+function createUnlockAuthorizationMiddleware(apiToken) {
+  const configuredToken = normalizeVoiceControlToken(apiToken);
   if (!configuredToken) {
-    return res.status(503).json({ success: false, error: 'voice_control_token_not_configured' });
+    throw new VoiceControlAuthConfigError(
+      'VOICE_CONTROL_AUTH_NOT_CONFIGURED',
+      'A validated voice-control token is required by the unlock router.'
+    );
   }
-  if (getProvidedToken(req) === configuredToken) return next();
-  res.set('WWW-Authenticate', 'Bearer');
-  return res.status(401).json({ success: false, error: 'unauthorized' });
+  return function requireUnlockAuthorization(req, res, next) {
+    if (timingSafeTokenEqual(getProvidedToken(req), configuredToken)) return next();
+    res.set('WWW-Authenticate', 'Bearer');
+    return res.status(401).json({ success: false, error: 'unauthorized' });
+  };
 }
 
-function createVoiceControlRouter({ jobBroker, agentBridge } = {}) {
+function createVoiceControlRouter({ jobBroker, agentBridge, voiceControlAuth = null } = {}) {
   if (!jobBroker) throw new Error('createVoiceControlRouter requires jobBroker');
   if (!agentBridge) throw new Error('createVoiceControlRouter requires agentBridge');
+  const auth = voiceControlAuth || loadVoiceControlAuthConfig();
+  const requireUnlockAuthorization = createUnlockAuthorizationMiddleware(auth.apiToken);
 
   const router = express.Router();
 
@@ -74,12 +141,20 @@ function createVoiceControlRouter({ jobBroker, agentBridge } = {}) {
     }
   });
 
-  router.get('/voice-control/status', requireLoopback, (req, res) => {
+  router.get('/voice-control/status', requireLoopback, requireUnlockAuthorization, (req, res) => {
     return res.json({ success: true, voiceExecution: jobBroker.getExecutionLock() });
   });
 
   router.post('/voice-control/unlock', requireUnlockAuthorization, async (req, res) => {
     const source = String(req.body?.source || 'operator');
+    const readiness = jobBroker.getUnlockReadiness?.() || { ready: true };
+    if (readiness.ready !== true) {
+      return res.status(503).json({
+        success: false,
+        error: readiness.error || 'local_voice_unlock_not_ready',
+        local: readiness,
+      });
+    }
     const bridge = await agentBridge.unlockVoiceExecution(source);
     if (!bridge.success || bridge.voiceExecution?.locked !== false) {
       return res.status(503).json({
@@ -99,9 +174,13 @@ function createVoiceControlRouter({ jobBroker, agentBridge } = {}) {
 }
 
 module.exports = {
+  VoiceControlAuthConfigError,
+  createUnlockAuthorizationMiddleware,
   createVoiceControlRouter,
   getProvidedToken,
   isLoopbackAddress,
+  loadVoiceControlAuthConfig,
+  normalizeVoiceControlToken,
   requireLoopback,
-  requireUnlockAuthorization,
+  timingSafeTokenEqual,
 };

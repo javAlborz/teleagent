@@ -128,7 +128,11 @@ test('tmux session filtering is bounded and returns mapped process metadata', as
   assert.equal(result.sessions[0].windows[0].panes[0].stable_target, '%12');
   assert.equal(result.sessions[0].windows[0].panes[0].named_target, 'main:phone.1');
   assert.equal(result.sessions[0].windows[0].panes[0].conversation_name, 'phone');
+  assert.equal(result.activity_included, false);
+  assert.equal('agent_state' in result.sessions[0].windows[0], false);
+  assert.equal('agent_state' in result.sessions[0].windows[0].panes[0], false);
   assert.equal(JSON.stringify(result).includes('agent_processes'), false);
+  assert.deepEqual(calls.map((call) => call.command), ['tmux', 'ps']);
   assert.deepEqual(calls[0].args.slice(0, 4), ['list-panes', '-s', '-t', 'main']);
   await assert.rejects(
     inspector.listTmuxSessions({ session: 'main;shutdown' }),
@@ -155,6 +159,64 @@ test('pane inspection returns canonical, named, and stable target identities', a
   assert.equal(result.stable_target, '%12');
   assert.equal(result.named_target, 'main:phone.1');
   assert.equal(result.conversation_name, '8player-tooling');
+});
+
+test('provider activity distinguishes output, quiet work, and waiting from process presence', async (t) => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'operator-activity-'));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+  const sessionDirectory = path.join(base, '.codex', 'sessions', '2026', '08', '20');
+  fs.mkdirSync(sessionDirectory, { recursive: true });
+  const rollout = path.join(
+    sessionDirectory,
+    'rollout-2026-08-20T00-00-00-44444444-4444-4444-8444-444444444444.jsonl'
+  );
+  fs.writeFileSync(rollout, `${JSON.stringify({
+    type: 'event_msg',
+    timestamp: new Date().toISOString(),
+    payload: { type: 'task_started' },
+  })}\n`);
+  const fakeExec = async (command) => {
+    if (command === 'tmux') {
+      return { stdout: 'main\t5\t1\t%12\t100\tnode\t/workspace\t1\tphone\tphone\t1\tphone\n' };
+    }
+    if (command === 'ps') {
+      return { stdout: '100 1 Ss -bash\n101 100 Sl node /opt/bin/codex\n' };
+    }
+    if (command === 'lsof') return { stdout: `p101\nn${rollout}\n` };
+    throw new Error(`Unexpected command: ${command}`);
+  };
+  const inspector = new OperatorInspector({
+    allowedRoots: [],
+    home: base,
+    execFileImpl: fakeExec,
+    recentOutputMs: 5000,
+  });
+
+  const producing = await inspector.inspectAgentActivity({ target: '%12' });
+  assert.equal(producing.agent_running, true);
+  assert.equal(producing.agent_state, 'producing_output');
+  assert.equal(producing.task_state, 'running');
+  assert.equal(producing.output_state, 'recent_output');
+  assert.equal(producing.generating, true);
+
+  const stale = new Date(Date.now() - 15000);
+  fs.utimesSync(rollout, stale, stale);
+  const quiet = await inspector.inspectAgentActivity({ target: '%12' });
+  assert.equal(quiet.agent_state, 'working_quietly');
+  assert.equal(quiet.task_state, 'running');
+  assert.equal(quiet.output_state, 'quiet');
+  assert.equal(quiet.generating, false);
+
+  fs.appendFileSync(rollout, `${JSON.stringify({
+    type: 'event_msg',
+    timestamp: new Date().toISOString(),
+    payload: { type: 'task_complete' },
+  })}\n`);
+  const waiting = await inspector.inspectAgentActivity({ target: '%12' });
+  assert.equal(waiting.agent_state, 'waiting_for_input');
+  assert.equal(waiting.task_state, 'waiting_for_input');
+  assert.equal(waiting.output_state, 'quiet');
+  assert.equal(waiting.generating, false);
 });
 
 test('Codex provider history resolves the pane-owned rollout and paginates redacted messages', async (t) => {

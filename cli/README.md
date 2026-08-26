@@ -15,7 +15,7 @@ curl -sSL https://raw.githubusercontent.com/javAlborz/teleagent/main/install.sh 
 ```bash
 git clone https://github.com/javAlborz/teleagent.git
 cd claude-phone/cli
-npm install
+npm ci
 npm link
 ```
 
@@ -29,19 +29,17 @@ The wizard guides you through configuration based on your deployment type:
 
 ### Voice Server
 
-Select this when setting up a Raspberry Pi or dedicated voice box that connects to a remote API server.
+The split-host voice/controller mode is retired. Credential-bearing voice
+traffic must be co-located with the guarded controller on fixed loopback; the
+configuration generator refuses `voice-server` and `pi-split` deployment modes.
 
-**What it asks for:**
-1. 3CX SIP domain and registrar
-2. API server IP and port (where claude-api-server runs)
-3. TTS endpoint URL and default voice
-4. STT endpoint URL
-5. Device configuration (name, extension, auth, voice, prompt)
-6. Server LAN IP (for RTP audio routing)
-
-**What `claude-phone start` does:**
-- Starts Docker containers (drachtio, freeswitch, voice-app)
-- Connects to the remote API server you specified
+Voice setup and start require a pre-provisioned, non-login
+`teleagent-voice` system account. The CLI resolves its exact UID/GID and never
+falls back to the invoking owner or UID/GID 1000. Install device configuration
+and the approval/SIP credentials under `/etc/teleagent-voice` with the
+root:`teleagent-voice` modes documented in `voice-app/DEPLOYMENT.md`, and use
+`/var/lib/teleagent-voice` for durable state. Missing identity or unsafe
+metadata stops startup before Docker opens a listener.
 
 ### API Server
 
@@ -70,15 +68,19 @@ Select this for a single machine running everything.
 5. Server LAN IP, API port, and HTTP port
 
 **What `claude-phone start` does:**
-- Starts Docker containers (drachtio, freeswitch, voice-app)
-- Starts claude-api-server
+- Delegates voice activation to `teleagent-voice-stack.service`; it never runs
+  Compose directly.
+- Starts the compatibility API process only in legacy/development installs.
+
+The production unit is deliberately dormant and fails closed until its
+root-owned image manifest, exact runtime identities, protected credentials,
+SIP fence, isolated provider plane, and controller readiness all validate.
 
 ### Pi Auto-Detection
 
-On Raspberry Pi, the setup wizard:
-- Recommends "Voice Server" mode if you select "Both"
-- Checks for 3CX SBC on port 5060 and auto-configures drachtio to use 5070 to avoid conflicts
-- Uses optimized settings for Pi hardware
+The former Pi split-host path is retained only as migration context and is
+rejected by hardened configuration generation. Do not use it for a production
+voice/controller boundary.
 
 ## Commands
 
@@ -95,8 +97,8 @@ claude-phone config reset       # Reset config (creates backup first)
 ### Service Management
 
 ```bash
-claude-phone start              # Start services based on installation type
-claude-phone stop               # Stop all services
+claude-phone start              # Delegate voice start to the guarded systemd unit
+claude-phone stop               # Panic/quiesce, then stop through that unit
 claude-phone status             # Show service status
 claude-phone doctor             # Health check for dependencies and services
 claude-phone api-server         # Start API server standalone (default port 3333)
@@ -146,6 +148,14 @@ All configuration is stored in `~/.claude-phone/`:
 ├── server.pid            # API server process ID
 └── backups/              # Configuration backups
 ```
+
+The generated `voice-app` service does not inherit this `.env` wholesale.
+Compose uses it only to resolve an explicit, source-tested voice runtime
+allowlist. General Claude/Codex bridge bearers remain empty in the container,
+sensitive bridge logging is forced off, and the approval signer always uses
+the fixed read-only `/run/secrets/teleagent-approval-private.pem` mount. Start
+the generated stack through the CLI, or run Compose from `~/.claude-phone`, so
+the protected `.env` is used for interpolation.
 
 ### Config Structure
 
@@ -211,8 +221,6 @@ All configuration is stored in `~/.claude-phone/`:
   "devices": [{
     "name": "Morpheus",
     "extension": "9000",
-    "authId": "9000",
-    "password": "***",
     "voiceId": "af_bella",
     "sessionType": "phone-codex-terra",
     "prompt": "You are Morpheus..."
@@ -223,42 +231,18 @@ All configuration is stored in `~/.claude-phone/`:
 }
 ```
 
-## Split Deployment Example
+## Split Deployment
 
-### On Raspberry Pi (Voice Server)
-
-```bash
-# Install
-curl -sSL https://raw.githubusercontent.com/javAlborz/teleagent/main/install.sh | bash
-
-# Setup - select "Voice Server"
-# Enter your Mac's IP when prompted for API server
-claude-phone setup
-
-# Start voice services
-claude-phone start
-```
-
-### On Mac (API Server)
-
-```bash
-# Install (if not already)
-curl -sSL https://raw.githubusercontent.com/javAlborz/teleagent/main/install.sh | bash
-
-# Configure the API host and select its providers
-claude-phone setup
-
-# Start the agent bridge
-claude-phone start
-
-# Or on a custom port
-claude-phone api-server --port 4000
-```
+The former Raspberry Pi voice-host / remote API-host topology is retired. The
+hardened voice app and controller must share fixed loopback on one Linux host;
+provider execution is isolated behind the local controller instead of moving
+credential-bearing voice traffic across the LAN.
 
 ## Requirements
 
-- **Node.js 18+** - Required for CLI
-- **Docker** - Required for Voice Server or Both modes
+- **Node.js 24+** - Required for deployed Teleagent services (the standalone
+  compatibility CLI remains Node 18-capable)
+- **Docker** - Required for the guarded all-in-one voice stack
 - **At least one authenticated agent CLI** - Claude Code, OpenAI Codex, or both, for API Server or Both modes
 
 `claude-phone doctor` checks only configured providers. For Codex it verifies

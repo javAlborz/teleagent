@@ -1,0 +1,186 @@
+#!/usr/local/libexec/teleagent-node
+'use strict';
+
+const crypto = require('node:crypto');
+const fs = require('node:fs');
+const path = require('node:path');
+const { spawnSync } = require('node:child_process');
+
+const MANIFEST = '/usr/local/libexec/teleagent-provider-cli.manifest.json';
+const CHECKER = '/usr/local/libexec/teleagent-provider-cli-check';
+const SYSTEMCTL = '/usr/bin/systemctl';
+const TARGET_ROOT = '/opt/teleagent/agent-tools';
+
+function fail(message) {
+  process.stderr.write(`Provider CLI install refused: ${message}\n`);
+  process.exit(77);
+}
+
+function run(filename, args, { allowFailure = false } = {}) {
+  const result = spawnSync(filename, args, {
+    cwd: '/',
+    encoding: 'utf8',
+    timeout: 10000,
+    maxBuffer: 256 * 1024,
+    env: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8' },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  if (result.error || (!allowFailure && result.status !== 0)) {
+    fail('a fixed installation dependency rejected the operation');
+  }
+  return result;
+}
+
+function digest(filename) {
+  const hash = crypto.createHash('sha256');
+  const descriptor = fs.openSync(filename, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+  try {
+    const buffer = Buffer.allocUnsafe(1024 * 1024);
+    for (;;) {
+      const count = fs.readSync(descriptor, buffer, 0, buffer.length, null);
+      if (count === 0) break;
+      hash.update(buffer.subarray(0, count));
+    }
+  } finally {
+    fs.closeSync(descriptor);
+  }
+  return hash.digest('hex');
+}
+
+function readManifest() {
+  const metadata = fs.lstatSync(MANIFEST);
+  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.uid !== 0 ||
+      metadata.gid !== 0 || (metadata.mode & 0o777) !== 0o444 || metadata.nlink !== 1) {
+    fail('the installed CLI manifest is unsafe');
+  }
+  const manifest = JSON.parse(fs.readFileSync(MANIFEST, 'utf8'));
+  if (manifest?.version !== 1 || !Array.isArray(manifest.artifacts) ||
+      manifest.artifacts.length !== 3) fail('the installed CLI manifest is invalid');
+  return manifest;
+}
+
+function requireQuiescentProviderPlane() {
+  for (const provider of ['claude', 'codex']) {
+    for (const suffix of ['service', 'socket']) {
+      const unit = `teleagent-provider-supervisor@${provider}.${suffix}`;
+      const active = run(SYSTEMCTL, ['is-active', '--quiet', unit], { allowFailure: true });
+      if (active.status === 0) fail('CLI installation requires stopped provider supervisors');
+    }
+  }
+  const launches = run(SYSTEMCTL, [
+    'list-units', '--all', '--plain', '--no-legend', 'teleagent-provider-launch-*.service',
+  ]);
+  if (launches.stdout.trim()) fail('CLI installation requires zero transient provider launches');
+}
+
+function inspectSource(filename, artifact) {
+  if (!path.isAbsolute(filename) || !filename.startsWith('/')) fail('CLI source must be absolute');
+  const metadata = fs.lstatSync(filename);
+  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.uid !== 0 ||
+      metadata.gid !== 0 || (metadata.mode & 0o022) !== 0 || metadata.nlink !== 1 ||
+      metadata.size !== artifact.size || fs.realpathSync(filename) !== filename ||
+      digest(filename) !== artifact.sha256) fail('a staged CLI source is unsafe or unreviewed');
+}
+
+function assertTargetKnownOrAbsent(artifact) {
+  if (!fs.existsSync(artifact.path)) return;
+  const metadata = fs.lstatSync(artifact.path);
+  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.uid !== 0 ||
+      metadata.gid !== 0 || (metadata.mode & 0o777) !== 0o755 || metadata.nlink !== 1 ||
+      metadata.size !== artifact.size || fs.realpathSync(artifact.path) !== artifact.path ||
+      digest(artifact.path) !== artifact.sha256) {
+    fail('refusing to overwrite an unknown provider CLI target');
+  }
+}
+
+function verifyVersion(filename, artifact) {
+  const result = spawnSync(filename, artifact.versionArgs, {
+    cwd: '/',
+    encoding: 'utf8',
+    timeout: 5000,
+    maxBuffer: 4096,
+    env: { PATH: '/usr/bin:/bin', LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8' },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  if (result.error || result.status !== 0 || result.stdout.trim() !== artifact.versionStdout) {
+    fail('a staged provider CLI version is unreviewed');
+  }
+}
+
+function install(claudeSource, codexVendorSource) {
+  requireQuiescentProviderPlane();
+  const manifest = readManifest();
+  const artifacts = Object.fromEntries(manifest.artifacts.map((entry) => [entry.id, entry]));
+  const sources = {
+    claude: path.resolve(claudeSource),
+    'codex-wrapper': artifacts['codex-wrapper'].source,
+    'codex-vendor': path.resolve(codexVendorSource),
+  };
+  for (const artifact of manifest.artifacts) {
+    inspectSource(sources[artifact.id], artifact);
+    assertTargetKnownOrAbsent(artifact);
+    if (artifact.id !== 'codex-wrapper') verifyVersion(sources[artifact.id], artifact);
+  }
+  const opt = fs.lstatSync('/opt');
+  if (!opt.isDirectory() || opt.isSymbolicLink() || opt.uid !== 0 || opt.gid !== 0 ||
+      (opt.mode & 0o022) !== 0 || fs.realpathSync('/opt') !== '/opt') {
+    fail('the host /opt root is unsafe');
+  }
+  if (!fs.existsSync('/opt/teleagent')) {
+    fs.mkdirSync('/opt/teleagent', { mode: 0o755 });
+    fs.chownSync('/opt/teleagent', 0, 0);
+  }
+  const root = fs.lstatSync('/opt/teleagent');
+  if (!root.isDirectory() || root.isSymbolicLink() || root.uid !== 0 || root.gid !== 0 ||
+      (root.mode & 0o022) !== 0 || fs.realpathSync('/opt/teleagent') !== '/opt/teleagent') {
+    fail('the Teleagent tool root is unsafe');
+  }
+  if (!fs.existsSync(TARGET_ROOT)) fs.mkdirSync(TARGET_ROOT, { mode: 0o755 });
+  const targetRootMetadata = fs.lstatSync(TARGET_ROOT);
+  if (!targetRootMetadata.isDirectory() || targetRootMetadata.isSymbolicLink() ||
+      targetRootMetadata.uid !== 0 || targetRootMetadata.gid !== 0 ||
+      (targetRootMetadata.mode & 0o777) !== 0o755 ||
+      fs.realpathSync(TARGET_ROOT) !== TARGET_ROOT) fail('the provider CLI target root is unsafe');
+  const stage = fs.mkdtempSync(path.join(TARGET_ROOT, '.provider-cli-stage-'));
+  try {
+    for (const artifact of manifest.artifacts) {
+      const staged = path.join(stage, path.basename(artifact.path));
+      fs.copyFileSync(sources[artifact.id], staged, fs.constants.COPYFILE_EXCL);
+      fs.chownSync(staged, 0, 0);
+      fs.chmodSync(staged, 0o755);
+      if (digest(staged) !== artifact.sha256) fail('a staged CLI copy changed during installation');
+    }
+    // The wrapper is committed last, so no executable path can select a new
+    // vendor until that vendor and the matching Claude artifact are durable.
+    for (const id of ['codex-vendor', 'claude', 'codex-wrapper']) {
+      const artifact = artifacts[id];
+      fs.renameSync(path.join(stage, path.basename(artifact.path)), artifact.path);
+      const descriptor = fs.openSync(artifact.path, fs.constants.O_RDONLY);
+      try { fs.fsyncSync(descriptor); } finally { fs.closeSync(descriptor); }
+    }
+  } finally {
+    fs.rmSync(stage, { recursive: true, force: true });
+  }
+  for (const provider of ['claude', 'codex']) {
+    run(CHECKER, ['--provider', provider]);
+  }
+}
+
+function main() {
+  if (process.geteuid() !== 0 || process.execArgv.length !== 0 ||
+      fs.realpathSync(process.argv[1] || '') !== '/usr/local/libexec/teleagent-provider-cli-install') {
+    fail('use the fixed root CLI installer entrypoint');
+  }
+  if (process.argv.length === 3 && process.argv[2] === '--check') {
+    for (const provider of ['claude', 'codex']) run(CHECKER, ['--provider', provider]);
+    return;
+  }
+  if (process.argv.length === 7 && process.argv[2] === '--install' &&
+      process.argv[3] === '--claude-source' && process.argv[5] === '--codex-vendor-source') {
+    install(process.argv[4], process.argv[6]);
+    return;
+  }
+  fail('usage: teleagent-provider-cli-install --check | --install --claude-source ABS --codex-vendor-source ABS');
+}
+
+try { main(); } catch { fail('the provider CLI installation could not complete safely'); }

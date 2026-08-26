@@ -186,20 +186,20 @@ $ claude-phone setup
 
 🔍 Checking prerequisites...
 
-  ✗ Node.js v12.22.9 (requires ≥18)
+  ✗ Node.js v22.22.0 (requires ≥24)
   ✓ Docker v24.0.7
   ✓ Docker Compose v2.21.0 (plugin)
   ✓ Disk space 45GB free (requires ≥2GB)
 
 ❌ Prerequisites not met.
 
-Node.js 12.22.9 is below minimum version 18.
+Node.js 22.22.0 is below the deployed-service minimum version 24.
 
-? Install Node.js 20 LTS automatically? (y/N) y
+? Install Node.js 24 automatically? (y/N) y
 
 The following commands will run with sudo:
 
-  curl -fsSL https://deb.nodesource.com/setup_20.x -o /tmp/nodesource_setup.sh
+  curl -fsSL https://deb.nodesource.com/setup_24.x -o /tmp/nodesource_setup.sh
   # Script preview (first 50 lines):
   # #!/bin/bash
   # ... (script content) ...
@@ -210,9 +210,9 @@ The following commands will run with sudo:
 ? Run these commands as root? (y/N) y
 
 [sudo] password for chuck:
-Installing Node.js 20 LTS...
+Installing Node.js 24...
   ✓ NodeSource repository added
-  ✓ Node.js 20.11.0 installed
+  ✓ Node.js 24.13.0 installed
 
 ✅ All prerequisites now met!
 ```
@@ -223,7 +223,7 @@ $ claude-phone setup
 
 🔍 Checking prerequisites...
 
-  ✓ Node.js v20.11.0 (requires ≥18)
+  ✓ Node.js v24.13.0 (requires ≥24)
   ✗ Docker not running (installed but daemon stopped)
 
 Docker Desktop is installed but not running.
@@ -270,13 +270,13 @@ $ claude-phone setup
 
 🔍 Checking prerequisites...
 
-  ✗ Node.js v12.22.9 (requires ≥18)
+  ✗ Node.js v22.22.0 (requires ≥24)
 
-? Install Node.js 20 LTS automatically? (y/N) n
+? Install Node.js 24 automatically? (y/N) n
 
-To install Node.js 20 manually on Ubuntu/Debian:
+To install Node.js 24 manually on Ubuntu/Debian:
 
-  curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+  curl -fsSL https://deb.nodesource.com/setup_24.x | sudo -E bash -
   sudo apt-get install -y nodejs
 
 After installing, run 'claude-phone setup' again.

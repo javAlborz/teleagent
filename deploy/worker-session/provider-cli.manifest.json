@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "artifacts": [
+    {
+      "id": "claude",
+      "provider": "claude",
+      "path": "/opt/teleagent/agent-tools/claude",
+      "source": null,
+      "sha256": "1a0a662dc1bb938eaec38545abce9a4a69113d7d7f7c5e1a553ea276617b906a",
+      "size": 247905800,
+      "mode": "0755",
+      "versionArgs": ["--version"],
+      "versionStdout": "2.1.246 (Claude Code)"
+    },
+    {
+      "id": "codex-wrapper",
+      "provider": "codex",
+      "path": "/opt/teleagent/agent-tools/codex",
+      "source": "/usr/local/libexec/teleagent-provider-codex-cli-wrapper",
+      "sha256": "431a07a7b66d6cd27eddc07f0c05a43b9538be49eb958b1279c5d965fdc2f172",
+      "size": 69,
+      "mode": "0755",
+      "versionArgs": ["--version"],
+      "versionStdout": "codex-cli 0.149.1"
+    },
+    {
+      "id": "codex-vendor",
+      "provider": "codex",
+      "path": "/opt/teleagent/agent-tools/codex-vendor",
+      "source": null,
+      "sha256": "73dc5888888f411c1f0fa7b81d866e721dcc86b527ce8e3b2cf4708661e823ba",
+      "size": 258227840,
+      "mode": "0755",
+      "versionArgs": ["--version"],
+      "versionStdout": "codex-cli 0.149.1"
+    }
+  ]
+}

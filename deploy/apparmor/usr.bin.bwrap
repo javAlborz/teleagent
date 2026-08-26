@@ -1,0 +1,13 @@
+# This profile only names bubblewrap so Ubuntu's global restriction can grant
+# this sandbox launcher permission to create an unprivileged user namespace.
+# Bubblewrap then applies the narrower filesystem/network sandbox requested by
+# Codex. Keep the host-wide restriction enabled.
+
+abi <abi/4.0>,
+include <tunables/global>
+
+profile bwrap /usr/bin/bwrap flags=(unconfined) {
+  userns,
+
+  include if exists <local/usr.bin.bwrap>
+}

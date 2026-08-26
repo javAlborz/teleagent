@@ -1,12 +1,178 @@
+const crypto = require('node:crypto');
 const { EventEmitter } = require('node:events');
+const net = require('node:net');
 const WebSocket = require('ws');
 
 const AUDIO_DEBUG = String(process.env.AUDIO_DEBUG || '').toLowerCase() === 'true';
+const MAX_BUFFERED_PLAYOUT_BYTES = 2 * 1024 * 1024;
+const MAX_PENDING_PLAYOUT_MARKERS = 30;
+const AUDIO_ATTACH_TOKEN_BYTES = 32;
+const AUDIO_ATTACH_TOKEN_RE = /^[A-Za-z0-9_-]{43}$/;
+const MAX_AUDIO_EXPECTATION_MS = 30000;
+const MAX_AUDIO_FORK_FRAME_BYTES = 256 * 1024;
 
 function audioDebugLog(...args) {
   if (AUDIO_DEBUG) {
     console.log(...args);
   }
+}
+
+function normalizeIpAddress(value) {
+  let address = String(value || '').trim().toLowerCase();
+  const zoneIndex = address.indexOf('%');
+  if (zoneIndex >= 0) address = address.slice(0, zoneIndex);
+  if (address.startsWith('::ffff:') && net.isIP(address.slice(7)) === 4) {
+    address = address.slice(7);
+  }
+  return address;
+}
+
+function isLoopbackAddress(value) {
+  const address = normalizeIpAddress(value);
+  if (address === 'localhost' || address === '::1') return true;
+  if (net.isIP(address) !== 4) return false;
+  return Number(address.split('.')[0]) === 127;
+}
+
+function normalizeNetworkHost(value, fieldName) {
+  const host = String(value || '').trim().toLowerCase();
+  if (!host || (host !== 'localhost' && net.isIP(host) === 0)) {
+    throw new Error(`${fieldName} must be localhost or a literal IP address`);
+  }
+  return host;
+}
+
+function normalizeAllowedPeers(value, { allowNonLoopback, nonLoopbackConfigured }) {
+  const supplied = Array.isArray(value) ? value : String(value || '').split(',');
+  const peers = [...new Set(supplied.map(normalizeIpAddress).filter(Boolean))];
+  if (peers.length === 0) {
+    if (nonLoopbackConfigured) {
+      throw new Error('WS_ALLOWED_PEERS must list exact peer IPs in non-loopback mode');
+    }
+    return ['127.0.0.1', '::1'];
+  }
+  for (const peer of peers) {
+    if (net.isIP(peer) === 0 || peer === '0.0.0.0' || peer === '::') {
+      throw new Error('WS_ALLOWED_PEERS entries must be exact IP addresses');
+    }
+    if (!allowNonLoopback && !isLoopbackAddress(peer)) {
+      throw new Error('Non-loopback WS_ALLOWED_PEERS require WS_NON_LOOPBACK_ENABLED=true');
+    }
+  }
+  return peers;
+}
+
+function normalizeAudioForkServerOptions({
+  port = 3001,
+  host = '127.0.0.1',
+  connectHost = '127.0.0.1',
+  allowNonLoopback = false,
+  allowedPeers,
+} = {}) {
+  const normalizedPort = Number(port);
+  if (!Number.isInteger(normalizedPort) || normalizedPort < 0 || normalizedPort > 65535) {
+    throw new Error('WS_PORT must be an integer between 0 and 65535');
+  }
+  const normalizedHost = normalizeNetworkHost(host, 'WS_HOST');
+  const normalizedConnectHost = normalizeNetworkHost(connectHost, 'WS_CONNECT_HOST');
+  if (normalizedConnectHost === '0.0.0.0' || normalizedConnectHost === '::') {
+    throw new Error('WS_CONNECT_HOST must identify a concrete interface');
+  }
+  const nonLoopbackConfigured =
+    !isLoopbackAddress(normalizedHost) || !isLoopbackAddress(normalizedConnectHost);
+  const optIn = allowNonLoopback === true;
+  if (nonLoopbackConfigured && !optIn) {
+    throw new Error('Non-loopback audio WebSocket networking requires WS_NON_LOOPBACK_ENABLED=true');
+  }
+  const normalizedPeers = normalizeAllowedPeers(allowedPeers, {
+    allowNonLoopback: optIn,
+    nonLoopbackConfigured,
+  });
+  return {
+    port: normalizedPort,
+    host: normalizedHost,
+    connectHost: normalizedConnectHost,
+    allowNonLoopback: optIn,
+    allowedPeers: normalizedPeers,
+  };
+}
+
+function redactAudioForkSecrets(value) {
+  return String(value || '').replace(
+    /\/v1\/audio\/([^/?#\s]+)\/[A-Za-z0-9_-]{43}/g,
+    '/v1/audio/$1/[redacted-credential]'
+  );
+}
+
+function createAudioForkError(code, message) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
+function debugGlobStatesAfterPrefix(pattern, prefix) {
+  const glob = String(pattern || '');
+  const addStarEpsilonClosure = (input) => {
+    const output = new Set(input);
+    const pending = [...input];
+    while (pending.length > 0) {
+      const position = pending.pop();
+      if (glob[position] === '*' && !output.has(position + 1)) {
+        output.add(position + 1);
+        pending.push(position + 1);
+      }
+    }
+    return output;
+  };
+
+  let states = addStarEpsilonClosure(new Set([0]));
+  for (const character of prefix) {
+    const next = new Set();
+    for (const position of states) {
+      if (glob[position] === '*') next.add(position);
+      else if (glob[position] === character) next.add(position + 1);
+    }
+    states = addStarEpsilonClosure(next);
+    if (states.size === 0) break;
+  }
+  return { glob, states };
+}
+
+function debugPatternCanMatchPrefix(pattern, prefix) {
+  // If the glob can consume the fixed prefix, every remaining literal can be
+  // supplied by a suffix and every remaining wildcard can be empty.
+  return debugGlobStatesAfterPrefix(pattern, prefix).states.size > 0;
+}
+
+function debugPatternCoversPrefix(pattern, prefix) {
+  const { glob, states } = debugGlobStatesAfterPrefix(pattern, prefix);
+  // A reachable trailing wildcard is the only glob form that can exclude
+  // every possible suffix beneath this namespace prefix.
+  return [...states].some((position) => (
+    glob[position] === '*' && [...glob.slice(position)].every((character) => character === '*')
+  ));
+}
+
+function assertAudioForkDebugSafe(debugNamespaces = process.env.DEBUG) {
+  const patterns = String(debugNamespaces || '')
+    .trim()
+    .replace(/\s+/g, ',')
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean);
+  const protectedPrefix = 'drachtio:';
+  const allProtectedNamespacesSkipped = patterns
+    .filter((pattern) => pattern.startsWith('-'))
+    .some((pattern) => debugPatternCoversPrefix(pattern.slice(1), protectedPrefix));
+  const couldEnableProtectedNamespace = patterns
+    .filter((pattern) => !pattern.startsWith('-'))
+    .some((pattern) => debugPatternCanMatchPrefix(pattern, protectedPrefix));
+  if (!allProtectedNamespacesSkipped && couldEnableProtectedNamespace) {
+    throw new Error(
+      'DEBUG must not enable any drachtio:* namespace because dependency traces can expose SIP or AudioFork credentials'
+    );
+  }
+  return true;
 }
 
 function pcmStats(buf, endian = 'LE') {
@@ -66,6 +232,8 @@ class AudioForkSession extends EventEmitter {
     this._silenceMs = 0;
 
     this._playout = null;
+    this._lastPlaybackOutcome = null;
+    this._pendingPlaybackMarkers = new Map();
 
     // DEBUG: Track message counts
     this._messageCount = 0;
@@ -74,10 +242,12 @@ class AudioForkSession extends EventEmitter {
 
     ws.on('message', (data, isBinary) => this._onMessage(data, isBinary));
     ws.on('close', () => {
+      this._failPendingPlaybackMarkers('websocket_closed');
       audioDebugLog('[AUDIO-DEBUG] WebSocket CLOSED for ' + callUuid + '. Total messages: ' + this._messageCount + ', binary: ' + this._binaryCount);
       this.emit('close');
     });
     ws.on('error', (err) => {
+      this._failPendingPlaybackMarkers('websocket_error');
       audioDebugLog('[AUDIO-DEBUG] WebSocket ERROR for ' + callUuid + ': ' + err.message);
       this.emit('error', err);
     });
@@ -94,8 +264,12 @@ class AudioForkSession extends EventEmitter {
 
   sendAudio(audio, { sampleRate = 24000, itemId = null } = {}) {
     const buffer = Buffer.from(audio || []);
-    if (buffer.length === 0 || this.ws.readyState !== WebSocket.OPEN) return false;
-    if (Number(this.ws.bufferedAmount || 0) > 2 * 1024 * 1024) {
+    if (buffer.length === 0) return false;
+    if (this.ws.readyState !== WebSocket.OPEN) {
+      this.emit('playout_unavailable', { itemId, reason: 'websocket_not_open' });
+      return false;
+    }
+    if (Number(this.ws.bufferedAmount || 0) > MAX_BUFFERED_PLAYOUT_BYTES) {
       this.emit('playout_backpressure', { bufferedAmount: this.ws.bufferedAmount });
       return false;
     }
@@ -108,6 +282,7 @@ class AudioForkSession extends EventEmitter {
         startedAt: Date.now(),
         sourceComplete: false,
       };
+      this._lastPlaybackOutcome = null;
     }
     this._playout.bytes += buffer.length;
 
@@ -126,6 +301,59 @@ class AudioForkSession extends EventEmitter {
     return true;
   }
 
+  sendPlaybackMarker(name, { itemId = null } = {}) {
+    const markerName = String(name || '').trim();
+    const bufferedAmount = Number(this.ws.bufferedAmount || 0);
+    const valid = /^[A-Za-z0-9:_.-]{1,180}$/.test(markerName);
+    const preconditionsMet = valid && itemId && this.ws.readyState === WebSocket.OPEN &&
+      bufferedAmount <= MAX_BUFFERED_PLAYOUT_BYTES &&
+      this._pendingPlaybackMarkers.size < MAX_PENDING_PLAYOUT_MARKERS &&
+      this._playout?.itemId === itemId && this._playout.sourceComplete;
+    if (!preconditionsMet) {
+      this.emit('playout_marker_failed', {
+        name: markerName || null,
+        itemId,
+        reason: this.ws.readyState !== WebSocket.OPEN
+          ? 'websocket_not_open'
+          : (bufferedAmount > MAX_BUFFERED_PLAYOUT_BYTES
+            ? 'websocket_backpressure'
+            : 'marker_precondition_failed'),
+      });
+      return false;
+    }
+    this._pendingPlaybackMarkers.set(markerName, {
+      name: markerName,
+      itemId,
+      queuedAt: new Date().toISOString(),
+    });
+    try {
+      this.ws.send(JSON.stringify({ type: 'mark', data: { name: markerName } }));
+    } catch {
+      this._pendingPlaybackMarkers.delete(markerName);
+      this.emit('playout_marker_failed', {
+        name: markerName,
+        itemId,
+        reason: 'marker_send_failed',
+      });
+      return false;
+    }
+    return true;
+  }
+
+  clearPlaybackMarkers(reason = 'playback_cleared') {
+    const markers = [...this._pendingPlaybackMarkers.values()];
+    this._pendingPlaybackMarkers.clear();
+    if (markers.length > 0 && this.ws.readyState === WebSocket.OPEN) {
+      try {
+        this.ws.send(JSON.stringify({ type: 'clearMarks' }));
+      } catch {
+        // Local authorization already fails closed when the queue is cleared.
+      }
+    }
+    if (markers.length > 0) this.emit('playout_markers_cleared', { reason, markers });
+    return markers.length;
+  }
+
   markPlaybackComplete(itemId = null) {
     if (!this._playout) return false;
     if (itemId && this._playout.itemId && itemId !== this._playout.itemId) return false;
@@ -133,16 +361,85 @@ class AudioForkSession extends EventEmitter {
     return true;
   }
 
+  isPlaybackActive() {
+    return Boolean(this.getPlaybackStatus()?.active);
+  }
+
+  getPlaybackStatus() {
+    if (!this._playout) return this._lastPlaybackOutcome;
+    const totalAudioMs = (this._playout.bytes / 2 / this._playout.sampleRate) * 1000;
+    const elapsedMs = Math.max(0, Date.now() - this._playout.startedAt);
+    const remainingMs = this._playout.sourceComplete
+      ? Math.max(0, totalAudioMs + 100 - elapsedMs)
+      : null;
+    const authorizationMarkerPending = [...this._pendingPlaybackMarkers.values()]
+      .some((marker) => marker.itemId === this._playout.itemId);
+    if (this._playout.sourceComplete && remainingMs === 0 && !authorizationMarkerPending) {
+      this._lastPlaybackOutcome = {
+        itemId: this._playout.itemId,
+        active: false,
+        completed: true,
+        interrupted: false,
+        totalAudioMs,
+        elapsedMs,
+        remainingMs: 0,
+      };
+      this._playout = null;
+      return this._lastPlaybackOutcome;
+    }
+    return {
+      itemId: this._playout.itemId,
+      active: true,
+      completed: false,
+      interrupted: false,
+      sourceComplete: this._playout.sourceComplete,
+      authorizationMarkerPending,
+      totalAudioMs,
+      elapsedMs,
+      remainingMs,
+    };
+  }
+
+  hasPlaybackCompleted(itemId = null) {
+    const status = this.getPlaybackStatus();
+    return Boolean(status?.completed && (!itemId || !status.itemId || status.itemId === itemId));
+  }
+
   stopPlayback() {
     const playout = this._playout;
-    if (!playout) return null;
+    if (!playout) {
+      this.clearPlaybackMarkers('playback_interrupted');
+      return null;
+    }
     const totalAudioMs = (playout.bytes / 2 / playout.sampleRate) * 1000;
     const elapsedMs = Math.max(0, Date.now() - playout.startedAt);
     this._playout = null;
-    if (playout.sourceComplete && elapsedMs >= totalAudioMs + 100) return null;
+    if (playout.sourceComplete && elapsedMs >= totalAudioMs + 100) {
+      this._lastPlaybackOutcome = {
+        itemId: playout.itemId,
+        active: false,
+        completed: true,
+        interrupted: false,
+        totalAudioMs,
+        elapsedMs,
+        remainingMs: 0,
+      };
+      this.clearPlaybackMarkers('playback_stopped');
+      return null;
+    }
+    this._lastPlaybackOutcome = {
+      itemId: playout.itemId,
+      active: false,
+      completed: false,
+      interrupted: true,
+      totalAudioMs,
+      elapsedMs,
+      remainingMs: Math.max(0, totalAudioMs + 100 - elapsedMs),
+    };
     if (this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify({ type: 'killAudio' }));
     }
+    this.clearPlaybackMarkers('playback_interrupted');
     return {
       itemId: playout.itemId,
       audioEndMs: Math.min(totalAudioMs, elapsedMs),
@@ -153,7 +450,9 @@ class AudioForkSession extends EventEmitter {
 
   close(code = 1000, reason = 'call ended') {
     this.captureEnabled = false;
+    this.clearPlaybackMarkers('audio_session_closed');
     this._playout = null;
+    this._lastPlaybackOutcome = null;
     this._resetUtterance();
     if (typeof this.ws?.close !== 'function') return false;
     if (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING) {
@@ -273,16 +572,25 @@ class AudioForkSession extends EventEmitter {
 
     if (typeof data === 'string' || isBinary === false) {
       const text = Buffer.isBuffer(data) ? data.toString('utf8') : data;
-      audioDebugLog('[AUDIO-DEBUG] Received STRING message #' + this._messageCount + ': ' + text.substring(0, 200));
       try {
         const meta = JSON.parse(text);
+        audioDebugLog(
+          '[AUDIO-DEBUG] Received metadata message #' + this._messageCount +
+          ', type=' + String(meta?.type || 'unknown').slice(0, 40) +
+          ', event=' + String(meta?.data?.event || meta?.event || 'none').slice(0, 40)
+        );
         this.emit('metadata', meta);
+        this._handlePlayoutMetadata(meta);
         if (meta && meta.sampleRate && Number.isFinite(Number(meta.sampleRate))) {
           this.sampleRate = Number(meta.sampleRate);
           this._preRollMaxBytes = Math.floor((this.sampleRate * 0.2) * 2);
           audioDebugLog('[AUDIO-DEBUG] Updated sampleRate to ' + this.sampleRate);
         }
       } catch {
+        audioDebugLog(
+          '[AUDIO-DEBUG] Received non-JSON metadata message #' + this._messageCount +
+          ', bytes=' + Buffer.byteLength(String(text || ''), 'utf8')
+        );
         this.emit('metadata', text);
       }
       return;
@@ -335,6 +643,50 @@ class AudioForkSession extends EventEmitter {
     if (this._silenceMs >= this.endSilenceMs) return this._finalizeUtterance('end_silence');
   }
 
+  _handlePlayoutMetadata(meta) {
+    if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return false;
+    const type = String(meta.type || '').trim().toLowerCase();
+    const event = String(meta.data?.event || meta.event || '').trim().toLowerCase();
+    if (type && type !== 'mark') return false;
+    if (event === 'playout') {
+      const name = String(meta.name || meta.data?.name || '').trim();
+      const marker = this._pendingPlaybackMarkers.get(name);
+      if (!marker) {
+        this.emit('playout_marker_unmatched', { name: name || null });
+        return false;
+      }
+      this._pendingPlaybackMarkers.delete(name);
+      const acknowledgedAt = new Date().toISOString();
+      this._lastPlaybackOutcome = {
+        itemId: marker.itemId,
+        active: false,
+        completed: true,
+        interrupted: false,
+        markerName: name,
+        acknowledgedAt,
+        remainingMs: 0,
+      };
+      if (this._playout?.itemId === marker.itemId) this._playout = null;
+      this.emit('playout_marker', { ...marker, acknowledgedAt });
+      return true;
+    }
+    if (event === 'cleared') {
+      const markers = [...this._pendingPlaybackMarkers.values()];
+      this._pendingPlaybackMarkers.clear();
+      if (markers.length > 0) {
+        this.emit('playout_markers_cleared', { reason: 'module_cleared', markers });
+      }
+      return true;
+    }
+    return false;
+  }
+
+  _failPendingPlaybackMarkers(reason) {
+    const markers = [...this._pendingPlaybackMarkers.values()];
+    this._pendingPlaybackMarkers.clear();
+    if (markers.length > 0) this.emit('playout_markers_cleared', { reason, markers });
+  }
+
   waitForUtterance({ timeoutMs = 30000, logTimeout = true } = {}) {
     audioDebugLog('[AUDIO-DEBUG] waitForUtterance called, timeoutMs=' + timeoutMs + ', captureEnabled=' + this.captureEnabled);
     return new Promise((resolve, reject) => {
@@ -375,62 +727,35 @@ class AudioForkSession extends EventEmitter {
 }
 
 class AudioForkServer extends EventEmitter {
-  constructor({ port = 3001, host = '0.0.0.0' } = {}) {
+  constructor(options = {}) {
     super();
-    this.port = port;
-    this.host = host;
+    assertAudioForkDebugSafe(process.env.DEBUG);
+    const normalized = normalizeAudioForkServerOptions(options);
+    this.port = normalized.port;
+    this.host = normalized.host;
+    this.connectHost = normalized.connectHost;
+    this.allowNonLoopback = normalized.allowNonLoopback;
+    this.allowedPeers = new Set(normalized.allowedPeers);
     this.wss = null;
-    this._pending = [];
+    this._pendingByCall = new Map();
     this._sessions = new Map();
   }
 
   start() {
     if (this.wss) return;
-    this.wss = new WebSocket.Server({ port: this.port, host: this.host });
+    this.wss = new WebSocket.Server({
+      port: this.port,
+      host: this.host,
+      maxPayload: MAX_AUDIO_FORK_FRAME_BYTES,
+    });
 
     this.wss.on('connection', (ws, req) => {
-      const url = (req && req.url) || '/';
-      audioDebugLog('[AUDIO-DEBUG] WebSocket connection received, URL: ' + url);
-
-      const path = url.split('?')[0] || '/';
-      const candidate = decodeURIComponent(path).replace(/^\/+/, '').trim();
-
-      const callUuidFromUrl = candidate.length ? candidate.split('/')[0] : '';
-      const callUuid = callUuidFromUrl || null;
-
-      audioDebugLog('[AUDIO-DEBUG] Extracted callUuid from URL: ' + callUuid);
-
-      if (callUuid) {
-        const idx = this._pending.findIndex((p) => p.callUuid === callUuid);
-        const pending = idx >= 0 ? this._pending.splice(idx, 1)[0] : null;
-        if (pending) {
-          clearTimeout(pending.timeout);
-          audioDebugLog('[AUDIO-DEBUG] Found pending expectation for ' + callUuid);
-        } else {
-          audioDebugLog('[AUDIO-DEBUG] No pending expectation for ' + callUuid + ', creating session anyway');
-        }
-
-        const session = new AudioForkSession({
-          ws,
-          callUuid,
-          ...(pending?.sessionOptions || {}),
-        });
-        this._sessions.set(callUuid, session);
-        session.on('close', () => this._sessions.delete(callUuid));
-        session.on('error', () => this._sessions.delete(callUuid));
-
-        this.emit('session', session);
-        if (pending) pending.resolve(session);
-        return;
-      }
-
-      const pending = this._pending.shift();
+      const pending = this._consumeAuthorizedExpectation(req);
       if (!pending) {
-        audioDebugLog('[AUDIO-DEBUG] No pending session and no callUuid in URL, closing connection');
-        ws.close(1011, 'No pending audio session');
+        audioDebugLog('[AUDIO-DEBUG] Rejected unauthorized audio WebSocket attachment');
+        ws.close(1008, 'Unauthorized audio session');
         return;
       }
-
       clearTimeout(pending.timeout);
       const session = new AudioForkSession({
         ws,
@@ -438,26 +763,37 @@ class AudioForkServer extends EventEmitter {
         ...(pending.sessionOptions || {}),
       });
       this._sessions.set(pending.callUuid, session);
-      session.on('close', () => this._sessions.delete(pending.callUuid));
-      session.on('error', () => this._sessions.delete(pending.callUuid));
+      const removeExactSession = () => {
+        if (this._sessions.get(pending.callUuid) === session) {
+          this._sessions.delete(pending.callUuid);
+        }
+      };
+      session.on('close', removeExactSession);
+      session.on('error', removeExactSession);
 
       this.emit('session', session);
       pending.resolve(session);
     });
 
     this.wss.on('listening', () => {
-      audioDebugLog('[AUDIO-DEBUG] WebSocket server listening on ' + this.host + ':' + this.port);
-      this.emit('listening', { host: this.host, port: this.port });
+      const actualPort = this._listeningPort();
+      audioDebugLog('[AUDIO-DEBUG] WebSocket server listening on ' + this.host + ':' + actualPort);
+      this.emit('listening', { host: this.host, port: actualPort });
     });
     this.wss.on('error', (err) => this.emit('error', err));
   }
 
   stop() {
     if (!this.wss) return;
-    for (const pending of this._pending.splice(0)) {
+    for (const pending of this._pendingByCall.values()) {
       clearTimeout(pending.timeout);
-      pending.reject(new Error(`Audio fork server stopped before call ${pending.callUuid} connected`));
+      pending.tokenHash.fill(0);
+      pending.reject(createAudioForkError(
+        'AUDIO_FORK_SERVER_STOPPED',
+        `Audio fork server stopped before call ${pending.callUuid} connected`
+      ));
     }
+    this._pendingByCall.clear();
     for (const session of this._sessions.values()) session.close(1001, 'audio fork server stopping');
     this._sessions.clear();
     this.wss.close();
@@ -468,14 +804,18 @@ class AudioForkServer extends EventEmitter {
    * Cancel a pending session expectation (call this when a call ends before session connects)
    */
   cancelExpectation(callUuid) {
-    const idx = this._pending.findIndex((p) => p.callUuid === callUuid);
-    if (idx >= 0) {
-      const pending = this._pending.splice(idx, 1)[0];
-      clearTimeout(pending.timeout);
-      audioDebugLog('[AUDIO-DEBUG] Cancelled pending expectation for ' + callUuid);
-      return true;
-    }
-    return false;
+    const normalizedCallUuid = this._normalizeCallUuid(callUuid);
+    const pending = this._pendingByCall.get(normalizedCallUuid);
+    if (!pending) return false;
+    this._pendingByCall.delete(normalizedCallUuid);
+    clearTimeout(pending.timeout);
+    pending.tokenHash.fill(0);
+    pending.reject(createAudioForkError(
+      'AUDIO_FORK_EXPECTATION_CANCELED',
+      `Audio fork expectation canceled for call ${normalizedCallUuid}`
+    ));
+    audioDebugLog('[AUDIO-DEBUG] Cancelled pending expectation for ' + normalizedCallUuid);
+    return true;
   }
 
   expectSession(callUuid, {
@@ -483,34 +823,145 @@ class AudioForkServer extends EventEmitter {
     sampleRate = 16000,
     bidirectionalStreaming = false,
   } = {}) {
-    audioDebugLog('[AUDIO-DEBUG] expectSession called for ' + callUuid + ', timeoutMs=' + timeoutMs);
-    return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        const idx = this._pending.findIndex((p) => p.callUuid === callUuid);
-        if (idx >= 0) this._pending.splice(idx, 1);
-        audioDebugLog('[AUDIO-DEBUG] expectSession TIMEOUT for ' + callUuid + ' (this is handled, not a crash)');
-        reject(new Error('Timed out waiting for WebSocket audio session (' + timeoutMs + 'ms) for call ' + callUuid));
-      }, timeoutMs);
+    if (!this.wss) {
+      throw createAudioForkError('AUDIO_FORK_NOT_LISTENING', 'Audio fork server is not listening');
+    }
+    const normalizedCallUuid = this._normalizeCallUuid(callUuid);
+    const normalizedTimeoutMs = Number(timeoutMs);
+    if (!Number.isInteger(normalizedTimeoutMs) || normalizedTimeoutMs < 1 ||
+        normalizedTimeoutMs > MAX_AUDIO_EXPECTATION_MS) {
+      throw createAudioForkError(
+        'AUDIO_FORK_TIMEOUT_INVALID',
+        `Audio fork expectation timeout must be between 1 and ${MAX_AUDIO_EXPECTATION_MS} milliseconds`
+      );
+    }
+    if (this._pendingByCall.has(normalizedCallUuid) || this._sessions.has(normalizedCallUuid)) {
+      throw createAudioForkError(
+        'AUDIO_FORK_EXPECTATION_EXISTS',
+        `An audio fork expectation or session already exists for call ${normalizedCallUuid}`
+      );
+    }
 
-      this._pending.push({
-        callUuid,
+    const attachToken = crypto.randomBytes(AUDIO_ATTACH_TOKEN_BYTES).toString('base64url');
+    const tokenHash = crypto.createHash('sha256').update(attachToken).digest();
+    const connectionUrl = this._buildConnectionUrl(normalizedCallUuid, attachToken);
+    let pending;
+    const session = new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        if (this._pendingByCall.get(normalizedCallUuid) !== pending) return;
+        this._pendingByCall.delete(normalizedCallUuid);
+        pending.tokenHash.fill(0);
+        audioDebugLog('[AUDIO-DEBUG] expectSession TIMEOUT for ' + normalizedCallUuid + ' (handled)');
+        reject(createAudioForkError(
+          'AUDIO_FORK_EXPECTATION_TIMEOUT',
+          `Timed out waiting for WebSocket audio session (${normalizedTimeoutMs}ms) for call ${normalizedCallUuid}`
+        ));
+      }, normalizedTimeoutMs);
+
+      pending = {
+        callUuid: normalizedCallUuid,
         resolve,
         reject,
         timeout,
+        tokenHash,
+        expiresAt: Date.now() + normalizedTimeoutMs,
         sessionOptions: { sampleRate, bidirectionalStreaming },
-      });
+      };
     });
+    // The FreeSWITCH ESL start call and the WebSocket attachment race. Mark the
+    // original promise observed immediately so an expectation timeout, cancel,
+    // or shutdown cannot become a process-wide unhandled rejection while the
+    // caller is still awaiting ESL. Callers still await this original promise
+    // and receive its rejection unchanged.
+    void session.catch(() => {});
+    this._pendingByCall.set(normalizedCallUuid, pending);
+    audioDebugLog(
+      '[AUDIO-DEBUG] expectSession registered for ' + normalizedCallUuid +
+      ', timeoutMs=' + normalizedTimeoutMs
+    );
+
+    const expectation = { session };
+    // The one-time URL is intentionally non-enumerable so routine object logging
+    // cannot expose the attach credential. Callers pass it directly to
+    // FreeSWITCH and must never persist or log it.
+    Object.defineProperty(expectation, 'connectionUrl', {
+      value: connectionUrl,
+      enumerable: false,
+      writable: false,
+      configurable: false,
+    });
+    return Object.freeze(expectation);
   }
 
   getSession(callUuid) {
     return this._sessions.get(callUuid);
   }
+
+  _normalizeCallUuid(callUuid) {
+    const value = String(callUuid || '').trim();
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:@+-]{0,255}$/.test(value)) {
+      throw createAudioForkError('AUDIO_FORK_CALL_ID_INVALID', 'Audio fork call ID is invalid');
+    }
+    return value;
+  }
+
+  _listeningPort() {
+    const address = this.wss?.address?.();
+    return Number(address?.port || this.port);
+  }
+
+  _buildConnectionUrl(callUuid, attachToken) {
+    const host = net.isIP(this.connectHost) === 6 ? `[${this.connectHost}]` : this.connectHost;
+    return `ws://${host}:${this._listeningPort()}/v1/audio/` +
+      `${encodeURIComponent(callUuid)}/${attachToken}`;
+  }
+
+  _parseAttachRequest(urlValue) {
+    try {
+      const parsed = new URL(String(urlValue || '/'), 'ws://audio-fork.invalid');
+      if (parsed.search || parsed.hash) return null;
+      const parts = parsed.pathname.split('/');
+      if (parts.length !== 5 || parts[0] !== '' || parts[1] !== 'v1' || parts[2] !== 'audio') {
+        return null;
+      }
+      const callUuid = this._normalizeCallUuid(decodeURIComponent(parts[3]));
+      const attachToken = parts[4];
+      if (!AUDIO_ATTACH_TOKEN_RE.test(attachToken)) return null;
+      return { callUuid, attachToken };
+    } catch {
+      return null;
+    }
+  }
+
+  _consumeAuthorizedExpectation(req) {
+    const remoteAddress = normalizeIpAddress(req?.socket?.remoteAddress);
+    if (!remoteAddress || !this.allowedPeers.has(remoteAddress)) return null;
+    const candidate = this._parseAttachRequest(req?.url);
+    if (!candidate) return null;
+    const pending = this._pendingByCall.get(candidate.callUuid);
+    if (!pending || this._sessions.has(candidate.callUuid) || pending.expiresAt < Date.now()) {
+      return null;
+    }
+    const candidateHash = crypto.createHash('sha256').update(candidate.attachToken).digest();
+    const matches = candidateHash.length === pending.tokenHash.length &&
+      crypto.timingSafeEqual(candidateHash, pending.tokenHash);
+    candidateHash.fill(0);
+    if (!matches) return null;
+
+    // JavaScript runs each connection callback to completion. Removing the
+    // pending row before creating a session makes this credential one-use even
+    // if two upgrade requests race in the same event-loop turn.
+    this._pendingByCall.delete(candidate.callUuid);
+    pending.tokenHash.fill(0);
+    return pending;
+  }
 }
 
-// Add global unhandled rejection handler to prevent crashes
-// This is a safety net - the actual fix is proper cleanup in conversation-loop.js
-process.on('unhandledRejection', (reason, promise) => {
-  audioDebugLog('[AUDIO-DEBUG] Unhandled Rejection (caught, not crashing):', reason);
-});
-
-module.exports = { AudioForkServer, AudioForkSession };
+module.exports = {
+  assertAudioForkDebugSafe,
+  AudioForkServer,
+  AudioForkSession,
+  isLoopbackAddress,
+  normalizeAudioForkServerOptions,
+  redactAudioForkSecrets,
+};

@@ -1,0 +1,56 @@
+#!/bin/sh
+set -eu
+
+if [ "$(id -un)" != "teleagent-session-broker" ]; then
+  echo "provider pane entry requires the session-broker identity" >&2
+  exit 77
+fi
+
+client=/usr/local/libexec/teleagent-provider-supervisor-client
+owner_mode=$(/usr/bin/stat -Lc '%u:%a' "$client")
+case "$owner_mode" in
+  0:755|0:555) ;;
+  *) echo "provider supervisor client ownership is unsafe" >&2; exit 77 ;;
+esac
+
+creation_id=
+provider=
+workspace=
+session_id=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --creation-id) [ "$#" -ge 2 ] || exit 77; creation_id=$2; shift 2 ;;
+    --provider) [ "$#" -ge 2 ] || exit 77; provider=$2; shift 2 ;;
+    --workspace) [ "$#" -ge 2 ] || exit 77; workspace=$2; shift 2 ;;
+    --session-id) [ "$#" -ge 2 ] || exit 77; session_id=$2; shift 2 ;;
+    *) echo "unknown pane entry argument" >&2; exit 77 ;;
+  esac
+done
+
+case "$creation_id" in session_[A-Za-z0-9][A-Za-z0-9]*) ;; *) exit 77 ;; esac
+case "$provider" in claude|codex) ;; *) exit 77 ;; esac
+case "$workspace" in /srv/teleagent-agent-workspaces/*) ;; *) exit 77 ;; esac
+case "$workspace" in *[!A-Za-z0-9_./-]*) exit 77 ;; esac
+case "$session_id" in
+  ????????-????-????-????-????????????) ;;
+  *) exit 77 ;;
+esac
+
+umask 077
+status_dir=/run/teleagent-worker-session/pane-status
+expected_status_owner="$(id -u):$(id -g):700"
+if [ ! -d "$status_dir" ] || [ -L "$status_dir" ] || \
+   [ "$(/usr/bin/stat -Lc '%u:%g:%a' "$status_dir")" != "$expected_status_owner" ]; then
+  echo "provider acceptance status boundary is unsafe" >&2
+  exit 77
+fi
+status_file="$status_dir/$creation_id.json"
+if [ -e "$status_file" ] || [ -L "$status_file" ]; then
+  echo "provider acceptance status already exists" >&2
+  exit 77
+fi
+exec 3>"$status_file"
+exec "$client" \
+  --provider "$provider" --workspace "$workspace" --mode interactive \
+  --access-mode mutating \
+  --task-id "$creation_id" --session-id "$session_id"

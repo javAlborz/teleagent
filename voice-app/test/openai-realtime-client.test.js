@@ -6,6 +6,7 @@ const test = require('node:test');
 const { setImmediate } = require('node:timers');
 const {
   OpenAIRealtimeClient,
+  buildRealtimeRouterTool,
   buildRealtimeTools,
   getRealtimeApiKey,
 } = require('../lib/openai-realtime-client');
@@ -64,6 +65,11 @@ async function createConnectedClient(overrides = {}) {
   return client;
 }
 
+function spokenWords(count, { period = false } = {}) {
+  const text = Array.from({ length: count }, (_, index) => `word${index + 1}`).join(' ');
+  return period ? `${text}.` : text;
+}
+
 test('Realtime session uses 24 kHz PCM, manual semantic VAD, tuned transcription, and bounded tools', async (t) => {
   const client = await createConnectedClient();
   t.after(() => client.close());
@@ -71,6 +77,7 @@ test('Realtime session uses 24 kHz PCM, manual semantic VAD, tuned transcription
 
   assert.equal(update.session.model, 'gpt-realtime-2.1-mini');
   assert.equal(update.session.audio.input.format.rate, 24000);
+  assert.deepEqual(update.session.audio.input.noise_reduction, { type: 'near_field' });
   assert.deepEqual(update.session.audio.input.turn_detection, {
     type: 'semantic_vad',
     eagerness: 'low',
@@ -88,31 +95,16 @@ test('Realtime session uses 24 kHz PCM, manual semantic VAD, tuned transcription
     token_limits: { post_instructions: 16000 },
   });
   const toolNames = update.session.tools.map((tool) => tool.name);
-  assert.deepEqual(toolNames.slice(0, 6), [
-    'send_agent_message',
-    'send_agent_session_message',
-    'handoff_agent_session',
-    'get_agent_task',
-    'list_agent_tasks',
-    'list_agent_sessions',
-  ]);
-  assert.equal(toolNames.includes('cancel_agent_task'), false);
-  assert.ok(toolNames.includes('get_voice_history'));
-  assert.ok(toolNames.includes('read_text_file'));
-  assert.ok(toolNames.includes('inspect_tmux_pane'));
-  assert.ok(toolNames.includes('inspect_agent_session_history'));
-  assert.ok(toolNames.includes('get_latest_agent_session_message'));
-  assert.ok(toolNames.includes('list_runtime_sessions'));
-  assert.ok(toolNames.includes('continue_agent_session_history'));
-  assert.ok(toolNames.includes('get_weather'));
-  assert.ok(toolNames.includes('end_call'));
-  assert.equal(
-    update.session.tools.find((tool) => tool.name === 'get_voice_history').parameters.properties.limit.maximum,
-    50
-  );
-  assert.ok(
-    update.session.tools.find((tool) => tool.name === 'list_tmux_sessions').parameters.properties.session
-  );
+  assert.deepEqual(toolNames, ['route_turn']);
+  assert.equal(update.session.tool_choice, 'none');
+  const actions = update.session.tools[0].parameters.properties.action.enum;
+  assert.ok(actions.includes('respond'));
+  assert.ok(actions.includes('send_agent_message'));
+  assert.ok(actions.includes('send_agent_session_message'));
+  assert.ok(actions.includes('get_voice_history'));
+  assert.ok(actions.includes('get_agent_activity'));
+  assert.ok(actions.includes('end_call'));
+  assert.equal(actions.includes('cancel_agent_task'), false);
   assert.equal(update.session.tools.some((tool) => tool.name.includes('shell')), false);
   assert.equal(client.ws.options.headers.Authorization, 'Bearer test-key');
 });
@@ -135,10 +127,26 @@ test('audio input and output use base64 Realtime events', async (t) => {
   const [output] = await audioEvent;
   assert.deepEqual(output.audio, input);
   assert.equal(output.itemId, 'item-1');
+
+  const audioDone = once(client, 'audio.done');
+  client.ws.serverSend({
+    type: 'response.output_audio.done',
+    item_id: 'item-1',
+    response_id: 'response-1',
+  });
+  const [done] = await audioDone;
+  assert.equal(done.item_id, 'item-1');
+  assert.equal(done.response_id, 'response-1');
 });
 
-test('tool-capable user responses buffer audio until the response is known to be speech-only', async (t) => {
-  const client = await createConnectedClient();
+test('caller turns route silently out of band before a speech-only response streams', async (t) => {
+  const calls = [];
+  const client = await createConnectedClient({
+    toolHandler: async (name, args) => {
+      calls.push({ name, args });
+      return { success: true };
+    },
+  });
   t.after(() => client.close());
   const audio = [];
   const transcripts = [];
@@ -146,28 +154,53 @@ test('tool-capable user responses buffer audio until the response is known to be
   client.on('assistant_transcript', (text) => transcripts.push(text));
 
   client.queueUserResponse();
-  client.ws.serverSend({ type: 'response.created', response: { id: 'response-buffered' } });
-  client.ws.serverSend({
-    type: 'response.output_audio.delta',
-    response_id: 'response-buffered',
-    item_id: 'item-buffered',
-    delta: Buffer.from([1, 2, 3]).toString('base64'),
-  });
-  client.ws.serverSend({
-    type: 'response.output_audio_transcript.done',
-    response_id: 'response-buffered',
-    item_id: 'item-buffered',
-    transcript: 'Direct answer.',
-  });
-  assert.equal(audio.length, 0);
-  assert.equal(transcripts.length, 0);
+  const routeCreate = client.ws.sentEvents().at(-1);
+  assert.equal(routeCreate.type, 'response.create');
+  assert.equal(routeCreate.response.conversation, 'none');
+  assert.deepEqual(routeCreate.response.output_modalities, ['text']);
+  assert.deepEqual(routeCreate.response.tool_choice, { type: 'function', name: 'route_turn' });
 
+  client.ws.serverSend({ type: 'response.created', response: { id: 'response-route' } });
   client.ws.serverSend({
     type: 'response.done',
-    response: { id: 'response-buffered', status: 'completed', output: [] },
+    response: {
+      id: 'response-route',
+      status: 'completed',
+      output: [{
+        type: 'function_call',
+        name: 'route_turn',
+        call_id: 'route-call-1',
+        arguments: JSON.stringify({
+          action: 'respond',
+          response_instruction: 'Answer the caller directly.',
+        }),
+      }],
+    },
   });
   await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(calls, []);
+  assert.equal(
+    client.ws.sentEvents().some((event) => event.item?.call_id === 'route-call-1'),
+    false
+  );
+  const speechCreate = client.ws.sentEvents().at(-1);
+  assert.equal(speechCreate.response.tool_choice, 'none');
+  assert.deepEqual(speechCreate.response.output_modalities, ['audio']);
+
+  client.ws.serverSend({ type: 'response.created', response: { id: 'response-spoken' } });
+  client.ws.serverSend({
+    type: 'response.output_audio.delta',
+    response_id: 'response-spoken',
+    item_id: 'item-spoken',
+    delta: Buffer.from([1, 2, 3]).toString('base64'),
+  });
   assert.deepEqual(audio.map((event) => [...event.audio]), [[1, 2, 3]]);
+  client.ws.serverSend({
+    type: 'response.output_audio_transcript.done',
+    response_id: 'response-spoken',
+    item_id: 'item-spoken',
+    transcript: 'Direct answer.',
+  });
   assert.deepEqual(transcripts, ['Direct answer.']);
 });
 
@@ -180,7 +213,7 @@ test('spoken preambles attached to tool selection are suppressed before phone pl
   client.on('assistant_transcript', (text) => transcripts.push(text));
   const suppressed = once(client, 'response.output_suppressed');
 
-  client.queueUserResponse();
+  client.requestResponse(undefined, { purpose: 'legacy_tool_turn' });
   client.ws.serverSend({ type: 'response.created', response: { id: 'response-tool-preamble' } });
   client.ws.serverSend({
     type: 'response.output_audio.delta',
@@ -213,7 +246,7 @@ test('spoken preambles attached to tool selection are suppressed before phone pl
 });
 
 test('a limiter-cancelled response releases already-generated audio instead of discarding playout', async (t) => {
-  const client = await createConnectedClient({ maxSpokenWords: 10, hardMaxSpokenWords: 20 });
+  const client = await createConnectedClient({ maxSpokenWords: 35, hardMaxSpokenWords: 120 });
   t.after(() => client.close());
   const audio = [];
   client.on('audio', (event) => audio.push(event));
@@ -230,7 +263,7 @@ test('a limiter-cancelled response releases already-generated audio instead of d
     type: 'response.output_audio_transcript.delta',
     response_id: 'response-limiter-drain',
     item_id: 'item-limiter-drain',
-    delta: 'one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty twenty-one.',
+    delta: spokenWords(121, { period: true }),
   });
   client.ws.serverSend({
     type: 'response.output_audio_transcript.done',
@@ -308,6 +341,10 @@ test('speech boundary events track caller state and support client-side playout 
   assert.equal(truncate.item_id, 'item-audio');
   assert.equal(truncate.audio_end_ms, 812);
 
+  assert.equal(client.deleteConversationItem('item-noise'), true);
+  const deleted = client.ws.sentEvents().find((event) => event.type === 'conversation.item.delete');
+  assert.equal(deleted.item_id, 'item-noise');
+
   const speechStopped = once(client, 'speech_stopped');
   client.ws.serverSend({ type: 'input_audio_buffer.speech_stopped', audio_end_ms: 920 });
   await speechStopped;
@@ -353,6 +390,10 @@ test('tool schema exposes only the supplied profile enum', () => {
     tools.find((tool) => tool.name === 'remember_preference').parameters.properties.value,
     { type: 'string' }
   );
+  const router = buildRealtimeRouterTool(['claude-opus', 'codex-sol']);
+  assert.ok(router.parameters.properties.action.enum.includes('respond'));
+  assert.ok(router.parameters.properties.action.enum.includes('codex-sol') === false);
+  assert.ok(router.parameters.properties.action.enum.includes('send_agent_message'));
 });
 
 test('accepted asynchronous jobs return tool output without a duplicate spoken response', async (t) => {
@@ -428,8 +469,8 @@ test('keyed notices replace stale status and flush after the active response', a
   );
 });
 
-test('spoken output waits for a sentence boundary after the hard limit', async (t) => {
-  const client = await createConnectedClient({ maxSpokenWords: 10, hardMaxSpokenWords: 20 });
+test('ordinary long sentences are not clipped until the absolute safety limit', async (t) => {
+  const client = await createConnectedClient({ maxSpokenWords: 35, hardMaxSpokenWords: 120 });
   t.after(() => client.close());
   client.requestResponse();
   client.ws.serverSend({ type: 'response.created', response: { id: 'response-long' } });
@@ -438,24 +479,24 @@ test('spoken output waits for a sentence boundary after the hard limit', async (
     type: 'response.output_audio_transcript.delta',
     response_id: 'response-long',
     item_id: 'item-long',
-    delta: 'one two three four five six seven eight nine ten eleven',
+    delta: spokenWords(100, { period: true }),
   });
   assert.equal(client.ws.sentEvents().some((entry) => entry.type === 'response.cancel'), false);
   client.ws.serverSend({
     type: 'response.output_audio_transcript.delta',
     response_id: 'response-long',
     item_id: 'item-long',
-    delta: ' twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty twenty-one.',
+    delta: ` ${spokenWords(21, { period: true })}`,
   });
   const [event] = await clipped;
-  assert.equal(event.softLimit, 10);
-  assert.equal(event.hardLimit, 20);
-  assert.equal(event.mode, 'hard_sentence_boundary');
+  assert.equal(event.softLimit, 35);
+  assert.equal(event.hardLimit, 120);
+  assert.equal(event.mode, 'absolute_hard_limit');
   assert.ok(client.ws.sentEvents().some((entry) => entry.type === 'response.cancel'));
 });
 
 test('spoken output retains a higher hard safety limit for punctuation-free runaway output', async (t) => {
-  const client = await createConnectedClient({ maxSpokenWords: 10, hardMaxSpokenWords: 14 });
+  const client = await createConnectedClient({ maxSpokenWords: 35, hardMaxSpokenWords: 120 });
   t.after(() => client.close());
   client.requestResponse();
   client.ws.serverSend({ type: 'response.created', response: { id: 'response-runaway' } });
@@ -464,11 +505,80 @@ test('spoken output retains a higher hard safety limit for punctuation-free runa
     type: 'response.output_audio_transcript.delta',
     response_id: 'response-runaway',
     item_id: 'item-runaway',
-    delta: 'one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty twenty-one twenty-two twenty-three twenty-four twenty-five twenty-six twenty-seven twenty-eight twenty-nine',
+    delta: spokenWords(121),
   });
   const [event] = await clipped;
   assert.equal(event.mode, 'absolute_hard_limit');
   assert.ok(client.ws.sentEvents().some((entry) => entry.type === 'response.cancel'));
+});
+
+test('cancelled completion notices are retried and acknowledged only after delivery', async (t) => {
+  const client = await createConnectedClient();
+  t.after(() => client.close());
+  const failed = once(client, 'notice.delivery_failed');
+  const delivered = once(client, 'notice.delivered');
+
+  client.sendSystemNotice('Luna completed the inspection.', { key: 'job:42', priority: 20 });
+  client.ws.serverSend({ type: 'response.created', response: { id: 'notice-first' } });
+  client.ws.serverSend({
+    type: 'response.done',
+    response: { id: 'notice-first', status: 'cancelled', output: [] },
+  });
+  const [failedNotice] = await failed;
+  assert.equal(failedNotice.key, 'job:42');
+
+  const noticeCreates = client.ws.sentEvents().filter((event) => (
+    event.type === 'response.create' && event.response?.instructions?.includes('Luna completed')
+  ));
+  assert.equal(noticeCreates.length, 2);
+  client.ws.serverSend({ type: 'response.created', response: { id: 'notice-retry' } });
+  client.ws.serverSend({
+    type: 'response.done',
+    response: { id: 'notice-retry', status: 'completed', output: [] },
+  });
+  const [deliveredNotice] = await delivered;
+  assert.equal(deliveredNotice.key, 'job:42');
+  assert.equal(client.pendingNotices.length, 0);
+});
+
+test('invalid approval narration is suppressed and retried through the tool path', async (t) => {
+  const client = await createConnectedClient({
+    responseValidator: ({ transcript }) => ({
+      allowed: !/press pound/i.test(transcript),
+      reason: 'unbacked_approval_prompt',
+      retryInstructions: 'Call the required tool before discussing approval.',
+      retryPurpose: 'approval_validation_retry',
+    }),
+  });
+  t.after(() => client.close());
+  const rejected = once(client, 'response.output_rejected');
+  const audio = [];
+  client.on('audio', (event) => audio.push(event));
+
+  client.queueUserResponse();
+  client.ws.serverSend({ type: 'response.created', response: { id: 'approval-hallucination' } });
+  client.ws.serverSend({
+    type: 'response.output_audio.delta',
+    response_id: 'approval-hallucination',
+    item_id: 'approval-audio',
+    delta: Buffer.from([1, 2, 3]).toString('base64'),
+  });
+  client.ws.serverSend({
+    type: 'response.output_audio_transcript.done',
+    response_id: 'approval-hallucination',
+    item_id: 'approval-audio',
+    transcript: 'Approval needed. Press pound to approve.',
+  });
+  client.ws.serverSend({
+    type: 'response.done',
+    response: { id: 'approval-hallucination', status: 'completed', output: [] },
+  });
+  const [event] = await rejected;
+  assert.equal(event.reason, 'unbacked_approval_prompt');
+  assert.deepEqual(audio, []);
+  assert.ok(client.ws.sentEvents().some((entry) => (
+    entry.type === 'response.create' && entry.response?.instructions?.includes('required tool')
+  )));
 });
 
 test('a late cancel race is classified as benign instead of an API failure', async (t) => {
@@ -516,9 +626,18 @@ test('Realtime billing usage events expose cached, audio, and text token details
 });
 
 test('Realtime uses a dedicated key rather than the Codex CLI key', () => {
+  const voiceKey = 'sk-proj-realtime-fixture-0123456789abcdef';
   assert.equal(getRealtimeApiKey({
-    OPENAI_REALTIME_API_KEY: ' voice-key ',
+    OPENAI_REALTIME_API_KEY: voiceKey,
     OPENAI_API_KEY: 'codex-key',
-  }), 'voice-key');
+  }), voiceKey);
   assert.equal(getRealtimeApiKey({ OPENAI_API_KEY: 'codex-key' }), '');
+  for (const rejected of [
+    'short-key',
+    ` ${voiceKey}`,
+    `${voiceKey}\n`,
+    'replace-with-openai-realtime-api-key-1234567890',
+  ]) {
+    assert.equal(getRealtimeApiKey({ OPENAI_REALTIME_API_KEY: rejected }), '');
+  }
 });

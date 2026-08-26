@@ -1,0 +1,22 @@
+[Unit]
+Description=Install reviewed Teleagent provider libexec closure
+Before=teleagent-provider-model-apparmor.service teleagent-provider-supervisor@claude.socket teleagent-provider-supervisor@codex.socket
+ConditionPathExists=/etc/teleagent/worker-session/ENABLE
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/teleagent-provider-libexec-install
+RemainAfterExit=yes
+UMask=0077
+LimitCORE=0
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=yes
+ReadOnlyPaths=/opt/teleagent/current
+ReadWritePaths=/usr/local/libexec /etc/teleagent/provider-runtime
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native
+
+# Deliberately dormant: no [Install] section.

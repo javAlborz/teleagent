@@ -1,12 +1,35 @@
-# CRITICAL: All containers must use network_mode: host
-# Docker bridge networking causes FreeSWITCH to advertise internal IPs
-# in SDP, making RTP unreachable from external callers.
+# CRITICAL: SIP/media containers use network_mode: host. The one-shot control
+# credential preflight has no network namespace at all.
 
 services:
+  voice-runtime-preflight:
+    # The launcher supplies this value only after verifying the root-owned
+    # release manifest, the OCI digest, the local image ID, and source label.
+    image: "${TELEAGENT_VOICE_IMAGE:?TELEAGENT_VOICE_IMAGE must be an approved OCI digest}"
+    restart: "no"
+    network_mode: none
+    user: "${VOICE_APP_UID:?VOICE_APP_UID must resolve teleagent-voice}:${VOICE_APP_GID:?VOICE_APP_GID must resolve teleagent-voice}"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,uid=${VOICE_APP_UID:?VOICE_APP_UID must resolve teleagent-voice},gid=${VOICE_APP_GID:?VOICE_APP_GID must resolve teleagent-voice},mode=0700,size=16777216
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - "${DEVICE_CONFIG_DIR:?DEVICE_CONFIG_DIR must be provisioned}:/app/config:ro"
+      - "${VOICE_STATE_DIR:?VOICE_STATE_DIR must be provisioned}:/app/state"
+      - /run/teleagent-voice-stack/voice-secrets:/run/secrets:ro
+    command: ["node", "voice-runtime-preflight.js"]
+
   drachtio:
-    image: drachtio/drachtio-server:latest
+    # Exact image already validated on Hermes. Upgrade only through a reviewed
+    # RTP/SIP canary; never float production on :latest alone.
+    image: drachtio/drachtio-server:latest@sha256:c03001e7c01ead29d0026245d0b42a9ebc8eefb0ff9bd180f5ff1f72be6da457
     container_name: drachtio
-    restart: unless-stopped
+    restart: "no"
+    ulimits:
+      core: 0
     mem_limit: 384m
     memswap_limit: 512m
     cpus: 1.0
@@ -18,22 +41,22 @@ services:
       - no-new-privileges:true
     tmpfs:
       - /tmp
-    command: >
-      drachtio
-      --contact "sip:127.0.0.1:${DRACHTIO_SIP_PORT:-5060};transport=${DRACHTIO_SIP_TRANSPORT:-udp}"
-      --address 127.0.0.1
-      --external-ip ${DRACHTIO_EXTERNAL_IP}
-      --secret ${DRACHTIO_SECRET}
-      --port 9022
-      --loglevel info
+    volumes:
+      - /run/teleagent-voice-stack/drachtio.conf.xml:/etc/drachtio.conf.xml:ro
+    command: ["drachtio", "-f", "/etc/drachtio.conf.xml"]
     # Ports (for reference - host mode doesn't need port mapping):
-    # - ${DRACHTIO_SIP_PORT:-5060}: SIP (${DRACHTIO_SIP_TRANSPORT:-udp})
+    # - 5070/udp: fixed authenticated Asterisk trunk
     # - 9022: Admin/App Port
+    depends_on:
+      voice-runtime-preflight:
+        condition: service_completed_successfully
 
   freeswitch:
-    image: drachtio/drachtio-freeswitch-mrf:latest
+    image: drachtio/drachtio-freeswitch-mrf:latest@sha256:7a6ce26834ff1b8eb27e97f3b9db72980a511e83ef01897097ca92a0f2d5eb62
     container_name: freeswitch
-    restart: unless-stopped
+    restart: "no"
+    ulimits:
+      core: 0
     mem_limit: 1g
     memswap_limit: 1280m
     cpus: 2.0
@@ -49,52 +72,128 @@ services:
     volumes:
       - ./freeswitch/entrypoint.sh:/usr/local/bin/entrypoint-hermes-freeswitch.sh:ro
       - ./freeswitch/mrf.xml:/usr/local/freeswitch/conf/sip_profiles/mrf.xml:ro
+      - /run/teleagent-voice-stack/freeswitch-event-socket.conf.xml:/usr/local/freeswitch/conf/autoload_configs/event_socket.conf.xml:ro
     command: >
       freeswitch
       --sip-port 5080
-      --password ${FREESWITCH_SECRET}
       --rtp-range-start 30000
       --rtp-range-end 30100
-    environment:
-      # CRITICAL: Set this to your server's LAN IP
-      # This IP goes into SDP packets so 3CX knows where to send audio
-      # Note: drachtio-freeswitch-mrf only accepts CLI flags, not env vars
-      - EXTERNAL_IP=${EXTERNAL_IP}
+    depends_on:
+      voice-runtime-preflight:
+        condition: service_completed_successfully
     # Ports (for reference):
     # - 8021: ESL (Event Socket Library)
     # - 5080: Internal SIP
     # - 30000-30100: RTP Audio (changed from 20000-20100 to avoid conflict with 3CX SBC)
 
   voice-app:
-    build:
-      context: .
-      dockerfile: voice-app/Dockerfile
+    image: "${TELEAGENT_VOICE_IMAGE:?TELEAGENT_VOICE_IMAGE must be an approved OCI digest}"
     container_name: voice-app
-    restart: unless-stopped
+    restart: "no"
+    ulimits:
+      core: 0
     mem_limit: 1g
     memswap_limit: 1280m
     cpus: 2.0
     pids_limit: 512
     network_mode: host
-    user: "1000:1000"
+    user: "${VOICE_APP_UID:?VOICE_APP_UID must resolve teleagent-voice}:${VOICE_APP_GID:?VOICE_APP_GID must resolve teleagent-voice}"
     read_only: true
     tmpfs:
-      - /tmp
+      - /tmp:rw,noexec,nosuid,nodev,uid=${VOICE_APP_UID:?VOICE_APP_UID must resolve teleagent-voice},gid=${VOICE_APP_GID:?VOICE_APP_GID must resolve teleagent-voice},mode=0700,size=536870912
     cap_drop:
       - ALL
     security_opt:
       - no-new-privileges:true
-    env_file:
-      - .env
+    environment:
+      # Fixed security boundary; never inherited from the host .env.
+      AGENT_API_URL: "http://127.0.0.1:3333"
+      AGENT_API_TOKEN: ""
+      CLAUDE_API_TOKEN: ""
+      CLAUDE_API_URL: ""
+      AGENT_LOG_SENSITIVE: "false"
+      CLAUDE_LOG_SENSITIVE: "false"
+      DRACHTIO_HOST: "127.0.0.1"
+      DRACHTIO_PORT: "9022"
+      FREESWITCH_HOST: "127.0.0.1"
+      FREESWITCH_PORT: "8021"
+      OPENAI_REALTIME_BASE_URL: "wss://api.openai.com/v1/realtime"
+      OPENAI_REALTIME_MODEL: "gpt-realtime-2.1-mini"
+      OPENAI_REALTIME_TRANSCRIPTION_MODEL: "gpt-live-transcribe"
+      OPENAI_REALTIME_VOICE: "marin"
+      STT_BASE_URL: "http://127.0.0.1:18001/v1"
+      STT_MODEL: "whisper-1"
+      TTS_BASE_URL: "http://127.0.0.1:18000/v1"
+      TTS_MODEL: "kokoro"
+      SIP_TRUNK_HOST: "127.0.0.1"
+      SIP_TRUNK_PORT: "5060"
+      SIP_TRUNK_TRANSPORT: "udp"
+      NODE_ENV: "production"
+      VOICE_APPROVAL_SIGNING_KEY_FILE: "/run/secrets/teleagent-approval-private.pem"
+      # Agent bridge and scoped capabilities
+      AGENT_DURABLE_EXECUTOR_ENABLED: "${AGENT_DURABLE_EXECUTOR_ENABLED:-}"
+      AGENT_DURABLE_EXECUTOR_POLL_MS: "${AGENT_DURABLE_EXECUTOR_POLL_MS:-}"
+      AGENT_DURABLE_EXECUTOR_SUBMIT_TIMEOUT_MS: "${AGENT_DURABLE_EXECUTOR_SUBMIT_TIMEOUT_MS:-}"
+      PHONE_DEPLOY_TIMEOUT_SECONDS: "${PHONE_DEPLOY_TIMEOUT_SECONDS:-}"
+      VOICE_PRIVILEGED_ACTIONS_ENABLED: "${VOICE_PRIVILEGED_ACTIONS_ENABLED:-}"
+      # Signed voice approval
+      VOICE_APPROVAL_CAPABILITY_ENABLED: "${VOICE_APPROVAL_CAPABILITY_ENABLED:-}"
+      VOICE_APPROVAL_CAPABILITY_TTL_SECONDS: "${VOICE_APPROVAL_CAPABILITY_TTL_SECONDS:-}"
+      VOICE_APPROVAL_MARKER_TIMEOUT_MS: "${VOICE_APPROVAL_MARKER_TIMEOUT_MS:-}"
+      VOICE_APPROVAL_SIGNING_KEY_ID: "${VOICE_APPROVAL_SIGNING_KEY_ID:-}"
+      VOICE_APPROVAL_TTL_SECONDS: "${VOICE_APPROVAL_TTL_SECONDS:-}"
+      # SIP and media services
+      DEFAULT_CALLER_ID: "${DEFAULT_CALLER_ID:-}"
+      # OpenAI Realtime
+      OPENAI_ORGANIZATION: "${OPENAI_ORGANIZATION:-}"
+      OPENAI_PROJECT: "${OPENAI_PROJECT:-}"
+      OPENAI_REALTIME_CONTEXT_RETENTION_RATIO: "${OPENAI_REALTIME_CONTEXT_RETENTION_RATIO:-}"
+      OPENAI_REALTIME_CONTEXT_TOKEN_LIMIT: "${OPENAI_REALTIME_CONTEXT_TOKEN_LIMIT:-}"
+      OPENAI_REALTIME_HARD_MAX_SPOKEN_WORDS: "${OPENAI_REALTIME_HARD_MAX_SPOKEN_WORDS:-}"
+      OPENAI_REALTIME_MAX_SPOKEN_WORDS: "${OPENAI_REALTIME_MAX_SPOKEN_WORDS:-}"
+      OPENAI_REALTIME_NOISE_REDUCTION: "${OPENAI_REALTIME_NOISE_REDUCTION:-}"
+      OPENAI_REALTIME_RESPONSE_DEBOUNCE_MS: "${OPENAI_REALTIME_RESPONSE_DEBOUNCE_MS:-}"
+      OPENAI_REALTIME_TRANSCRIPTION_DELAY: "${OPENAI_REALTIME_TRANSCRIPTION_DELAY:-}"
+      OPENAI_REALTIME_TRANSCRIPTION_KEYWORDS: "${OPENAI_REALTIME_TRANSCRIPTION_KEYWORDS:-}"
+      OPENAI_REALTIME_TRANSCRIPTION_LANGUAGES: "${OPENAI_REALTIME_TRANSCRIPTION_LANGUAGES:-}"
+      OPENAI_REALTIME_TRANSCRIPTION_PROMPT: "${OPENAI_REALTIME_TRANSCRIPTION_PROMPT:-}"
+      # Legacy TTS and STT
+      LEGACY_SPEECH_SERVICES_ENABLED: "${LEGACY_SPEECH_SERVICES_ENABLED:-}"
+      TTS_ALLOWED_VOICES: "${TTS_ALLOWED_VOICES:-}"
+      TTS_RESPONSE_FORMAT: "${TTS_RESPONSE_FORMAT:-}"
+      TTS_SPEED: "${TTS_SPEED:-}"
+      TTS_TIMEOUT_MS: "${TTS_TIMEOUT_MS:-}"
+      TTS_VOICE: "${TTS_VOICE:-}"
+      # Voice HTTP, AudioFork, and durable lifecycle
+      AUDIO_DEBUG: "${AUDIO_DEBUG:-}"
+      AUDIO_DIR: "/tmp/voice-audio"
+      DEBUG: "${DEBUG:-}"
+      HTTP_HOST: "${HTTP_HOST:-}"
+      HTTP_PORT: "${HTTP_PORT:-}"
+      VOICE_APP_EXECUTION_LOCK_FILE: "${VOICE_APP_EXECUTION_LOCK_FILE:-}"
+      VOICE_CALLBACK_LEASE_MS: "${VOICE_CALLBACK_LEASE_MS:-}"
+      VOICE_CALLBACK_RETRY_BASE_MS: "${VOICE_CALLBACK_RETRY_BASE_MS:-}"
+      VOICE_CALLBACK_RETRY_MAX_MS: "${VOICE_CALLBACK_RETRY_MAX_MS:-}"
+      VOICE_JOB_RECONCILIATION_BASE_MS: "${VOICE_JOB_RECONCILIATION_BASE_MS:-}"
+      VOICE_JOB_RECONCILIATION_MAX_MS: "${VOICE_JOB_RECONCILIATION_MAX_MS:-}"
+      VOICE_JOB_RECONCILIATION_POLL_MS: "${VOICE_JOB_RECONCILIATION_POLL_MS:-}"
+      VOICE_STATE_DB_PATH: "${VOICE_STATE_DB_PATH:-}"
+      WS_ALLOWED_PEERS: "${WS_ALLOWED_PEERS:-}"
+      WS_CONNECT_HOST: "${WS_CONNECT_HOST:-}"
+      WS_HOST: "${WS_HOST:-}"
+      WS_NON_LOOPBACK_ENABLED: "${WS_NON_LOOPBACK_ENABLED:-}"
+      WS_PORT: "${WS_PORT:-}"
+      # Outbound callback plane
+      OUTBOUND_API_NON_LOOPBACK_ENABLED: "${OUTBOUND_API_NON_LOOPBACK_ENABLED:-}"
     volumes:
-      # Audio files directory for TTS playback
-      - ./voice-app/audio:/app/audio
-      # Static phone assets, including locally synced hold music
-      - ./voice-app/static:/app/static:ro
       # Device configurations
-      - ${DEVICE_CONFIG_DIR:-./voice-app/config}:/app/config:ro
+      - "${DEVICE_CONFIG_DIR:?DEVICE_CONFIG_DIR must be provisioned}:/app/config:ro"
       # Durable voice threads, jobs, approvals, and per-profile session mappings
-      - ${VOICE_STATE_DIR:-./voice-app/state}:/app/state
+      - "${VOICE_STATE_DIR:?VOICE_STATE_DIR must be provisioned}:/app/state"
+      # Systemd projects only the reviewed voice-app credentials. Each source
+      # file is root:teleagent-voice 0440; the projection is ephemeral and the
+      # agent/controller processes receive only their own public/verifier data.
+      - /run/teleagent-voice-stack/voice-secrets:/run/secrets:ro
     depends_on:
       - drachtio
       - freeswitch

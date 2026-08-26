@@ -19,7 +19,7 @@ export async function installNode(platform) {
     {
       type: 'confirm',
       name: 'confirmed',
-      message: 'Install Node.js 20 LTS automatically?',
+      message: 'Install Node.js 24 LTS automatically?',
       default: false
     }
   ]);
@@ -75,7 +75,7 @@ export async function installNode(platform) {
  * @returns {Promise<{success: boolean}>}
  */
 async function installNodeApt() {
-  const scriptUrl = 'https://deb.nodesource.com/setup_20.x';
+  const scriptUrl = 'https://deb.nodesource.com/setup_24.x';
   const tempFile = path.join(os.tmpdir(), `nodesource_setup_${Date.now()}.sh`);
 
   try {
@@ -130,7 +130,7 @@ async function installNodeApt() {
  * @returns {Promise<{success: boolean}>}
  */
 async function installNodeDnf(packageManager) {
-  const scriptUrl = 'https://rpm.nodesource.com/setup_20.x';
+  const scriptUrl = 'https://rpm.nodesource.com/setup_24.x';
   const tempFile = path.join(os.tmpdir(), `nodesource_setup_${Date.now()}.sh`);
 
   try {
@@ -196,15 +196,15 @@ async function installNodePacman() {
  */
 async function installNodeBrew() {
   try {
-    console.log(chalk.cyan('\nInstalling Node.js 20 via Homebrew...'));
+    console.log(chalk.cyan('\nInstalling Node.js 24 via Homebrew...'));
     console.log(chalk.gray('This may take several minutes...\n'));
 
-    const result = await runWithLogging('brew install node@20');
+    const result = await runWithLogging('brew install node@24');
 
     if (result.success) {
-      // Link node@20
-      console.log(chalk.cyan('\nLinking Node.js 20...'));
-      await runWithLogging('brew link node@20');
+      // Link the supported LTS line explicitly.
+      console.log(chalk.cyan('\nLinking Node.js 24...'));
+      await runWithLogging('brew link node@24');
     }
 
     return result;
@@ -225,14 +225,14 @@ function showNodeManualInstructions(platform) {
   switch (platform.packageManager) {
     case 'apt':
       console.log(chalk.gray('For Ubuntu/Debian:\n'));
-      console.log(chalk.cyan('  curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -'));
+      console.log(chalk.cyan('  curl -fsSL https://deb.nodesource.com/setup_24.x | sudo -E bash -'));
       console.log(chalk.cyan('  sudo apt-get install -y nodejs\n'));
       break;
 
     case 'dnf':
     case 'yum':
       console.log(chalk.gray('For RHEL/Fedora:\n'));
-      console.log(chalk.cyan('  curl -fsSL https://rpm.nodesource.com/setup_20.x | sudo bash -'));
+      console.log(chalk.cyan('  curl -fsSL https://rpm.nodesource.com/setup_24.x | sudo bash -'));
       console.log(chalk.cyan(`  sudo ${platform.packageManager} install -y nodejs\n`));
       break;
 
@@ -243,7 +243,7 @@ function showNodeManualInstructions(platform) {
 
     case 'brew':
       console.log(chalk.gray('For macOS:\n'));
-      console.log(chalk.cyan('  brew install node@20\n'));
+      console.log(chalk.cyan('  brew install node@24\n'));
       break;
 
     default:

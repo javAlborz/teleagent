@@ -1,16 +1,18 @@
 import { execSync } from 'child_process';
 
+export const REQUIRED_NODE_VERSION = '24.0.0';
+
 /**
  * Check Node.js version
  * @param {object} _platform - Platform info from detectPlatform()
  * @returns {Promise<object>} Check result
  */
-export async function checkNode(_platform) {
-  const requiredVersion = '18.0.0';
+export async function checkNode(_platform, { execNodeVersion = execSync } = {}) {
+  const requiredVersion = REQUIRED_NODE_VERSION;
 
   try {
     // Run node --version
-    const output = execSync('node --version', {
+    const output = execNodeVersion('node --version', {
       encoding: 'utf-8',
       stdio: 'pipe'
     });
@@ -55,7 +57,7 @@ export async function checkNode(_platform) {
 }
 
 /**
- * Parse Node.js version string (handles v20.11.0 or 20.11.0 format)
+ * Parse Node.js version string (handles v24.1.0 or 24.1.0 format)
  * @param {string} versionString - Raw version output
  * @returns {string|null} Parsed version (e.g., "20.11.0")
  */
@@ -76,7 +78,7 @@ function parseNodeVersion(versionString) {
 /**
  * Compare two semantic versions
  * @param {string} version1 - First version (e.g., "20.11.0")
- * @param {string} version2 - Second version (e.g., "18.0.0")
+ * @param {string} version2 - Second version (e.g., "20.0.0")
  * @returns {number} -1 if v1 < v2, 0 if equal, 1 if v1 > v2
  */
 function compareVersions(version1, version2) {

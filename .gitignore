@@ -1,6 +1,11 @@
 # Dependencies
 node_modules/
 package-lock.json
+!package-lock.json
+!cli/package-lock.json
+!claude-api-server/package-lock.json
+!privileged-action-broker/package-lock.json
+!realtime-sip-gateway/package-lock.json
 !voice-app/package-lock.json
 
 # Environment files (contain secrets!)
@@ -19,6 +24,14 @@ claude-api-server/audio/
 # Logs
 *.log
 logs/
+
+# Durable runtime state
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
 
 # IDE
 .vscode/

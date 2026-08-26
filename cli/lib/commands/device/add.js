@@ -7,7 +7,7 @@ import { writeDockerConfig } from '../../docker.js';
 import { getAgentProfileChoices } from '../../agents.js';
 
 /**
- * Device add command - Add a new SIP device
+ * Device add command - Add a new phone persona/routing entry
  * @returns {Promise<void>}
  */
 export async function deviceAddCommand() {
@@ -65,23 +65,6 @@ export async function deviceAddCommand() {
     },
     {
       type: 'input',
-      name: 'authId',
-      message: 'SIP auth ID (press Enter to use extension):',
-      default: (answers) => answers.extension
-    },
-    {
-      type: 'password',
-      name: 'password',
-      message: 'SIP password:',
-      validate: (input) => {
-        if (!input || input.trim() === '') {
-          return 'Password cannot be empty';
-        }
-        return true;
-      }
-    },
-    {
-      type: 'input',
       name: 'voiceId',
       message: 'TTS voice name/ID:',
       default: config.api.tts.defaultVoice || '',
@@ -116,8 +99,6 @@ export async function deviceAddCommand() {
   const newDevice = {
     name: answers.name.trim(),
     extension: answers.extension,
-    authId: answers.authId || answers.extension,
-    password: answers.password,
     voiceId: answers.voiceId,
     sessionType: answers.sessionType,
     prompt: answers.prompt || `You are ${answers.name}, a helpful AI assistant accessible via phone.`

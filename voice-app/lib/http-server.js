@@ -4,13 +4,14 @@
  * Express server that:
  * 1. Serves generated TTS audio files to FreeSWITCH
  * 2. Provides health check endpoint
- * 3. Accepts audio uploads and returns playback URLs
+ * 3. Keeps media retrieval on the local FreeSWITCH boundary
  * 4. Automatically cleans up old temporary files
  */
 
 const express = require('express');
 const path = require('path');
-const fs = require('fs').promises;
+const fsSync = require('fs');
+const fs = fsSync.promises;
 const debug = require('debug')('voice-app:http-server');
 const crypto = require('crypto');
 
@@ -18,97 +19,152 @@ const crypto = require('crypto');
 const CLEANUP_INTERVAL = 120000;
 // File max age: 10 minutes
 const FILE_MAX_AGE = 600000;
+const MAX_MEDIA_FILE_BYTES = 128 * 1024 * 1024;
+const MEDIA_TYPES = Object.freeze({
+  wav: 'audio/wav',
+  mp3: 'audio/mpeg',
+  mpeg: 'audio/mpeg',
+  opus: 'audio/ogg',
+  aac: 'audio/aac',
+  flac: 'audio/flac',
+  pcm: 'application/octet-stream',
+});
+
+function isWithin(root, candidate) {
+  const relative = path.relative(root, candidate);
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+function canonicalMediaRoot(directory, label) {
+  const resolved = path.resolve(directory);
+  const metadata = fsSync.lstatSync(resolved);
+  const canonical = fsSync.realpathSync(resolved);
+  if (!metadata.isDirectory() || metadata.isSymbolicLink() || canonical !== resolved) {
+    throw new Error(`${label} must be a canonical non-symlink directory`);
+  }
+  if (!fsSync.constants.O_NOFOLLOW) {
+    throw new Error('The media server requires O_NOFOLLOW support');
+  }
+  return canonical;
+}
+
+function normalizeMediaPath(rawValue, { nested = false } = {}) {
+  const value = String(rawValue || '');
+  if (!value || value.length > 512 || /[\\\0\r\n]/u.test(value) || path.isAbsolute(value)) {
+    return null;
+  }
+  const segments = value.split('/');
+  if ((!nested && segments.length !== 1) ||
+      segments.some((segment) => !segment || segment === '.' || segment === '..' ||
+        !/^[A-Za-z0-9][A-Za-z0-9._-]{0,200}$/u.test(segment))) {
+    return null;
+  }
+  const extension = path.extname(value).slice(1).toLowerCase();
+  if (!Object.hasOwn(MEDIA_TYPES, extension)) return null;
+  return { relativePath: segments.join(path.sep), contentType: MEDIA_TYPES[extension] };
+}
+
+async function openConfinedMedia(root, rawValue, options) {
+  const normalized = normalizeMediaPath(rawValue, options);
+  if (!normalized) return null;
+  const candidate = path.join(root, normalized.relativePath);
+  let handle;
+  try {
+    handle = await fs.open(
+      candidate,
+      fsSync.constants.O_RDONLY | fsSync.constants.O_NOFOLLOW,
+    );
+    const metadata = await handle.stat();
+    if (!metadata.isFile() || metadata.size < 0 || metadata.size > MAX_MEDIA_FILE_BYTES) {
+      await handle.close();
+      return null;
+    }
+    // Resolve the already-open descriptor, not the mutable pathname. This
+    // closes both final-component and intermediate-directory symlink races.
+    const openedPath = await fs.realpath(`/proc/self/fd/${handle.fd}`);
+    if (!isWithin(root, openedPath)) {
+      await handle.close();
+      return null;
+    }
+    return { handle, metadata, contentType: normalized.contentType };
+  } catch {
+    await handle?.close().catch(() => {});
+    return null;
+  }
+}
+
+function confinedMediaHandler(root, { nested = false, cacheControl = 'no-store' } = {}) {
+  return async (req, res) => {
+    const requestedPath = nested ? req.params[0] : req.params.filename;
+    const opened = await openConfinedMedia(root, requestedPath, { nested });
+    if (!opened) return res.status(404).json({ error: 'not_found' });
+
+    res.status(200);
+    res.setHeader('Content-Type', opened.contentType);
+    res.setHeader('Content-Length', String(opened.metadata.size));
+    res.setHeader('Cache-Control', cacheControl);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    const stream = opened.handle.createReadStream({ autoClose: true });
+    stream.once('error', (error) => {
+      if (!res.headersSent) res.status(404).json({ error: 'not_found' });
+      else res.destroy(error);
+    });
+    res.once('close', () => stream.destroy());
+    stream.pipe(res);
+    return undefined;
+  };
+}
+
+function isLoopbackAddress(address) {
+  const value = String(address || '').toLowerCase();
+  return value === '127.0.0.1' || value === '::1' || value === '::ffff:127.0.0.1';
+}
+
+function requireLoopbackMedia(req, res, next) {
+  if (isLoopbackAddress(req.socket?.remoteAddress)) return next();
+  return res.status(403).json({ error: 'loopback_required' });
+}
 
 /**
  * Create HTTP Server
  *
  * @param {string} audioDir - Directory to serve audio files from
  * @param {number} port - Port to listen on (default: 3000)
- * @param {string} host - Host/interface to bind (default: 0.0.0.0)
+ * @param {string} host - Host/interface to bind (default: 127.0.0.1)
+ * @param {Object} options - Optional test/deployment roots
  * @returns {Object} { app, server, saveAudio, getAudioUrl, close, finalize }
  */
-function createHttpServer(audioDir, port = 3000, host = '0.0.0.0') {
+function createHttpServer(audioDir, port = 3000, host = '127.0.0.1', {
+  staticDir = path.join(__dirname, '..', 'static'),
+} = {}) {
   const app = express();
+  const canonicalAudioDir = canonicalMediaRoot(audioDir, 'Generated audio directory');
+  const canonicalStaticDir = canonicalMediaRoot(staticDir, 'Static media directory');
 
   // Parse JSON bodies
   app.use(express.json());
 
-  // Parse binary bodies for audio upload
-  app.use('/audio', express.raw({ type: 'audio/*', limit: '10mb' }));
-
-  // Serve static audio files
-  app.use('/audio-files', express.static(audioDir, {
-    setHeaders: (res, filepath) => {
-      // Set appropriate content type for audio files
-      if (filepath.endsWith('.wav')) {
-        res.setHeader('Content-Type', 'audio/wav');
-      } else if (filepath.endsWith('.mp3')) {
-        res.setHeader('Content-Type', 'audio/mpeg');
-      }
-    }
-  }));
+  // Generated and static audio are consumed by local FreeSWITCH. They may
+  // contain private call content and are never part of the non-loopback API.
+  app.get(
+    '/audio-files/:filename',
+    requireLoopbackMedia,
+    confinedMediaHandler(canonicalAudioDir),
+  );
 
   // Serve STATIC audio files (beeps, hold music) - NOT subject to cleanup
-  app.use('/static', express.static(path.join(__dirname, '..', 'static'), {
-    setHeaders: (res, filepath) => {
-      if (filepath.endsWith('.wav')) {
-        res.setHeader('Content-Type', 'audio/wav');
-      } else if (filepath.endsWith('.mp3')) {
-        res.setHeader('Content-Type', 'audio/mpeg');
-      }
-    }
-  }));
+  app.get(
+    /^\/static\/(.+)$/u,
+    requireLoopbackMedia,
+    confinedMediaHandler(canonicalStaticDir, { nested: true, cacheControl: 'private, max-age=300' }),
+  );
 
   // Health check endpoint
   app.get('/health', (req, res) => {
     res.json({
       status: 'healthy',
-      timestamp: new Date().toISOString(),
-      audioDir,
-      port,
-      host
+      timestamp: new Date().toISOString()
     });
-  });
-
-  // Audio upload endpoint
-  app.post("/audio", async (req, res) => {
-    try {
-      const audioBuffer = req.body;
-
-      if (!audioBuffer || audioBuffer.length === 0) {
-        return res.status(400).json({
-          error: 'No audio data provided'
-        });
-      }
-
-      // Generate unique filename
-      const filename = `audio_${Date.now()}_${crypto.randomBytes(8).toString('hex')}.wav`;
-      const filepath = path.join(audioDir, filename);
-
-      debug(`Saving audio to ${filepath} (${audioBuffer.length} bytes)`);
-
-      // Save to disk
-      await fs.writeFile(filepath, audioBuffer);
-
-      // Generate URL
-      const url = `http://localhost:${port}/audio-files/${filename}`;
-
-      debug(`Audio saved, URL: ${url}`);
-
-      res.json({
-        success: true,
-        url,
-        filename,
-        size: audioBuffer.length
-      });
-
-    } catch (error) {
-      console.error('Error saving audio:', error);
-      res.status(500).json({
-        error: 'Failed to save audio',
-        message: error.message
-      });
-    }
   });
 
   // NOTE: 404 and error handlers are added in finalize() AFTER additional routes
@@ -143,12 +199,16 @@ function createHttpServer(audioDir, port = 3000, host = '0.0.0.0') {
    * @returns {Promise<string>} URL to audio file
    */
   async function saveAudio(audioBuffer, format = 'wav') {
-    const filename = `audio_${Date.now()}_${crypto.randomBytes(8).toString('hex')}.${format}`;
-    const filepath = path.join(audioDir, filename);
+    const normalizedFormat = String(format || '').toLowerCase();
+    if (!Object.hasOwn(MEDIA_TYPES, normalizedFormat)) {
+      throw new Error('Unsupported generated audio format');
+    }
+    const filename = `audio_${Date.now()}_${crypto.randomBytes(8).toString('hex')}.${normalizedFormat}`;
+    const filepath = path.join(canonicalAudioDir, filename);
 
     debug(`Saving ${format} audio to ${filepath} (${audioBuffer.length} bytes)`);
 
-    await fs.writeFile(filepath, audioBuffer);
+    await fs.writeFile(filepath, audioBuffer, { flag: 'wx', mode: 0o600 });
 
     const url = `http://localhost:${port}/audio-files/${filename}`;
     debug(`Audio saved, URL: ${url}`);
@@ -162,6 +222,7 @@ function createHttpServer(audioDir, port = 3000, host = '0.0.0.0') {
    * @returns {string} Full URL
    */
   function getAudioUrl(filename) {
+    if (!normalizeMediaPath(filename)) throw new Error('Invalid generated audio filename');
     return `http://localhost:${port}/audio-files/${filename}`;
   }
 
@@ -179,11 +240,10 @@ function createHttpServer(audioDir, port = 3000, host = '0.0.0.0') {
     });
 
     // Error handler
-    app.use((err, req, res, next) => {
+    app.use((err, req, res, _next) => {
       console.error('Server error:', err);
       res.status(500).json({
-        error: 'Internal server error',
-        message: err.message
+        error: 'Internal server error'
       });
     });
 
@@ -215,7 +275,11 @@ async function cleanupOldFiles(directory, maxAge) {
       const filepath = path.join(directory, file);
 
       try {
-        const stats = await fs.stat(filepath);
+        const stats = await fs.lstat(filepath);
+        if (!stats.isFile()) {
+          if (stats.isSymbolicLink()) await fs.unlink(filepath);
+          continue;
+        }
         const age = now - stats.mtimeMs;
 
         if (age > maxAge) {
@@ -240,5 +304,7 @@ async function cleanupOldFiles(directory, maxAge) {
 
 module.exports = {
   createHttpServer,
-  cleanupOldFiles
+  cleanupOldFiles,
+  isLoopbackAddress,
+  requireLoopbackMedia
 };

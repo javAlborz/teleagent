@@ -1,5 +1,6 @@
 import os from 'os';
 import { spawn } from 'child_process';
+import { getRuntimeSecretEnvironment } from './runtime-security.js';
 
 export const AGENT_PROVIDERS = ['claude', 'codex'];
 
@@ -107,9 +108,16 @@ export function getAgentProfileChoices(config) {
 export function buildAgentServerEnvironment(config, baseEnvironment = process.env) {
   const agents = normalizeAgentConfig(config?.agents);
   const codex = agents.codex;
+  const runtimeSecrets = getRuntimeSecretEnvironment(config);
+  const bindHost = String(config?.server?.agentApiBindHost || '127.0.0.1');
+  const nonLoopbackEnabled = config?.server?.agentApiNonLoopbackEnabled === true;
 
   return {
     ...baseEnvironment,
+    ...runtimeSecrets,
+    AGENT_API_BIND_HOST: bindHost,
+    AGENT_API_NON_LOOPBACK_ENABLED: String(nonLoopbackEnabled),
+    AGENT_DURABLE_EXECUTOR_ENABLED: 'true',
     AGENT_PROVIDERS: agents.providers.join(','),
     CLAUDE_COMMAND: agents.claude.command,
     CLAUDE_WORKING_DIR: agents.claude.workingDirectory,

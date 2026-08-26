@@ -1,0 +1,54 @@
+[Unit]
+Description=Teleagent isolated %i provider launch supervisor
+Requires=teleagent-provider-model-apparmor.service teleagent-provider-supervisor@%i.socket teleagent-provider-egress@%i.socket teleagent-provider-egress-control@%i.socket
+After=local-fs.target teleagent-provider-model-apparmor.service teleagent-provider-supervisor@%i.socket teleagent-provider-egress@%i.socket teleagent-provider-egress-control@%i.socket
+ConditionPathExists=/etc/teleagent/worker-session/ENABLE
+
+[Service]
+Type=simple
+User=teleagent-%i-supervisor
+Group=teleagent-%i-supervisor
+UMask=0077
+WorkingDirectory=/
+Environment=HOME=/var/lib/teleagent-%i-supervisor
+Environment=PATH=/usr/sbin:/usr/bin:/sbin:/bin
+Environment=LANG=C.UTF-8
+Environment=LC_ALL=C.UTF-8
+Environment=TELEAGENT_PROVIDER=%i
+ExecStartPre=+/usr/local/libexec/teleagent-provider-boundary --action assert-supervisor-start-admitted
+ExecStartPre=/usr/bin/sudo -n /usr/local/libexec/teleagent-provider-boundary --action recover --provider %i
+ExecStart=/opt/teleagent/node/bin/node /opt/teleagent/current/claude-api-server/provider-supervisor-service.js
+Restart=on-failure
+RestartSec=2s
+KillMode=control-group
+TimeoutStopSec=30s
+LimitCORE=0
+
+# This UID never runs model/tool code and never receives a provider bearer.
+# The sole privilege crossing is the exact root-owned boundary controller,
+# which creates one independently killable transient cgroup per launch.
+NoNewPrivileges=no
+AmbientCapabilities=
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadOnlyPaths=/opt/teleagent/current /opt/teleagent/agent-tools /srv/teleagent-agent-workspaces
+ReadWritePaths=/var/lib/teleagent-%i-supervisor /run/teleagent-provider-capabilities /run/systemd/system
+InaccessiblePaths=/var/lib/teleagent-control /var/lib/teleagent-session-broker /var/lib/teleagent-privileged-action -/var/lib/teleagent-claude-worker -/var/lib/teleagent-codex-worker /var/lib/teleagent-claude-egress /var/lib/teleagent-codex-egress /etc/teleagent/provider-egress-secrets -/etc/teleagent/credentials -/etc/teleagent-control -/etc/teleagent/controller -/etc/teleagent/privileged-action -/etc/teleagent-voice -/run/secrets /run/teleagent-worker-session /run/teleagent-privileged-action /opt/teleagent/current/voice-app/audio /opt/teleagent/current/voice-app/static
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictRealtime=yes
+RestrictNamespaces=yes
+RestrictSUIDSGID=no
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native
+
+# Deliberately dormant: no [Install] section.

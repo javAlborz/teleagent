@@ -8,6 +8,11 @@ const router = express.Router();
 const logger = require('./logger');
 const deviceRegistry = require('./device-registry');
 const { getHoldMusicEnabled } = require('./phone-agent-config');
+const { requireLoopback } = require('./voice-control-routes');
+
+// Device metadata is an operator convenience, not a public API. Keeping the
+// router local also prevents future fields from silently widening exposure.
+router.use(requireLoopback);
 
 function publicDevice(device, { includeVoiceId = false } = {}) {
   const isRealtime = device.voiceMode === 'openai-realtime';

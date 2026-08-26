@@ -1,0 +1,289 @@
+#!/usr/local/libexec/teleagent-node
+'use strict';
+
+const fs = require('node:fs');
+const path = require('node:path');
+const { spawn } = require('node:child_process');
+
+// Keep this root-executed wrapper self-contained. Requiring JavaScript from
+// the mutable application deployment before validating it would turn a
+// group-writable checkout into root code execution.
+function observeChildExit(child) {
+  const completion = new Promise((resolve, reject) => {
+    child.once('error', reject);
+    child.once('exit', (code, signal) => resolve({ code, signal }));
+  });
+  void completion.catch(() => {});
+  return completion;
+}
+
+const SETPRIV = '/usr/bin/setpriv';
+const SHIM = '/usr/local/libexec/teleagent-provider-egress-shim';
+const RUNTIME = '/usr/local/libexec/teleagent-provider-runtime';
+const LAUNCH_HOME = '/tmp/teleagent-provider-home';
+const READINESS_DIRECTORY = '/run/teleagent-provider-capabilities';
+const MODEL_APPARMOR_PROFILE = 'teleagent-provider-model';
+const PROVIDERS = Object.freeze({
+  claude: Object.freeze({
+    shimUser: 'teleagent-claude-shim',
+    runtimeUser: 'teleagent-claude-worker',
+    runtimeHome: '/nonexistent/teleagent-claude-worker',
+  }),
+  codex: Object.freeze({
+    shimUser: 'teleagent-codex-shim',
+    runtimeUser: 'teleagent-codex-worker',
+    runtimeHome: '/nonexistent/teleagent-codex-worker',
+  }),
+});
+const LAUNCH_ID = /^launch_[a-f0-9]{32}$/;
+const LAUNCH_CAPABILITY = /^[a-f0-9]{64}$/;
+
+function fail(message) {
+  process.stderr.write(`Provider boundary refused: ${message}\n`);
+  process.exit(77);
+}
+
+if (process.getuid() !== 0) fail('root boundary identity is required');
+for (const filename of [process.argv[1], SETPRIV, SHIM, RUNTIME]) {
+  const metadata = fs.lstatSync(filename);
+  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.uid !== 0 ||
+      (metadata.mode & 0o022) !== 0 || (metadata.mode & 0o111) === 0 ||
+      fs.realpathSync(filename) !== filename) fail('boundary executable trust is invalid');
+}
+
+const args = process.argv.slice(2);
+const providerIndex = args.indexOf('--provider');
+if (providerIndex !== 0 || !PROVIDERS[args[1]]) fail('fixed provider is required');
+const provider = args[1];
+const spec = PROVIDERS[provider];
+const launchIndex = args.indexOf('--launch-id');
+if (launchIndex !== 2 || !LAUNCH_ID.test(args[launchIndex + 1] || '')) {
+  fail('fixed launch identity is required');
+}
+const launchId = args[launchIndex + 1];
+const accessIndex = args.indexOf('--access-mode');
+if (accessIndex !== 6 || !['read-only', 'mutating'].includes(args[accessIndex + 1] || '')) {
+  fail('fixed provider access mode is required');
+}
+const credentialsDirectory = path.resolve(String(process.env.CREDENTIALS_DIRECTORY || ''));
+const capabilityFile = path.join(credentialsDirectory, 'provider-launch-capability');
+if (!credentialsDirectory.startsWith('/run/credentials/') || credentialsDirectory === '/') {
+  fail('launch credential directory is invalid');
+}
+const capabilityMetadata = fs.lstatSync(capabilityFile);
+if (!capabilityMetadata.isFile() || capabilityMetadata.isSymbolicLink() ||
+    capabilityMetadata.uid !== 0 || (capabilityMetadata.mode & 0o077) !== 0 ||
+    capabilityMetadata.size > 128) fail('launch credential file is unsafe');
+const capability = fs.readFileSync(capabilityFile, 'utf8').trim();
+if (!LAUNCH_CAPABILITY.test(capability)) fail('launch credential is invalid');
+
+function dropTo(
+  user,
+  home,
+  command,
+  commandArgs,
+  stdio,
+  extraEnvironment = {},
+  apparmorProfile = null
+) {
+  return spawn(SETPRIV, [
+    '--reuid', user,
+    '--regid', user,
+    '--init-groups',
+    '--no-new-privs',
+    '--bounding-set=-all',
+    '--inh-caps=-all',
+    '--ambient-caps=-all',
+    '--pdeathsig', 'SIGKILL',
+    ...(apparmorProfile ? ['--apparmor-profile', apparmorProfile] : []),
+    '--', command, ...commandArgs,
+  ], {
+    cwd: '/',
+    env: {
+      PATH: '/usr/sbin:/usr/bin:/sbin:/bin',
+      LANG: 'C.UTF-8',
+      LC_ALL: 'C.UTF-8',
+      HOME: home,
+      USER: user,
+      LOGNAME: user,
+      ...extraEnvironment,
+    },
+    stdio,
+    shell: false,
+  });
+}
+
+function waitForShim(child) {
+  return new Promise((resolve, reject) => {
+    let output = '';
+    const timer = setTimeout(() => reject(new Error('shim readiness timed out')), 5000);
+    child.stdout.on('data', (chunk) => {
+      output += chunk;
+      if (output === 'READY\n') {
+        clearTimeout(timer);
+        resolve();
+      } else if (output.length > 64) reject(new Error('shim readiness response is invalid'));
+    });
+    child.once('error', reject);
+    child.once('exit', () => reject(new Error('shim exited before readiness')));
+  });
+}
+
+function waitForProviderSpawn(child, provider, launchId) {
+  const stream = child.stdio?.[3];
+  if (!stream) return Promise.reject(new Error('provider readiness channel is unavailable'));
+  return new Promise((resolve, reject) => {
+    let output = '';
+    const timer = setTimeout(() => reject(new Error('provider spawn readiness timed out')), 15_000);
+    const finish = (error, marker = null) => {
+      clearTimeout(timer);
+      stream.removeAllListeners();
+      if (error) reject(error);
+      else resolve(marker);
+    };
+    stream.on('data', (chunk) => {
+      output += chunk;
+      if (output.length > 512 || (output.includes('\n') && !output.endsWith('\n'))) {
+        return finish(new Error('provider spawn readiness is invalid'));
+      }
+      if (!output.endsWith('\n')) return;
+      let marker;
+      try { marker = JSON.parse(output.slice(0, -1)); }
+      catch { return finish(new Error('provider spawn readiness is invalid')); }
+      if (marker?.version !== 1 || marker.type !== 'provider_spawned' ||
+          marker.provider !== provider || marker.launchId !== launchId || !(
+            (Number.isSafeInteger(marker.pid) && marker.pid > 1 &&
+              /^[0-9]+$/.test(String(marker.starttime || '')) &&
+              marker.identityUnavailable !== true) ||
+            (marker.identityUnavailable === true && marker.pid === undefined &&
+              marker.starttime === undefined)
+          )) {
+        return finish(new Error('provider spawn readiness is invalid'));
+      }
+      finish(null, marker);
+    });
+    stream.once('error', () => finish(new Error('provider spawn readiness failed')));
+    stream.once('end', () => {
+      if (!output.endsWith('\n')) finish(new Error('provider exited before spawn readiness'));
+    });
+  });
+}
+
+function readinessFilename(provider, launchId) {
+  return path.join(
+    READINESS_DIRECTORY,
+    `${provider}.${launchId}.provider-readiness.jsonl`
+  );
+}
+
+function readReadinessRecords(filename, maxBytes = 512) {
+  const metadata = fs.lstatSync(filename);
+  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.uid !== 0 ||
+      (metadata.mode & 0o077) !== 0 || metadata.size <= 0 || metadata.size > maxBytes ||
+      fs.realpathSync(filename) !== filename) {
+    throw new Error('provider readiness file is unsafe');
+  }
+  try {
+    const serialized = fs.readFileSync(filename, 'utf8');
+    if (!serialized.endsWith('\n')) throw new Error('partial readiness record');
+    return serialized.trimEnd().split('\n').map((line) => JSON.parse(line));
+  } catch {
+    throw new Error('provider readiness file is invalid');
+  }
+}
+
+function appendReadinessRecord(filename, record) {
+  const descriptor = fs.openSync(
+    filename,
+    fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_NOFOLLOW
+  );
+  try {
+    fs.writeFileSync(descriptor, `${JSON.stringify(record)}\n`, 'utf8');
+    fs.fsyncSync(descriptor);
+  } finally {
+    fs.closeSync(descriptor);
+  }
+  const directory = fs.openSync(
+    READINESS_DIRECTORY,
+    fs.constants.O_RDONLY | fs.constants.O_DIRECTORY
+  );
+  try { fs.fsyncSync(directory); }
+  finally { fs.closeSync(directory); }
+}
+
+function persistProviderStartIntent(provider, launchId) {
+  const filename = readinessFilename(provider, launchId);
+  const records = readReadinessRecords(filename, 256);
+  const planned = records[0];
+  if (records.length !== 1 || planned?.version !== 1 ||
+      planned.type !== 'provider_planned' || planned.provider !== provider ||
+      planned.launchId !== launchId) {
+    throw new Error('provider readiness file is invalid');
+  }
+  appendReadinessRecord(filename, {
+    version: 1,
+    type: 'provider_start_intent',
+    provider,
+    launchId,
+  });
+}
+
+function persistProviderSpawn(marker) {
+  const filename = readinessFilename(marker.provider, marker.launchId);
+  const records = readReadinessRecords(filename, 384);
+  const planned = records[0];
+  const intent = records[1];
+  if (planned?.version !== 1 || planned.type !== 'provider_planned' ||
+      planned.provider !== marker.provider || planned.launchId !== marker.launchId ||
+      records.length !== 2 || intent?.version !== 1 ||
+      intent.type !== 'provider_start_intent' || intent.provider !== marker.provider ||
+      intent.launchId !== marker.launchId) {
+    throw new Error('provider readiness file is invalid');
+  }
+  appendReadinessRecord(filename, marker);
+}
+
+function stopChild(child, signal) {
+  if (!child || child.exitCode !== null || child.signalCode !== null) return;
+  try { child.kill(signal); } catch { /* systemd cgroup stop remains authoritative */ }
+}
+
+(async () => {
+  const shim = dropTo(spec.shimUser, '/', SHIM, [
+    '--provider', provider, '--launch-id', launchId,
+  ], [
+    'ignore', 'pipe', 'inherit',
+  ], {
+    TELEAGENT_PROVIDER_SHIM_CAPABILITY: capability,
+  });
+  await waitForShim(shim);
+  // This durable fsynced line is the execution boundary. A crash anywhere
+  // after it—including after the model spawn but before fd3 is persisted—is
+  // outcome-unknown and can never be requeued as a pre-provider denial.
+  persistProviderStartIntent(provider, launchId);
+  const runtime = dropTo(spec.runtimeUser, LAUNCH_HOME, RUNTIME, args, [
+    'inherit', 'inherit', 'inherit', 'pipe',
+  ], {}, MODEL_APPARMOR_PROFILE);
+  // Observe termination before awaiting the readiness pipe. A provider wrapper
+  // may emit a valid spawn tombstone and exit in the same event-loop turn; an
+  // exit listener installed after readiness persistence can otherwise miss
+  // that event and leave this boundary alive indefinitely.
+  const runtimeExit = observeChildExit(runtime);
+  const providerSpawn = await waitForProviderSpawn(runtime, provider, launchId);
+  persistProviderSpawn(providerSpawn);
+  for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
+    process.on(signal, () => {
+      stopChild(runtime, signal);
+      stopChild(shim, signal === 'SIGINT' ? 'SIGTERM' : signal);
+    });
+  }
+  const result = await runtimeExit;
+  stopChild(shim, 'SIGTERM');
+  const shimExited = await Promise.race([
+    new Promise((resolve) => shim.once('exit', () => resolve(true))),
+    new Promise((resolve) => setTimeout(() => resolve(false), 1000)),
+  ]);
+  if (!shimExited) stopChild(shim, 'SIGKILL');
+  if (result.signal) process.kill(process.pid, result.signal);
+  else process.exit(Number.isInteger(result.code) ? result.code : 1);
+})().catch((error) => fail(error.message));

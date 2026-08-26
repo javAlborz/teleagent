@@ -1,0 +1,3 @@
+d /run/teleagent-privileged-action 0750 root teleagent-control -
+d /var/lib/teleagent-privileged-action 0700 root root -
+d /etc/teleagent/privileged-action 0700 root root -
