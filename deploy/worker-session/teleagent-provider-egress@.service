@@ -9,6 +9,7 @@ ConditionPathExists=/run/systemd/resolve/resolv.conf
 
 [Service]
 Type=simple
+Slice=teleagent-provider.slice
 User=teleagent-%i-egress
 Group=teleagent-%i-egress
 Sockets=teleagent-provider-egress@%i.socket teleagent-provider-egress-control@%i.socket
@@ -49,6 +50,14 @@ RestartSec=2s
 KillMode=control-group
 TimeoutStopSec=20s
 LimitCORE=0
+MemoryHigh=384M
+MemoryMax=512M
+MemorySwapMax=0
+TasksMax=128
+CPUQuota=25%
+CPUWeight=100
+IOAccounting=yes
+IOWeight=100
 NoNewPrivileges=yes
 AmbientCapabilities=
 CapabilityBoundingSet=

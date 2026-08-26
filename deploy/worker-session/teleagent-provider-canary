@@ -3,33 +3,37 @@
 
 const { spawn } = require('node:child_process');
 const path = require('node:path');
-const {
-  buildClaudeArgs,
-  buildCodexArgs,
-} = require('../../claude-api-server/agent-cli');
 
 const CLIENT = '/usr/local/libexec/teleagent-provider-supervisor-client';
-const WORKSPACE_ROOT = '/srv/teleagent-agent-workspaces';
+const FIXED_WORKSPACE = '/srv/teleagent-agent-workspaces/phone';
+const EMPTY_MCP = '/etc/teleagent/provider-runtime/empty-mcp.json';
+const EMPTY_SETTINGS = '/etc/teleagent/provider-runtime/empty-settings.json';
 
 function buildCanaryInvocation(provider, workspaceInput) {
   const workspace = path.resolve(String(workspaceInput || ''));
-  const relative = path.relative(WORKSPACE_ROOT, workspace);
-  if (!['claude', 'codex'].includes(provider) || !relative ||
-      relative.startsWith('..') || path.isAbsolute(relative)) {
+  if (!['claude', 'codex'].includes(provider) || workspace !== FIXED_WORKSPACE) {
     throw new Error('Provider canary requires an exact provider workspace');
   }
+  // Keep this activation executable self-contained and digest-pinned. These
+  // are the exact fixed argument vectors admitted by provider-runtime and the
+  // captured egress envelopes; root activation must not import application
+  // JavaScript through an installed libexec entrypoint.
   const args = provider === 'claude'
-    ? buildClaudeArgs({
-      // Sonnet 5 is the only Claude model whose pinned CLI wire envelope is
-      // currently captured and admitted by provider-egress. A cheaper model
-      // is not a valid canary if its protocol shape is intentionally blocked.
-      model: 'claude-sonnet-5', permissionMode: 'dontAsk',
-      tools: ['Read', 'Glob', 'Grep'], allowedTools: ['Read', 'Glob', 'Grep'],
-    })
-    : buildCodexArgs({
-      model: 'gpt-5.6-luna', reasoningEffort: 'low', sandbox: 'read-only',
-      approvalPolicy: 'never', workingDirectory: workspace,
-    });
+    ? [
+      '-p', '--bare', '--safe-mode', '--strict-mcp-config',
+      '--mcp-config', EMPTY_MCP,
+      '--settings', EMPTY_SETTINGS,
+      // Sonnet 5 is the captured Claude activation envelope.
+      '--model', 'claude-sonnet-5', '--permission-mode', 'dontAsk',
+      '--tools', 'Read,Glob,Grep', '--allowedTools', 'Read,Glob,Grep',
+    ]
+    : [
+      '--ask-for-approval', 'never', '--sandbox', 'read-only',
+      '--model', 'gpt-5.6-luna', '--config', 'model_reasoning_effort="low"',
+      '--cd', workspace, 'exec',
+      '--ignore-user-config', '--ignore-rules', '--strict-config',
+      '--skip-git-repo-check', '--json', '-',
+    ];
   return [
     '--provider', provider,
     '--mode', 'managed',

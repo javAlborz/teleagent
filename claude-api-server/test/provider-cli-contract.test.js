@@ -4,7 +4,13 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
+const {
+  copySourceToStage,
+  installArtifactsInPrivateStage,
+  verifyVersion,
+} = require('../../deploy/worker-session/teleagent-provider-cli-install');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const DEPLOY = path.join(ROOT, 'deploy', 'worker-session');
@@ -82,4 +88,96 @@ test('checked-in wire capture keeps unobserved routes fail closed', () => {
   ]);
   assert.equal(capture.clients.codex.compactionProbe.correlationVerified, true);
   assert.equal(capture.clients.codex.compactionProbe.responsesCompactPathObserved, false);
+});
+
+test('provider CLI installation executes only its descriptor-copied private stage', (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'provider-cli-private-stage-'));
+  fs.chmodSync(directory, 0o700);
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const source = path.join(directory, 'caller-selected-cli');
+  const staged = path.join(directory, 'root-private-staged-cli');
+  const marker = path.join(directory, 'original-path-executed');
+  const reviewed = '#!/bin/sh\nprintf \'reviewed-cli 1.0\\n\'\n';
+  fs.writeFileSync(source, reviewed, { mode: 0o755 });
+  fs.chmodSync(source, 0o755);
+  const artifact = {
+    size: Buffer.byteLength(reviewed),
+    sha256: crypto.createHash('sha256').update(reviewed).digest('hex'),
+    versionArgs: ['--version'],
+    versionStdout: 'reviewed-cli 1.0',
+  };
+  copySourceToStage(source, staged, artifact, {
+    expectedUid: process.getuid(),
+    expectedGid: process.getgid(),
+  });
+
+  fs.writeFileSync(source, `#!/bin/sh\n/usr/bin/touch '${marker}'\nprintf 'reviewed-cli 1.0\\n'\n`);
+  fs.chmodSync(source, 0o755);
+  verifyVersion(staged, artifact);
+  assert.equal(fs.existsSync(marker), false);
+  assert.equal(fs.readFileSync(staged, 'utf8'), reviewed);
+  const metadata = fs.lstatSync(staged);
+  assert.equal(metadata.isSymbolicLink(), false);
+  assert.equal(metadata.nlink, 1);
+  assert.equal(metadata.mode & 0o777, 0o755);
+
+  const installer = fs.readFileSync(
+    path.join(DEPLOY, 'teleagent-provider-cli-install'), 'utf8'
+  );
+  assert.match(installer,
+    /copySource\(sources\[artifact\.id\], staged, artifact,[\s\S]*versionCheck\(staged, artifact\)/);
+  assert.doesNotMatch(installer, /verifyVersion\(sources\[artifact\.id\]/);
+  assert.doesNotMatch(installer, /function fail\(message\) \{[\s\S]*process\.exit\(/);
+  assert.match(installer, /process\.exitCode = 77/);
+});
+
+test('provider CLI installation removes private stages on every pre-commit failure', (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'provider-cli-cleanup-'));
+  fs.chmodSync(directory, 0o700);
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const expectedUid = process.getuid();
+  const expectedGid = process.getgid();
+  const artifactIds = ['claude', 'codex-wrapper', 'codex-vendor'];
+
+  for (const scenario of ['second-source-validation', 'copy-enospc', 'version-probe']) {
+    const targetRoot = path.join(directory, scenario);
+    fs.mkdirSync(targetRoot, { mode: 0o755 });
+    const artifacts = Object.fromEntries(artifactIds.map((id) => [id, {
+      id,
+      path: path.join(targetRoot, id),
+    }]));
+    const manifest = { artifacts: artifactIds.map((id) => artifacts[id]) };
+    const sources = Object.fromEntries(artifactIds.map((id) => [id, `${id}-source`]));
+    let copyCount = 0;
+    const copySource = (_source, staged) => {
+      copyCount += 1;
+      if (scenario === 'second-source-validation' && copyCount === 2) {
+        throw new Error('second-source-validation');
+      }
+      fs.writeFileSync(staged, 'reviewed fixture\n', { mode: 0o755 });
+      if (scenario === 'copy-enospc') {
+        const error = new Error('copy-enospc');
+        error.code = 'ENOSPC';
+        throw error;
+      }
+    };
+    const versionCheck = () => {
+      if (scenario === 'version-probe') throw new Error('version-probe');
+    };
+
+    assert.throws(
+      () => installArtifactsInPrivateStage(manifest, artifacts, sources, {
+        targetRoot,
+        expectedUid,
+        expectedGid,
+        copySource,
+        versionCheck,
+      }),
+      new RegExp(scenario),
+    );
+    assert.deepEqual(
+      fs.readdirSync(targetRoot).filter((name) => name.startsWith('.provider-cli-stage-')),
+      [],
+    );
+  }
 });

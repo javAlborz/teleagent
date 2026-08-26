@@ -1,0 +1,230 @@
+#!/usr/local/libexec/teleagent-node
+'use strict';
+
+const fs = require('node:fs');
+const path = require('node:path');
+
+const SOURCE_ROOT = '/opt/teleagent/current/deploy/worker-session';
+const INSTALLED_VERIFIER = '/usr/local/libexec/verify-worker-session-identity';
+const NOLOGIN = new Set(['/usr/sbin/nologin', '/sbin/nologin']);
+const USERS = Object.freeze([
+  ['teleagent-control', '/var/lib/teleagent-control'],
+  ['teleagent-session-broker', '/var/lib/teleagent-session-broker'],
+  ['teleagent-claude-supervisor', '/var/lib/teleagent-claude-supervisor'],
+  ['teleagent-codex-supervisor', '/var/lib/teleagent-codex-supervisor'],
+  ['teleagent-claude-worker', '/nonexistent/teleagent-claude-worker'],
+  ['teleagent-codex-worker', '/nonexistent/teleagent-codex-worker'],
+  ['teleagent-claude-shim', '/nonexistent'],
+  ['teleagent-codex-shim', '/nonexistent'],
+  ['teleagent-claude-egress', '/var/lib/teleagent-claude-egress'],
+  ['teleagent-codex-egress', '/var/lib/teleagent-codex-egress'],
+]);
+const SHARED_GROUP_MEMBERS = Object.freeze({
+  'teleagent-agent-workspace': Object.freeze([
+    'teleagent-session-broker', 'teleagent-claude-worker', 'teleagent-codex-worker',
+  ]),
+  'teleagent-provider-launch': Object.freeze([
+    'teleagent-session-broker', 'teleagent-control',
+  ]),
+  'teleagent-claude-egress-client': Object.freeze(['teleagent-claude-shim']),
+  'teleagent-codex-egress-client': Object.freeze(['teleagent-codex-shim']),
+});
+
+function refuse(message) {
+  throw new Error(`Worker-session identity verification refused: ${message}`);
+}
+
+function meaningfulLines(source) {
+  return String(source).split('\n').map((line) => line.trim())
+    .filter((line) => line && !line.startsWith('#'));
+}
+
+function validateSysusersSource(source) {
+  const expected = [
+    'g teleagent-agent-workspace -',
+    'g teleagent-provider-launch -',
+    'g teleagent-claude-egress-client -',
+    'g teleagent-codex-egress-client -',
+    'u teleagent-control - "Teleagent private controller" /var/lib/teleagent-control /usr/sbin/nologin',
+    'u teleagent-session-broker - "Teleagent isolated session broker" /var/lib/teleagent-session-broker /usr/sbin/nologin',
+    'u teleagent-claude-supervisor - "Teleagent Claude provider supervisor" /var/lib/teleagent-claude-supervisor /usr/sbin/nologin',
+    'u teleagent-codex-supervisor - "Teleagent Codex provider supervisor" /var/lib/teleagent-codex-supervisor /usr/sbin/nologin',
+    'u teleagent-claude-worker - "Teleagent ephemeral Claude worker" /nonexistent/teleagent-claude-worker /usr/sbin/nologin',
+    'u teleagent-codex-worker - "Teleagent ephemeral Codex worker" /nonexistent/teleagent-codex-worker /usr/sbin/nologin',
+    'u teleagent-claude-shim - "Teleagent Claude private-network egress shim" /nonexistent /usr/sbin/nologin',
+    'u teleagent-codex-shim - "Teleagent Codex private-network egress shim" /nonexistent /usr/sbin/nologin',
+    'u teleagent-claude-egress - "Teleagent Claude credential egress broker" /var/lib/teleagent-claude-egress /usr/sbin/nologin',
+    'u teleagent-codex-egress - "Teleagent Codex credential egress broker" /var/lib/teleagent-codex-egress /usr/sbin/nologin',
+    'm teleagent-session-broker teleagent-agent-workspace',
+    'm teleagent-session-broker teleagent-provider-launch',
+    'm teleagent-control teleagent-provider-launch',
+    'm teleagent-claude-worker teleagent-agent-workspace',
+    'm teleagent-codex-worker teleagent-agent-workspace',
+    'm teleagent-claude-shim teleagent-claude-egress-client',
+    'm teleagent-codex-shim teleagent-codex-egress-client',
+  ];
+  if (JSON.stringify(meaningfulLines(source)) !== JSON.stringify(expected)) {
+    refuse('the sysusers identity topology drifted');
+  }
+  return true;
+}
+
+function parseDatabase(source, fieldCount, label) {
+  const rows = [];
+  for (const line of String(source).split('\n')) {
+    if (!line || line.startsWith('#')) continue;
+    const fields = line.split(':');
+    if (fields.length !== fieldCount) refuse(`${label} contains a malformed record`);
+    rows.push(fields);
+  }
+  return rows;
+}
+
+function numeric(value, label) {
+  if (!/^[0-9]+$/u.test(String(value))) refuse(`${label} is not numeric`);
+  const result = Number(value);
+  if (!Number.isSafeInteger(result)) refuse(`${label} is outside the safe integer range`);
+  return result;
+}
+
+function uniqueNamed(rows, name, label) {
+  const matches = rows.filter((fields) => fields[0] === name);
+  if (matches.length !== 1) refuse(`${label} must contain exactly one ${name} record`);
+  return matches[0];
+}
+
+function sortedMembers(group) {
+  return group[3].split(',').filter(Boolean).sort();
+}
+
+function validateIdentityRecords(passwdSource, groupSource) {
+  const passwd = parseDatabase(passwdSource, 7, 'passwd');
+  const groups = parseDatabase(groupSource, 4, 'group');
+  const expectedUsers = new Set(USERS.map(([name]) => name));
+  const expectedGroups = new Set([
+    ...expectedUsers,
+    ...Object.keys(SHARED_GROUP_MEMBERS),
+  ]);
+  const identities = {};
+  const controlledUids = new Map();
+  const controlledGids = new Map();
+
+  for (const [name, home] of USERS) {
+    const user = uniqueNamed(passwd, name, 'passwd');
+    const group = uniqueNamed(groups, name, 'group');
+    const uid = numeric(user[2], `${name} uid`);
+    const gid = numeric(user[3], `${name} primary gid`);
+    const groupGid = numeric(group[2], `${name} group gid`);
+    if (uid <= 0 || gid <= 0 || uid === 1000 || gid === 1000 || gid !== groupGid ||
+        user[5] !== home || !NOLOGIN.has(user[6]) || sortedMembers(group).length !== 0) {
+      refuse(`${name} has an unsafe account contract`);
+    }
+    if (controlledUids.has(uid) || controlledGids.has(gid)) {
+      refuse('split runtime numeric identities collide');
+    }
+    controlledUids.set(uid, name);
+    controlledGids.set(gid, name);
+    identities[name] = { uid, gid };
+  }
+
+  for (const [name, expectedMembers] of Object.entries(SHARED_GROUP_MEMBERS)) {
+    const group = uniqueNamed(groups, name, 'group');
+    const gid = numeric(group[2], `${name} gid`);
+    if (gid <= 0 || gid === 1000 || controlledGids.has(gid) ||
+        JSON.stringify(sortedMembers(group)) !== JSON.stringify([...expectedMembers].sort())) {
+      refuse(`${name} has an unsafe shared-group contract`);
+    }
+    controlledGids.set(gid, name);
+    identities[name] = { gid };
+  }
+
+  for (const [uid, name] of controlledUids) {
+    const aliases = passwd.filter((fields) => numeric(fields[2], 'passwd uid') === uid);
+    if (aliases.length !== 1 || aliases[0][0] !== name) refuse('a split runtime UID is reused');
+  }
+  for (const [gid, name] of controlledGids) {
+    const aliases = groups.filter((fields) => numeric(fields[2], 'group gid') === gid);
+    if (aliases.length !== 1 || aliases[0][0] !== name) refuse('a split runtime GID is reused');
+    for (const user of passwd) {
+      const primaryGid = numeric(user[3], 'passwd primary gid');
+      const permitted = expectedUsers.has(user[0]) && user[0] === name;
+      if (primaryGid === gid && !permitted) refuse('a controlled GID is reused as another primary group');
+    }
+  }
+  for (const group of groups) {
+    for (const member of sortedMembers(group)) {
+      if (!expectedUsers.has(member)) continue;
+      const permitted = SHARED_GROUP_MEMBERS[group[0]]?.includes(member) === true;
+      if (!permitted || !expectedGroups.has(group[0])) {
+        refuse('a split runtime user retains an unreviewed supplementary group');
+      }
+    }
+  }
+  return Object.freeze(identities);
+}
+
+function inspectRootDatabase(filename) {
+  const metadata = fs.lstatSync(filename);
+  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.uid !== 0 ||
+      (metadata.mode & 0o022) !== 0 || metadata.nlink !== 1 || metadata.size > 4 * 1024 * 1024) {
+    refuse('the system identity database is unsafe');
+  }
+  return fs.readFileSync(filename, 'utf8');
+}
+
+function sourceCheck(sourceRoot = SOURCE_ROOT) {
+  const filename = path.join(sourceRoot, 'teleagent-worker-session.sysusers');
+  const metadata = fs.lstatSync(filename);
+  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1 ||
+      (metadata.mode & 0o022) !== 0) refuse('the reviewed sysusers source is unsafe');
+  return validateSysusersSource(fs.readFileSync(filename, 'utf8'));
+}
+
+function installedCheck({
+  passwdPath = '/etc/passwd',
+  groupPath = '/etc/group',
+} = {}) {
+  if (process.getuid() !== 0) refuse('the installed identity check requires root');
+  sourceCheck();
+  return validateIdentityRecords(
+    inspectRootDatabase(passwdPath),
+    inspectRootDatabase(groupPath)
+  );
+}
+
+function main() {
+  const mode = process.argv[2];
+  if (process.argv.length !== 3 || !['--source-check', '--installed-check'].includes(mode)) {
+    refuse('usage: verify-worker-session-identity --source-check|--installed-check');
+  }
+  const invoked = fs.realpathSync(process.argv[1]);
+  if (mode === '--installed-check') {
+    if (invoked !== INSTALLED_VERIFIER) refuse('use the fixed installed identity verifier');
+    const metadata = fs.lstatSync(INSTALLED_VERIFIER);
+    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.uid !== 0 ||
+        metadata.gid !== 0 || (metadata.mode & 0o777) !== 0o755 || metadata.nlink !== 1) {
+      refuse('the installed identity verifier metadata is unsafe');
+    }
+    installedCheck();
+    process.stdout.write('WORKER_SESSION_IDENTITY_OK\n');
+    return;
+  }
+  if (invoked !== path.join(SOURCE_ROOT, 'verify-worker-session-identity') &&
+      invoked !== INSTALLED_VERIFIER) refuse('source check requires a reviewed fixed entrypoint');
+  sourceCheck();
+  process.stdout.write('WORKER_SESSION_IDENTITY_SOURCE_OK\n');
+}
+
+if (require.main === module) {
+  try { main(); } catch (error) {
+    process.stderr.write(`${error.message}\n`);
+    process.exit(77);
+  }
+}
+
+module.exports = {
+  SHARED_GROUP_MEMBERS,
+  USERS,
+  validateIdentityRecords,
+  validateSysusersSource,
+};

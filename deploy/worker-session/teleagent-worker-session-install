@@ -1,0 +1,553 @@
+#!/bin/bash
+set -euo pipefail
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+unset ENV BASH_ENV CDPATH LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT GCONV_PATH \
+  NODE_OPTIONS NODE_PATH PYTHONPATH PERL5LIB RUBYOPT
+umask 077
+
+name=teleagent-worker-session-install
+sentinel=/etc/teleagent/worker-session/ENABLE
+systemctl_bin=/usr/bin/systemctl
+sysusers_bin=/usr/bin/systemd-sysusers
+tmpfiles_bin=/usr/bin/systemd-tmpfiles
+visudo_bin=/usr/sbin/visudo
+identity_bin=/usr/local/libexec/verify-worker-session-identity
+root_prefix=
+expected_uid=0
+expected_gid=0
+
+fail() {
+  local message=$1
+  local status=${2:-77}
+  printf 'Worker-session installation refused: %s\n' "$message" >&2
+  exit "$status"
+}
+
+validate_test_dependency() {
+  local filename=$1
+  [ -f "$filename" ] && [ ! -L "$filename" ] ||
+    fail 'a test dependency is not a regular file'
+  [ "$(/usr/bin/stat -c '%u:%g:%a:%h' "$filename")" = \
+    "${expected_uid}:${expected_gid}:700:1" ] ||
+    fail 'a test dependency has unsafe metadata'
+  case "$(/usr/bin/readlink -f -- "$filename")" in
+    "$root_prefix"/*) ;;
+    *) fail 'a test dependency escaped the isolated fixture' ;;
+  esac
+}
+
+configure_environment() {
+  if [ "${TELEAGENT_WORKER_SESSION_INSTALL_TEST_ONLY:-}" = 1 ]; then
+    [ -n "${TELEAGENT_WORKER_SESSION_INSTALL_TEST_ROOT:-}" ] ||
+      fail 'the isolated test root is required'
+    root_prefix=$(/usr/bin/readlink -f -- \
+      "$TELEAGENT_WORKER_SESSION_INSTALL_TEST_ROOT")
+    case "$root_prefix" in
+      /tmp/teleagent-worker-session-install-test-*) ;;
+      *) fail 'the isolated test root is outside the allowed namespace' ;;
+    esac
+    expected_uid=$(/usr/bin/id -u)
+    expected_gid=$(/usr/bin/id -g)
+    [ -d "$root_prefix" ] && [ ! -L "$root_prefix" ] ||
+      fail 'the isolated test root is unsafe'
+    [ "$(/usr/bin/stat -c '%u:%g:%a' "$root_prefix")" = \
+      "${expected_uid}:${expected_gid}:700" ] ||
+      fail 'the isolated test root has unsafe metadata'
+    systemctl_bin=${TELEAGENT_WORKER_SESSION_INSTALL_TEST_SYSTEMCTL:-}
+    sysusers_bin=${TELEAGENT_WORKER_SESSION_INSTALL_TEST_SYSUSERS:-}
+    tmpfiles_bin=${TELEAGENT_WORKER_SESSION_INSTALL_TEST_TMPFILES:-}
+    visudo_bin=${TELEAGENT_WORKER_SESSION_INSTALL_TEST_VISUDO:-}
+    identity_bin=${TELEAGENT_WORKER_SESSION_INSTALL_TEST_IDENTITY:-}
+    for dependency in \
+      "$systemctl_bin" "$sysusers_bin" "$tmpfiles_bin" "$visudo_bin" "$identity_bin"; do
+      validate_test_dependency "$dependency"
+    done
+    return
+  fi
+
+  for forbidden in \
+    "${TELEAGENT_WORKER_SESSION_INSTALL_TEST_ROOT:-}" \
+    "${TELEAGENT_WORKER_SESSION_INSTALL_TEST_SYSTEMCTL:-}" \
+    "${TELEAGENT_WORKER_SESSION_INSTALL_TEST_SYSUSERS:-}" \
+    "${TELEAGENT_WORKER_SESSION_INSTALL_TEST_TMPFILES:-}" \
+    "${TELEAGENT_WORKER_SESSION_INSTALL_TEST_VISUDO:-}" \
+    "${TELEAGENT_WORKER_SESSION_INSTALL_TEST_IDENTITY:-}"; do
+    [ -z "$forbidden" ] || fail 'test dependency overrides require the isolated test lane'
+  done
+}
+
+host_path() {
+  printf '%s%s\n' "$root_prefix" "$1"
+}
+
+configure_environment
+self=$(/usr/bin/readlink -f -- "$0")
+installed_entrypoint=$(host_path /usr/local/libexec/teleagent-worker-session-install)
+if [ "$self" = "$installed_entrypoint" ]; then
+  source_root=$(/usr/bin/readlink -f -- \
+    "$(host_path /opt/teleagent/current/deploy/worker-session)")
+else
+  [ "$(/usr/bin/basename -- "$self")" = "$name" ] ||
+    fail 'the installer entrypoint is unreviewed'
+  source_root=$(/usr/bin/dirname -- "$self")
+fi
+app_root=$(/usr/bin/readlink -f -- "$source_root/../..")
+[ "$source_root" = "$app_root/deploy/worker-session" ] ||
+  fail 'the worker-session source bundle is outside a release root'
+
+declare -a sources=()
+declare -a targets=()
+declare -a source_modes=()
+declare -a target_modes=()
+declare -a source_digests=()
+
+add_asset() {
+  sources+=("$1")
+  targets+=("$2")
+  source_modes+=("$3")
+  target_modes+=("$4")
+  source_digests+=("${5:-}")
+}
+
+load_assets() {
+  add_asset deploy/worker-session/teleagent-worker-session.service \
+    /etc/systemd/system/teleagent-worker-session.service 0644 0644
+  add_asset deploy/worker-session/teleagent-worker-session.socket \
+    /etc/systemd/system/teleagent-worker-session.socket 0644 0644
+  add_asset deploy/worker-session/teleagent-provider-supervisor@.service \
+    /etc/systemd/system/teleagent-provider-supervisor@.service 0644 0644
+  add_asset deploy/worker-session/teleagent-provider-supervisor@.socket \
+    /etc/systemd/system/teleagent-provider-supervisor@.socket 0644 0644
+  add_asset deploy/worker-session/teleagent-provider-egress@.service \
+    /etc/systemd/system/teleagent-provider-egress@.service 0644 0644
+  add_asset deploy/worker-session/teleagent-provider-egress@.socket \
+    /etc/systemd/system/teleagent-provider-egress@.socket 0644 0644
+  add_asset deploy/worker-session/teleagent-provider-egress-control@.socket \
+    /etc/systemd/system/teleagent-provider-egress-control@.socket 0644 0644
+  add_asset deploy/worker-session/teleagent-provider-libexec-install.service \
+    /etc/systemd/system/teleagent-provider-libexec-install.service 0644 0644
+  add_asset deploy/worker-session/teleagent-provider-model-apparmor.service \
+    /etc/systemd/system/teleagent-provider-model-apparmor.service 0644 0644
+  add_asset deploy/worker-session/teleagent-provider.slice \
+    /etc/systemd/system/teleagent-provider.slice 0644 0644
+  add_asset deploy/worker-session/teleagent-provider-model.slice \
+    /etc/systemd/system/teleagent-provider-model.slice 0644 0644
+  add_asset deploy/worker-session/teleagent-worker-session.sysusers \
+    /etc/sysusers.d/teleagent-worker-session.conf 0644 0644
+  add_asset deploy/worker-session/teleagent-worker-session.tmpfiles \
+    /etc/tmpfiles.d/teleagent-worker-session.conf 0644 0644
+  add_asset deploy/worker-session/teleagent-provider-supervisors.sudoers \
+    /etc/sudoers.d/teleagent-provider-supervisors 0644 0440
+  add_asset deploy/worker-session/provider-runtime-empty-settings.json \
+    /etc/teleagent/provider-runtime/empty-settings.json 0644 0444
+  add_asset deploy/worker-session/provider-runtime-empty-mcp.json \
+    /etc/teleagent/provider-runtime/empty-mcp.json 0644 0444
+  add_asset deploy/worker-session/provider-libexec.manifest \
+    /etc/teleagent/provider-runtime/provider-libexec.manifest 0444 0444
+  add_asset deploy/worker-session/teleagent-provider-supervisor-client \
+    /usr/local/libexec/teleagent-provider-supervisor-client 0755 0755
+  add_asset deploy/worker-session/teleagent-session-pane-entry \
+    /usr/local/libexec/teleagent-session-pane-entry 0755 0755
+  add_asset deploy/worker-session/teleagent-worker-session-create \
+    /usr/local/libexec/teleagent-worker-session-create 0755 0755
+  add_asset deploy/worker-session/verify-worker-session-boundary \
+    /usr/local/libexec/verify-worker-session-boundary 0755 0755
+  add_asset deploy/worker-session/verify-worker-session-identity \
+    /usr/local/libexec/verify-worker-session-identity 0755 0755
+  add_asset deploy/worker-session/teleagent-worker-session-install \
+    /usr/local/libexec/teleagent-worker-session-install 0755 0755
+
+  local manifest="$app_root/deploy/worker-session/provider-libexec.manifest"
+  local digest relative target mode extra source_mode
+  local provider_targets=
+  while IFS=' ' read -r digest relative target mode extra; do
+    [ -z "${extra:-}" ] && [ "${#digest}" -eq 64 ] ||
+      fail 'the provider libexec manifest has a malformed record'
+    case "$digest" in *[!0-9a-f]*) fail 'a provider libexec digest is invalid' ;; esac
+    case "$relative" in
+      deploy/worker-session/*|claude-api-server/provider-egress-shim.js) ;;
+      *) fail 'a provider libexec source escaped the release root' ;;
+    esac
+    case "$target:$mode" in
+      teleagent-provider-*:0755|teleagent-provider-*:0444) ;;
+      *) fail 'a provider libexec target is invalid' ;;
+    esac
+    [ "$(/usr/bin/basename -- "$target")" = "$target" ] ||
+      fail 'a provider libexec target is not a basename'
+    case "$relative" in
+      deploy/worker-session/provider-cli.manifest.json|\
+      deploy/worker-session/teleagent-provider-model.apparmor) source_mode=0644 ;;
+      deploy/worker-session/teleagent-codex-cli-wrapper|*) source_mode=0755 ;;
+    esac
+    add_asset "$relative" "/usr/local/libexec/$target" "$source_mode" "$mode" "$digest"
+    provider_targets="${provider_targets}${target}\n"
+  done < "$manifest"
+  local expected_provider_targets
+  expected_provider_targets='teleagent-provider-apparmor-install
+teleagent-provider-boundary
+teleagent-provider-boundary-runtime
+teleagent-provider-canary
+teleagent-provider-cli-check
+teleagent-provider-cli-install
+teleagent-provider-cli.manifest.json
+teleagent-provider-codex-cli-wrapper
+teleagent-provider-egress-credential-check
+teleagent-provider-egress-shim
+teleagent-provider-libexec-install
+teleagent-provider-model.apparmor
+teleagent-provider-runtime'
+  [ "$(printf '%b' "$provider_targets" | LC_ALL=C /usr/bin/sort)" = \
+    "$expected_provider_targets" ] || fail 'the provider libexec closure is incomplete'
+}
+
+load_assets
+
+inspect_directory() {
+  local directory=$1
+  local metadata
+  [ -d "$directory" ] && [ ! -L "$directory" ] ||
+    fail 'a trusted directory is absent or unsafe'
+  metadata=$(/usr/bin/stat -c '%u:%g:%a' "$directory")
+  case "$metadata" in
+    "${expected_uid}:${expected_gid}:"*) ;;
+    *) fail 'a trusted directory has the wrong owner' ;;
+  esac
+  local mode=${metadata##*:}
+  [ $((8#$mode & 0022)) -eq 0 ] || fail 'a trusted directory is group- or world-writable'
+  [ "$(/usr/bin/readlink -f -- "$directory")" = "$directory" ] ||
+    fail 'a trusted directory resolves through a link'
+}
+
+assert_source_file() {
+  local filename=$1
+  local mode=$2
+  local actual
+  [ -f "$filename" ] && [ ! -L "$filename" ] ||
+    fail 'a reviewed source asset is absent or unsafe'
+  actual=$(/usr/bin/stat -c '%u:%g:%a:%h' "$filename")
+  case "$mode:$actual" in
+    0755:"${expected_uid}:${expected_gid}:555:1"|\
+    0755:"${expected_uid}:${expected_gid}:755:1"|\
+    0644:"${expected_uid}:${expected_gid}:444:1"|\
+    0644:"${expected_uid}:${expected_gid}:644:1"|\
+    0444:"${expected_uid}:${expected_gid}:444:1"|\
+    0444:"${expected_uid}:${expected_gid}:644:1") ;;
+    *) fail 'a reviewed source asset has unsafe metadata' ;;
+  esac
+}
+
+assert_unique_assets() {
+  local source_list target_list
+  source_list=$(printf '%s\n' "${sources[@]}" | LC_ALL=C /usr/bin/sort)
+  target_list=$(printf '%s\n' "${targets[@]}" | LC_ALL=C /usr/bin/sort)
+  [ "$(printf '%s\n' "$source_list" | /usr/bin/uniq -d)" = '' ] ||
+    fail 'the install closure contains a duplicate source'
+  [ "$(printf '%s\n' "$target_list" | /usr/bin/uniq -d)" = '' ] ||
+    fail 'the install closure contains a duplicate target'
+}
+
+source_check() {
+  inspect_directory "$app_root"
+  inspect_directory "$app_root/deploy"
+  inspect_directory "$source_root"
+  inspect_directory "$app_root/claude-api-server"
+  assert_unique_assets
+
+  local index filename digest
+  for ((index = 0; index < ${#sources[@]}; index += 1)); do
+    filename="$app_root/${sources[$index]}"
+    case "${sources[$index]}:${targets[$index]}:${target_modes[$index]}" in
+      *..*) fail 'the install closure contains path traversal' ;;
+    esac
+    case "${targets[$index]}" in
+      /etc/systemd/system/teleagent-*|/etc/sysusers.d/teleagent-*|\
+      /etc/tmpfiles.d/teleagent-*|/etc/sudoers.d/teleagent-*|\
+      /etc/teleagent/provider-runtime/*|/usr/local/libexec/teleagent-*|\
+      /usr/local/libexec/verify-worker-session-boundary|\
+      /usr/local/libexec/verify-worker-session-identity) ;;
+      *) fail 'the install closure contains an unapproved target' ;;
+    esac
+    [ "${targets[$index]}" != "$sentinel" ] ||
+      fail 'the activation sentinel entered the install closure'
+    assert_source_file "$filename" "${source_modes[$index]}"
+    digest=${source_digests[$index]}
+    if [ -n "$digest" ] && [ "$(/usr/bin/sha256sum "$filename" | /usr/bin/awk '{print $1}')" != "$digest" ]; then
+      fail 'a provider libexec source digest is unreviewed'
+    fi
+  done
+
+  local unit condition_count
+  for unit in \
+    teleagent-worker-session.service \
+    teleagent-worker-session.socket \
+    teleagent-provider-supervisor@.service \
+    teleagent-provider-supervisor@.socket \
+    teleagent-provider-egress@.service \
+    teleagent-provider-egress@.socket \
+    teleagent-provider-egress-control@.socket \
+    teleagent-provider-libexec-install.service \
+    teleagent-provider-model-apparmor.service \
+    teleagent-provider.slice \
+    teleagent-provider-model.slice; do
+    filename="$source_root/$unit"
+    condition_count=$(/usr/bin/grep -Fxc \
+      'ConditionPathExists=/etc/teleagent/worker-session/ENABLE' "$filename" || true)
+    [ "$condition_count" -eq 1 ] || fail 'a unit lost its exact activation sentinel gate'
+    ! /usr/bin/grep -Eq '^\[Install\][[:space:]]*$' "$filename" ||
+      fail 'a dormant worker-session unit became enableable'
+  done
+  ! /usr/bin/grep -Fq '/etc/teleagent/worker-session/ENABLE' \
+    "$source_root/teleagent-worker-session.tmpfiles" ||
+    fail 'tmpfiles must never create the activation sentinel'
+  "$visudo_bin" -cf "$source_root/teleagent-provider-supervisors.sudoers" >/dev/null ||
+    fail 'the reviewed sudoers policy is invalid'
+}
+
+assert_sentinel_absent() {
+  local installed_sentinel
+  installed_sentinel=$(host_path "$sentinel")
+  if [ -e "$installed_sentinel" ] || [ -L "$installed_sentinel" ]; then
+    fail 'the activation sentinel must remain absent'
+  fi
+}
+
+unit_file_target() {
+  local unit=$1
+  case "$unit" in
+    teleagent-provider-supervisor@*.service)
+      host_path /etc/systemd/system/teleagent-provider-supervisor@.service ;;
+    teleagent-provider-supervisor@*.socket)
+      host_path /etc/systemd/system/teleagent-provider-supervisor@.socket ;;
+    teleagent-provider-egress@*.service)
+      host_path /etc/systemd/system/teleagent-provider-egress@.service ;;
+    teleagent-provider-egress@*.socket)
+      host_path /etc/systemd/system/teleagent-provider-egress@.socket ;;
+    teleagent-provider-egress-control@*.socket)
+      host_path /etc/systemd/system/teleagent-provider-egress-control@.socket ;;
+    *) host_path "/etc/systemd/system/$unit" ;;
+  esac
+}
+
+assert_unit_dormant() {
+  local unit=$1
+  local phase=$2
+  local target load_state active_state unit_file_state status
+  target=$(unit_file_target "$unit")
+  load_state=$("$systemctl_bin" show "$unit" --property=LoadState --value) ||
+    fail 'a worker-session unit load state is unavailable' 75
+  active_state=$("$systemctl_bin" show "$unit" --property=ActiveState --value) ||
+    fail 'a worker-session unit active state is unavailable' 75
+  [ "$active_state" = inactive ] ||
+    fail 'a worker-session unit is active, failed, or transitional' 75
+  case "$load_state:$phase" in
+    loaded:pre|loaded:installed)
+      unit_file_state=$("$systemctl_bin" show "$unit" \
+        --property=UnitFileState --value) ||
+        fail 'a worker-session unit-file state is unavailable' 75
+      [ "$unit_file_state" = static ] ||
+        fail 'a worker-session unit is not exactly static' 75
+      ;;
+    not-found:pre)
+      [ ! -e "$target" ] && [ ! -L "$target" ] ||
+        fail 'a missing worker-session unit conflicts with an installed unit file' 75
+      if "$systemctl_bin" is-enabled "$unit" >/dev/null 2>&1; then
+        fail 'a missing worker-session unit unexpectedly has enablement state' 75
+      else
+        status=$?
+      fi
+      [ "$status" -eq 4 ] ||
+        fail 'a missing worker-session unit cannot be proved absent' 75
+      ;;
+    *) fail 'a worker-session unit state is unavailable or unsafe' 75 ;;
+  esac
+}
+
+assert_dormant() {
+  local phase=${1:-installed}
+  assert_sentinel_absent
+  local unit
+  for unit in \
+    teleagent-worker-session.service \
+    teleagent-worker-session.socket \
+    teleagent-provider-libexec-install.service \
+    teleagent-provider-model-apparmor.service \
+    teleagent-provider.slice \
+    teleagent-provider-model.slice \
+    teleagent-provider-supervisor@claude.service \
+    teleagent-provider-supervisor@claude.socket \
+    teleagent-provider-supervisor@codex.service \
+    teleagent-provider-supervisor@codex.socket \
+    teleagent-provider-egress@claude.service \
+    teleagent-provider-egress@claude.socket \
+    teleagent-provider-egress-control@claude.socket \
+    teleagent-provider-egress@codex.service \
+    teleagent-provider-egress@codex.socket \
+    teleagent-provider-egress-control@codex.socket; do
+    assert_unit_dormant "$unit" "$phase"
+  done
+  local transient
+  transient=$("$systemctl_bin" list-units --all --plain --no-legend \
+    'teleagent-provider-launch-*.service') ||
+    fail 'provider transient-unit enumeration is unavailable' 75
+  [ -z "$(printf '%s\n' "$transient" | /usr/bin/sed '/^[[:space:]]*$/d')" ] ||
+    fail 'transient provider launch units must be absent' 75
+  assert_sentinel_absent
+}
+
+require_install_authority() {
+  if [ -n "$root_prefix" ]; then
+    return
+  fi
+  [ "$(/usr/bin/id -u)" -eq 0 ] || fail 'root is required'
+}
+
+ensure_directory() {
+  local absolute=$1
+  local mode=$2
+  local directory
+  directory=$(host_path "$absolute")
+  if [ ! -e "$directory" ] && [ ! -L "$directory" ]; then
+    /usr/bin/install -d -o "$expected_uid" -g "$expected_gid" -m "$mode" -- "$directory"
+  fi
+  inspect_directory "$directory"
+}
+
+prepare_target_directories() {
+  ensure_directory /etc 0755
+  ensure_directory /etc/systemd 0755
+  ensure_directory /etc/systemd/system 0755
+  ensure_directory /etc/sysusers.d 0755
+  ensure_directory /etc/tmpfiles.d 0755
+  ensure_directory /etc/sudoers.d 0755
+  ensure_directory /etc/teleagent 0755
+  ensure_directory /etc/teleagent/provider-runtime 0755
+  ensure_directory /usr 0755
+  ensure_directory /usr/local 0755
+  ensure_directory /usr/local/libexec 0755
+  ensure_directory /run 0755
+}
+
+assert_target_file() {
+  local filename=$1
+  local mode=$2
+  [ -f "$filename" ] && [ ! -L "$filename" ] ||
+    fail 'an installed worker-session asset is absent or unsafe'
+  [ "$(/usr/bin/stat -c '%u:%g:%a:%h' "$filename")" = \
+    "${expected_uid}:${expected_gid}:${mode#0}:1" ] ||
+    fail 'an installed worker-session asset has unsafe metadata'
+}
+
+check_installed_assets() {
+  local index source target
+  for ((index = 0; index < ${#sources[@]}; index += 1)); do
+    source="$app_root/${sources[$index]}"
+    target=$(host_path "${targets[$index]}")
+    assert_target_file "$target" "${target_modes[$index]}"
+    /usr/bin/cmp -s -- "$source" "$target" ||
+      fail 'an installed worker-session asset differs from reviewed source'
+  done
+  "$visudo_bin" -cf "$(host_path /etc/sudoers.d/teleagent-provider-supervisors)" \
+    >/dev/null || fail 'the installed sudoers policy is invalid'
+}
+
+install_disabled() {
+  require_install_authority
+  source_check
+  assert_dormant pre
+  prepare_target_directories
+
+  local staging
+  staging=$(/usr/bin/mktemp -d "$(host_path /run)/teleagent-worker-session-install.XXXXXX")
+  /usr/bin/chmod 0700 "$staging"
+  local committed=0
+  local complete=0
+  local index target temporary
+
+  rollback() {
+    local status=$?
+    trap - EXIT INT TERM
+    for ((index = 0; index < ${#targets[@]}; index += 1)); do
+      target=$(host_path "${targets[$index]}")
+      /usr/bin/rm -f -- "${target}.new-$$"
+    done
+    if [ "$complete" -ne 1 ] && [ "$committed" -eq 1 ]; then
+      for ((index = ${#targets[@]} - 1; index >= 0; index -= 1)); do
+        target=$(host_path "${targets[$index]}")
+        if [ -f "$staging/backup-$index" ]; then
+          /usr/bin/install -o "$expected_uid" -g "$expected_gid" \
+            -m "${target_modes[$index]}" -- "$staging/backup-$index" "$target"
+        else
+          /usr/bin/rm -f -- "$target"
+        fi
+      done
+      "$systemctl_bin" daemon-reload >/dev/null 2>&1 || true
+    fi
+    /usr/bin/rm -rf -- "$staging"
+    exit "$status"
+  }
+  trap rollback EXIT INT TERM
+
+  for ((index = 0; index < ${#sources[@]}; index += 1)); do
+    target=$(host_path "${targets[$index]}")
+    temporary="${target}.new-$$"
+    [ ! -e "$temporary" ] && [ ! -L "$temporary" ] ||
+      fail 'an installation staging path already exists'
+    if [ -e "$target" ] || [ -L "$target" ]; then
+      assert_target_file "$target" "${target_modes[$index]}"
+      /usr/bin/cp --preserve=mode,ownership,timestamps -- "$target" "$staging/backup-$index"
+    fi
+    /usr/bin/install -o "$expected_uid" -g "$expected_gid" \
+      -m "${target_modes[$index]}" -- "$app_root/${sources[$index]}" "$temporary"
+    /usr/bin/sync -f "$temporary"
+  done
+
+  committed=1
+  for ((index = 0; index < ${#targets[@]}; index += 1)); do
+    target=$(host_path "${targets[$index]}")
+    /usr/bin/mv -f -- "${target}.new-$$" "$target"
+    /usr/bin/sync -d "$(/usr/bin/dirname -- "$target")"
+  done
+
+  "$sysusers_bin" "$(host_path /etc/sysusers.d/teleagent-worker-session.conf)"
+  "$tmpfiles_bin" --create "$(host_path /etc/tmpfiles.d/teleagent-worker-session.conf)"
+  "$systemctl_bin" daemon-reload
+  "$identity_bin" --installed-check | /usr/bin/grep -qx WORKER_SESSION_IDENTITY_OK ||
+    fail 'the installed split numeric identities failed verification'
+  assert_dormant installed
+  check_installed_assets
+  complete=1
+  /usr/bin/rm -rf -- "$staging"
+  trap - EXIT INT TERM
+}
+
+check_installed() {
+  require_install_authority
+  source_check
+  assert_dormant installed
+  check_installed_assets
+  "$identity_bin" --installed-check | /usr/bin/grep -qx WORKER_SESSION_IDENTITY_OK ||
+    fail 'the installed split numeric identities failed verification'
+}
+
+case "${1:-}" in
+  --source-check)
+    [ "$#" -eq 1 ] || fail 'unexpected arguments'
+    source_check
+    printf 'WORKER_SESSION_SOURCE_OK\n'
+    ;;
+  --install-disabled)
+    [ "$#" -eq 1 ] || fail 'unexpected arguments'
+    install_disabled
+    printf 'WORKER_SESSION_INSTALLED_DISABLED\n'
+    ;;
+  --check)
+    [ "$#" -eq 1 ] || fail 'unexpected arguments'
+    check_installed
+    printf 'WORKER_SESSION_INSTALLED_DISABLED_OK\n'
+    ;;
+  *)
+    fail 'usage: teleagent-worker-session-install --source-check|--install-disabled|--check'
+    ;;
+esac

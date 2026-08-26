@@ -9,7 +9,10 @@ all of these independently enforced host boundaries:
    `/run/teleagent-provider-launch/{claude,codex}.sock`.
 2. The supervisors run as `teleagent-{claude,codex}-supervisor`, admit one
    launch at a time, and ask the fixed root boundary to create one transient
-   systemd cgroup. They hold no provider credential.
+   systemd cgroup. They hold no provider credential. Supervisors and egress
+   brokers share the aggregate `teleagent-provider.slice`; model transients
+   live in its tighter `teleagent-provider-model.slice` child so model pressure
+   cannot consume the recovery plane or all staging-host CPU and memory.
 3. Model/tool processes run as distinct
    `teleagent-{claude,codex}-worker` identities whose account homes are fixed
    beneath `/nonexistent`; there is no persistent provider home. Each launch
@@ -56,8 +59,12 @@ worker can traverse or connect to them.
 
 The broker exposes only:
 
-- bounded realpath-checked workspace and Git reads below
-  `/srv/teleagent-agent-workspaces`;
+- bounded reads from the exact root-provisioned
+  `/srv/teleagent-agent-workspaces/phone` anchor; the workspace root must be an
+  exact dedicated filesystem mount distinct from `/srv`, with more than 2 GiB
+  total, at most 64 GiB total, and at least 2 GiB free. Its non-writable
+  ancestors and crash-atomic root-owned global launch lock prevent mount-target
+  substitution and sibling-filesystem exhaustion;
 - its dedicated mode-0600 tmux socket
   `/run/teleagent-worker-session/tmux.sock`;
 - sanitized provider-session history projected into broker-readable stores;
@@ -90,17 +97,35 @@ matching bounded egress service.
 
 ## Source-only activation contract
 
-The tracked units, sockets, sysusers, tmpfiles, sudoers, policies, empty runtime
-configuration, and verification script under `deploy/worker-session/` are
-dormant. Activation requires a root review, provider-specific credentials with
-project-side billing limits plus local conservative request/reserved-token
-allowances, `/etc/teleagent/worker-session/ENABLE`, and a clean
-run of `verify-worker-session-boundary`. The verifier exercises the real split
-UIDs, socket/DB/tmux DAC denials, clean-config canaries, private-runtime socket
-mask, provider egress, and zero-capability model runtime. Do not add provider
-workers to `teleagent-control` or `teleagent-provider-launch`, expose the root
-broker, copy provider credentials into worker homes, or make owner tmux sockets
-visible.
+The tracked units, sockets, slices, sysusers, tmpfiles, sudoers, digest-pinned
+libexec policy, empty runtime configuration, and verification scripts under
+`deploy/worker-session/` are dormant. The release-local installer has only
+three public modes:
+
+```sh
+deploy/worker-session/teleagent-worker-session-install --source-check
+deploy/worker-session/teleagent-worker-session-install --install-disabled
+/usr/local/libexec/teleagent-worker-session-install --check
+```
+
+The installer never creates `/etc/teleagent/worker-session/ENABLE`, enables a
+unit, or starts/restarts a unit. It refuses active, failed, transitional, or
+unknown unit state; after installation every unit must be exactly loaded,
+inactive, and static. It also verifies unique numeric UIDs/GIDs so a preexisting
+account or group cannot alias two privilege planes. Canonical release staging
+normalizes executable sources to mode 0555 and data sources to 0444; the source
+checker also accepts the non-writable-parent development variants 0755/0644.
+
+Activation is a later, explicit root operation. It requires a root review,
+provider-specific credentials with project-side billing limits plus local
+conservative request/reserved-token allowances, the activation sentinel, and a
+clean run of
+`/usr/local/libexec/verify-worker-session-boundary --installed-check`. The
+verifier exercises the real split UIDs, socket/DB/tmux DAC denials, fixed-anchor
+provider canaries, private-runtime socket mask, provider egress, and
+zero-capability model runtime. Do not add provider workers to
+`teleagent-control` or `teleagent-provider-launch`, expose the root broker, copy
+provider credentials into worker homes, or make owner tmux sockets visible.
 
 The local allowance is not actual token usage, dollar spend, or remaining
 OpenAI/Anthropic project balance. Provider billing dashboards remain

@@ -11,9 +11,10 @@ const CHECKER = '/usr/local/libexec/teleagent-provider-cli-check';
 const SYSTEMCTL = '/usr/bin/systemctl';
 const TARGET_ROOT = '/opt/teleagent/agent-tools';
 
+class ProviderCliInstallRefusal extends Error {}
+
 function fail(message) {
-  process.stderr.write(`Provider CLI install refused: ${message}\n`);
-  process.exit(77);
+  throw new ProviderCliInstallRefusal(message);
 }
 
 function run(filename, args, { allowFailure = false } = {}) {
@@ -63,8 +64,10 @@ function requireQuiescentProviderPlane() {
   for (const provider of ['claude', 'codex']) {
     for (const suffix of ['service', 'socket']) {
       const unit = `teleagent-provider-supervisor@${provider}.${suffix}`;
-      const active = run(SYSTEMCTL, ['is-active', '--quiet', unit], { allowFailure: true });
-      if (active.status === 0) fail('CLI installation requires stopped provider supervisors');
+      const active = run(SYSTEMCTL, ['show', unit, '--property=ActiveState', '--value']);
+      if (active.stdout.trim() !== 'inactive') {
+        fail('CLI installation requires exactly inactive provider supervisors');
+      }
     }
   }
   const launches = run(SYSTEMCTL, [
@@ -73,18 +76,98 @@ function requireQuiescentProviderPlane() {
   if (launches.stdout.trim()) fail('CLI installation requires zero transient provider launches');
 }
 
-function inspectSource(filename, artifact) {
-  if (!path.isAbsolute(filename) || !filename.startsWith('/')) fail('CLI source must be absolute');
-  const metadata = fs.lstatSync(filename);
-  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.uid !== 0 ||
-      metadata.gid !== 0 || (metadata.mode & 0o022) !== 0 || metadata.nlink !== 1 ||
-      metadata.size !== artifact.size || fs.realpathSync(filename) !== filename ||
-      digest(filename) !== artifact.sha256) fail('a staged CLI source is unsafe or unreviewed');
+function inspectSourceDescriptor(metadata, artifact, expectedUid, expectedGid) {
+  if (!metadata.isFile() || metadata.uid !== BigInt(expectedUid) ||
+      metadata.gid !== BigInt(expectedGid) || (metadata.mode & 0o022n) !== 0n ||
+      metadata.nlink !== 1n || metadata.size !== BigInt(artifact.size)) {
+    fail('a CLI source descriptor is unsafe or unreviewed');
+  }
+}
+
+function sameSourceSnapshot(before, after) {
+  return before.dev === after.dev && before.ino === after.ino &&
+    before.size === after.size && before.mode === after.mode &&
+    before.uid === after.uid && before.gid === after.gid &&
+    before.nlink === after.nlink && before.mtimeNs === after.mtimeNs &&
+    before.ctimeNs === after.ctimeNs;
+}
+
+function writeAll(descriptor, buffer, length) {
+  let offset = 0;
+  while (offset < length) {
+    offset += fs.writeSync(descriptor, buffer, offset, length - offset, null);
+  }
+}
+
+function copySourceToStage(filename, staged, artifact, {
+  expectedUid = 0,
+  expectedGid = 0,
+} = {}) {
+  if (!path.isAbsolute(filename) || fs.realpathSync(filename) !== filename) {
+    fail('CLI source must be one canonical absolute path');
+  }
+  const sourceDescriptor = fs.openSync(
+    filename,
+    fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0)
+  );
+  let stagedDescriptor;
+  try {
+    const before = fs.fstatSync(sourceDescriptor, { bigint: true });
+    inspectSourceDescriptor(before, artifact, expectedUid, expectedGid);
+    stagedDescriptor = fs.openSync(
+      staged,
+      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL |
+        (fs.constants.O_NOFOLLOW || 0),
+      0o600
+    );
+    const hash = crypto.createHash('sha256');
+    const buffer = Buffer.allocUnsafe(1024 * 1024);
+    let copied = 0;
+    for (;;) {
+      const count = fs.readSync(sourceDescriptor, buffer, 0, buffer.length, null);
+      if (count === 0) break;
+      writeAll(stagedDescriptor, buffer, count);
+      hash.update(buffer.subarray(0, count));
+      copied += count;
+      if (copied > artifact.size) fail('a CLI source changed while it was staged');
+    }
+    const after = fs.fstatSync(sourceDescriptor, { bigint: true });
+    if (!sameSourceSnapshot(before, after) || copied !== artifact.size ||
+        hash.digest('hex') !== artifact.sha256) {
+      fail('a CLI source changed while it was staged');
+    }
+    fs.fchownSync(stagedDescriptor, expectedUid, expectedGid);
+    fs.fchmodSync(stagedDescriptor, 0o755);
+    fs.fsyncSync(stagedDescriptor);
+    const stagedMetadata = fs.fstatSync(stagedDescriptor, { bigint: true });
+    if (!stagedMetadata.isFile() || stagedMetadata.uid !== BigInt(expectedUid) ||
+        stagedMetadata.gid !== BigInt(expectedGid) ||
+        (stagedMetadata.mode & 0o777n) !== 0o755n || stagedMetadata.nlink !== 1n ||
+        stagedMetadata.size !== BigInt(artifact.size)) {
+      fail('a staged CLI descriptor has unsafe metadata');
+    }
+  } finally {
+    if (stagedDescriptor !== undefined) fs.closeSync(stagedDescriptor);
+    fs.closeSync(sourceDescriptor);
+  }
+  const installedMetadata = fs.lstatSync(staged);
+  if (!installedMetadata.isFile() || installedMetadata.isSymbolicLink() ||
+      installedMetadata.uid !== expectedUid || installedMetadata.gid !== expectedGid ||
+      (installedMetadata.mode & 0o777) !== 0o755 || installedMetadata.nlink !== 1 ||
+      installedMetadata.size !== artifact.size || fs.realpathSync(staged) !== staged ||
+      digest(staged) !== artifact.sha256) {
+    fail('a staged CLI copy is unsafe or unreviewed');
+  }
+  return staged;
 }
 
 function assertTargetKnownOrAbsent(artifact) {
-  if (!fs.existsSync(artifact.path)) return;
-  const metadata = fs.lstatSync(artifact.path);
+  let metadata;
+  try { metadata = fs.lstatSync(artifact.path); }
+  catch (error) {
+    if (error?.code === 'ENOENT') return;
+    throw error;
+  }
   if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.uid !== 0 ||
       metadata.gid !== 0 || (metadata.mode & 0o777) !== 0o755 || metadata.nlink !== 1 ||
       metadata.size !== artifact.size || fs.realpathSync(artifact.path) !== artifact.path ||
@@ -107,19 +190,54 @@ function verifyVersion(filename, artifact) {
   }
 }
 
+function installArtifactsInPrivateStage(manifest, artifacts, sources, {
+  targetRoot = TARGET_ROOT,
+  expectedUid = 0,
+  expectedGid = 0,
+  copySource = copySourceToStage,
+  versionCheck = verifyVersion,
+} = {}) {
+  const stage = fs.mkdtempSync(path.join(targetRoot, '.provider-cli-stage-'));
+  try {
+    const stageMetadata = fs.lstatSync(stage);
+    if (!stageMetadata.isDirectory() || stageMetadata.isSymbolicLink() ||
+        stageMetadata.uid !== expectedUid || stageMetadata.gid !== expectedGid ||
+        (stageMetadata.mode & 0o777) !== 0o700 || fs.realpathSync(stage) !== stage) {
+      fail('the private provider CLI stage is unsafe');
+    }
+    for (const artifact of manifest.artifacts) {
+      const staged = path.join(stage, path.basename(artifact.path));
+      copySource(sources[artifact.id], staged, artifact, { expectedUid, expectedGid });
+      // Never execute the caller-selected pathname. Only the root-owned,
+      // descriptor-copied, fsynced stage can supply executable review evidence.
+      if (artifact.id !== 'codex-wrapper') versionCheck(staged, artifact);
+    }
+    // The wrapper is committed last, so no executable path can select a new
+    // vendor until that vendor and the matching Claude artifact are durable.
+    for (const id of ['codex-vendor', 'claude', 'codex-wrapper']) {
+      const artifact = artifacts[id];
+      fs.renameSync(path.join(stage, path.basename(artifact.path)), artifact.path);
+      const descriptor = fs.openSync(artifact.path, fs.constants.O_RDONLY);
+      try { fs.fsyncSync(descriptor); } finally { fs.closeSync(descriptor); }
+    }
+  } finally {
+    // All refusal and unexpected-error paths unwind here. Internal validation
+    // must never terminate the process before a potentially huge stage is gone.
+    fs.rmSync(stage, { recursive: true, force: true });
+  }
+}
+
 function install(claudeSource, codexVendorSource) {
   requireQuiescentProviderPlane();
   const manifest = readManifest();
   const artifacts = Object.fromEntries(manifest.artifacts.map((entry) => [entry.id, entry]));
   const sources = {
-    claude: path.resolve(claudeSource),
+    claude: claudeSource,
     'codex-wrapper': artifacts['codex-wrapper'].source,
-    'codex-vendor': path.resolve(codexVendorSource),
+    'codex-vendor': codexVendorSource,
   };
   for (const artifact of manifest.artifacts) {
-    inspectSource(sources[artifact.id], artifact);
     assertTargetKnownOrAbsent(artifact);
-    if (artifact.id !== 'codex-wrapper') verifyVersion(sources[artifact.id], artifact);
   }
   const opt = fs.lstatSync('/opt');
   if (!opt.isDirectory() || opt.isSymbolicLink() || opt.uid !== 0 || opt.gid !== 0 ||
@@ -141,26 +259,7 @@ function install(claudeSource, codexVendorSource) {
       targetRootMetadata.uid !== 0 || targetRootMetadata.gid !== 0 ||
       (targetRootMetadata.mode & 0o777) !== 0o755 ||
       fs.realpathSync(TARGET_ROOT) !== TARGET_ROOT) fail('the provider CLI target root is unsafe');
-  const stage = fs.mkdtempSync(path.join(TARGET_ROOT, '.provider-cli-stage-'));
-  try {
-    for (const artifact of manifest.artifacts) {
-      const staged = path.join(stage, path.basename(artifact.path));
-      fs.copyFileSync(sources[artifact.id], staged, fs.constants.COPYFILE_EXCL);
-      fs.chownSync(staged, 0, 0);
-      fs.chmodSync(staged, 0o755);
-      if (digest(staged) !== artifact.sha256) fail('a staged CLI copy changed during installation');
-    }
-    // The wrapper is committed last, so no executable path can select a new
-    // vendor until that vendor and the matching Claude artifact are durable.
-    for (const id of ['codex-vendor', 'claude', 'codex-wrapper']) {
-      const artifact = artifacts[id];
-      fs.renameSync(path.join(stage, path.basename(artifact.path)), artifact.path);
-      const descriptor = fs.openSync(artifact.path, fs.constants.O_RDONLY);
-      try { fs.fsyncSync(descriptor); } finally { fs.closeSync(descriptor); }
-    }
-  } finally {
-    fs.rmSync(stage, { recursive: true, force: true });
-  }
+  installArtifactsInPrivateStage(manifest, artifacts, sources);
   for (const provider of ['claude', 'codex']) {
     run(CHECKER, ['--provider', provider]);
   }
@@ -183,4 +282,21 @@ function main() {
   fail('usage: teleagent-provider-cli-install --check | --install --claude-source ABS --codex-vendor-source ABS');
 }
 
-try { main(); } catch { fail('the provider CLI installation could not complete safely'); }
+if (require.main === module) {
+  try {
+    main();
+  } catch (error) {
+    const message = error instanceof ProviderCliInstallRefusal
+      ? error.message
+      : 'the provider CLI installation could not complete safely';
+    process.stderr.write(`Provider CLI install refused: ${message}\n`);
+    process.exitCode = 77;
+  }
+}
+
+module.exports = {
+  copySourceToStage,
+  installArtifactsInPrivateStage,
+  sameSourceSnapshot,
+  verifyVersion,
+};

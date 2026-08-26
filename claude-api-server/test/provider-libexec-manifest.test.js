@@ -20,9 +20,11 @@ test('provider libexec manifest pins the complete reviewed install closure', () 
   let hasModelProfile = false;
   const requiredTargets = new Set([
     'teleagent-provider-cli-check',
+    'teleagent-provider-canary',
     'teleagent-provider-cli-install',
     'teleagent-provider-cli.manifest.json',
     'teleagent-provider-codex-cli-wrapper',
+    'teleagent-provider-egress-credential-check',
   ]);
 
   for (const line of lines) {

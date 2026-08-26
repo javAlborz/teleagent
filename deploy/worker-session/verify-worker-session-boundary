@@ -1,6 +1,57 @@
 #!/bin/sh
 set -eu
 
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+unset ENV BASH_ENV CDPATH LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT GCONV_PATH \
+  NODE_OPTIONS NODE_PATH PYTHONPATH PERL5LIB RUBYOPT
+IFS=$(/usr/bin/printf ' \t\nx')
+IFS=${IFS%x}
+umask 077
+
+fixed_entrypoint=/usr/local/libexec/verify-worker-session-boundary
+invoked=$(/usr/bin/readlink -f -- "$0")
+case "${1:-}" in
+  --source-check)
+    [ "$#" -eq 1 ] || { /usr/bin/printf '%s\n' 'unexpected source-check arguments' >&2; exit 77; }
+    [ -f "$invoked" ] && [ ! -L "$invoked" ] || {
+      /usr/bin/printf '%s\n' 'worker-session source verifier is unsafe' >&2
+      exit 77
+    }
+    source_metadata=$(/usr/bin/stat -c '%a:%h' "$invoked")
+    source_mode=${source_metadata%%:*}
+    [ "${source_metadata##*:}" -eq 1 ] && [ $((0$source_mode & 0022)) -eq 0 ] || {
+      /usr/bin/printf '%s\n' 'worker-session source verifier metadata is unsafe' >&2
+      exit 77
+    }
+    /bin/sh -n "$invoked"
+    /usr/bin/printf '%s\n' WORKER_SESSION_BOUNDARY_SOURCE_OK
+    exit 0
+    ;;
+  --installed-check)
+    [ "$#" -eq 1 ] || { /usr/bin/printf '%s\n' 'unexpected installed-check arguments' >&2; exit 77; }
+    [ "$(/usr/bin/id -u)" -eq 0 ] && [ "$invoked" = "$fixed_entrypoint" ] || {
+      /usr/bin/printf '%s\n' 'use the fixed root worker-session verifier entrypoint' >&2
+      exit 77
+    }
+    [ "$(/usr/bin/stat -c '%u:%g:%a:%h' "$fixed_entrypoint")" = '0:0:755:1' ] || {
+      /usr/bin/printf '%s\n' 'installed worker-session verifier metadata is unsafe' >&2
+      exit 77
+    }
+    ;;
+  *)
+    /usr/bin/printf '%s\n' \
+      'usage: verify-worker-session-boundary --source-check|--installed-check' >&2
+    exit 77
+    ;;
+esac
+
+/usr/local/libexec/verify-worker-session-identity --installed-check |
+  /usr/bin/grep -qx WORKER_SESSION_IDENTITY_OK || {
+    /usr/bin/printf '%s\n' 'split worker-session numeric identity verification failed' >&2
+    exit 77
+  }
+
 broker=/run/teleagent-worker-session/broker.sock
 tmux_socket=/run/teleagent-worker-session/tmux.sock
 state=/var/lib/teleagent-session-broker/operations.sqlite
@@ -24,26 +75,26 @@ done
 # Exercise a real kernel read denial against a separate synthetic root-owned
 # file. This keeps a clean provider HOME clean while still proving that every
 # untrusted/provider-adjacent identity receives EACCES rather than secret data.
-auth_probe_directory=$(mktemp -d /run/teleagent-provider-auth-probe.XXXXXX)
+auth_probe_directory=$(/usr/bin/mktemp -d /run/teleagent-provider-auth-probe.XXXXXX)
 auth_denial_probe="$auth_probe_directory/root-only"
-chmod 0711 "$auth_probe_directory"
+/usr/bin/chmod 0711 "$auth_probe_directory"
 ( umask 077; : > "$auth_denial_probe" )
-chown root:root "$auth_probe_directory" "$auth_denial_probe"
-if [ "$(stat -c '%U:%G:%a' "$auth_denial_probe")" != root:root:600 ]; then
+/usr/bin/chown root:root "$auth_probe_directory" "$auth_denial_probe"
+if [ "$(/usr/bin/stat -c '%U:%G:%a' "$auth_denial_probe")" != root:root:600 ]; then
   echo "provider synthetic authentication probe metadata is unsafe" >&2
   exit 77
 fi
 cleanup_auth_denial_probe() {
-  rm -f "$auth_denial_probe"
-  rmdir "$auth_probe_directory" 2>/dev/null || true
+  /usr/bin/rm -f "$auth_denial_probe"
+  /usr/bin/rmdir "$auth_probe_directory" 2>/dev/null || true
 }
 trap cleanup_auth_denial_probe EXIT INT TERM
 
 assert_exact_groups() {
   identity=$1
   shift
-  actual_groups=$(id -Gn "$identity" | tr ' ' '\n' | sed '/^$/d' | LC_ALL=C sort -u)
-  expected_groups=$(printf '%s\n' "$@" | sed '/^$/d' | LC_ALL=C sort -u)
+  actual_groups=$(/usr/bin/id -Gn "$identity" | /usr/bin/tr ' ' '\n' | /usr/bin/sed '/^$/d' | LC_ALL=C /usr/bin/sort -u)
+  expected_groups=$(/usr/bin/printf '%s\n' "$@" | /usr/bin/sed '/^$/d' | LC_ALL=C /usr/bin/sort -u)
   if [ "$actual_groups" != "$expected_groups" ]; then
     echo "split identity supplementary-group matrix is unsafe" >&2
     exit 77
@@ -86,7 +137,7 @@ for provider_user in teleagent-claude-worker teleagent-codex-worker; do
       supervisor_home=/var/lib/teleagent-codex-supervisor
       ;;
   esac
-  sudo -n -u "$provider_user" /usr/local/libexec/teleagent-node -e '
+  /usr/bin/sudo -n -u "$provider_user" /usr/local/libexec/teleagent-node -e '
 const fs = require("node:fs");
 const net = require("node:net");
 const workspace = process.argv[1];
@@ -159,14 +210,14 @@ function finish() {
 }
 setTimeout(() => process.exit(1), 2000).unref();
 ' "$workspace" "$other_home" "$provider_launcher" "$supervisor_home" "$auth_denial_probe" \
-  | grep -qx EXPECTED_DENIAL
+  | /usr/bin/grep -qx EXPECTED_DENIAL
 done
 
 # Neither supervisor identity is admitted to either control socket or runtime
 # authentication home. The inherited listener fd and exact sudo rule are its
 # only launch authority, preventing cross-provider supervisor impersonation.
 for supervisor_user in teleagent-claude-supervisor teleagent-codex-supervisor; do
-  sudo -n -u "$supervisor_user" /usr/local/libexec/teleagent-node -e '
+  /usr/bin/sudo -n -u "$supervisor_user" /usr/local/libexec/teleagent-node -e '
 const fs = require("node:fs");
 const net = require("node:net");
 const sockets = [
@@ -199,7 +250,7 @@ for (const pathname of sockets) {
   });
 }
 setTimeout(() => process.exit(1), 2000).unref();
-' "$auth_denial_probe" | grep -qx SUPERVISOR_ADMISSION_DENIED
+' "$auth_denial_probe" | /usr/bin/grep -qx SUPERVISOR_ADMISSION_DENIED
 done
 
 # Shims receive only their matching data-plane egress group. Egress services
@@ -208,7 +259,7 @@ done
 for isolated_user in \
   teleagent-claude-shim teleagent-codex-shim \
   teleagent-claude-egress teleagent-codex-egress; do
-  sudo -n -u "$isolated_user" /usr/local/libexec/teleagent-node -e '
+  /usr/bin/sudo -n -u "$isolated_user" /usr/local/libexec/teleagent-node -e '
 const fs = require("node:fs");
 const net = require("node:net");
 const identity = process.argv[1];
@@ -257,12 +308,12 @@ if (allowedSocket) {
   socket.once("error", () => { failed = true; finish(); });
 }
 setTimeout(() => process.exit(1), 2000).unref();
-' "$isolated_user" "$auth_denial_probe" | grep -qx ISOLATED_ROLE_BOUNDARY_OK
+' "$isolated_user" "$auth_denial_probe" | /usr/bin/grep -qx ISOLATED_ROLE_BOUNDARY_OK
 done
 
 # The broker may traverse only the provider log projections. The synthetic
 # root-owned probe proves credential-like data remains kernel-inaccessible.
-sudo -n -u teleagent-session-broker /usr/local/libexec/teleagent-node -e '
+/usr/bin/sudo -n -u teleagent-session-broker /usr/local/libexec/teleagent-node -e '
 const fs = require("node:fs");
 const candidates = [process.argv[1]];
 for (const filename of candidates) {
@@ -270,7 +321,7 @@ for (const filename of candidates) {
   catch (error) { if (!["EACCES", "EPERM"].includes(error.code)) process.exit(1); }
 }
 process.stdout.write("BROKER_AUTH_DENIED\n");
-' "$auth_denial_probe" | grep -qx BROKER_AUTH_DENIED
+' "$auth_denial_probe" | /usr/bin/grep -qx BROKER_AUTH_DENIED
 
 cleanup_auth_denial_probe
 trap - EXIT INT TERM
@@ -279,27 +330,45 @@ trap - EXIT INT TERM
 # transient namespace hides the mutable application checkout entirely.
 libexec_manifest=/etc/teleagent/provider-runtime/provider-libexec.manifest
 source_libexec_manifest=/opt/teleagent/current/deploy/worker-session/provider-libexec.manifest
-if [ "$(stat -Lc '%U:%G:%a' "$libexec_manifest")" != root:root:444 ] ||
-   [ -L "$libexec_manifest" ] || ! cmp -s "$source_libexec_manifest" "$libexec_manifest"; then
+if [ "$(/usr/bin/stat -Lc '%U:%G:%a' "$libexec_manifest")" != root:root:444 ] ||
+   [ -L "$libexec_manifest" ] || ! /usr/bin/cmp -s "$source_libexec_manifest" "$libexec_manifest"; then
   echo "provider libexec manifest is absent or unreviewed" >&2
+  exit 77
+fi
+expected_libexec_targets='teleagent-provider-apparmor-install
+teleagent-provider-boundary
+teleagent-provider-boundary-runtime
+teleagent-provider-canary
+teleagent-provider-cli-check
+teleagent-provider-cli-install
+teleagent-provider-cli.manifest.json
+teleagent-provider-codex-cli-wrapper
+teleagent-provider-egress-credential-check
+teleagent-provider-egress-shim
+teleagent-provider-libexec-install
+teleagent-provider-model.apparmor
+teleagent-provider-runtime'
+actual_libexec_targets=$(/usr/bin/awk '{print $3}' "$libexec_manifest" | LC_ALL=C /usr/bin/sort)
+if [ "$actual_libexec_targets" != "$expected_libexec_targets" ]; then
+  echo "provider libexec manifest closure is incomplete" >&2
   exit 77
 fi
 while IFS=' ' read -r digest _source target mode extra; do
   if [ -n "${extra:-}" ] || [ "${#digest}" -ne 64 ] ||
      { [ "$mode" != 0755 ] && [ "$mode" != 0444 ]; } ||
-     [ "$(basename "$target")" != "$target" ]; then
+     [ "$(/usr/bin/basename "$target")" != "$target" ]; then
     echo "provider libexec manifest entry is invalid" >&2
     exit 77
   fi
   installed=/usr/local/libexec/$target
-  if [ "$(stat -Lc '%U:%G:%a' "$installed")" != "root:root:${mode#0}" ] ||
+  if [ "$(/usr/bin/stat -Lc '%U:%G:%a' "$installed")" != "root:root:${mode#0}" ] ||
      [ -L "$installed" ] ||
-     [ "$(sha256sum "$installed" | awk '{print $1}')" != "$digest" ]; then
+     [ "$(/usr/bin/sha256sum "$installed" | /usr/bin/awk '{print $1}')" != "$digest" ]; then
     echo "provider libexec artifact is absent or unreviewed" >&2
     exit 77
   fi
 done < "$libexec_manifest"
-if grep -q '/opt/teleagent/current' /usr/local/libexec/teleagent-provider-boundary-runtime; then
+if /usr/bin/grep -q '/opt/teleagent/current' /usr/local/libexec/teleagent-provider-boundary-runtime; then
   echo "root boundary runtime still depends on the mutable application tree" >&2
   exit 77
 fi
@@ -307,17 +376,17 @@ fi
 # Activation pins CLI resume semantics. These read-only probes do not touch or
 # print credentials; unsupported versions leave the controller not ready.
 /usr/local/libexec/teleagent-provider-cli-check --provider claude \
-  | grep -qx 'PROVIDER_CLI_OK claude'
+  | /usr/bin/grep -qx 'PROVIDER_CLI_OK claude'
 /usr/local/libexec/teleagent-provider-cli-check --provider codex \
-  | grep -qx 'PROVIDER_CLI_OK codex'
-sudo -n -u teleagent-claude-worker /opt/teleagent/agent-tools/claude --help 2>&1 \
-  | grep -q -- '--resume'
-sudo -n -u teleagent-codex-worker /opt/teleagent/agent-tools/codex resume --help 2>&1 \
-  | grep -q 'SESSION_ID'
-grep -q 'NoNewPrivs' /usr/local/libexec/teleagent-provider-runtime
-grep -q 'CapBnd' /usr/local/libexec/teleagent-provider-runtime
+  | /usr/bin/grep -qx 'PROVIDER_CLI_OK codex'
+/usr/bin/sudo -n -u teleagent-claude-worker /opt/teleagent/agent-tools/claude --help 2>&1 \
+  | /usr/bin/grep -q -- '--resume'
+/usr/bin/sudo -n -u teleagent-codex-worker /opt/teleagent/agent-tools/codex resume --help 2>&1 \
+  | /usr/bin/grep -q 'SESSION_ID'
+/usr/bin/grep -q 'NoNewPrivs' /usr/local/libexec/teleagent-provider-runtime
+/usr/bin/grep -q 'CapBnd' /usr/local/libexec/teleagent-provider-runtime
 
-if [ "$(stat -c '%U:%G:%a' /run/teleagent-provider-launch)" != root:root:711 ]; then
+if [ "$(/usr/bin/stat -c '%U:%G:%a' /run/teleagent-provider-launch)" != root:root:711 ]; then
   echo "provider launch parent metadata is unsafe" >&2
   exit 77
 fi
@@ -325,31 +394,31 @@ fi
 # Supervisors are Unix-only; only the credential egress identities receive
 # direct DNS/provider HTTPS, with every private control range denied.
 for provider in claude codex; do
-  systemctl show "teleagent-provider-supervisor@${provider}.service" \
-    -p RestrictAddressFamilies --value | grep -qx 'AF_UNIX'
-  systemctl show "teleagent-provider-supervisor@${provider}.service" \
-    -p LimitCORE --value | grep -qx '0'
-  systemctl show "teleagent-provider-supervisor@${provider}.service" \
-    -p InaccessiblePaths --value | grep -q '/etc/teleagent/provider-egress-secrets'
-  systemctl show "teleagent-provider-egress@${provider}.service" \
-    -p BindReadOnlyPaths --value | grep -q '/run/systemd/resolve/resolv.conf'
-  systemctl show "teleagent-provider-egress@${provider}.service" \
-    -p IPAddressDeny --value | grep -q '100.64.0.0/10'
-  systemctl show "teleagent-provider-egress@${provider}.service" \
-    -p LimitCORE --value | grep -qx '0'
+  /usr/bin/systemctl show "teleagent-provider-supervisor@${provider}.service" \
+    -p RestrictAddressFamilies --value | /usr/bin/grep -qx 'AF_UNIX'
+  /usr/bin/systemctl show "teleagent-provider-supervisor@${provider}.service" \
+    -p LimitCORE --value | /usr/bin/grep -qx '0'
+  /usr/bin/systemctl show "teleagent-provider-supervisor@${provider}.service" \
+    -p InaccessiblePaths --value | /usr/bin/grep -q '/etc/teleagent/provider-egress-secrets'
+  /usr/bin/systemctl show "teleagent-provider-egress@${provider}.service" \
+    -p BindReadOnlyPaths --value | /usr/bin/grep -q '/run/systemd/resolve/resolv.conf'
+  /usr/bin/systemctl show "teleagent-provider-egress@${provider}.service" \
+    -p IPAddressDeny --value | /usr/bin/grep -q '100.64.0.0/10'
+  /usr/bin/systemctl show "teleagent-provider-egress@${provider}.service" \
+    -p LimitCORE --value | /usr/bin/grep -qx '0'
 done
 
 # The fixed root boundary executable runs inside each supervisor's mount
 # namespace. Prove that UID 0 in that namespace cannot read a sentinel from
 # any credential/state plane; checking only the non-root service UID would not
 # protect against a bug in the sudo helper itself.
-supervisor_probe_root=$(mktemp -d /run/teleagent-supervisor-root-probes.XXXXXX)
-chmod 0700 "$supervisor_probe_root"
+supervisor_probe_root=$(/usr/bin/mktemp -d /run/teleagent-supervisor-root-probes.XXXXXX)
+/usr/bin/chmod 0700 "$supervisor_probe_root"
 cleanup_supervisor_root_probes() {
   for created_probe in ${created_probes:-}; do
-    rm -f "$created_probe"
+    /usr/bin/rm -f "$created_probe"
   done
-  rmdir "$supervisor_probe_root" 2>/dev/null || true
+  /usr/bin/rmdir "$supervisor_probe_root" 2>/dev/null || true
 }
 trap cleanup_supervisor_root_probes EXIT INT TERM
 protected_directories='
@@ -376,9 +445,9 @@ for protected_directory in $protected_directories; do
     exit 77
   fi
   ( umask 077; : > "$probe" )
-  chown root:root "$probe"
-  chmod 0600 "$probe"
-  if [ "$(stat -c '%U:%G:%a:%s' "$probe")" != root:root:600:0 ]; then
+  /usr/bin/chown root:root "$probe"
+  /usr/bin/chmod 0600 "$probe"
+  if [ "$(/usr/bin/stat -c '%U:%G:%a:%s' "$probe")" != root:root:600:0 ]; then
     echo "supervisor boundary probe metadata is unsafe" >&2
     exit 77
   fi
@@ -386,7 +455,7 @@ for protected_directory in $protected_directories; do
   probe_arguments="$probe_arguments $probe"
 done
 for provider in claude codex; do
-  supervisor_pid=$(systemctl show "teleagent-provider-supervisor@${provider}.service" \
+  supervisor_pid=$(/usr/bin/systemctl show "teleagent-provider-supervisor@${provider}.service" \
     -p MainPID --value)
   case "$supervisor_pid" in
     ''|0|*[!0-9]*) echo "provider supervisor has no trusted mount namespace" >&2; exit 77 ;;
@@ -401,7 +470,7 @@ for (const filename of process.argv.slice(1)) {
   }
 }
 process.stdout.write("SUPERVISOR_ROOT_SECRET_DENIED\n");
-' $probe_arguments | grep -qx SUPERVISOR_ROOT_SECRET_DENIED
+' $probe_arguments | /usr/bin/grep -qx SUPERVISOR_ROOT_SECRET_DENIED
 done
 cleanup_supervisor_root_probes
 trap - EXIT INT TERM
@@ -415,31 +484,15 @@ if [ "${TELEAGENT_PROVIDER_CANARY:-}" != I_UNDERSTAND_THIS_CALLS_BOTH_PROVIDERS 
   exit 77
 fi
 host_socket_probe=/run/teleagent-provider-host-socket-probe.sock
-config_probe_workspace="$workspace/.teleagent-config-boundary-probe"
-visible_socket_probe="$config_probe_workspace/.teleagent-visible-host-socket-probe.sock"
+visible_socket_probe="$workspace/.teleagent-visible-host-socket-probe.sock"
 if [ -e "$host_socket_probe" ] || [ -L "$host_socket_probe" ]; then
   echo "provider host socket probe path already exists" >&2
   exit 77
 fi
-if [ -e "$config_probe_workspace" ] || [ -L "$config_probe_workspace" ]; then
-  echo "provider config probe path already exists" >&2
+if [ -e "$visible_socket_probe" ] || [ -L "$visible_socket_probe" ]; then
+  echo "provider visible socket probe path already exists" >&2
   exit 77
 fi
-/usr/local/libexec/teleagent-node -e '
-const fs = require("node:fs");
-const path = require("node:path");
-const workspace = process.argv[1];
-const marker = path.join(workspace, "hook-executed");
-fs.mkdirSync(path.join(workspace, ".codex"), { recursive: true, mode: 0o770 });
-fs.mkdirSync(path.join(workspace, ".claude"), { recursive: true, mode: 0o770 });
-fs.writeFileSync(path.join(workspace, ".codex", "config.toml"), "malformed = [\n");
-fs.writeFileSync(path.join(workspace, ".codex", "hooks.json"), JSON.stringify({
-  hooks: { SessionStart: [{ command: `/usr/bin/touch ${marker}` }] },
-}));
-fs.writeFileSync(path.join(workspace, ".claude", "settings.json"), JSON.stringify({
-  hooks: { SessionStart: [{ matcher: "", hooks: [{ type: "command", command: `/usr/bin/touch ${marker}` }] }] },
-}));
-' "$config_probe_workspace"
 /usr/local/libexec/teleagent-node -e '
 const net = require("node:net");
 const fs = require("node:fs");
@@ -462,18 +515,8 @@ host_socket_probe_pid=$!
 cleanup_provider_probes() {
   kill "$host_socket_probe_pid" 2>/dev/null || true
   wait "$host_socket_probe_pid" 2>/dev/null || true
-  rm -f "$host_socket_probe"
-  rm -f "$visible_socket_probe"
-  /usr/local/libexec/teleagent-node -e '
-const fs = require("node:fs");
-const path = require("node:path");
-const target = path.resolve(process.argv[1]);
-const parent = path.resolve(process.argv[2]);
-if (path.dirname(target) !== parent || path.basename(target) !== ".teleagent-config-boundary-probe") {
-  process.exit(77);
-}
-fs.rmSync(target, { recursive: true, force: true });
-' "$config_probe_workspace" "$workspace"
+  /usr/bin/rm -f "$host_socket_probe"
+  /usr/bin/rm -f "$visible_socket_probe"
 }
 trap cleanup_provider_probes EXIT INT TERM
 probe_deadline=0
@@ -483,23 +526,23 @@ while [ ! -S "$host_socket_probe" ]; do
     echo "provider host socket probe failed to start" >&2
     exit 77
   fi
-  sleep 0.02
+  /usr/bin/sleep 0.02
 done
 probe_deadline=0
 while [ ! -S "$visible_socket_probe" ] ||
-      [ "$(stat -c '%a' "$visible_socket_probe" 2>/dev/null || true)" != 777 ]; do
+      [ "$(/usr/bin/stat -c '%a' "$visible_socket_probe" 2>/dev/null || true)" != 777 ]; do
   probe_deadline=$((probe_deadline + 1))
   if [ "$probe_deadline" -ge 100 ]; then
     echo "provider visible Unix socket probe failed to start" >&2
     exit 77
   fi
-  sleep 0.02
+  /usr/bin/sleep 0.02
 done
 # Prove DAC and pathname visibility would permit both model identities to
 # connect without the model AppArmor profile. The provider runtime must then
 # observe an LSM denial for this exact same world-connectable socket.
 for provider in claude codex; do
-  sudo -n -u "teleagent-${provider}-worker" \
+  /usr/bin/sudo -n -u "teleagent-${provider}-worker" \
     /usr/local/libexec/teleagent-node -e '
 const net = require("node:net");
 const socket = net.createConnection({ path: process.argv[1] });
@@ -509,27 +552,23 @@ socket.once("connect", () => {
 });
 socket.once("error", () => process.exit(1));
 setTimeout(() => process.exit(1), 2000).unref();
-' "$visible_socket_probe" | grep -qx VISIBLE_SOCKET_DAC_ALLOWED
+' "$visible_socket_probe" | /usr/bin/grep -qx VISIBLE_SOCKET_DAC_ALLOWED
 done
-sudo -n -u "$controller_user" \
-  /opt/teleagent/current/deploy/worker-session/teleagent-provider-canary claude "$config_probe_workspace" \
-  | grep -q PROVIDER_CANARY_OK
-sudo -n -u "$controller_user" \
-  /opt/teleagent/current/deploy/worker-session/teleagent-provider-canary codex "$config_probe_workspace" \
-  | grep -q PROVIDER_CANARY_OK
-if [ -e "$config_probe_workspace/hook-executed" ]; then
-  echo "provider clean-config probe executed an untrusted project hook" >&2
-  exit 77
-fi
+/usr/bin/sudo -n -u "$controller_user" \
+  /usr/local/libexec/teleagent-provider-canary claude "$workspace" \
+  | /usr/bin/grep -q PROVIDER_CANARY_OK
+/usr/bin/sudo -n -u "$controller_user" \
+  /usr/local/libexec/teleagent-provider-canary codex "$workspace" \
+  | /usr/bin/grep -q PROVIDER_CANARY_OK
 cleanup_provider_probes
 trap - EXIT INT TERM
 
 # The private controller identity must be able to traverse/connect. A 200 or
 # 503 HTTP response is acceptable here; this check proves admission, not app
 # readiness or panic state.
-getent passwd "$controller_user" >/dev/null
-id -Gn "$controller_user" | tr " " "\n" | grep -qx teleagent-control
-sudo -n -u "$controller_user" /usr/local/libexec/teleagent-node -e '
+/usr/bin/getent passwd "$controller_user" >/dev/null
+/usr/bin/id -Gn "$controller_user" | /usr/bin/tr " " "\n" | /usr/bin/grep -qx teleagent-control
+/usr/bin/sudo -n -u "$controller_user" /usr/local/libexec/teleagent-node -e '
 const net = require("node:net");
 const socket = net.createConnection({ path: "/run/teleagent-worker-session/broker.sock" });
 let response = "";
@@ -541,4 +580,4 @@ socket.once("end", () => {
 });
 socket.once("error", () => process.exit(1));
 setTimeout(() => process.exit(1), 2000).unref();
-' | grep -qx CONTROLLER_CONNECTED
+' | /usr/bin/grep -qx CONTROLLER_CONNECTED

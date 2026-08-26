@@ -12,8 +12,13 @@ const SYSTEMD_RUN = '/usr/bin/systemd-run';
 const SYSTEMCTL = '/usr/bin/systemctl';
 const RUNTIME = '/usr/local/libexec/teleagent-provider-boundary-runtime';
 const CLI_CHECK = '/usr/local/libexec/teleagent-provider-cli-check';
+const GETENT = '/usr/bin/getent';
 const WORKSPACE_ROOT = '/srv/teleagent-agent-workspaces';
+const FIXED_WORKSPACE = `${WORKSPACE_ROOT}/phone`;
+const WORKSPACE_GROUP = 'teleagent-agent-workspace';
+const WORKSPACE_PARENT = path.dirname(WORKSPACE_ROOT);
 const CAPABILITY_DIRECTORY = '/run/teleagent-provider-capabilities';
+const GLOBAL_LAUNCH_LOCK = '.global-provider-launch.lock';
 const SYSTEMD_RUNTIME_UNIT_DIRECTORY = '/run/systemd/system';
 const GLOBAL_PANIC_DIRECTORY = '/var/lib/teleagent-provider-plane';
 const GLOBAL_PANIC_FILE = path.join(GLOBAL_PANIC_DIRECTORY, 'panic.lock');
@@ -236,6 +241,41 @@ function deriveProviderLaunchPolicy(provider, providerArgs) {
   };
 }
 
+function readStableBoundedFile(filename, maxBytes = 1024 * 1024) {
+  let descriptor;
+  try {
+    descriptor = fs.openSync(
+      filename,
+      fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0)
+    );
+    const before = fs.fstatSync(descriptor, { bigint: true });
+    if (!before.isFile() || (before.mode & 0o6000n) !== 0n ||
+        before.size < 0n || before.size > BigInt(maxBytes)) {
+      fail('provider workspace configuration exceeds the bounded regular-file contract');
+    }
+    const chunks = [];
+    const buffer = Buffer.allocUnsafe(64 * 1024);
+    let total = 0;
+    for (;;) {
+      const count = fs.readSync(descriptor, buffer, 0, buffer.length, null);
+      if (count === 0) break;
+      total += count;
+      if (total > maxBytes) fail('provider workspace configuration changed while reading');
+      chunks.push(Buffer.from(buffer.subarray(0, count)));
+    }
+    const after = fs.fstatSync(descriptor, { bigint: true });
+    if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size ||
+        before.mode !== after.mode || before.uid !== after.uid || before.gid !== after.gid ||
+        before.nlink !== after.nlink || before.mtimeNs !== after.mtimeNs ||
+        before.ctimeNs !== after.ctimeNs || BigInt(total) !== before.size) {
+      fail('provider workspace configuration changed while reading');
+    }
+    return Buffer.concat(chunks, total).toString('utf8');
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+  }
+}
+
 function validateProviderWorkspace(workspace) {
   let visited = 0;
   const pending = [workspace];
@@ -265,8 +305,7 @@ function validateProviderWorkspace(workspace) {
         fail('provider workspace contains credential material');
       }
       if (path.relative(workspace, filename) === path.join('.git', 'config')) {
-        if (metadata.size > 1024 * 1024) fail('provider workspace git configuration is too large');
-        const gitConfig = fs.readFileSync(filename, 'utf8');
+        const gitConfig = readStableBoundedFile(filename);
         if (/extraheader|credential\s*=|credential[.]helper|https?:\/\/[^\s/@:]+:[^\s/@]+@|(?:token|password|secret)\s*=/i.test(gitConfig)) {
           fail('provider workspace git configuration contains credentials');
         }
@@ -276,22 +315,73 @@ function validateProviderWorkspace(workspace) {
   return { safe: true, entries: visited };
 }
 
+function resolveWorkspaceGroupGid({ lookup = spawnSync } = {}) {
+  const result = lookup(GETENT, ['group', WORKSPACE_GROUP], {
+    cwd: '/',
+    encoding: 'utf8',
+    timeout: 5000,
+    maxBuffer: 4096,
+    env: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8' },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const lines = String(result?.stdout || '').trim().split('\n');
+  const fields = lines.length === 1 ? lines[0].split(':') : [];
+  const gid = fields.length === 4 && fields[0] === WORKSPACE_GROUP && /^[0-9]+$/.test(fields[2])
+    ? Number(fields[2])
+    : NaN;
+  if (result?.error || result?.status !== 0 || result?.signal ||
+      !Number.isSafeInteger(gid) || gid <= 0 || gid >= 0xffffffff) {
+    fail('the provider workspace group identity is unavailable or unsafe');
+  }
+  return gid;
+}
+
+function validateWorkspaceAnchor(workspace, {
+  lstat = fs.lstatSync,
+  realpath = fs.realpathSync,
+  expectedUid = 0,
+  expectedGid = null,
+} = {}) {
+  if (workspace !== FIXED_WORKSPACE) {
+    fail('provider launches require the exact root-provisioned workspace anchor');
+  }
+  const ancestor = lstat(WORKSPACE_PARENT);
+  const parent = lstat(WORKSPACE_ROOT);
+  const selected = lstat(FIXED_WORKSPACE);
+  const requiredGid = expectedGid === null ? resolveWorkspaceGroupGid() : expectedGid;
+  if (!ancestor.isDirectory() || ancestor.isSymbolicLink() ||
+      ancestor.uid !== expectedUid || (ancestor.mode & 0o022) !== 0 ||
+      realpath(WORKSPACE_PARENT) !== WORKSPACE_PARENT ||
+      !parent.isDirectory() || parent.isSymbolicLink() || parent.uid !== expectedUid ||
+      parent.gid !== requiredGid || (parent.mode & 0o7777) !== 0o751 ||
+      realpath(WORKSPACE_ROOT) !== WORKSPACE_ROOT || !selected.isDirectory() ||
+      selected.isSymbolicLink() || selected.uid !== expectedUid ||
+      selected.gid !== requiredGid || requiredGid <= 0 ||
+      (selected.mode & 0o7777) !== 0o2770 || realpath(FIXED_WORKSPACE) !== FIXED_WORKSPACE) {
+    fail('the root-provisioned provider workspace anchor is replaceable or unsafe');
+  }
+  return { workspace: FIXED_WORKSPACE, gid: requiredGid };
+}
+
 function validateWorkspaceStorageBoundary(directory = WORKSPACE_ROOT, {
   stat = (filename) => fs.statSync(filename, { bigint: true }),
   statfs = (filename) => fs.statfsSync(filename, { bigint: true }),
 } = {}) {
-  let rootMetadata;
+  if (directory !== WORKSPACE_ROOT) {
+    fail('provider workspaces require the exact dedicated mountpoint');
+  }
+  let parentMetadata;
   let workspaceMetadata;
   let storage;
   try {
-    rootMetadata = stat('/');
+    parentMetadata = stat(WORKSPACE_PARENT);
     workspaceMetadata = stat(directory);
     storage = statfs(directory);
   } catch {
     fail('provider workspace storage boundary cannot be inspected');
   }
-  if (rootMetadata.dev === workspaceMetadata.dev) {
-    fail('provider workspaces require a dedicated filesystem');
+  if (parentMetadata.dev === workspaceMetadata.dev) {
+    fail('provider workspaces require an exact dedicated filesystem mountpoint');
   }
   const blockSize = BigInt(storage.bsize);
   const totalBytes = blockSize * BigInt(storage.blocks);
@@ -345,19 +435,16 @@ function parseControl(argv, environment = process.env, { uid = process.getuid() 
   if (launchId && !LAUNCH_ID.test(launchId)) fail('launch ID is invalid');
   if (action !== 'launch') return { action, provider, launchId, spec };
   const workspace = path.resolve(String(workspaceInput || ''));
-  const relative = path.relative(WORKSPACE_ROOT, workspace);
   if (!['managed', 'interactive'].includes(mode) ||
       !['read-only', 'mutating'].includes(accessMode) ||
       mode === 'interactive' ||
-      !relative || relative.startsWith('..') ||
-      path.isAbsolute(relative) || !/^[A-Za-z0-9_./-]+$/.test(workspace) ||
-      fs.realpathSync(workspace) !== workspace || (taskId && !TASK_ID.test(taskId)) ||
+      workspace !== FIXED_WORKSPACE || (taskId && !TASK_ID.test(taskId)) ||
       providerArgs.length > 256 || providerArgs.some((arg) => arg.length > 8192 || /[\0\r\n]/.test(arg))) {
     fail('launch arguments are outside the fixed boundary');
   }
   if (mode === 'interactive') fail('persistent interactive provider sessions are disabled');
   if (mode === 'managed' && sessionId) fail('managed launch cannot select a provider session');
-  validateProviderWorkspace(workspace);
+  validateWorkspaceAnchor(workspace);
   const launchPolicy = deriveProviderLaunchPolicy(provider, providerArgs);
   return {
     action, provider, launchId, mode, accessMode,
@@ -426,6 +513,313 @@ function persistCancellationTombstone(unit, {
 function capabilityFilePath(launchId) {
   if (!LAUNCH_ID.test(launchId || '')) fail('launch capability identity is invalid');
   return path.join(CAPABILITY_DIRECTORY, `${launchId}.credential`);
+}
+
+function globalLaunchLockPath(directory = CAPABILITY_DIRECTORY) {
+  return path.join(directory, GLOBAL_LAUNCH_LOCK);
+}
+
+function processStartTime(pid, { procRoot = '/proc' } = {}) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) fail('global provider launch lock PID is invalid');
+  let source;
+  try { source = fs.readFileSync(path.join(procRoot, String(pid), 'stat'), 'utf8'); }
+  catch (error) {
+    if (error?.code === 'ENOENT') return null;
+    throw error;
+  }
+  const close = source.lastIndexOf(') ');
+  if (close < 0) fail('global provider launch lock process identity is invalid');
+  const fields = source.slice(close + 2).trim().split(/\s+/);
+  // After the comm field, index 0 is field 3 (state); starttime is field 22.
+  const startTime = fields[19];
+  if (!/^[1-9][0-9]*$/u.test(startTime || '')) {
+    fail('global provider launch lock process start time is invalid');
+  }
+  return startTime;
+}
+
+function normalizeGlobalLaunchLock(source) {
+  if (Buffer.byteLength(source) > 1024 || /\r|\0/u.test(source)) {
+    fail('the global provider launch lock has invalid encoding');
+  }
+  let record;
+  try { record = JSON.parse(source); }
+  catch { fail('the global provider launch lock has invalid content'); }
+  if (!record || Array.isArray(record) ||
+      JSON.stringify(Object.keys(record)) !==
+        JSON.stringify(['version', 'launchId', 'pid', 'startTime']) ||
+      record.version !== 1 || !LAUNCH_ID.test(record.launchId || '') ||
+      !Number.isSafeInteger(record.pid) || record.pid <= 0 ||
+      !/^[1-9][0-9]*$/u.test(record.startTime || '') ||
+      source !== `${JSON.stringify(record)}\n`) {
+    fail('the global provider launch lock has invalid content');
+  }
+  return Object.freeze(record);
+}
+
+function inspectGlobalLaunchLockDescriptor(descriptor, {
+  uid = 0,
+  gid = 0,
+  allowedLinks = [1],
+} = {}) {
+  const before = fs.fstatSync(descriptor);
+  if (!before.isFile() || before.uid !== uid || before.gid !== gid ||
+      (before.mode & 0o777) !== 0o600 || !allowedLinks.includes(before.nlink) ||
+      before.size <= 0 || before.size > 1024) {
+    fail('the global provider launch lock is unsafe');
+  }
+  const content = Buffer.alloc(before.size);
+  let offset = 0;
+  while (offset < content.length) {
+    const count = fs.readSync(descriptor, content, offset, content.length - offset, offset);
+    if (!Number.isSafeInteger(count) || count <= 0) {
+      fail('the global provider launch lock changed while it was inspected');
+    }
+    offset += count;
+  }
+  const after = fs.fstatSync(descriptor);
+  if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size ||
+      before.mode !== after.mode || before.uid !== after.uid || before.gid !== after.gid ||
+      before.nlink !== after.nlink || before.mtimeMs !== after.mtimeMs ||
+      before.ctimeMs !== after.ctimeMs) {
+    fail('the global provider launch lock changed while it was inspected');
+  }
+  return {
+    record: normalizeGlobalLaunchLock(content.toString('utf8')),
+    metadata: before,
+  };
+}
+
+function inspectGlobalLaunchLockState(filename, {
+  directory = CAPABILITY_DIRECTORY,
+  uid = 0,
+  gid = 0,
+} = {}) {
+  if (filename !== globalLaunchLockPath(directory)) {
+    fail('global provider launch lock path is invalid');
+  }
+  const descriptor = fs.openSync(
+    filename,
+    fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW
+  );
+  try {
+    const inspected = inspectGlobalLaunchLockDescriptor(descriptor, {
+      uid, gid, allowedLinks: [1, 2],
+    });
+    if (fs.realpathSync(filename) !== filename) {
+      fail('the global provider launch lock is unsafe');
+    }
+    let companion = null;
+    if (inspected.metadata.nlink === 2) {
+      const candidates = [];
+      for (const entry of fs.readdirSync(directory)) {
+        if (!/^\.global-provider-launch\.lock\.tmp\.[1-9][0-9]*\.[a-f0-9]{32}$/u.test(entry)) {
+          continue;
+        }
+        const candidate = path.join(directory, entry);
+        const metadata = fs.lstatSync(candidate);
+        if (metadata.isFile() && !metadata.isSymbolicLink() &&
+            metadata.dev === inspected.metadata.dev && metadata.ino === inspected.metadata.ino &&
+            metadata.uid === uid && metadata.gid === gid &&
+            (metadata.mode & 0o777) === 0o600 && metadata.nlink === 2 &&
+            fs.realpathSync(candidate) === candidate) {
+          candidates.push(candidate);
+        }
+      }
+      if (candidates.length !== 1) fail('the global provider launch lock is unsafe');
+      companion = candidates[0];
+    }
+    return { ...inspected, companion };
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
+
+function inspectGlobalLaunchLock(filename, options = {}) {
+  return inspectGlobalLaunchLockState(filename, options).record;
+}
+
+function createGlobalLaunchLock(launchId, {
+  directory = CAPABILITY_DIRECTORY,
+  uid = 0,
+  gid = 0,
+  pid = process.pid,
+  readStartTime = processStartTime,
+  writeDescriptor = fs.writeSync,
+  fsyncDescriptor = fs.fsyncSync,
+  inspectLock = inspectGlobalLaunchLock,
+  syncPublishedDirectory = fsyncDirectory,
+  phaseHook = () => {},
+} = {}) {
+  if (!LAUNCH_ID.test(launchId || '')) fail('global provider launch lock identity is invalid');
+  secureRootDirectory(directory, 0o022, uid);
+  const startTime = readStartTime(pid);
+  if (startTime === null) fail('global provider launch lock owner is unavailable');
+  const record = Object.freeze({ version: 1, launchId, pid, startTime });
+  const serialized = Buffer.from(`${JSON.stringify(record)}\n`, 'utf8');
+  const filename = globalLaunchLockPath(directory);
+  const temporary = path.join(
+    directory,
+    `${GLOBAL_LAUNCH_LOCK}.tmp.${pid}.${crypto.randomBytes(16).toString('hex')}`
+  );
+  let descriptor;
+  let createdIdentity = null;
+  let published = false;
+  try {
+    descriptor = fs.openSync(
+      temporary,
+      fs.constants.O_RDWR | fs.constants.O_CREAT | fs.constants.O_EXCL |
+        fs.constants.O_NOFOLLOW,
+      0o600
+    );
+  } catch (error) {
+    throw error;
+  }
+  try {
+    createdIdentity = fs.fstatSync(descriptor);
+    fs.fchownSync(descriptor, uid, gid);
+    fs.fchmodSync(descriptor, 0o600);
+    phaseHook('pre-write');
+    let offset = 0;
+    while (offset < serialized.length) {
+      const written = writeDescriptor(
+        descriptor, serialized, offset, serialized.length - offset, null
+      );
+      if (!Number.isSafeInteger(written) || written <= 0 ||
+          written > serialized.length - offset) {
+        fail('global provider launch lock write was incomplete');
+      }
+      offset += written;
+      if (offset < serialized.length) phaseHook('partial-write');
+    }
+    phaseHook('pre-fsync');
+    fsyncDescriptor(descriptor);
+    const staged = inspectGlobalLaunchLockDescriptor(descriptor, { uid, gid });
+    if (JSON.stringify(staged.record) !== JSON.stringify(record)) {
+      fail('the global provider launch lock is unsafe');
+    }
+    phaseHook('pre-publish');
+    const current = fs.lstatSync(temporary);
+    if (current.dev !== createdIdentity.dev || current.ino !== createdIdentity.ino ||
+        current.nlink !== 1) {
+      fail('the global provider launch lock stage changed before publication');
+    }
+    try { fs.linkSync(temporary, filename); }
+    catch (error) {
+      if (error?.code === 'EEXIST') {
+        fail('another provider launch owns the global workspace lock', 75);
+      }
+      throw error;
+    }
+    published = true;
+    phaseHook('post-publish');
+    const installed = inspectLock(filename, { directory, uid, gid });
+    if (JSON.stringify(installed) !== JSON.stringify(record)) {
+      fail('the global provider launch lock is unsafe');
+    }
+    fs.unlinkSync(temporary);
+    syncPublishedDirectory(directory);
+    const durable = inspectGlobalLaunchLockState(filename, { directory, uid, gid });
+    if (durable.companion !== null ||
+        JSON.stringify(durable.record) !== JSON.stringify(record)) {
+      fail('the global provider launch lock is unsafe');
+    }
+    fs.closeSync(descriptor);
+    descriptor = undefined;
+    return filename;
+  } catch (error) {
+    if (descriptor !== undefined) {
+      try { fs.closeSync(descriptor); } catch { /* exact-inode cleanup below is authoritative */ }
+      descriptor = undefined;
+    }
+    let cleanupError = null;
+    if (createdIdentity !== null) {
+      try {
+        if (published) {
+          const current = fs.lstatSync(filename);
+          if (current.dev !== createdIdentity.dev || current.ino !== createdIdentity.ino) {
+            fail('failed global provider launch lock construction changed path identity');
+          }
+          fs.unlinkSync(filename);
+        }
+        try {
+          const staged = fs.lstatSync(temporary);
+          if (staged.dev !== createdIdentity.dev || staged.ino !== createdIdentity.ino) {
+            fail('failed global provider launch lock construction changed stage identity');
+          }
+          fs.unlinkSync(temporary);
+        } catch (candidate) {
+          if (candidate?.code !== 'ENOENT') throw candidate;
+        }
+        fsyncDirectory(directory);
+      } catch (candidate) {
+        if (candidate?.code !== 'ENOENT') cleanupError = candidate;
+      }
+    }
+    if (cleanupError) {
+      fail('failed global provider launch lock construction could not be cleaned safely');
+    }
+    throw error;
+  }
+}
+
+function removeGlobalLaunchLock(filename, launchId, {
+  directory = CAPABILITY_DIRECTORY,
+  uid = 0,
+  gid = 0,
+  pid = process.pid,
+  readStartTime = processStartTime,
+} = {}) {
+  if (filename !== globalLaunchLockPath(directory) || !LAUNCH_ID.test(launchId || '')) {
+    fail('global provider launch lock removal is invalid');
+  }
+  const record = inspectGlobalLaunchLock(filename, { directory, uid, gid });
+  if (record.launchId !== launchId || record.pid !== pid ||
+      readStartTime(pid) !== record.startTime) {
+    fail('the global provider launch lock changed before release');
+  }
+  fs.unlinkSync(filename);
+  fsyncDirectory(directory);
+}
+
+function clearStaleGlobalLaunchLockAfterQuiescence({
+  quiesced,
+  directory = CAPABILITY_DIRECTORY,
+  uid = 0,
+  gid = 0,
+  readStartTime = processStartTime,
+} = {}) {
+  if (quiesced !== true) fail('global provider launch lock recovery requires quiescence');
+  secureRootDirectory(directory, 0o022, uid);
+  const filename = globalLaunchLockPath(directory);
+  let inspected;
+  try { inspected = inspectGlobalLaunchLockState(filename, { directory, uid, gid }); }
+  catch (error) {
+    if (error?.code === 'ENOENT') return { proved: true, removed: false };
+    throw error;
+  }
+  const { record, companion } = inspected;
+  if (readStartTime(record.pid) === record.startTime) {
+    fail('global provider launch lock owner remains live after quiescence');
+  }
+  fs.unlinkSync(filename);
+  if (companion !== null) {
+    const metadata = fs.lstatSync(companion);
+    if (metadata.dev !== inspected.metadata.dev || metadata.ino !== inspected.metadata.ino ||
+        metadata.nlink !== 1) {
+      fail('the global provider launch lock companion changed during recovery');
+    }
+    fs.unlinkSync(companion);
+  }
+  fsyncDirectory(directory);
+  return { proved: true, removed: true, launchId: record.launchId };
+}
+
+function assertGlobalProviderLaunchUnlocked({
+  isLocked = globalProviderPanicLocked,
+} = {}) {
+  if (isLocked()) fail('global provider plane is panic-locked', 75);
+  return true;
 }
 
 function readinessFilePath(provider, launchId, directory = CAPABILITY_DIRECTORY) {
@@ -729,6 +1123,7 @@ function buildSystemdRunInvocation(input) {
   runtimeArgs.push('--', ...input.providerArgs);
   const properties = [
     'Type=exec',
+    'Slice=teleagent-provider-model.slice',
     `BindsTo=${supervisorUnit} ${egressUnit}`,
     `After=${supervisorUnit} ${egressUnit}`,
     'User=root',
@@ -737,9 +1132,14 @@ function buildSystemdRunInvocation(input) {
     'KillMode=control-group',
     'TimeoutStopSec=8s',
     'RuntimeMaxSec=1h',
-    'MemoryMax=4G',
-    'TasksMax=512',
-    'CPUQuota=400%',
+    'MemoryHigh=2G',
+    'MemoryMax=3G',
+    'MemorySwapMax=0',
+    'TasksMax=384',
+    'CPUQuota=150%',
+    'CPUWeight=25',
+    'IOAccounting=yes',
+    'IOWeight=25',
     'LimitNOFILE=4096',
     'LimitFSIZE=268435456',
     'LimitCORE=0',
@@ -1026,10 +1426,19 @@ async function panicAllProviderPlanes({ control = providerControl } = {}) {
   for (const provider of Object.keys(PROVIDERS)) {
     egress[provider] = await recoverProviderEgress(provider, control);
   }
-  const quiesced = Object.values(supervisorResults).every((status) => status.quiesced) &&
+  const providerPlaneQuiesced = Object.values(supervisorResults).every((status) => status.quiesced) &&
     launchResults.every((result) => result.quiesced) &&
     Object.values(egress).every((result) => result.persisted && result.quiesced) &&
     !masked.error && !masked.signal && masked.status === 0;
+  let launchLockRecovery = { proved: providerPlaneQuiesced, removed: false };
+  if (providerPlaneQuiesced) {
+    try {
+      launchLockRecovery = clearStaleGlobalLaunchLockAfterQuiescence({ quiesced: true });
+    } catch (error) {
+      launchLockRecovery = { proved: false, removed: false, error: error.message };
+    }
+  }
+  const quiesced = providerPlaneQuiesced && launchLockRecovery.proved === true;
   return {
     accepted: true,
     persisted: lock.persisted === true &&
@@ -1038,6 +1447,7 @@ async function panicAllProviderPlanes({ control = providerControl } = {}) {
     alreadyLocked: lock.alreadyLocked === true,
     supervisorResults,
     launchCount: launchResults.length,
+    launchLockRecovery,
     egress,
   };
 }
@@ -1165,8 +1575,6 @@ async function main(argv = process.argv.slice(2), environment = process.env, {
     return result.success && result.quiesced ? 0 : 75;
   }
   if (input.action === 'launch') {
-    checkProviderCli(input.provider);
-    validateWorkspaceStorageBoundary();
     const unit = unitName(input.provider, input.launchId);
     if (hasCancellationTombstone(unit)) fail('provider launch was canceled before submit', 75);
     const capability = randomCapability();
@@ -1175,9 +1583,18 @@ async function main(argv = process.argv.slice(2), environment = process.env, {
     let credentialPath = null;
     let readinessPath = null;
     let registered = false;
+    let globalLaunchLock = null;
     try {
+      globalLaunchLock = createGlobalLaunchLock(input.launchId);
+      assertGlobalProviderLaunchUnlocked();
+      checkProviderCli(input.provider);
+      validateWorkspaceAnchor(input.workspace);
+      validateProviderWorkspace(input.workspace);
+      validateWorkspaceStorageBoundary();
+      assertGlobalProviderLaunchUnlocked();
       credentialPath = createCapabilityFile(input.launchId, capability);
       readinessPath = createReadinessFile(input.provider, input.launchId);
+      assertGlobalProviderLaunchUnlocked();
       const registration = await control({
         provider: input.provider,
         action: 'register',
@@ -1192,7 +1609,9 @@ async function main(argv = process.argv.slice(2), environment = process.env, {
       if (registration?.registered !== true) fail('provider launch capability was not registered');
       registered = true;
       if (hasCancellationTombstone(unit)) fail('provider launch was canceled before start', 75);
+      assertGlobalProviderLaunchUnlocked();
       const invocation = buildSystemdRunInvocation({ ...input, credentialPath, readinessPath });
+      assertGlobalProviderLaunchUnlocked();
       const child = spawnImpl(invocation.command, invocation.args, {
         stdio: 'inherit',
         env: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8' },
@@ -1232,6 +1651,7 @@ async function main(argv = process.argv.slice(2), environment = process.env, {
           });
         } catch { /* expiry + supervisor panic remain fail-closed backstops */ }
       }
+      if (globalLaunchLock) removeGlobalLaunchLock(globalLaunchLock, input.launchId);
     }
   }
   if (input.action === 'status') {
@@ -1279,15 +1699,18 @@ if (require.main === module) {
 module.exports = {
   PROVIDER_MODELS,
   PROVIDERS,
+  assertGlobalProviderLaunchUnlocked,
   buildSystemdRunInvocation,
   capabilityFilePath,
   createCapabilityFile,
+  createGlobalLaunchLock,
   createReadinessFile,
   deriveProviderLaunchPolicy,
   forceStopSystemdUnit,
   globalProviderRecoveryPending,
   globalProviderPanicLocked,
   validateProviderWorkspace,
+  validateWorkspaceAnchor,
   validateWorkspaceStorageBoundary,
   hasCancellationTombstone,
   inspectUnit,
@@ -1298,15 +1721,19 @@ module.exports = {
   persistGlobalProviderRecovery,
   persistCancellationTombstone,
   parseControl,
+  processStartTime,
   purgeProviderReadinessArtifacts,
   providerControl,
   requirePinnedProviderCli,
   probeProviderSupervisor,
+  readStableBoundedFile,
   removeCapabilityFile,
+  removeGlobalLaunchLock,
   removeReadinessFile,
   readinessFilePath,
   clearGlobalProviderRecovery,
   clearGlobalProviderPanic,
+  clearStaleGlobalLaunchLockAfterQuiescence,
   terminateUnit,
   unitName,
   unlockAllProviderPlanes,

@@ -6,6 +6,7 @@ ConditionPathExists=/etc/teleagent/worker-session/ENABLE
 
 [Service]
 Type=simple
+Slice=teleagent-provider.slice
 User=teleagent-%i-supervisor
 Group=teleagent-%i-supervisor
 UMask=0077
@@ -23,6 +24,14 @@ RestartSec=2s
 KillMode=control-group
 TimeoutStopSec=30s
 LimitCORE=0
+MemoryHigh=384M
+MemoryMax=512M
+MemorySwapMax=0
+TasksMax=128
+CPUQuota=25%
+CPUWeight=100
+IOAccounting=yes
+IOWeight=100
 
 # This UID never runs model/tool code and never receives a provider bearer.
 # The sole privilege crossing is the exact root-owned boundary controller,

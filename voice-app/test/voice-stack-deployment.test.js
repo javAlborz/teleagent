@@ -113,8 +113,19 @@ test('voice installer can only install or check a disabled stack and never provi
   assert.match(installer, /--source-check\|--install-disabled\|--check/);
   assert.match(installer, /systemd-sysusers/);
   assert.match(installer, /systemd-tmpfiles/);
-  assert.match(installer, /is-active --quiet/);
-  assert.match(installer, /is-enabled --quiet/);
+  assert.doesNotMatch(installer, /is-active --quiet/);
+  assert.match(installer, /--property=LoadState --value/);
+  assert.match(installer, /--property=ActiveState --value/);
+  assert.match(installer, /--property=UnitFileState --value/);
+  assert.match(installer,
+    /load_state=\$\("\$systemctl_bin" show[^\n]+--property=LoadState --value\) \|\|\n\s+fail/);
+  assert.match(installer,
+    /active_state=\$\("\$systemctl_bin" show[^\n]+--property=ActiveState --value\) \|\|\n\s+fail/);
+  assert.match(installer, /not-found\)[\s\S]*teleagent-voice-stack\.service/);
+  assert.match(installer, /\[ "\$load_state" = loaded \]/);
+  assert.match(installer, /\[ "\$active_state" = inactive \]/);
+  assert.match(installer, /\[ "\$unit_file_state" = static \]/);
+  assert.doesNotMatch(installer, /is-enabled(?:\s|$)/);
   assert.doesNotMatch(installer, /"\$systemctl_bin"\s+(?:start|enable|restart)\b/);
   assert.doesNotMatch(installer, /\/usr\/bin\/(?:docker|nft)\b/);
   assert.doesNotMatch(installer, /\/etc\/teleagent-voice\/credentials\//);

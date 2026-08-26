@@ -19,13 +19,44 @@ require_root() {
   [ "$(id -u)" -eq 0 ] || fail 'root is required'
 }
 
+assert_inactive() {
+  local load_state active_state
+  load_state=$("$systemctl_bin" show "$unit" --property=LoadState --value) ||
+    fail 'the voice stack load state is unavailable'
+  active_state=$("$systemctl_bin" show "$unit" --property=ActiveState --value) ||
+    fail 'the voice stack active state is unavailable'
+  [ "$active_state" = inactive ] ||
+    fail 'the voice stack must remain exactly inactive'
+  case "$load_state" in
+    loaded) ;;
+    not-found)
+      [ ! -e /etc/systemd/system/teleagent-voice-stack.service ] &&
+        [ ! -L /etc/systemd/system/teleagent-voice-stack.service ] ||
+        fail 'the absent voice unit conflicts with an installed unit file'
+      ;;
+    *) fail 'the voice stack load state is unsafe' ;;
+  esac
+}
+
 assert_disabled() {
-  if "$systemctl_bin" is-active --quiet "$unit"; then
-    fail 'the voice stack must remain inactive during installation'
-  fi
-  if "$systemctl_bin" is-enabled --quiet "$unit"; then
-    fail 'the dormant voice stack must not be enabled'
-  fi
+  local load_state
+  local active_state
+  local unit_file_state
+  load_state=$("$systemctl_bin" show "$unit" --property=LoadState --value) ||
+    fail 'the voice stack load state is unavailable'
+  active_state=$("$systemctl_bin" show "$unit" --property=ActiveState --value) ||
+    fail 'the voice stack active state is unavailable'
+  unit_file_state=$("$systemctl_bin" show "$unit" --property=UnitFileState --value) ||
+    fail 'the voice stack unit-file state is unavailable'
+  [ "$load_state" = loaded ] ||
+    fail 'the installed voice stack unit is not loaded'
+  [ "$active_state" = inactive ] ||
+    fail 'the voice stack must remain exactly inactive'
+  # A unit with no [Install] section is correctly reported as static, while the
+  # generic enablement query still returns success. Require the exact static
+  # state instead of interpreting that exit status as an enabled unit.
+  [ "$unit_file_state" = static ] ||
+    fail 'the dormant voice stack must remain a static unit'
 }
 
 source_check() {
@@ -46,7 +77,7 @@ assert_source_file() {
 
 install_disabled() {
   require_root
-  assert_disabled
+  assert_inactive
   source_check
 
   local -a sources=(
