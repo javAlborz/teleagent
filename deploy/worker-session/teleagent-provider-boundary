@@ -99,8 +99,8 @@ function syncDirectory(directory) {
   finally { fs.closeSync(descriptor); }
 }
 
-function requirePinnedProviderCli(provider) {
-  const result = spawnSync(CLI_CHECK, ['--provider', provider], {
+function requirePinnedProviderCli(provider, { spawnCheck = spawnSync } = {}) {
+  const result = spawnCheck(CLI_CHECK, ['--provider', provider], {
     cwd: '/',
     encoding: 'utf8',
     timeout: 15000,

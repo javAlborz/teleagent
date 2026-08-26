@@ -203,7 +203,9 @@ release code runs.
 The provider section cross-checks `provider-cli.manifest.json` against the
 actual bundled Claude binary, Codex wrapper, and Codex vendor binary. IDs,
 provider names, install destinations, sources, target modes, byte sizes,
-digests, and version-check contracts must all agree.
+digests, and captured-version provenance must all agree. Root release install
+and verification never execute these artifacts; only the later unprivileged
+managed provider canary supplies activation-time execution evidence.
 
 The image config digest is distinct from a registry manifest digest. Before a
 registry is approved, both registry fields are `null` and `runtimeReference`

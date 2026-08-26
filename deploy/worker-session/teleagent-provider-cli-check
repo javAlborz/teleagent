@@ -3,14 +3,14 @@
 
 const crypto = require('node:crypto');
 const fs = require('node:fs');
-const { spawnSync } = require('node:child_process');
 
 const MANIFEST = '/usr/local/libexec/teleagent-provider-cli.manifest.json';
 const PROVIDERS = new Set(['claude', 'codex']);
 
+class ProviderCliCheckRefusal extends Error {}
+
 function fail(message) {
-  process.stderr.write(`Provider CLI check refused: ${message}\n`);
-  process.exit(77);
+  throw new ProviderCliCheckRefusal(message);
 }
 
 function exactKeys(value, expected) {
@@ -62,27 +62,15 @@ function readManifest() {
   return manifest;
 }
 
-async function checkArtifact(artifact) {
+async function checkArtifact(artifact, { expectedUid = 0, expectedGid = 0 } = {}) {
   const metadata = fs.lstatSync(artifact.path);
-  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.uid !== 0 ||
-      metadata.gid !== 0 || (metadata.mode & 0o777) !== 0o755 || metadata.nlink !== 1 ||
+  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.uid !== expectedUid ||
+      metadata.gid !== expectedGid || (metadata.mode & 0o777) !== 0o755 || metadata.nlink !== 1 ||
       metadata.size !== artifact.size || fs.realpathSync(artifact.path) !== artifact.path) {
     fail('a pinned provider CLI artifact has unsafe metadata');
   }
   if (await digestFile(artifact.path) !== artifact.sha256) {
     fail('a pinned provider CLI artifact digest drifted');
-  }
-  const result = spawnSync(artifact.path, artifact.versionArgs, {
-    cwd: '/',
-    encoding: 'utf8',
-    timeout: 5000,
-    maxBuffer: 4096,
-    env: { PATH: '/opt/teleagent/agent-tools:/usr/bin:/bin', LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8' },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  if (result.error || result.status !== 0 || result.signal ||
-      result.stdout.trim() !== artifact.versionStdout) {
-    fail('a pinned provider CLI version drifted');
   }
 }
 
@@ -99,4 +87,17 @@ async function main() {
   process.stdout.write(`PROVIDER_CLI_OK ${provider}\n`);
 }
 
-main().catch(() => fail('the pinned provider CLI could not be verified'));
+if (require.main === module) {
+  main().catch((error) => {
+    const message = error instanceof ProviderCliCheckRefusal
+      ? error.message
+      : 'the pinned provider CLI could not be verified';
+    process.stderr.write(`Provider CLI check refused: ${message}\n`);
+    process.exitCode = 77;
+  });
+}
+
+module.exports = {
+  checkArtifact,
+  digestFile,
+};

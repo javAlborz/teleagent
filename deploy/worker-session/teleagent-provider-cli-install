@@ -176,26 +176,11 @@ function assertTargetKnownOrAbsent(artifact) {
   }
 }
 
-function verifyVersion(filename, artifact) {
-  const result = spawnSync(filename, artifact.versionArgs, {
-    cwd: '/',
-    encoding: 'utf8',
-    timeout: 5000,
-    maxBuffer: 4096,
-    env: { PATH: '/usr/bin:/bin', LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8' },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  if (result.error || result.status !== 0 || result.stdout.trim() !== artifact.versionStdout) {
-    fail('a staged provider CLI version is unreviewed');
-  }
-}
-
 function installArtifactsInPrivateStage(manifest, artifacts, sources, {
   targetRoot = TARGET_ROOT,
   expectedUid = 0,
   expectedGid = 0,
   copySource = copySourceToStage,
-  versionCheck = verifyVersion,
 } = {}) {
   const stage = fs.mkdtempSync(path.join(targetRoot, '.provider-cli-stage-'));
   try {
@@ -208,9 +193,6 @@ function installArtifactsInPrivateStage(manifest, artifacts, sources, {
     for (const artifact of manifest.artifacts) {
       const staged = path.join(stage, path.basename(artifact.path));
       copySource(sources[artifact.id], staged, artifact, { expectedUid, expectedGid });
-      // Never execute the caller-selected pathname. Only the root-owned,
-      // descriptor-copied, fsynced stage can supply executable review evidence.
-      if (artifact.id !== 'codex-wrapper') versionCheck(staged, artifact);
     }
     // The wrapper is committed last, so no executable path can select a new
     // vendor until that vendor and the matching Claude artifact are durable.
@@ -298,5 +280,4 @@ module.exports = {
   copySourceToStage,
   installArtifactsInPrivateStage,
   sameSourceSnapshot,
-  verifyVersion,
 };

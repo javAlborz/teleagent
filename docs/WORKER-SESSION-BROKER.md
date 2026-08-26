@@ -138,6 +138,12 @@ inactive, and static. It also verifies unique numeric UIDs/GIDs so a preexisting
 account or group cannot alias two privilege planes. Canonical release staging
 normalizes executable sources to mode 0555 and data sources to 0444; the source
 checker also accepts the non-writable-parent development variants 0755/0644.
+The root provider-CLI installer and checker treat the pinned Claude binary,
+Codex wrapper, and Codex vendor binary as opaque bytes: they verify exact
+owner, mode, link count, size, path, and digest but never execute them, including
+for `--version`. Captured version strings remain release provenance. The later
+managed provider canary is the sole activation execution proof and runs through
+the unprivileged supervisor/worker boundary.
 
 Activation is a later, explicit root operation. It requires a root review,
 provider-specific credentials with project-side billing limits plus local
