@@ -64,6 +64,23 @@ BOUND_SOURCE_PATHS = (
     "lib/voice-app-runtime-env.js",
 )
 
+API_LOCK_PATH = "claude-api-server/package-lock.json"
+API_NODE_MODULES_PATH = "claude-api-server/node_modules"
+API_NATIVE_MODULE_PATHS = (
+    "claude-api-server/node_modules/better-sqlite3/build/Release/better_sqlite3.node",
+    "claude-api-server/node_modules/node-pty/build/Release/pty.node",
+)
+PRIVILEGED_BROKER_LOCK_PATH = "privileged-action-broker/package-lock.json"
+PRIVILEGED_BROKER_NODE_MODULES_PATH = "privileged-action-broker/node_modules"
+PRIVILEGED_BROKER_NATIVE_MODULE_PATHS = (
+    "privileged-action-broker/node_modules/better-sqlite3/build/Release/better_sqlite3.node",
+)
+REALTIME_SIP_LOCK_PATH = "realtime-sip-gateway/package-lock.json"
+REALTIME_SIP_NODE_MODULES_PATH = "realtime-sip-gateway/node_modules"
+REALTIME_SIP_NATIVE_MODULE_PATHS = (
+    "realtime-sip-gateway/node_modules/better-sqlite3/build/Release/better_sqlite3.node",
+)
+
 PROVIDER_ARTIFACT_IDS = ("claude", "codex-wrapper", "codex-vendor")
 PROVIDER_DESTINATIONS = {
     "claude": "/opt/teleagent/agent-tools/claude",
@@ -452,7 +469,11 @@ def validate_build_input(value: Any) -> dict[str, Any]:
         config["hostRuntime"],
         (
             "nodePath", "interpreterTargets", "apiLockPath", "nodeModulesPath",
-            "nativeModulePaths", "boundSourcePaths",
+            "nativeModulePaths", "privilegedBrokerLockPath",
+            "privilegedBrokerNodeModulesPath", "privilegedBrokerNativeModulePaths",
+            "realtimeSipLockPath", "realtimeSipNodeModulesPath",
+            "realtimeSipNativeModulePaths",
+            "boundSourcePaths",
         ),
         "host runtime input",
     )
@@ -460,15 +481,55 @@ def validate_build_input(value: Any) -> dict[str, Any]:
     interpreter_targets = _require_array(runtime["interpreterTargets"], "interpreter targets")
     if tuple(interpreter_targets) != INTERPRETER_TARGETS:
         raise _error("the two fixed host interpreter targets are not explicitly bound")
-    validate_relative_path(runtime["apiLockPath"], "API lockfile path")
+    if runtime["apiLockPath"] != API_LOCK_PATH:
+        raise _error("the API lockfile path is not fixed")
     module_root = validate_relative_path(runtime["nodeModulesPath"], "node_modules path")
+    if module_root != API_NODE_MODULES_PATH:
+        raise _error("the API node_modules path is not fixed")
     native_paths = _require_array(runtime["nativeModulePaths"], "native module paths")
-    if not native_paths or native_paths != sorted(native_paths) or len(set(native_paths)) != len(native_paths):
-        raise _error("native module paths must be nonempty, sorted, and unique")
+    if tuple(native_paths) != API_NATIVE_MODULE_PATHS:
+        raise _error("the API native module paths are not exact")
     for index, native_path in enumerate(native_paths):
         value_path = validate_relative_path(native_path, f"native module path {index}")
         if not value_path.startswith(f"{module_root}/") or not value_path.endswith(".node"):
             raise _error("a native module is outside the declared dependency tree")
+
+    if runtime["privilegedBrokerLockPath"] != PRIVILEGED_BROKER_LOCK_PATH:
+        raise _error("the privileged broker lockfile path is not fixed")
+    broker_module_root = validate_relative_path(
+        runtime["privilegedBrokerNodeModulesPath"], "privileged broker node_modules path"
+    )
+    if broker_module_root != PRIVILEGED_BROKER_NODE_MODULES_PATH:
+        raise _error("the privileged broker node_modules path is not fixed")
+    broker_native_paths = _require_array(
+        runtime["privilegedBrokerNativeModulePaths"],
+        "privileged broker native module paths",
+    )
+    if tuple(broker_native_paths) != PRIVILEGED_BROKER_NATIVE_MODULE_PATHS:
+        raise _error("the privileged broker native module paths are not exact")
+    for index, native_path in enumerate(broker_native_paths):
+        value_path = validate_relative_path(
+            native_path, f"privileged broker native module path {index}"
+        )
+        if not value_path.startswith(f"{broker_module_root}/") or not value_path.endswith(".node"):
+            raise _error("a privileged broker native module escaped its dependency tree")
+
+    if runtime["realtimeSipLockPath"] != REALTIME_SIP_LOCK_PATH:
+        raise _error("the realtime SIP lockfile path is not fixed")
+    realtime_module_root = validate_relative_path(
+        runtime["realtimeSipNodeModulesPath"], "realtime SIP node_modules path"
+    )
+    if realtime_module_root != REALTIME_SIP_NODE_MODULES_PATH:
+        raise _error("the realtime SIP node_modules path is not fixed")
+    realtime_native_paths = _require_array(
+        runtime["realtimeSipNativeModulePaths"], "realtime SIP native module paths"
+    )
+    if tuple(realtime_native_paths) != REALTIME_SIP_NATIVE_MODULE_PATHS:
+        raise _error("the realtime SIP native module paths are not exact")
+    for index, native_path in enumerate(realtime_native_paths):
+        value_path = validate_relative_path(native_path, f"realtime SIP native module path {index}")
+        if not value_path.startswith(f"{realtime_module_root}/") or not value_path.endswith(".node"):
+            raise _error("a realtime SIP native module escaped its dependency tree")
     bound_paths = _require_array(runtime["boundSourcePaths"], "bound source paths")
     if tuple(bound_paths) != BOUND_SOURCE_PATHS:
         raise _error("host launch, bind-mount, or canary source bindings are incomplete")
@@ -601,6 +662,42 @@ def _validate_sbom(root: Path, entries: Mapping[str, Entry], relative: str, labe
     return entry
 
 
+def _construct_dependency_binding(
+    entries: Sequence[Entry],
+    entry_by_path: Mapping[str, Entry],
+    *,
+    lock_path: str,
+    module_root: str,
+    expected_native_paths: Sequence[str],
+    label: str,
+) -> tuple[Entry, list[dict[str, Any]]]:
+    lock_entry = _required_file(entry_by_path, lock_path, f"{label} lockfile path")
+    module_directory = entry_by_path.get(module_root)
+    if module_directory is None or module_directory.kind != "D":
+        raise _error(f"the {label} node_modules tree is absent")
+    if any(
+        entry.path == f"{module_root}/.bin" or entry.path.startswith(f"{module_root}/.bin/")
+        for entry in entries
+    ):
+        raise _error(f"{label} node_modules/.bin must not enter the release")
+    actual_native_paths = sorted(
+        entry.path
+        for entry in entries
+        if entry.kind == "F"
+        and entry.path.startswith(f"{module_root}/")
+        and entry.path.endswith(".node")
+    )
+    if list(expected_native_paths) != actual_native_paths:
+        raise _error(f"the {label} native node_modules set differs from the declared closure")
+    native_modules: list[dict[str, Any]] = []
+    for relative in actual_native_paths:
+        native = _required_file(entry_by_path, relative, f"{label} native module")
+        native_modules.append(
+            {"path": relative, "sha256": _prefixed(native.digest), "size": native.size}
+        )
+    return lock_entry, native_modules
+
+
 def _construct_manifest(
     root: Path,
     config: Mapping[str, Any],
@@ -615,27 +712,33 @@ def _construct_manifest(
     node_entry = _required_file(entry_by_path, runtime["nodePath"], "release Node path")
     if node_entry.mode != 0o555:
         raise _error("the release-contained Node interpreter is not executable")
-    lock_entry = _required_file(entry_by_path, runtime["apiLockPath"], "API lockfile path")
-    module_root = validate_relative_path(runtime["nodeModulesPath"], "node_modules path")
-    module_directory = entry_by_path.get(module_root)
-    if module_directory is None or module_directory.kind != "D":
-        raise _error("the host node_modules tree is absent")
-    if any(entry.path == f"{module_root}/.bin" or entry.path.startswith(f"{module_root}/.bin/") for entry in entries):
-        raise _error("node_modules/.bin symlinks or executable shims must not enter the release")
-
-    actual_native_paths = sorted(
-        entry.path
-        for entry in entries
-        if entry.kind == "F" and entry.path.startswith(f"{module_root}/") and entry.path.endswith(".node")
+    module_root = runtime["nodeModulesPath"]
+    lock_entry, native_modules = _construct_dependency_binding(
+        entries,
+        entry_by_path,
+        lock_path=runtime["apiLockPath"],
+        module_root=module_root,
+        expected_native_paths=runtime["nativeModulePaths"],
+        label="API",
     )
-    if actual_native_paths != runtime["nativeModulePaths"]:
-        raise _error("the native node_modules set differs from the declared closure")
-    native_modules: list[dict[str, Any]] = []
-    for relative in actual_native_paths:
-        native = _required_file(entry_by_path, relative, "native module")
-        native_modules.append(
-            {"path": relative, "sha256": _prefixed(native.digest), "size": native.size}
-        )
+    broker_module_root = runtime["privilegedBrokerNodeModulesPath"]
+    broker_lock_entry, broker_native_modules = _construct_dependency_binding(
+        entries,
+        entry_by_path,
+        lock_path=runtime["privilegedBrokerLockPath"],
+        module_root=broker_module_root,
+        expected_native_paths=runtime["privilegedBrokerNativeModulePaths"],
+        label="privileged broker",
+    )
+    realtime_module_root = runtime["realtimeSipNodeModulesPath"]
+    realtime_lock_entry, realtime_native_modules = _construct_dependency_binding(
+        entries,
+        entry_by_path,
+        lock_path=runtime["realtimeSipLockPath"],
+        module_root=realtime_module_root,
+        expected_native_paths=runtime["realtimeSipNativeModulePaths"],
+        label="realtime SIP gateway",
+    )
 
     for relative in runtime["boundSourcePaths"]:
         _required_file(entry_by_path, relative, "bound host source path")
@@ -693,6 +796,14 @@ def _construct_manifest(
             "apiLockSha256": _prefixed(lock_entry.digest),
             "nodeModulesPath": module_root,
             "nativeModules": native_modules,
+            "privilegedBrokerLockPath": broker_lock_entry.path,
+            "privilegedBrokerLockSha256": _prefixed(broker_lock_entry.digest),
+            "privilegedBrokerNodeModulesPath": broker_module_root,
+            "privilegedBrokerNativeModules": broker_native_modules,
+            "realtimeSipLockPath": realtime_lock_entry.path,
+            "realtimeSipLockSha256": _prefixed(realtime_lock_entry.digest),
+            "realtimeSipNodeModulesPath": realtime_module_root,
+            "realtimeSipNativeModules": realtime_native_modules,
             "boundSourcePaths": list(BOUND_SOURCE_PATHS),
         },
         "providerCli": {
@@ -721,6 +832,28 @@ def _construct_manifest(
             "voiceImageSha256": _prefixed(voice_sbom.digest),
         },
     }
+
+
+def _validate_native_module_bindings(
+    value: Any,
+    *,
+    module_root: str,
+    expected_paths: Sequence[str],
+    label: str,
+) -> list[dict[str, Any]]:
+    records = _require_array(value, f"{label} native modules")
+    native_paths: list[str] = []
+    for record in records:
+        item = _require_keys(record, ("path", "sha256", "size"), f"{label} native module binding")
+        relative = validate_relative_path(item["path"], f"{label} native module path")
+        if not relative.startswith(f"{module_root}/") or not relative.endswith(".node"):
+            raise _error(f"a {label} native module binding escaped node_modules")
+        _require_string(item["sha256"], f"{label} native module digest", DIGEST_RE)
+        _require_int(item["size"], f"{label} native module size", minimum=1)
+        native_paths.append(relative)
+    if tuple(native_paths) != tuple(expected_paths):
+        raise _error(f"the {label} native module bindings are not exact")
+    return records
 
 
 def _validate_manifest_shape(manifest: Any) -> dict[str, Any]:
@@ -758,7 +891,12 @@ def _validate_manifest_shape(manifest: Any) -> dict[str, Any]:
         value["hostRuntime"],
         (
             "nodePath", "nodeSha256", "interpreterTargets", "apiLockPath",
-            "apiLockSha256", "nodeModulesPath", "nativeModules", "boundSourcePaths",
+            "apiLockSha256", "nodeModulesPath", "nativeModules",
+            "privilegedBrokerLockPath", "privilegedBrokerLockSha256",
+            "privilegedBrokerNodeModulesPath", "privilegedBrokerNativeModules",
+            "realtimeSipLockPath", "realtimeSipLockSha256",
+            "realtimeSipNodeModulesPath", "realtimeSipNativeModules",
+            "boundSourcePaths",
         ),
         "manifest host runtime",
     )
@@ -766,21 +904,51 @@ def _validate_manifest_shape(manifest: Any) -> dict[str, Any]:
     _require_string(runtime["nodeSha256"], "release Node digest", DIGEST_RE)
     if tuple(_require_array(runtime["interpreterTargets"], "interpreter targets")) != INTERPRETER_TARGETS:
         raise _error("the manifest does not bind both host Node interpreter targets")
-    validate_relative_path(runtime["apiLockPath"], "API lockfile path")
+    if runtime["apiLockPath"] != API_LOCK_PATH:
+        raise _error("the manifest API lockfile path is not fixed")
     _require_string(runtime["apiLockSha256"], "API lockfile digest", DIGEST_RE)
     module_root = validate_relative_path(runtime["nodeModulesPath"], "node_modules path")
-    native_modules = _require_array(runtime["nativeModules"], "native modules")
-    native_paths: list[str] = []
-    for record in native_modules:
-        item = _require_keys(record, ("path", "sha256", "size"), "native module binding")
-        relative = validate_relative_path(item["path"], "native module path")
-        if not relative.startswith(f"{module_root}/") or not relative.endswith(".node"):
-            raise _error("a native module binding escaped node_modules")
-        _require_string(item["sha256"], "native module digest", DIGEST_RE)
-        _require_int(item["size"], "native module size", minimum=1)
-        native_paths.append(relative)
-    if not native_paths or native_paths != sorted(native_paths) or len(set(native_paths)) != len(native_paths):
-        raise _error("native module bindings are not nonempty, sorted, and unique")
+    if module_root != API_NODE_MODULES_PATH:
+        raise _error("the manifest API node_modules path is not fixed")
+    _validate_native_module_bindings(
+        runtime["nativeModules"],
+        module_root=module_root,
+        expected_paths=API_NATIVE_MODULE_PATHS,
+        label="API",
+    )
+    if runtime["privilegedBrokerLockPath"] != PRIVILEGED_BROKER_LOCK_PATH:
+        raise _error("the manifest privileged broker lockfile path is not fixed")
+    _require_string(
+        runtime["privilegedBrokerLockSha256"],
+        "privileged broker lockfile digest",
+        DIGEST_RE,
+    )
+    broker_module_root = validate_relative_path(
+        runtime["privilegedBrokerNodeModulesPath"],
+        "privileged broker node_modules path",
+    )
+    if broker_module_root != PRIVILEGED_BROKER_NODE_MODULES_PATH:
+        raise _error("the manifest privileged broker node_modules path is not fixed")
+    _validate_native_module_bindings(
+        runtime["privilegedBrokerNativeModules"],
+        module_root=broker_module_root,
+        expected_paths=PRIVILEGED_BROKER_NATIVE_MODULE_PATHS,
+        label="privileged broker",
+    )
+    if runtime["realtimeSipLockPath"] != REALTIME_SIP_LOCK_PATH:
+        raise _error("the manifest realtime SIP lockfile path is not fixed")
+    _require_string(runtime["realtimeSipLockSha256"], "realtime SIP lockfile digest", DIGEST_RE)
+    realtime_module_root = validate_relative_path(
+        runtime["realtimeSipNodeModulesPath"], "realtime SIP node_modules path"
+    )
+    if realtime_module_root != REALTIME_SIP_NODE_MODULES_PATH:
+        raise _error("the manifest realtime SIP node_modules path is not fixed")
+    _validate_native_module_bindings(
+        runtime["realtimeSipNativeModules"],
+        module_root=realtime_module_root,
+        expected_paths=REALTIME_SIP_NATIVE_MODULE_PATHS,
+        label="realtime SIP gateway",
+    )
     if tuple(_require_array(runtime["boundSourcePaths"], "bound source paths")) != BOUND_SOURCE_PATHS:
         raise _error("the manifest host source bindings are incomplete")
 
@@ -848,31 +1016,73 @@ def _validate_manifest_shape(manifest: Any) -> dict[str, Any]:
     return value
 
 
+def _cross_validate_dependency_binding(
+    entry_by_path: Mapping[str, Entry],
+    entries: Sequence[Entry],
+    *,
+    lock_path: str,
+    lock_digest: str,
+    module_root: str,
+    native_modules: Sequence[Mapping[str, Any]],
+    label: str,
+) -> None:
+    lock = _required_file(entry_by_path, lock_path, f"{label} lockfile path")
+    if _prefixed(lock.digest) != lock_digest:
+        raise _error(f"the {label} lockfile binding differs from the inventory")
+    if entry_by_path.get(module_root, Entry("", "", 0, None, None)).kind != "D":
+        raise _error(f"the manifest {label} node_modules directory is absent")
+    if any(
+        entry.path == f"{module_root}/.bin" or entry.path.startswith(f"{module_root}/.bin/")
+        for entry in entries
+    ):
+        raise _error(f"{label} node_modules/.bin entered the immutable closure")
+    actual_native = sorted(
+        entry.path
+        for entry in entries
+        if entry.kind == "F" and entry.path.startswith(f"{module_root}/") and entry.path.endswith(".node")
+    )
+    declared_native = [item["path"] for item in native_modules]
+    if actual_native != declared_native:
+        raise _error(f"the {label} native module set differs from the manifest")
+    for item in native_modules:
+        entry = _required_file(entry_by_path, item["path"], f"{label} native module")
+        if _prefixed(entry.digest) != item["sha256"] or entry.size != item["size"]:
+            raise _error(f"a {label} native module binding differs from the inventory")
+
+
 def _cross_validate_manifest(root: Path, manifest: Mapping[str, Any], entries: Sequence[Entry]) -> None:
     entry_by_path = _entry_map(entries)
     runtime = manifest["hostRuntime"]
     node = _required_file(entry_by_path, runtime["nodePath"], "release Node path")
-    lock = _required_file(entry_by_path, runtime["apiLockPath"], "API lockfile path")
     if _prefixed(node.digest) != runtime["nodeSha256"] or node.mode != 0o555:
         raise _error("the release Node binding differs from the inventory")
-    if _prefixed(lock.digest) != runtime["apiLockSha256"]:
-        raise _error("the API lockfile binding differs from the inventory")
-    module_root = runtime["nodeModulesPath"]
-    if entry_by_path.get(module_root, Entry("", "", 0, None, None)).kind != "D":
-        raise _error("the manifest node_modules directory is absent")
-    if any(entry.path == f"{module_root}/.bin" or entry.path.startswith(f"{module_root}/.bin/") for entry in entries):
-        raise _error("node_modules/.bin entered the immutable closure")
-    actual_native = sorted(
-        entry.path for entry in entries
-        if entry.kind == "F" and entry.path.startswith(f"{module_root}/") and entry.path.endswith(".node")
+    _cross_validate_dependency_binding(
+        entry_by_path,
+        entries,
+        lock_path=runtime["apiLockPath"],
+        lock_digest=runtime["apiLockSha256"],
+        module_root=runtime["nodeModulesPath"],
+        native_modules=runtime["nativeModules"],
+        label="API",
     )
-    declared_native = [item["path"] for item in runtime["nativeModules"]]
-    if actual_native != declared_native:
-        raise _error("the native module set differs from the manifest")
-    for item in runtime["nativeModules"]:
-        entry = _required_file(entry_by_path, item["path"], "native module")
-        if _prefixed(entry.digest) != item["sha256"] or entry.size != item["size"]:
-            raise _error("a native module binding differs from the inventory")
+    _cross_validate_dependency_binding(
+        entry_by_path,
+        entries,
+        lock_path=runtime["privilegedBrokerLockPath"],
+        lock_digest=runtime["privilegedBrokerLockSha256"],
+        module_root=runtime["privilegedBrokerNodeModulesPath"],
+        native_modules=runtime["privilegedBrokerNativeModules"],
+        label="privileged broker",
+    )
+    _cross_validate_dependency_binding(
+        entry_by_path,
+        entries,
+        lock_path=runtime["realtimeSipLockPath"],
+        lock_digest=runtime["realtimeSipLockSha256"],
+        module_root=runtime["realtimeSipNodeModulesPath"],
+        native_modules=runtime["realtimeSipNativeModules"],
+        label="realtime SIP gateway",
+    )
     for relative in runtime["boundSourcePaths"]:
         _required_file(entry_by_path, relative, "bound host source path")
 
@@ -1127,6 +1337,9 @@ def load_build_input(filename: Path | str) -> dict[str, Any]:
 
 
 __all__ = [
+    "API_LOCK_PATH",
+    "API_NATIVE_MODULE_PATHS",
+    "API_NODE_MODULES_PATH",
     "BOUND_SOURCE_PATHS",
     "BUILD_INPUT_VERSION",
     "ClosureError",
@@ -1135,6 +1348,12 @@ __all__ = [
     "FORMAT_VERSION",
     "INTERPRETER_TARGETS",
     "MANIFEST_NAME",
+    "PRIVILEGED_BROKER_LOCK_PATH",
+    "PRIVILEGED_BROKER_NATIVE_MODULE_PATHS",
+    "PRIVILEGED_BROKER_NODE_MODULES_PATH",
+    "REALTIME_SIP_LOCK_PATH",
+    "REALTIME_SIP_NATIVE_MODULE_PATHS",
+    "REALTIME_SIP_NODE_MODULES_PATH",
     "canonical_json_bytes",
     "generate_release",
     "load_build_input",

@@ -15,11 +15,20 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from release_closure import (
+    API_LOCK_PATH,
+    API_NATIVE_MODULE_PATHS,
+    API_NODE_MODULES_PATH,
     BOUND_SOURCE_PATHS,
     ClosureError,
     FILE_LIST_NAME,
     INTERPRETER_TARGETS,
     MANIFEST_NAME,
+    PRIVILEGED_BROKER_LOCK_PATH,
+    PRIVILEGED_BROKER_NATIVE_MODULE_PATHS,
+    PRIVILEGED_BROKER_NODE_MODULES_PATH,
+    REALTIME_SIP_LOCK_PATH,
+    REALTIME_SIP_NATIVE_MODULE_PATHS,
+    REALTIME_SIP_NODE_MODULES_PATH,
     canonical_json_bytes,
     generate_release,
     package_release,
@@ -65,6 +74,18 @@ class ReleaseFixture:
         self.write(
             "claude-api-server/node_modules/node-pty/build/Release/pty.node",
             b"fixture-node-pty-native",
+            executable=True,
+        )
+        self.write(PRIVILEGED_BROKER_LOCK_PATH, '{"lockfileVersion":3}\n')
+        self.write(
+            PRIVILEGED_BROKER_NATIVE_MODULE_PATHS[0],
+            b"fixture-privileged-broker-better-sqlite3-native",
+            executable=True,
+        )
+        self.write(REALTIME_SIP_LOCK_PATH, '{"lockfileVersion":3}\n')
+        self.write(
+            REALTIME_SIP_NATIVE_MODULE_PATHS[0],
+            b"fixture-realtime-sip-better-sqlite3-native",
             executable=True,
         )
         for relative in BOUND_SOURCE_PATHS:
@@ -176,12 +197,17 @@ class ReleaseFixture:
             "hostRuntime": {
                 "nodePath": "runtime/node/bin/node",
                 "interpreterTargets": list(INTERPRETER_TARGETS),
-                "apiLockPath": "claude-api-server/package-lock.json",
-                "nodeModulesPath": "claude-api-server/node_modules",
-                "nativeModulePaths": [
-                    "claude-api-server/node_modules/better-sqlite3/build/Release/better_sqlite3.node",
-                    "claude-api-server/node_modules/node-pty/build/Release/pty.node",
-                ],
+                "apiLockPath": API_LOCK_PATH,
+                "nodeModulesPath": API_NODE_MODULES_PATH,
+                "nativeModulePaths": list(API_NATIVE_MODULE_PATHS),
+                "privilegedBrokerLockPath": PRIVILEGED_BROKER_LOCK_PATH,
+                "privilegedBrokerNodeModulesPath": PRIVILEGED_BROKER_NODE_MODULES_PATH,
+                "privilegedBrokerNativeModulePaths": list(
+                    PRIVILEGED_BROKER_NATIVE_MODULE_PATHS
+                ),
+                "realtimeSipLockPath": REALTIME_SIP_LOCK_PATH,
+                "realtimeSipNodeModulesPath": REALTIME_SIP_NODE_MODULES_PATH,
+                "realtimeSipNativeModulePaths": list(REALTIME_SIP_NATIVE_MODULE_PATHS),
                 "boundSourcePaths": list(BOUND_SOURCE_PATHS),
             },
             "providerCli": {
@@ -243,6 +269,14 @@ class ReleaseClosureTests(unittest.TestCase):
             self.assertEqual(verified, generated)
             self.assertEqual(manifest["hostRuntime"]["interpreterTargets"], list(INTERPRETER_TARGETS))
             self.assertEqual(manifest["hostRuntime"]["boundSourcePaths"], list(BOUND_SOURCE_PATHS))
+            self.assertEqual(
+                [item["path"] for item in manifest["hostRuntime"]["privilegedBrokerNativeModules"]],
+                list(PRIVILEGED_BROKER_NATIVE_MODULE_PATHS),
+            )
+            self.assertEqual(
+                [item["path"] for item in manifest["hostRuntime"]["realtimeSipNativeModules"]],
+                list(REALTIME_SIP_NATIVE_MODULE_PATHS),
+            )
             self.assertEqual(stat.S_IMODE(fixture.root.stat().st_mode), 0o555)
             self.assertEqual(
                 stat.S_IMODE(
@@ -355,6 +389,34 @@ class ReleaseClosureTests(unittest.TestCase):
             (missing.root / missing.config["hostRuntime"]["nativeModulePaths"][0]).unlink()
             with self.assertRaisesRegex(ClosureError, "native node_modules set"):
                 missing.generate()
+
+            broker_unexpected = self.fixture(base, "unexpected-broker-native")
+            broker_unexpected.write(
+                "privileged-action-broker/node_modules/injected/build/Release/injected.node",
+                b"injected-privileged-native-code",
+                executable=True,
+            )
+            with self.assertRaisesRegex(ClosureError, "privileged broker native node_modules set"):
+                broker_unexpected.generate()
+
+            broker_missing = self.fixture(base, "missing-broker-native")
+            (broker_missing.root / PRIVILEGED_BROKER_NATIVE_MODULE_PATHS[0]).unlink()
+            with self.assertRaisesRegex(ClosureError, "privileged broker native node_modules set"):
+                broker_missing.generate()
+
+            sip_unexpected = self.fixture(base, "unexpected-sip-native")
+            sip_unexpected.write(
+                "realtime-sip-gateway/node_modules/injected/build/Release/injected.node",
+                b"injected-realtime-sip-native-code",
+                executable=True,
+            )
+            with self.assertRaisesRegex(ClosureError, "realtime SIP gateway native node_modules set"):
+                sip_unexpected.generate()
+
+            sip_missing = self.fixture(base, "missing-sip-native")
+            (sip_missing.root / REALTIME_SIP_NATIVE_MODULE_PATHS[0]).unlink()
+            with self.assertRaisesRegex(ClosureError, "realtime SIP gateway native node_modules set"):
+                sip_missing.generate()
 
     def test_provider_voice_and_sbom_cross_bindings_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

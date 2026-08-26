@@ -3,6 +3,51 @@
 Status: source-side build contract. This document and the tools under
 `scripts/release/` do not authorize installation or activation.
 
+## Dormant CI evidence lane
+
+`.github/workflows/teleagent-release-candidate.yml` is a manual, default-branch
+evidence workflow. It is restricted to the exact repo-scoped
+`hephaestus-ci-build-vm01-teleagent` runner with the `self-hosted`, `Linux`,
+`X64`, `ci-build`, and `teleagent` labels. Third-party Actions use immutable
+commit SHAs, checkout does not persist credentials, jobs time out, concurrent
+runs queue instead of cancelling one another, and the workflow has only
+`contents: read`. It has no pull-request/push trigger, secrets, OIDC token,
+attestation permission, registry permission, deploy step, service activation,
+or image push.
+
+The runner user is a member of the Docker group, which is root-equivalent, and
+the guest is currently long-lived. Therefore every uploaded artifact is
+explicitly **non-promotable build evidence**. GitHub attestation is deliberately
+omitted: granting OIDC to this trust domain would make the evidence look
+stronger without supplying an independent build boundary. Promotion remains
+blocked until an external system resets or creates a clean immutable guest for
+each job, verifies that generation outside the guest, and performs attestation
+in a separate ephemeral trust domain.
+
+Dependency lifecycle scripts, native smoke loads, repository tests, and lint do
+not run in the Docker-group host context. They run in a digest-pinned throwaway
+Node 24.19.0 container with an empty environment, no Docker socket or runner
+credentials, a read-only root, all capabilities dropped, no-new-privileges,
+and fixed CPU, memory, PID, file-descriptor, and wall-clock bounds. The archived
+source mount is read-only; only explicit package-local `node_modules` output
+mounts are writable. Link and extended-metadata checks run before the host
+copies the reviewed Node or provider bytes into either fresh assembly.
+
+`scripts/release/ci-release-inputs.json` pins the Node archive and interpreter,
+the lifecycle image digest, the Syft and Trivy release archives and installed
+executable bytes, the exact runner name, and the root-owned provider inputs.
+The builder fails if any input/tool is missing or drifts. It builds and scans
+the voice image, produces CycloneDX 1.6 SBOMs, assembles the current v2-shaped
+tree and deterministic archive twice, and uploads only evidence. It never deploys,
+starts, imports on a target, provisions credentials, or pushes to a registry.
+
+This baseline also records `host-executed-bound-source-integration-is-pending`
+in `release-summary.json`: controller, privileged, and bounded realtime-SIP
+installer/runtime assets are landing in parallel and still need one canonical
+`BOUND_SOURCE_PATHS` integration commit. Until that commit and its mirrored
+homelab verifier land, this lane must not be described as a complete release
+closure even in a future ephemeral builder.
+
 ## Security decision
 
 A Git revision, an OCI label, and a manifest stored inside the release do not
@@ -134,6 +179,20 @@ The native-module array must equal every `*.node` file under the declared host
 `node_modules`. Dependencies are installed in the builder and copied as bytes;
 the target never runs `npm`, downloads a prebuild, or compiles an addon.
 
+The long one-line example above illustrates the original API dependency
+binding. The current v2 `hostRuntime` schema additionally requires, in exact
+key order, these package-local bindings:
+
+```json
+{"privilegedBrokerLockPath":"privileged-action-broker/package-lock.json","privilegedBrokerLockSha256":"sha256:<64hex>","privilegedBrokerNodeModulesPath":"privileged-action-broker/node_modules","privilegedBrokerNativeModules":[{"path":"privileged-action-broker/node_modules/better-sqlite3/build/Release/better_sqlite3.node","sha256":"sha256:<64hex>","size":123}],"realtimeSipLockPath":"realtime-sip-gateway/package-lock.json","realtimeSipLockSha256":"sha256:<64hex>","realtimeSipNodeModulesPath":"realtime-sip-gateway/node_modules","realtimeSipNativeModules":[{"path":"realtime-sip-gateway/node_modules/better-sqlite3/build/Release/better_sqlite3.node","sha256":"sha256:<64hex>","size":123}]}
+```
+
+These fields occur after the API `nativeModules` field and before
+`boundSourcePaths`; they are not a separate object. Each lockfile digest,
+package-local production tree, and complete native-addon set is independently
+cross-checked against the full inventory. Node resolution uses normal sibling
+`node_modules` lookup; mutable/system `NODE_PATH` is forbidden.
+
 Both Node interpreter destinations are explicit because root launchers and
 verifiers currently use `/usr/local/libexec/teleagent-node`, while broker,
 supervisor, and egress services use `/opt/teleagent/node/bin/node`. The same
@@ -214,6 +273,16 @@ not part of the release and not an approval:
       "claude-api-server/node_modules/better-sqlite3/build/Release/better_sqlite3.node",
       "claude-api-server/node_modules/node-pty/build/Release/pty.node"
     ],
+    "privilegedBrokerLockPath": "privileged-action-broker/package-lock.json",
+    "privilegedBrokerNodeModulesPath": "privileged-action-broker/node_modules",
+    "privilegedBrokerNativeModulePaths": [
+      "privileged-action-broker/node_modules/better-sqlite3/build/Release/better_sqlite3.node"
+    ],
+    "realtimeSipLockPath": "realtime-sip-gateway/package-lock.json",
+    "realtimeSipNodeModulesPath": "realtime-sip-gateway/node_modules",
+    "realtimeSipNativeModulePaths": [
+      "realtime-sip-gateway/node_modules/better-sqlite3/build/Release/better_sqlite3.node"
+    ],
     "boundSourcePaths": [
       "claude-api-server/agent-cli.js",
       "deploy/voice-stack/drachtio.conf.xml.template",
@@ -259,10 +328,15 @@ Run release builds only on the bounded CI/build lane, never Hermes:
    or untracked changes and record its exact commit and Git tree IDs.
 2. Populate a fresh staging directory from `git archive` of that commit.
 3. Copy one digest-pinned Node distribution into `runtime/node`.
-4. In a digest-pinned builder, run `npm ci --omit=dev` for
-   `claude-api-server`. Remove `node_modules/.bin` and foreign-platform native
-   prebuilds. Require the two reviewed Linux native modules; do not rebuild on
-   the target.
+4. In the resource-bounded lifecycle sandbox, run independent
+   `npm ci --omit=dev` installs for `claude-api-server`,
+   `privileged-action-broker`, and `realtime-sip-gateway`. Remove each
+   `node_modules/.bin` and every undeclared native addon. Require exactly the
+   API server's `better_sqlite3.node` and `pty.node`, the privileged broker's
+   package-local `better_sqlite3.node`, and the realtime SIP gateway's
+   package-local `better_sqlite3.node`. Smoke-load each tree inside the same
+   no-socket sandbox; never execute those dependency bytes on the CI host or
+   rebuild them on a target.
 5. Copy the reviewed Claude and Codex vendor binaries into the artifact paths.
 6. Build the voice image with the same source revision and platform, save the
    exact Docker archive, and generate its canonical v2 manifest.
@@ -283,7 +357,9 @@ Run release builds only on the bounded CI/build lane, never Hermes:
     file-list, manifest, and tar SHA-256 values. Native-byte divergence blocks
     the candidate; it never justifies a target-host rebuild.
 11. Review the manifest, SBOMs, scan evidence, and image/provider identities.
-    Create the external approval only through the homelab change.
+    The current long-lived-runner output remains non-promotable and cannot be
+    used to create an external approval. Only a future externally reset and
+    attested ephemeral build may feed the separately reviewed homelab change.
 
 The tar is uncompressed and deterministic: byte-sorted entries, a single
 `sha256-<manifest-digest>` top directory, uid/gid zero, empty owner names,
@@ -333,10 +409,13 @@ python3 scripts/release/verify-release-closure.py --root /path/to/release
 Run the build-contract regressions:
 
 ```bash
-python3 -m unittest -v scripts/release/test_release_closure.py
+scripts/hermes-safe-test python3 -m unittest -v \
+  scripts/release/test_release_closure.py scripts/release/test_ci_release.py
 ```
 
 Tests cover canonicalization, traversal, extra/missing/tampered files,
-symlinks, hardlinks, FIFOs, xattrs, modes, exact native modules,
-provider/image/SBOM cross-binding, host-bound source completeness, and
-byte-identical double packaging.
+symlinks, hardlinks, FIFOs, xattrs, modes, all three exact package-local native
+dependency trees, provider/image/SBOM cross-binding, dynamic host-bound source
+input, lifecycle-container isolation, immutable Action/tool pins, manual
+default-branch runner gating, non-promotable authorization, and byte-identical
+double packaging. These static/unit tests do not run Docker or download tools.
