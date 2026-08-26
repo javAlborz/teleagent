@@ -8,6 +8,7 @@ const { spawnSync } = require('node:child_process');
 const test = require('node:test');
 const {
   inspectPath,
+  inspectSourceAsset,
   sourceCheck,
   validateIdentityRecords,
 } = require('../../deploy/voice-stack/verify-voice-stack-identity');
@@ -40,7 +41,10 @@ function identityFixture({
 }
 
 test('voice deployment source is dormant and contains only the reviewed identity topology', () => {
-  assert.equal(sourceCheck(DEPLOY), true);
+  assert.equal(sourceCheck(DEPLOY, {
+    sourceUid: process.getuid(),
+    sourceGid: process.getgid(),
+  }), true);
   const unit = fs.readFileSync(path.join(DEPLOY, 'teleagent-voice-stack.service'), 'utf8');
   assert.match(unit,
     /^ExecStartPre=\/usr\/local\/libexec\/verify-voice-stack-identity --installed-check$/m);
@@ -48,6 +52,63 @@ test('voice deployment source is dormant and contains only the reviewed identity
     /^ExecStopPost=\/usr\/local\/libexec\/teleagent-voice-stack-launch cleanup$/m);
   assert.doesNotMatch(unit, /^\[Install\]$/m);
   assert.doesNotMatch(unit, /^Environment=.*(?:TOKEN|PASSWORD|SECRET|API_KEY|PRIVATE_KEY)=/mi);
+});
+
+test('voice source assets accept only installed or immutable read-only modes', (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'voice-source-metadata-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const source = path.join(directory, 'source-asset');
+  fs.writeFileSync(source, 'reviewed\n', { mode: 0o644 });
+  const metadata = fs.statSync(source);
+  const expected = { uid: metadata.uid, gid: metadata.gid };
+
+  for (const [targetMode, acceptedModes] of [
+    [0o644, [0o644, 0o444]],
+    [0o755, [0o755, 0o555]],
+  ]) {
+    for (const acceptedMode of acceptedModes) {
+      fs.chmodSync(source, acceptedMode);
+      assert.doesNotThrow(() => inspectSourceAsset(source, {
+        ...expected,
+        mode: targetMode,
+      }));
+    }
+  }
+
+  for (const [targetMode, rejectedMode] of [
+    [0o644, 0o600],
+    [0o644, 0o640],
+    [0o644, 0o440],
+    [0o644, 0o755],
+    [0o755, 0o700],
+    [0o755, 0o750],
+    [0o755, 0o775],
+    [0o755, 0o4755],
+    [0o755, 0o644],
+  ]) {
+    fs.chmodSync(source, rejectedMode);
+    assert.throws(() => inspectSourceAsset(source, {
+      ...expected,
+      mode: targetMode,
+    }), /unsafe metadata/);
+  }
+  assert.throws(() => inspectSourceAsset(source, {
+    ...expected,
+    mode: 0o700,
+  }), /unsupported target mode/);
+  fs.chmodSync(source, 0o644);
+  assert.throws(() => inspectSourceAsset(source, {
+    uid: metadata.uid + 1,
+    gid: metadata.gid,
+    mode: 0o644,
+  }), /unsafe metadata/);
+
+  const hardlink = path.join(directory, 'hardlink');
+  fs.linkSync(source, hardlink);
+  assert.throws(() => inspectSourceAsset(source, {
+    ...expected,
+    mode: 0o644,
+  }), /unsafe metadata/);
 });
 
 test('voice identity accepts one private nologin account with no ID reuse or supplementary group', () => {
@@ -139,6 +200,9 @@ test('voice installer can only install or check a disabled stack and never provi
   assert.doesNotMatch(installer, /activation-state\.json/);
   assert.doesNotMatch(installer, /\/var\/lib\/teleagent-voice-stack\/(?:\*|[^'" ]+)/);
   assert.doesNotMatch(installer, /(?:generate|rotate).*(?:secret|credential|key)/i);
+  assert.match(installer, /644\) immutable_mode=444/);
+  assert.match(installer, /755\) immutable_mode=555/);
+  assert.match(installer, /"0:0:\$\{mode\}:1"\|"0:0:\$\{immutable_mode\}:1"/);
   assert.match(installer, /rollback\(\)/);
 });
 

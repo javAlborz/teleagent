@@ -110,9 +110,18 @@ source_check() {
 assert_source_file() {
   local filename=$1
   local mode=$2
+  local immutable_mode metadata
   [ -f "$filename" ] && [ ! -L "$filename" ] || fail 'a reviewed source asset is absent'
-  [ "$(stat -c '%u:%g:%a:%h' "$filename")" = "0:0:${mode}:1" ] ||
-    fail 'a reviewed source asset has unsafe metadata'
+  case "$mode" in
+    644) immutable_mode=444 ;;
+    755) immutable_mode=555 ;;
+    *) fail 'a reviewed source asset has an unsupported target mode' ;;
+  esac
+  metadata=$(stat -c '%u:%g:%a:%h' "$filename")
+  case "$metadata" in
+    "0:0:${mode}:1"|"0:0:${immutable_mode}:1") ;;
+    *) fail 'a reviewed source asset has unsafe metadata' ;;
+  esac
 }
 
 install_disabled() {

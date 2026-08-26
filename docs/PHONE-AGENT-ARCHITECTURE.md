@@ -256,6 +256,11 @@ and only then commits inactive generation zero. State replacement fsyncs the
 new file before rename and fsyncs the parent directory afterward; if a crash
 still loses the rename, absence remains recovery-gated.
 
+The installer accepts each root-owned, single-link release source only at its
+exact installed mode (`0644` or `0755`) or the corresponding immutable release
+mode (`0444` or `0555`). It rejects every other mode and always normalizes the
+installed policy and executable copies back to their exact target modes.
+
 The unconditional `ExecStopPost` removes only containers bearing the exact
 `com.docker.compose.project=teleagent-voice` label and proves none remain before
 removing projected credentials. This cleanup does not clear controller panic or

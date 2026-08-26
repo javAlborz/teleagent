@@ -42,13 +42,28 @@ function exactlyOnce(source, expression, label) {
   if (matches.length !== 1) refuse(`${label} must occur exactly once`);
 }
 
-function sourceCheck(sourceRoot = SOURCE_ROOT) {
+function inspectSourceAsset(filename, { uid = 0, gid = 0, mode }) {
+  const metadata = fs.lstatSync(filename);
+  if (![0o644, 0o755].includes(mode)) {
+    refuse(`reviewed source asset ${path.basename(filename)} has an unsupported target mode`);
+  }
+  const actualMode = metadata.mode & 0o7777;
+  const immutableMode = mode & 0o555;
+  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1 ||
+      metadata.uid !== uid || metadata.gid !== gid ||
+      ![mode, immutableMode].includes(actualMode)) {
+    refuse(`reviewed source asset ${path.basename(filename)} has unsafe metadata`);
+  }
+  return metadata;
+}
+
+function sourceCheck(sourceRoot = SOURCE_ROOT, { sourceUid = 0, sourceGid = 0 } = {}) {
   for (const [sourceName, _target, mode] of REVIEWED_ASSETS) {
-    const metadata = fs.lstatSync(path.join(sourceRoot, sourceName));
-    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1 ||
-        (metadata.mode & 0o777) !== mode || (metadata.mode & 0o022) !== 0) {
-      refuse(`reviewed source asset ${sourceName} has unsafe metadata`);
-    }
+    inspectSourceAsset(path.join(sourceRoot, sourceName), {
+      uid: sourceUid,
+      gid: sourceGid,
+      mode,
+    });
   }
   const sysusers = fs.readFileSync(path.join(sourceRoot, 'teleagent-voice-stack.sysusers'), 'utf8');
   const tmpfiles = fs.readFileSync(path.join(sourceRoot, 'teleagent-voice-stack.tmpfiles'), 'utf8');
@@ -187,7 +202,7 @@ function inspectPath(filename, { type, uid, gid, mode, nlink = null }) {
   const metadata = fs.lstatSync(filename);
   const correctType = type === 'directory' ? metadata.isDirectory() : metadata.isFile();
   if (metadata.isSymbolicLink() || !correctType || metadata.uid !== uid || metadata.gid !== gid ||
-      (metadata.mode & 0o777) !== mode || (nlink !== null && metadata.nlink !== nlink)) {
+      (metadata.mode & 0o7777) !== mode || (nlink !== null && metadata.nlink !== nlink)) {
     refuse(`unsafe metadata for ${filename}`);
   }
   return metadata;
@@ -205,7 +220,7 @@ function inspectRootDatabase(filename) {
 function compareInstalledAssets(sourceRoot = SOURCE_ROOT) {
   for (const [sourceName, target, mode] of REVIEWED_ASSETS) {
     const source = path.join(sourceRoot, sourceName);
-    inspectPath(source, { type: 'file', uid: 0, gid: 0, mode, nlink: 1 });
+    inspectSourceAsset(source, { uid: 0, gid: 0, mode });
     inspectPath(target, { type: 'file', uid: 0, gid: 0, mode, nlink: 1 });
     if (!fs.readFileSync(source).equals(fs.readFileSync(target))) {
       refuse(`installed asset ${path.basename(target)} differs from reviewed source`);
@@ -266,6 +281,7 @@ module.exports = {
   COLLISION_IDENTITIES,
   REVIEWED_ASSETS,
   inspectPath,
+  inspectSourceAsset,
   sourceCheck,
   validateIdentityRecords,
 };
