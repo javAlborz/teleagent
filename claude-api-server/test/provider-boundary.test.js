@@ -168,14 +168,149 @@ test('workspace storage must be a bounded dedicated filesystem with a free-space
       }),
     },
   );
-  assert.deepEqual(inspect(), { totalBytes: 32n * gib, freeBytes: 8n * gib });
+  assert.deepEqual(inspect(), { totalBytes: 32n * gib, freeBytes: 8n * gib, device: 2n });
   assert.throws(() => inspect({ parentDev: 2n }), /dedicated filesystem mountpoint/);
+  assert.throws(() => inspect({ total: 2n * gib }), /size or free-space/);
   assert.throws(() => inspect({ total: 65n * gib }), /size or free-space/);
   assert.throws(() => inspect({ free: 1n * gib }), /size or free-space/);
   assert.throws(
     () => boundary.validateWorkspaceStorageBoundary('/srv'),
     /exact dedicated mountpoint/
   );
+
+  const inspected = [];
+  assert.equal(boundary.attestWorkspaceStorageBoundary({
+    validateStorage: (directory) => inspected.push(directory),
+  }), 'PROVIDER_WORKSPACE_STORAGE_OK');
+  assert.deepEqual(inspected, ['/srv/teleagent-agent-workspaces']);
+  assert.throws(
+    () => boundary.attestWorkspaceStorageBoundary({
+      validateStorage: () => { throw new Error('unsafe storage fixture'); },
+    }),
+    /unsafe storage fixture/
+  );
+});
+
+test('supervisor admission proves workload storage isolation before panic state', () => {
+  const order = [];
+  boundary.assertSupervisorStartAdmitted({
+    validateStorageIsolation: () => order.push('storage-isolation'),
+    panicLocked: () => {
+      order.push('panic');
+      return false;
+    },
+    recoveryPending: () => assert.fail('an unlocked plane needs no recovery lookup'),
+  });
+  assert.deepEqual(order, ['storage-isolation', 'panic']);
+
+  assert.throws(
+    () => boundary.assertSupervisorStartAdmitted({
+      validateStorageIsolation: () => { throw new Error('storage refused'); },
+      panicLocked: () => assert.fail('panic state must not precede storage attestation'),
+    }),
+    /storage refused/
+  );
+});
+
+test('provider plane storage is a bounded dedicated mount with private supervisor homes', () => {
+  const root = '/var/lib/teleagent-provider-plane';
+  const parent = '/var/lib';
+  const homes = {
+    claude: `${root}/claude-supervisor`,
+    codex: `${root}/codex-supervisor`,
+  };
+  const identities = {
+    claude: { uid: 991, gid: 992 },
+    codex: { uid: 993, gid: 994 },
+  };
+  const metadata = ({ uid, gid, mode }) => ({
+    uid,
+    gid,
+    mode,
+    isDirectory: () => true,
+    isSymbolicLink: () => false,
+  });
+  const inspect = (overrides = {}) => boundary.validateProviderPlaneStorageBoundary({
+    requireReserve: overrides.requireReserve ?? true,
+    requireHomes: overrides.requireHomes ?? true,
+    identities,
+    lstat: (filename) => {
+      if (filename === parent) return metadata({ uid: 0, gid: 0, mode: 0o40755 });
+      if (filename === root) {
+        return metadata({ uid: 0, gid: 0, mode: overrides.rootMode ?? 0o40751 });
+      }
+      const provider = Object.entries(homes).find(([, home]) => home === filename)?.[0];
+      assert.ok(provider);
+      return metadata({
+        uid: overrides.provider === provider ? (overrides.uid ?? identities[provider].uid) : identities[provider].uid,
+        gid: identities[provider].gid,
+        mode: 0o40700,
+      });
+    },
+    realpath: (filename) => filename,
+    stat: (filename) => ({
+      dev: filename === parent
+        ? 1n
+        : filename === root
+          ? (overrides.rootDev ?? 2n)
+          : (overrides.homeDev?.[filename] ?? 2n),
+    }),
+    statfs: () => ({
+      bsize: 4096n,
+      blocks: (overrides.capacity ?? (2n * 1024n * 1024n * 1024n)) / 4096n,
+      bavail: (overrides.free ?? (768n * 1024n * 1024n)) / 4096n,
+    }),
+  });
+  const healthy = inspect();
+  assert.equal(healthy.root, root);
+  assert.equal(healthy.requiredFreeBytes, 512n * 1024n * 1024n);
+  assert.equal(healthy.admitted, true);
+  assert.throws(() => inspect({ rootDev: 1n }), /dedicated mountpoint/);
+  assert.throws(() => inspect({ rootMode: 0o40771 }), /dedicated mountpoint/);
+  assert.throws(() => inspect({ provider: 'claude', uid: 995 }), /private storage boundary/);
+  assert.throws(() => inspect({ homeDev: { [homes.codex]: 3n } }), /private storage boundary/);
+  assert.throws(
+    () => inspect({ capacity: 5n * 1024n * 1024n * 1024n }),
+    /1-4 GiB/
+  );
+  assert.throws(
+    () => inspect({ free: 511n * 1024n * 1024n }),
+    /reserve is exhausted/
+  );
+  assert.equal(inspect({
+    free: 511n * 1024n * 1024n,
+    requireReserve: false,
+  }).admitted, false, 'recovery inspection preserves writes below the admission reserve');
+  assert.doesNotThrow(() => inspect({
+    free: 511n * 1024n * 1024n,
+    requireReserve: false,
+    requireHomes: false,
+    provider: 'claude',
+    uid: 995,
+  }), 'panic persistence depends on the exact mount, not mutable supervisor homes');
+
+  const options = [];
+  assert.equal(boundary.attestProviderPlaneStorageBoundary({
+    validateStorage: (input) => options.push(input),
+  }), 'PROVIDER_PLANE_STORAGE_OK');
+  assert.deepEqual(options, [{ requireReserve: true }]);
+
+  const workspace = { device: 2n };
+  const providerPlane = { device: 3n };
+  assert.deepEqual(boundary.validateProviderStorageIsolation({
+    validateWorkspaceStorage: (directory) => {
+      assert.equal(directory, '/srv/teleagent-agent-workspaces');
+      return workspace;
+    },
+    validateProviderPlaneStorage: (input) => {
+      assert.deepEqual(input, { requireReserve: true });
+      return providerPlane;
+    },
+  }), { workspace, providerPlane });
+  assert.throws(() => boundary.validateProviderStorageIsolation({
+    validateWorkspaceStorage: () => ({ device: 7n }),
+    validateProviderPlaneStorage: () => ({ device: 7n }),
+  }), /require distinct filesystems/);
 });
 
 test('workspace mounts use one non-replaceable root anchor and one global launch lock', () => {
@@ -502,6 +637,28 @@ test('global panic actions admit only the isolated session broker and keep super
   ], {}, { uid: 0 }), {
     action: 'assert-supervisor-start-admitted', provider: null, launchId: null, spec: null,
   });
+  assert.deepEqual(boundary.parseControl([
+    '--action', 'attest-workspace-storage',
+  ], { SUDO_USER: 'root-installer-caller' }, { uid: 0 }), {
+    action: 'attest-workspace-storage', provider: null, launchId: null, spec: null,
+  });
+  assert.deepEqual(boundary.parseControl([
+    '--action', 'attest-provider-plane-storage',
+  ], { SUDO_USER: 'root-installer-caller' }, { uid: 0 }), {
+    action: 'attest-provider-plane-storage', provider: null, launchId: null, spec: null,
+  });
+  assert.throws(
+    () => boundary.parseControl([
+      '--action', 'attest-workspace-storage', '--provider', 'claude',
+    ], {}, { uid: 0 }),
+    /global provider boundary identity/
+  );
+  assert.throws(
+    () => boundary.parseControl([
+      '--action', 'attest-workspace-storage',
+    ], {}, { uid: 1000 }),
+    /global provider boundary identity/
+  );
   assert.throws(
     () => boundary.parseControl(['--action', 'recover-root-panic'], {
       SUDO_USER: 'teleagent-claude-worker',

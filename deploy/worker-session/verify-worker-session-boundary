@@ -187,11 +187,11 @@ for provider_user in teleagent-claude-worker teleagent-codex-worker; do
   case "$provider_user" in
     teleagent-claude-worker)
       other_home=/var/lib/teleagent-codex-worker
-      supervisor_home=/var/lib/teleagent-claude-supervisor
+      supervisor_home=/var/lib/teleagent-provider-plane/claude-supervisor
       ;;
     teleagent-codex-worker)
       other_home=/var/lib/teleagent-claude-worker
-      supervisor_home=/var/lib/teleagent-codex-supervisor
+      supervisor_home=/var/lib/teleagent-provider-plane/codex-supervisor
       ;;
   esac
   /usr/bin/sudo -n -u "$provider_user" /usr/local/libexec/teleagent-node -e '
@@ -429,6 +429,26 @@ if /usr/bin/grep -q '/opt/teleagent/current' /usr/local/libexec/teleagent-provid
   echo "root boundary runtime still depends on the mutable application tree" >&2
   exit 77
 fi
+workspace_storage_attestation=$(
+  /usr/local/libexec/teleagent-provider-boundary --action attest-workspace-storage
+) || {
+  echo "provider workspace storage attestation failed" >&2
+  exit 77
+}
+[ "$workspace_storage_attestation" = PROVIDER_WORKSPACE_STORAGE_OK ] || {
+  echo "provider workspace storage attestation was invalid" >&2
+  exit 77
+}
+provider_plane_storage_attestation=$(
+  /usr/local/libexec/teleagent-provider-boundary --action attest-provider-plane-storage
+) || {
+  echo "provider plane storage attestation failed" >&2
+  exit 77
+}
+[ "$provider_plane_storage_attestation" = PROVIDER_PLANE_STORAGE_OK ] || {
+  echo "provider plane storage attestation was invalid" >&2
+  exit 77
+}
 
 # Activation pins CLI resume semantics. These read-only probes do not touch or
 # print credentials; unsupported versions leave the controller not ready.

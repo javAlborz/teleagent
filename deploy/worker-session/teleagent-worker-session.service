@@ -3,7 +3,7 @@ Description=Teleagent isolated workspace and tmux session broker
 Documentation=file:/opt/teleagent/current/docs/WORKER-SESSION-BROKER.md
 Requires=teleagent-worker-session.socket
 After=local-fs.target teleagent-worker-session.socket
-RequiresMountsFor=/var/lib/teleagent-worker-state
+RequiresMountsFor=/var/lib/teleagent-worker-state /var/lib/teleagent-provider-plane
 ConditionPathExists=/etc/teleagent/worker-session/ENABLE
 
 [Service]
@@ -24,6 +24,9 @@ Environment=WORKER_SESSION_SINGLETON_DB_PATH=/var/lib/teleagent-worker-state/ses
 Environment=WORKER_SESSION_PROVIDER_VIEW=/var/lib/teleagent-worker-state/session-broker/provider-view
 Environment=WORKER_SESSION_WORKSPACE_ROOT=/srv/teleagent-agent-workspaces
 Environment=WORKER_SESSION_INSPECTION_ROOTS=/srv/teleagent-agent-workspaces/phone
+ExecStartPre=+/usr/bin/env -i HOME=/var/empty PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 /usr/local/libexec/verify-teleagent-release-closure --check-start-gate
+ExecStartPre=+/usr/local/libexec/teleagent-provider-boundary --action attest-workspace-storage
+ExecStartPre=+/usr/local/libexec/teleagent-provider-boundary --action attest-provider-plane-storage
 ExecStart=/opt/teleagent/node/bin/node /opt/teleagent/current/claude-api-server/worker-session-broker-service.js
 Restart=on-failure
 RestartSec=2s
@@ -47,7 +50,7 @@ PrivateDevices=yes
 PrivateTmp=no
 ProtectSystem=strict
 ProtectHome=yes
-ReadOnlyPaths=/srv/teleagent-agent-workspaces
+ReadOnlyPaths=/srv/teleagent-agent-workspaces /var/lib/teleagent-provider-plane
 ReadWritePaths=/var/lib/teleagent-worker-state/session-broker /run/teleagent-worker-session
 InaccessiblePaths=/var/lib/teleagent-control /var/lib/teleagent-worker-state/claude-egress /var/lib/teleagent-worker-state/codex-egress /run/teleagent-privileged-action
 ProtectControlGroups=yes

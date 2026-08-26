@@ -19,10 +19,15 @@ const CONTROL_TIMEOUT_MS = 12_000;
 const PROVIDER_READY_TIMEOUT_MS = 15_000;
 const PROVIDER_READY_POLL_MS = 25;
 const WORKSPACE_ROOT = '/srv/teleagent-agent-workspaces';
+const PROVIDER_PLANE_ROOT = '/var/lib/teleagent-provider-plane';
+const PROVIDER_PLANE_PARENT = path.dirname(PROVIDER_PLANE_ROOT);
+const MIN_PROVIDER_PLANE_CAPACITY_BYTES = 1n * 1024n * 1024n * 1024n;
+const MAX_PROVIDER_PLANE_CAPACITY_BYTES = 4n * 1024n * 1024n * 1024n;
+const MIN_PROVIDER_PLANE_FREE_BYTES = 512n * 1024n * 1024n;
 const PROVIDERS = Object.freeze({
   claude: Object.freeze({
     supervisorUser: 'teleagent-claude-supervisor',
-    supervisorHome: '/var/lib/teleagent-claude-supervisor',
+    supervisorHome: '/var/lib/teleagent-provider-plane/claude-supervisor',
     runtimeUser: 'teleagent-claude-worker',
     runtimeHome: '/nonexistent/teleagent-claude-worker',
     command: '/opt/teleagent/agent-tools/claude',
@@ -30,7 +35,7 @@ const PROVIDERS = Object.freeze({
   }),
   codex: Object.freeze({
     supervisorUser: 'teleagent-codex-supervisor',
-    supervisorHome: '/var/lib/teleagent-codex-supervisor',
+    supervisorHome: '/var/lib/teleagent-provider-plane/codex-supervisor',
     runtimeUser: 'teleagent-codex-worker',
     runtimeHome: '/nonexistent/teleagent-codex-worker',
     command: '/opt/teleagent/agent-tools/codex',
@@ -72,8 +77,79 @@ function socketPathForFd(fd) {
   return path.resolve(matches[0]);
 }
 
+function validateProviderPlaneStorageBoundary({
+  supervisorHome,
+  expectedUid,
+  expectedGid,
+  lstat = fs.lstatSync,
+  stat = (filename) => fs.statSync(filename, { bigint: true }),
+  statfs = (filename) => fs.statfsSync(filename, { bigint: true }),
+  realpath = fs.realpathSync,
+} = {}) {
+  if (!Object.values(PROVIDERS).some((spec) => spec.supervisorHome === supervisorHome) ||
+      !Number.isSafeInteger(expectedUid) || expectedUid <= 0 ||
+      !Number.isSafeInteger(expectedGid) || expectedGid <= 0) {
+    throw new Error('Provider plane storage identity is invalid.');
+  }
+  let parent;
+  let root;
+  let home;
+  let parentDevice;
+  let rootDevice;
+  let homeDevice;
+  let storage;
+  try {
+    parent = lstat(PROVIDER_PLANE_PARENT);
+    root = lstat(PROVIDER_PLANE_ROOT);
+    home = lstat(supervisorHome);
+    parentDevice = stat(PROVIDER_PLANE_PARENT);
+    rootDevice = stat(PROVIDER_PLANE_ROOT);
+    homeDevice = stat(supervisorHome);
+    storage = statfs(PROVIDER_PLANE_ROOT);
+  } catch {
+    throw new Error('Provider plane storage cannot be inspected.');
+  }
+  if (!parent.isDirectory() || parent.isSymbolicLink() || parent.uid !== 0 ||
+      (parent.mode & 0o022) !== 0 || realpath(PROVIDER_PLANE_PARENT) !== PROVIDER_PLANE_PARENT ||
+      !root.isDirectory() || root.isSymbolicLink() || root.uid !== 0 || root.gid !== 0 ||
+      (root.mode & 0o7777) !== 0o751 || realpath(PROVIDER_PLANE_ROOT) !== PROVIDER_PLANE_ROOT ||
+      rootDevice.dev === parentDevice.dev || !home.isDirectory() || home.isSymbolicLink() ||
+      home.uid !== expectedUid || home.gid !== expectedGid ||
+      (home.mode & 0o7777) !== 0o700 || realpath(supervisorHome) !== supervisorHome ||
+      homeDevice.dev !== rootDevice.dev) {
+    throw new Error('Provider plane requires one exact private dedicated storage boundary.');
+  }
+  const blockSize = BigInt(storage.bsize);
+  const blocks = BigInt(storage.blocks);
+  const availableBlocks = BigInt(storage.bavail);
+  if (blockSize <= 0n || blocks <= 0n || availableBlocks < 0n || availableBlocks > blocks) {
+    throw new Error('Provider plane filesystem accounting is invalid.');
+  }
+  const capacityBytes = blockSize * blocks;
+  const freeBytes = blockSize * availableBlocks;
+  if (capacityBytes < MIN_PROVIDER_PLANE_CAPACITY_BYTES ||
+      capacityBytes > MAX_PROVIDER_PLANE_CAPACITY_BYTES) {
+    throw new Error('Provider plane filesystem capacity is outside the fixed 1-4 GiB boundary.');
+  }
+  const percentageReserve = capacityBytes / 5n;
+  const requiredFreeBytes = percentageReserve > MIN_PROVIDER_PLANE_FREE_BYTES
+    ? percentageReserve
+    : MIN_PROVIDER_PLANE_FREE_BYTES;
+  if (freeBytes < requiredFreeBytes) {
+    throw new Error('Provider plane filesystem reserve is exhausted.');
+  }
+  return Object.freeze({
+    root: PROVIDER_PLANE_ROOT,
+    directory: supervisorHome,
+    capacityBytes,
+    freeBytes,
+    requiredFreeBytes,
+  });
+}
+
 function normalizeProviderSupervisorConfig(environment = process.env, {
   uid = process.getuid(),
+  gid = process.getgid(),
   username = os.userInfo().username,
   pid = process.pid,
   launchGid = groupGid('teleagent-provider-launch'),
@@ -96,11 +172,11 @@ function normalizeProviderSupervisorConfig(environment = process.env, {
   if (environment.LISTEN_FDNAMES && environment.LISTEN_FDNAMES !== `provider-${provider}`) {
     throw new Error('Provider supervisor inherited the wrong socket name.');
   }
-  const homeMetadata = fs.lstatSync(spec.supervisorHome);
-  if (!homeMetadata.isDirectory() || homeMetadata.isSymbolicLink() ||
-      homeMetadata.uid !== uid || (homeMetadata.mode & 0o077) !== 0) {
-    throw new Error('Provider supervisor home ownership is unsafe.');
-  }
+  validateProviderPlaneStorageBoundary({
+    supervisorHome: spec.supervisorHome,
+    expectedUid: uid,
+    expectedGid: gid,
+  });
   for (const filename of [spec.command, FIXED_SUDO, FIXED_BOUNDARY]) {
     const metadata = fs.lstatSync(filename);
     if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.uid !== 0 ||
@@ -118,7 +194,7 @@ function normalizeProviderSupervisorConfig(environment = process.env, {
       (socketMetadata.mode & 0o777) !== 0o660) {
     throw new Error('Provider supervisor socket boundary is unsafe.');
   }
-  return Object.freeze({ provider, spec, uid, fd, launchGid });
+  return Object.freeze({ provider, spec, uid, gid, fd, launchGid });
 }
 
 function normalizeLaunch(input, config, workspaceRoot = WORKSPACE_ROOT) {
@@ -753,7 +829,13 @@ async function startProviderSupervisor({
   ptySpawnImpl = null,
   panicState = null,
   boundaryControl = createBoundaryControl(),
+  validateStorage = validateProviderPlaneStorageBoundary,
 } = {}) {
+  validateStorage({
+    supervisorHome: config.spec.supervisorHome,
+    expectedUid: config.uid,
+    expectedGid: config.gid,
+  });
   const ptySpawn = ptySpawnImpl || require('node-pty').spawn;
   const durablePanicState = panicState || createFilePanicState({
     directory: config.spec.supervisorHome,
@@ -811,4 +893,5 @@ module.exports = {
   normalizeProviderSupervisorConfig,
   socketPathForFd,
   startProviderSupervisor,
+  validateProviderPlaneStorageBoundary,
 };

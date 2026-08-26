@@ -2,6 +2,7 @@
 Description=Teleagent isolated %i provider launch supervisor
 Requires=teleagent-provider-model-apparmor.service teleagent-provider-supervisor@%i.socket teleagent-provider-egress@%i.socket teleagent-provider-egress-control@%i.socket
 After=local-fs.target teleagent-provider-model-apparmor.service teleagent-provider-supervisor@%i.socket teleagent-provider-egress@%i.socket teleagent-provider-egress-control@%i.socket
+RequiresMountsFor=/var/lib/teleagent-provider-plane
 ConditionPathExists=/etc/teleagent/worker-session/ENABLE
 
 [Service]
@@ -11,11 +12,12 @@ User=teleagent-%i-supervisor
 Group=teleagent-%i-supervisor
 UMask=0077
 WorkingDirectory=/
-Environment=HOME=/var/lib/teleagent-%i-supervisor
+Environment=HOME=/var/lib/teleagent-provider-plane/%i-supervisor
 Environment=PATH=/usr/sbin:/usr/bin:/sbin:/bin
 Environment=LANG=C.UTF-8
 Environment=LC_ALL=C.UTF-8
 Environment=TELEAGENT_PROVIDER=%i
+ExecStartPre=+/usr/bin/env -i HOME=/var/empty PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 /usr/local/libexec/verify-teleagent-release-closure --check-start-gate
 ExecStartPre=+/usr/local/libexec/teleagent-provider-boundary --action assert-supervisor-start-admitted
 ExecStartPre=/usr/bin/sudo -n /usr/local/libexec/teleagent-provider-boundary --action recover --provider %i
 ExecStart=/opt/teleagent/node/bin/node /opt/teleagent/current/claude-api-server/provider-supervisor-service.js
@@ -43,7 +45,7 @@ PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=yes
 ReadOnlyPaths=/opt/teleagent/current /opt/teleagent/agent-tools /srv/teleagent-agent-workspaces
-ReadWritePaths=/var/lib/teleagent-%i-supervisor /run/teleagent-provider-capabilities /run/systemd/system
+ReadWritePaths=/var/lib/teleagent-provider-plane /run/teleagent-provider-capabilities /run/systemd/system
 InaccessiblePaths=/var/lib/teleagent-control /var/lib/teleagent-worker-state /var/lib/teleagent-privileged-action -/var/lib/teleagent-claude-worker -/var/lib/teleagent-codex-worker /etc/teleagent/provider-egress-secrets -/etc/teleagent/credentials -/etc/teleagent-control -/etc/teleagent/controller -/etc/teleagent/privileged-action -/etc/teleagent-voice -/run/secrets /run/teleagent-worker-session /run/teleagent-privileged-action /opt/teleagent/current/voice-app/audio /opt/teleagent/current/voice-app/static
 ProtectControlGroups=yes
 ProtectKernelLogs=yes

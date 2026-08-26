@@ -12,15 +12,18 @@ const {
   createMemoryPanicState,
   createProviderSupervisor,
   normalizeLaunch,
+  startProviderSupervisor,
+  validateProviderPlaneStorageBoundary,
 } = require('../provider-supervisor-service');
 
 function config() {
   return {
     provider: 'claude',
     uid: process.getuid(),
+    gid: process.getgid(),
     spec: {
       supervisorUser: 'teleagent-claude-supervisor',
-      supervisorHome: '/var/lib/teleagent-claude-supervisor',
+      supervisorHome: '/var/lib/teleagent-provider-plane/claude-supervisor',
       runtimeUser: 'teleagent-claude-worker',
       runtimeHome: '/var/lib/teleagent-claude-worker',
       command: '/opt/teleagent/agent-tools/claude',
@@ -28,6 +31,80 @@ function config() {
     },
   };
 }
+
+function providerPlaneStorage(overrides = {}) {
+  const root = '/var/lib/teleagent-provider-plane';
+  const parent = '/var/lib';
+  const home = `${root}/claude-supervisor`;
+  const metadata = ({ uid, gid, mode }) => ({
+    uid,
+    gid,
+    mode,
+    isDirectory: () => true,
+    isSymbolicLink: () => false,
+  });
+  return validateProviderPlaneStorageBoundary({
+    supervisorHome: home,
+    expectedUid: 991,
+    expectedGid: 992,
+    lstat: (filename) => {
+      if (filename === parent) return metadata({ uid: 0, gid: 0, mode: 0o40755 });
+      if (filename === root) {
+        return metadata({ uid: 0, gid: 0, mode: overrides.rootMode ?? 0o40751 });
+      }
+      assert.equal(filename, home);
+      return metadata({
+        uid: overrides.uid ?? 991,
+        gid: overrides.gid ?? 992,
+        mode: overrides.homeMode ?? 0o40700,
+      });
+    },
+    realpath: (filename) => filename,
+    stat: (filename) => ({
+      dev: filename === parent
+        ? 1n
+        : filename === root
+          ? (overrides.rootDev ?? 2n)
+          : (overrides.homeDev ?? 2n),
+    }),
+    statfs: () => ({
+      bsize: 4096n,
+      blocks: (overrides.capacity ?? (2n * 1024n * 1024n * 1024n)) / 4096n,
+      bavail: (overrides.free ?? (768n * 1024n * 1024n)) / 4096n,
+    }),
+  });
+}
+
+test('provider supervisor state requires its exact bounded dedicated mount and reserve', async () => {
+  const healthy = providerPlaneStorage();
+  assert.equal(healthy.root, '/var/lib/teleagent-provider-plane');
+  assert.equal(healthy.directory,
+    '/var/lib/teleagent-provider-plane/claude-supervisor');
+  assert.equal(healthy.requiredFreeBytes, 512n * 1024n * 1024n);
+  assert.throws(() => providerPlaneStorage({ rootDev: 1n }), /dedicated storage boundary/);
+  assert.throws(() => providerPlaneStorage({ homeDev: 3n }), /dedicated storage boundary/);
+  assert.throws(() => providerPlaneStorage({ rootMode: 0o40771 }), /dedicated storage boundary/);
+  assert.throws(() => providerPlaneStorage({ uid: 993 }), /dedicated storage boundary/);
+  assert.throws(
+    () => providerPlaneStorage({ capacity: 5n * 1024n * 1024n * 1024n }),
+    /1-4 GiB/
+  );
+  assert.throws(
+    () => providerPlaneStorage({ free: 511n * 1024n * 1024n }),
+    /reserve is exhausted/
+  );
+
+  let recoveryCalled = false;
+  await assert.rejects(startProviderSupervisor({
+    config: config(),
+    ptySpawnImpl: assert.fail,
+    validateStorage: () => { throw new Error('storage startup refused'); },
+    boundaryControl: {
+      recover: async () => { recoveryCalled = true; },
+    },
+  }), /storage startup refused/);
+  assert.equal(recoveryCalled, false);
+});
 
 function frameSocket(socketPath) {
   const socket = net.createConnection({ path: socketPath });

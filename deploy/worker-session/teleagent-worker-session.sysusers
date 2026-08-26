@@ -4,8 +4,8 @@ g teleagent-claude-egress-client -
 g teleagent-codex-egress-client -
 u teleagent-control - "Teleagent private controller" /var/lib/teleagent-control /usr/sbin/nologin
 u teleagent-session-broker - "Teleagent isolated session broker" /var/lib/teleagent-session-broker /usr/sbin/nologin
-u teleagent-claude-supervisor - "Teleagent Claude provider supervisor" /var/lib/teleagent-claude-supervisor /usr/sbin/nologin
-u teleagent-codex-supervisor - "Teleagent Codex provider supervisor" /var/lib/teleagent-codex-supervisor /usr/sbin/nologin
+u teleagent-claude-supervisor - "Teleagent Claude provider supervisor" /var/lib/teleagent-provider-plane/claude-supervisor /usr/sbin/nologin
+u teleagent-codex-supervisor - "Teleagent Codex provider supervisor" /var/lib/teleagent-provider-plane/codex-supervisor /usr/sbin/nologin
 u teleagent-claude-worker - "Teleagent ephemeral Claude worker" /nonexistent/teleagent-claude-worker /usr/sbin/nologin
 u teleagent-codex-worker - "Teleagent ephemeral Codex worker" /nonexistent/teleagent-codex-worker /usr/sbin/nologin
 u teleagent-claude-shim - "Teleagent Claude private-network egress shim" /nonexistent /usr/sbin/nologin

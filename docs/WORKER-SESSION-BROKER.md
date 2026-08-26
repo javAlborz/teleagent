@@ -103,6 +103,23 @@ never active or recent capability state. The broker is also capped at 512 MiB
 RAM, zero swap, 128 tasks, and 50 percent of one CPU; egress services retain
 their independent recovery-plane resource caps.
 
+Provider supervisor panic and recovery state is isolated separately from both
+the host root and worker/egress state. Before disabled installation, provision
+`/var/lib/teleagent-provider-plane` as an exact dedicated filesystem mount
+between 1 GiB and 4 GiB, owned by `root:root` at mode 0751. Tmpfiles creates
+private mode-0700 `claude-supervisor` and `codex-supervisor` homes on that same
+device, and the matching sysusers records use those homes. Installation,
+checking, supervisor startup, worker-broker startup, and every new provider
+launch reject a shared, replaceable, oversized, cross-device, or mis-owned
+provider-plane path. Admission also preserves the larger of 512 MiB or 20
+percent free. Supervisor startup and every provider launch additionally prove
+that the workspace and provider-plane mount device IDs differ, so the two
+provider-accessible workload roots cannot share one exhaustion boundary. Root
+panic/recovery inspection remains permitted below that
+admission reserve so existing cancellation and crash truth is not rewritten;
+the mount is the containment boundary, and no audit/panic truth is pruned
+automatically.
+
 ## Session parity and deliberate limits
 
 Only sessions created on the broker-owned tmux socket are visible. Historical
@@ -134,10 +151,32 @@ deploy/worker-session/teleagent-worker-session-install --install-disabled
 The installer never creates `/etc/teleagent/worker-session/ENABLE`, enables a
 unit, or starts/restarts a unit. It refuses active, failed, transitional, or
 unknown unit state; after installation every unit must be exactly loaded,
-inactive, and static. It also verifies unique numeric UIDs/GIDs so a preexisting
-account or group cannot alias two privilege planes. Canonical release staging
+inactive/dead, and static. Each unit is inspected with one sanitized,
+10-second, 4096-byte-bounded systemd property snapshot that rejects missing,
+duplicate, or unknown fields, stale loaded policy, and drop-ins. It also
+verifies unique numeric UIDs/GIDs so a preexisting
+account or group cannot alias two privilege planes. Before either
+`--install-disabled` or `--check` returns its fixed success token, the installed
+root provider boundary runs only its read-only `attest-workspace-storage` and
+`attest-provider-plane-storage` actions. Those actions reuse the launch-time
+storage validators and emit exactly `PROVIDER_WORKSPACE_STORAGE_OK` and
+`PROVIDER_PLANE_STORAGE_OK` only when both dedicated mounts satisfy the
+boundaries described above; they do not start a provider, create a capability,
+or activate a unit. Source
+checking validates the attestor bytes and wiring without claiming that an
+offline release tree proves host mount state. Canonical release staging
 normalizes executable sources to mode 0555 and data sources to 0444; the source
 checker also accepts the non-writable-parent development variants 0755/0644.
+Every worker, provider-supervisor, provider-egress, and libexec-install unit
+that directly consumes `/opt/teleagent/current` runs the fixed host-owned release
+verifier with `--check-start-gate` as its first execution directive under an
+empty environment. This cheap boot-time gate validates the boot gate, current
+release, approval, manifest, and installed runtime metadata without scanning or
+hashing the full release, then emits `TELEAGENT_RELEASE_START_GATE_OK`; each
+unit contains it exactly once as the first `ExecStartPre`/`ExecStart` directive
+and contains no `ExecCondition` or `ExecReload`. The full
+`--check-runtime` scan remains serialized at release handoff rather than being
+amplified across service prestarts.
 The root provider-CLI installer and checker treat the pinned Claude binary,
 Codex wrapper, and Codex vendor binary as opaque bytes: they verify exact
 owner, mode, link count, size, path, and digest but never execute them, including
@@ -157,9 +196,14 @@ provider-specific credentials with project-side billing limits plus local
 conservative request/reserved-token allowances, the activation sentinel, and a
 clean run of
 `/usr/local/libexec/verify-worker-session-boundary --installed-check`. The
-verifier exercises the real split UIDs, socket/DB/tmux DAC denials, fixed-anchor
-provider canaries, private-runtime socket mask, provider egress, and
-zero-capability model runtime. Do not add provider workers to
+verifier repeats both storage attestations after verifying the installed
+libexec digest closure. Both the worker broker and provider supervisor units
+also run the root attestations as an `ExecStartPre`, so activation cannot bypass
+a missing, shared, oversized, or low-free-space workspace or provider-plane
+mount. The
+verifier then exercises the real split UIDs, socket/DB/tmux DAC denials,
+fixed-anchor provider canaries, private-runtime socket mask, provider egress,
+and zero-capability model runtime. Do not add provider workers to
 `teleagent-control` or `teleagent-provider-launch`, expose the root broker, copy
 provider credentials into worker homes, or make owner tmux sockets visible.
 

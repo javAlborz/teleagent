@@ -44,6 +44,7 @@ Environment=PROVIDER_EGRESS_CONTROL_SOCKET_PATH=/run/teleagent-provider-egress-c
 Environment=PROVIDER_EGRESS_DB_PATH=/var/lib/teleagent-worker-state/%i-egress/budget.sqlite
 Environment=PROVIDER_EGRESS_POLICY_PATH=/etc/teleagent/provider-egress/%i.json
 LoadCredential=provider-api-key:/etc/teleagent/provider-egress-secrets/%i.api-key
+ExecStartPre=+/usr/bin/env -i HOME=/var/empty PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 /usr/local/libexec/verify-teleagent-release-closure --check-start-gate
 ExecStartPre=+/usr/local/libexec/teleagent-provider-egress-credential-check %i
 ExecStart=/opt/teleagent/node/bin/node /opt/teleagent/current/claude-api-server/provider-egress-broker.js
 Restart=on-failure

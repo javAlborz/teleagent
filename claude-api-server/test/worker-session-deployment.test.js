@@ -63,11 +63,18 @@ test('session broker, RPC socket, state DB, and tmux socket exclude provider ide
     /^Environment=WORKER_SESSION_DB_PATH=\/var\/lib\/teleagent-worker-state\/session-broker\/operations\.sqlite$/m);
   assert.match(service, /^MemoryHigh=384M$/m);
   assert.match(service, /^MemoryMax=512M$/m);
-  assert.match(service, /^RequiresMountsFor=\/var\/lib\/teleagent-worker-state$/m);
+  assert.match(service,
+    /^RequiresMountsFor=\/var\/lib\/teleagent-worker-state \/var\/lib\/teleagent-provider-plane$/m);
   assert.match(service, /^MemorySwapMax=0$/m);
   assert.match(service, /^TasksMax=128$/m);
   assert.match(service, /^CPUQuota=50%$/m);
   assert.match(service, /^IOAccounting=yes$/m);
+  assert.match(service,
+    /^ExecStartPre=\+\/usr\/local\/libexec\/teleagent-provider-boundary --action attest-workspace-storage$/m);
+  assert.match(service,
+    /^ExecStartPre=\+\/usr\/local\/libexec\/teleagent-provider-boundary --action attest-provider-plane-storage$/m);
+  assert.match(service, /^ReadOnlyPaths=.*\/var\/lib\/teleagent-provider-plane/m);
+  assert.doesNotMatch(service, /^ReadWritePaths=.*\/var\/lib\/teleagent-provider-plane/m);
   assert.match(voiceService, /^InaccessiblePaths=.*\/var\/lib\/teleagent-worker-state$/m);
   assert.doesNotMatch(voiceService, /\/var\/lib\/teleagent-session-broker/);
   assert.match(paneEntry, /id -un.*teleagent-session-broker/);
@@ -84,6 +91,12 @@ test('session broker, RPC socket, state DB, and tmux socket exclude provider ide
   assert.match(providerService, /^ExecStartPre=.*teleagent-provider-boundary --action recover/m);
   assert.match(providerService,
     /^ExecStartPre=\+\/usr\/local\/libexec\/teleagent-provider-boundary --action assert-supervisor-start-admitted$/m);
+  assert.match(providerService,
+    /^Environment=HOME=\/var\/lib\/teleagent-provider-plane\/%i-supervisor$/m);
+  assert.match(providerService,
+    /^RequiresMountsFor=\/var\/lib\/teleagent-provider-plane$/m);
+  assert.match(providerService, /^ReadWritePaths=\/var\/lib\/teleagent-provider-plane /m);
+  assert.doesNotMatch(providerService, /\/var\/lib\/teleagent-%i-supervisor/);
   assert.match(providerService, /^LimitCORE=0$/m);
   assert.match(providerService, /^Slice=teleagent-provider\.slice$/m);
   assert.match(providerService, /^MemoryMax=512M$/m);
@@ -148,7 +161,24 @@ test('session broker, RPC socket, state DB, and tmux socket exclude provider ide
   assert.match(libexecManifest, /teleagent-provider-cli-install/);
   assert.match(libexecManifest, /teleagent-provider-cli\.manifest\.json/);
   assert.match(providerBoundary,
-    /checkProviderCli\(input\.provider\)[\s\S]*validateWorkspaceStorageBoundary\(\)/);
+    /createGlobalLaunchLock\(input\.launchId\)[\s\S]*validateProviderStorageIsolation\(\)[\s\S]*checkProviderCli\(input\.provider\)/);
+  assert.match(providerBoundary,
+    /function attestWorkspaceStorageBoundary[\s\S]*validateStorage\(WORKSPACE_ROOT\)/);
+  assert.match(providerBoundary,
+    /WORKSPACE_STORAGE_ATTESTATION = 'PROVIDER_WORKSPACE_STORAGE_OK'/);
+  assert.match(providerBoundary,
+    /input\.action === 'attest-workspace-storage'[\s\S]*attestWorkspaceStorageBoundary\(\)/);
+  assert.match(providerBoundary,
+    /input\.action === 'assert-supervisor-start-admitted'[\s\S]*assertSupervisorStartAdmitted\(\)/);
+  assert.match(providerBoundary,
+    /function assertSupervisorStartAdmitted[\s\S]*validateStorageIsolation\(\)[\s\S]*panicLocked\(\)/);
+  assert.match(providerBoundary,
+    /function validateProviderPlaneStorageBoundary[\s\S]*PROVIDER_PLANE_ROOT/);
+  assert.match(providerBoundary, /MIN_PROVIDER_PLANE_CAPACITY_BYTES/);
+  assert.match(providerBoundary, /MAX_PROVIDER_PLANE_CAPACITY_BYTES/);
+  assert.match(providerBoundary, /MIN_PROVIDER_PLANE_FREE_BYTES/);
+  assert.match(providerBoundary,
+    /input\.action === 'attest-provider-plane-storage'[\s\S]*attestProviderPlaneStorageBoundary\(\)/);
   assert.match(libexecInstall, /read -r digest source target mode extra/);
   assert.match(libexecInstall, /requires zero transient launch units/);
   assert.match(libexecInstall, /source digest is unreviewed/);
@@ -230,7 +260,12 @@ test('session broker, RPC socket, state DB, and tmux socket exclude provider ide
   assert.doesNotMatch(socket + service + tmpfiles, /SocketGroup=teleagent-worker/);
   assert.doesNotMatch(service, /SupplementaryGroups=.*teleagent-control/);
   assert.match(tmpfiles, /^d \/run\/teleagent-provider-launch 0711 root root -$/m);
-  assert.match(tmpfiles, /^d \/var\/lib\/teleagent-provider-plane 0700 root root -$/m);
+  assert.match(tmpfiles, /^d \/var\/lib\/teleagent-provider-plane 0751 root root -$/m);
+  assert.match(tmpfiles,
+    /^d \/var\/lib\/teleagent-provider-plane\/claude-supervisor 0700 teleagent-claude-supervisor teleagent-claude-supervisor -$/m);
+  assert.match(tmpfiles,
+    /^d \/var\/lib\/teleagent-provider-plane\/codex-supervisor 0700 teleagent-codex-supervisor teleagent-codex-supervisor -$/m);
+  assert.doesNotMatch(tmpfiles, /^d \/var\/lib\/teleagent-(?:claude|codex)-supervisor /m);
   assert.match(tmpfiles,
     /^d \/var\/lib\/teleagent-worker-state\/claude-egress 0700 teleagent-claude-egress teleagent-claude-egress -$/m);
   assert.match(tmpfiles,
@@ -261,6 +296,14 @@ test('activation verification requires clean provider homes, synthetic DAC denia
   assert.match(verifier, /session-broker claude-egress codex-egress/);
   assert.match(verifier, /expected_libexec_targets=[\s\S]*teleagent-provider-egress-credential-check/);
   assert.match(verifier, /provider libexec manifest closure is incomplete/);
+  assert.match(verifier,
+    /teleagent-provider-boundary --action attest-workspace-storage/);
+  assert.match(verifier, /PROVIDER_WORKSPACE_STORAGE_OK/);
+  assert.match(verifier,
+    /teleagent-provider-boundary --action attest-provider-plane-storage/);
+  assert.match(verifier, /PROVIDER_PLANE_STORAGE_OK/);
+  assert.match(verifier,
+    /\/var\/lib\/teleagent-provider-plane\/(?:claude|codex)-supervisor/);
   assert.match(verifier, /WORKER_SESSION_BOUNDARY_SOURCE_OK/);
   assert.match(verifier, /teleagent-claude-worker teleagent-codex-worker/);
   assert.match(verifier, /other_home/);
@@ -387,7 +430,10 @@ test('provider and supervisor identities are distinct and only the workspace is 
   const tmpfiles = source('teleagent-worker-session.tmpfiles');
   assert.match(sysusers, /^g teleagent-provider-launch -$/m);
   for (const provider of ['claude', 'codex']) {
-    assert.match(sysusers, new RegExp(`^u teleagent-${provider}-supervisor `, 'm'));
+    assert.match(sysusers, new RegExp(
+      `^u teleagent-${provider}-supervisor - .* /var/lib/teleagent-provider-plane/${provider}-supervisor /usr/sbin/nologin$`,
+      'm'
+    ));
     assert.match(sysusers, new RegExp(
       `^u teleagent-${provider}-worker - .* /nonexistent/teleagent-${provider}-worker /usr/sbin/nologin$`,
       'm',
@@ -396,7 +442,7 @@ test('provider and supervisor identities are distinct and only the workspace is 
     assert.match(sysusers, new RegExp(`^u teleagent-${provider}-egress `, 'm'));
     assert.doesNotMatch(tmpfiles, new RegExp(`/var/lib/teleagent-${provider}-worker`));
     assert.match(tmpfiles, new RegExp(
-      `^d /var/lib/teleagent-${provider}-supervisor 0700 teleagent-${provider}-supervisor teleagent-${provider}-supervisor -$`,
+      `^d /var/lib/teleagent-provider-plane/${provider}-supervisor 0700 teleagent-${provider}-supervisor teleagent-${provider}-supervisor -$`,
       'm'
     ));
   }

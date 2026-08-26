@@ -14,9 +14,11 @@ sysusers_bin=/usr/bin/systemd-sysusers
 tmpfiles_bin=/usr/bin/systemd-tmpfiles
 visudo_bin=/usr/sbin/visudo
 identity_bin=/usr/local/libexec/verify-worker-session-identity
+storage_attestor_bin=/usr/local/libexec/teleagent-provider-boundary
 root_prefix=
 expected_uid=0
 expected_gid=0
+systemctl_output=
 
 fail() {
   local message=$1
@@ -60,8 +62,10 @@ configure_environment() {
     tmpfiles_bin=${TELEAGENT_WORKER_SESSION_INSTALL_TEST_TMPFILES:-}
     visudo_bin=${TELEAGENT_WORKER_SESSION_INSTALL_TEST_VISUDO:-}
     identity_bin=${TELEAGENT_WORKER_SESSION_INSTALL_TEST_IDENTITY:-}
+    storage_attestor_bin=${TELEAGENT_WORKER_SESSION_INSTALL_TEST_STORAGE_ATTESTOR:-}
     for dependency in \
-      "$systemctl_bin" "$sysusers_bin" "$tmpfiles_bin" "$visudo_bin" "$identity_bin"; do
+      "$systemctl_bin" "$sysusers_bin" "$tmpfiles_bin" "$visudo_bin" \
+      "$identity_bin" "$storage_attestor_bin"; do
       validate_test_dependency "$dependency"
     done
     return
@@ -73,7 +77,8 @@ configure_environment() {
     "${TELEAGENT_WORKER_SESSION_INSTALL_TEST_SYSUSERS:-}" \
     "${TELEAGENT_WORKER_SESSION_INSTALL_TEST_TMPFILES:-}" \
     "${TELEAGENT_WORKER_SESSION_INSTALL_TEST_VISUDO:-}" \
-    "${TELEAGENT_WORKER_SESSION_INSTALL_TEST_IDENTITY:-}"; do
+    "${TELEAGENT_WORKER_SESSION_INSTALL_TEST_IDENTITY:-}" \
+    "${TELEAGENT_WORKER_SESSION_INSTALL_TEST_STORAGE_ATTESTOR:-}"; do
     [ -z "$forbidden" ] || fail 'test dependency overrides require the isolated test lane'
   done
 }
@@ -83,6 +88,55 @@ host_path() {
 }
 
 configure_environment
+
+run_systemctl() {
+  local -a clean_environment=(
+    'PATH=/usr/sbin:/usr/bin:/sbin:/bin'
+    'LANG=C.UTF-8'
+    'LC_ALL=C.UTF-8'
+  )
+  if [ -n "$root_prefix" ]; then
+    clean_environment+=(
+      "TELEAGENT_WORKER_SESSION_INSTALL_TEST_ROOT=$root_prefix"
+      "FAKE_SYSTEMCTL_LOG=${FAKE_SYSTEMCTL_LOG:-}"
+      "FAKE_STATE_QUERY_FAILURE=${FAKE_STATE_QUERY_FAILURE:-}"
+      "FAKE_ACTIVE_UNIT=${FAKE_ACTIVE_UNIT:-}"
+      "FAKE_SUB_STATE=${FAKE_SUB_STATE:-}"
+      "FAKE_UNIT_FILE_STATE=${FAKE_UNIT_FILE_STATE:-}"
+      "FAKE_FRAGMENT_PATH=${FAKE_FRAGMENT_PATH:-}"
+      "FAKE_NEED_DAEMON_RELOAD=${FAKE_NEED_DAEMON_RELOAD:-}"
+      "FAKE_DROP_IN_PATHS=${FAKE_DROP_IN_PATHS:-}"
+      "FAKE_SHOW_MODE=${FAKE_SHOW_MODE:-}"
+      "FAKE_SHOW_DELAY_UNIT=${FAKE_SHOW_DELAY_UNIT:-}"
+    )
+  fi
+  /usr/bin/timeout --signal=TERM --kill-after=1s 10s \
+    /usr/bin/env -i "${clean_environment[@]}" "$systemctl_bin" "$@"
+}
+
+capture_systemctl() {
+  local label=$1
+  shift
+  local captured status
+  local LC_ALL=C
+  set +e
+  captured=$(
+    run_systemctl "$@" | /usr/bin/head -c 4097
+    printf '\036%d' "$?"
+  )
+  set -e
+  case "$captured" in
+    *$'\036'[0-9]*) ;;
+    *) fail "$label status record is invalid" 75 ;;
+  esac
+  status=${captured##*$'\036'}
+  systemctl_output=${captured%$'\036'*}
+  case "$status" in ''|*[!0-9]*) fail "$label status record is invalid" 75 ;; esac
+  [ "${#systemctl_output}" -le 4096 ] ||
+    fail "$label output exceeded its fixed byte bound" 75
+  [ "$status" -eq 0 ] || fail "$label is unavailable" 75
+}
+
 self=$(/usr/bin/readlink -f -- "$0")
 installed_entrypoint=$(host_path /usr/local/libexec/teleagent-worker-session-install)
 if [ "$self" = "$installed_entrypoint" ]; then
@@ -298,6 +352,43 @@ source_check() {
     ! /usr/bin/grep -Eq '^\[Install\][[:space:]]*$' "$filename" ||
       fail 'a dormant worker-session unit became enableable'
   done
+  [ "$(/usr/bin/grep -Fxc \
+    'ExecStartPre=+/usr/local/libexec/teleagent-provider-boundary --action attest-workspace-storage' \
+    "$source_root/teleagent-worker-session.service" || true)" -eq 1 ] ||
+    fail 'the worker broker lost its workspace storage activation gate'
+  [ "$(/usr/bin/grep -Fxc \
+    'ExecStartPre=+/usr/local/libexec/teleagent-provider-boundary --action attest-provider-plane-storage' \
+    "$source_root/teleagent-worker-session.service" || true)" -eq 1 ] ||
+    fail 'the worker broker lost its provider plane storage activation gate'
+  [ "$(/usr/bin/grep -Fxc \
+    'ExecStartPre=+/usr/local/libexec/teleagent-provider-boundary --action assert-supervisor-start-admitted' \
+    "$source_root/teleagent-provider-supervisor@.service" || true)" -eq 1 ] ||
+    fail 'the provider supervisor lost its workspace storage activation gate'
+  local release_gate gate_count gate_line first_exec_line condition_count reload_count
+  release_gate='ExecStartPre=+/usr/bin/env -i HOME=/var/empty PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 /usr/local/libexec/verify-teleagent-release-closure --check-start-gate'
+  for unit in \
+    teleagent-worker-session.service \
+    teleagent-provider-supervisor@.service \
+    teleagent-provider-egress@.service \
+    teleagent-provider-libexec-install.service; do
+    filename="$source_root/$unit"
+    gate_count=$(/usr/bin/grep -Fxc "$release_gate" "$filename" || true)
+    [ "$gate_count" -eq 1 ] || fail 'a release-consuming unit lost its exact start gate'
+    gate_line=$(/usr/bin/awk -v gate="$release_gate" '$0 == gate { print NR }' "$filename")
+    first_exec_line=$(/usr/bin/awk \
+      '/^[[:space:]]*Exec(Condition|StartPre|Start)[[:space:]]*=/ { print NR; exit }' \
+      "$filename")
+    [ "$gate_line" = "$first_exec_line" ] ||
+      fail 'a release-consuming unit runs policy before its start gate'
+    condition_count=$(/usr/bin/grep -Ec \
+      '^[[:space:]]*ExecCondition[[:space:]]*=' "$filename" || true)
+    [ "$condition_count" -eq 0 ] ||
+      fail 'a release-consuming unit contains an ungated condition command'
+    reload_count=$(/usr/bin/grep -Ec \
+      '^[[:space:]]*ExecReload[[:space:]]*=' "$filename" || true)
+    [ "$reload_count" -eq 0 ] ||
+      fail 'a release-consuming unit contains an ungated reload command'
+  done
   ! /usr/bin/grep -Fq '/etc/teleagent/worker-session/ENABLE' \
     "$source_root/teleagent-worker-session.tmpfiles" ||
     fail 'tmpfiles must never create the activation sentinel'
@@ -333,26 +424,88 @@ unit_file_target() {
 assert_unit_dormant() {
   local unit=$1
   local phase=$2
-  local target load_state active_state unit_file_state status
+  local target load_state active_state sub_state unit_file_state fragment_path
+  local need_daemon_reload drop_in_paths status line
+  local seen_load=0 seen_active=0 seen_sub=0 seen_unit_file=0
+  local seen_fragment=0 seen_reload=0 seen_drop_ins=0
   target=$(unit_file_target "$unit")
-  load_state=$("$systemctl_bin" show "$unit" --property=LoadState --value) ||
-    fail 'a worker-session unit load state is unavailable' 75
-  active_state=$("$systemctl_bin" show "$unit" --property=ActiveState --value) ||
-    fail 'a worker-session unit active state is unavailable' 75
+  capture_systemctl 'a worker-session unit state snapshot' \
+    show "$unit" --no-pager \
+    --property=LoadState \
+    --property=ActiveState \
+    --property=SubState \
+    --property=UnitFileState \
+    --property=FragmentPath \
+    --property=NeedDaemonReload \
+    --property=DropInPaths
+  case "$systemctl_output" in
+    *$'\n') systemctl_output=${systemctl_output%$'\n'} ;;
+    *) fail 'a worker-session unit state snapshot has invalid framing' 75 ;;
+  esac
+  while IFS= read -r line; do
+    case "$line" in
+      LoadState=*)
+        [ "$seen_load" -eq 0 ] || fail 'a worker-session unit state snapshot is duplicate' 75
+        seen_load=1
+        load_state=${line#LoadState=}
+        ;;
+      ActiveState=*)
+        [ "$seen_active" -eq 0 ] || fail 'a worker-session unit state snapshot is duplicate' 75
+        seen_active=1
+        active_state=${line#ActiveState=}
+        ;;
+      SubState=*)
+        [ "$seen_sub" -eq 0 ] || fail 'a worker-session unit state snapshot is duplicate' 75
+        seen_sub=1
+        sub_state=${line#SubState=}
+        ;;
+      UnitFileState=*)
+        [ "$seen_unit_file" -eq 0 ] || fail 'a worker-session unit state snapshot is duplicate' 75
+        seen_unit_file=1
+        unit_file_state=${line#UnitFileState=}
+        ;;
+      FragmentPath=*)
+        [ "$seen_fragment" -eq 0 ] || fail 'a worker-session unit state snapshot is duplicate' 75
+        seen_fragment=1
+        fragment_path=${line#FragmentPath=}
+        ;;
+      NeedDaemonReload=*)
+        [ "$seen_reload" -eq 0 ] || fail 'a worker-session unit state snapshot is duplicate' 75
+        seen_reload=1
+        need_daemon_reload=${line#NeedDaemonReload=}
+        ;;
+      DropInPaths=*)
+        [ "$seen_drop_ins" -eq 0 ] || fail 'a worker-session unit state snapshot is duplicate' 75
+        seen_drop_ins=1
+        drop_in_paths=${line#DropInPaths=}
+        ;;
+      *) fail 'a worker-session unit state snapshot contains an unknown property' 75 ;;
+    esac
+  done <<< "$systemctl_output"
+  [ "$seen_load:$seen_active:$seen_sub:$seen_unit_file:$seen_fragment:$seen_reload:$seen_drop_ins" = \
+    '1:1:1:1:1:1:1' ] || fail 'a worker-session unit state snapshot is incomplete' 75
   [ "$active_state" = inactive ] ||
     fail 'a worker-session unit is active, failed, or transitional' 75
+  [ "$sub_state" = dead ] ||
+    fail 'a worker-session unit substate is not exactly dead' 75
   case "$load_state:$phase" in
     loaded:pre|loaded:installed)
-      unit_file_state=$("$systemctl_bin" show "$unit" \
-        --property=UnitFileState --value) ||
-        fail 'a worker-session unit-file state is unavailable' 75
       [ "$unit_file_state" = static ] ||
         fail 'a worker-session unit is not exactly static' 75
+      [ "$fragment_path" = "$target" ] ||
+        fail 'a worker-session unit loaded an unreviewed fragment' 75
+      [ "$need_daemon_reload" = no ] ||
+        fail 'a worker-session unit has stale loaded policy' 75
+      [ -z "$drop_in_paths" ] ||
+        fail 'a worker-session unit has an unreviewed drop-in' 75
       ;;
     not-found:pre)
       [ ! -e "$target" ] && [ ! -L "$target" ] ||
         fail 'a missing worker-session unit conflicts with an installed unit file' 75
-      if "$systemctl_bin" is-enabled "$unit" >/dev/null 2>&1; then
+      [ -z "$unit_file_state" ] && [ -z "$fragment_path" ] &&
+        [ "$need_daemon_reload" = no ] && [ -z "$drop_in_paths" ] ||
+        fail 'a missing worker-session unit has unexpected loaded policy' 75
+      if run_systemctl is-enabled "$unit" >/dev/null 2>&1; then
         fail 'a missing worker-session unit unexpectedly has enablement state' 75
       else
         status=$?
@@ -388,9 +541,9 @@ assert_dormant() {
     assert_unit_dormant "$unit" "$phase"
   done
   local transient
-  transient=$("$systemctl_bin" list-units --all --plain --no-legend \
-    'teleagent-provider-launch-*.service') ||
-    fail 'provider transient-unit enumeration is unavailable' 75
+  capture_systemctl 'provider transient-unit enumeration' \
+    list-units --all --plain --no-legend 'teleagent-provider-launch-*.service'
+  transient=$systemctl_output
   [ -z "$(printf '%s\n' "$transient" | /usr/bin/sed '/^[[:space:]]*$/d')" ] ||
     fail 'transient provider launch units must be absent' 75
   assert_sentinel_absent
@@ -401,6 +554,18 @@ require_install_authority() {
     return
   fi
   [ "$(/usr/bin/id -u)" -eq 0 ] || fail 'root is required'
+}
+
+assert_component_storage() {
+  local attestation
+  attestation=$("$storage_attestor_bin" --action attest-workspace-storage) ||
+    fail 'the provider workspace storage boundary failed attestation'
+  [ "$attestation" = PROVIDER_WORKSPACE_STORAGE_OK ] ||
+    fail 'the provider workspace storage boundary failed attestation'
+  attestation=$("$storage_attestor_bin" --action attest-provider-plane-storage) ||
+    fail 'the provider plane storage boundary failed attestation'
+  [ "$attestation" = PROVIDER_PLANE_STORAGE_OK ] ||
+    fail 'the provider plane storage boundary failed attestation'
 }
 
 ensure_directory() {
@@ -482,7 +647,7 @@ install_disabled() {
           /usr/bin/rm -f -- "$target"
         fi
       done
-      "$systemctl_bin" daemon-reload >/dev/null 2>&1 || true
+      run_systemctl daemon-reload >/dev/null 2>&1 || true
     fi
     /usr/bin/rm -rf -- "$staging"
     exit "$status"
@@ -512,11 +677,12 @@ install_disabled() {
 
   "$sysusers_bin" "$(host_path /etc/sysusers.d/teleagent-worker-session.conf)"
   "$tmpfiles_bin" --create "$(host_path /etc/tmpfiles.d/teleagent-worker-session.conf)"
-  "$systemctl_bin" daemon-reload
+  run_systemctl daemon-reload
   "$identity_bin" --installed-check | /usr/bin/grep -qx WORKER_SESSION_IDENTITY_OK ||
     fail 'the installed split numeric identities failed verification'
   assert_dormant installed
   check_installed_assets
+  assert_component_storage
   complete=1
   /usr/bin/rm -rf -- "$staging"
   trap - EXIT INT TERM
@@ -529,6 +695,7 @@ check_installed() {
   check_installed_assets
   "$identity_bin" --installed-check | /usr/bin/grep -qx WORKER_SESSION_IDENTITY_OK ||
     fail 'the installed split numeric identities failed verification'
+  assert_component_storage
 }
 
 case "${1:-}" in

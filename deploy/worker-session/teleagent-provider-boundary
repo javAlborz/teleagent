@@ -20,7 +20,13 @@ const WORKSPACE_PARENT = path.dirname(WORKSPACE_ROOT);
 const CAPABILITY_DIRECTORY = '/run/teleagent-provider-capabilities';
 const GLOBAL_LAUNCH_LOCK = '.global-provider-launch.lock';
 const SYSTEMD_RUNTIME_UNIT_DIRECTORY = '/run/systemd/system';
-const GLOBAL_PANIC_DIRECTORY = '/var/lib/teleagent-provider-plane';
+const PROVIDER_PLANE_ROOT = '/var/lib/teleagent-provider-plane';
+const PROVIDER_PLANE_PARENT = path.dirname(PROVIDER_PLANE_ROOT);
+const PROVIDER_PLANE_HOMES = Object.freeze({
+  claude: `${PROVIDER_PLANE_ROOT}/claude-supervisor`,
+  codex: `${PROVIDER_PLANE_ROOT}/codex-supervisor`,
+});
+const GLOBAL_PANIC_DIRECTORY = PROVIDER_PLANE_ROOT;
 const GLOBAL_PANIC_FILE = path.join(GLOBAL_PANIC_DIRECTORY, 'panic.lock');
 const GLOBAL_RECOVERY_FILE = path.join(GLOBAL_PANIC_DIRECTORY, 'recovery.lock');
 const LAUNCH_ID = /^launch_[a-f0-9]{32}$/;
@@ -77,6 +83,11 @@ const FORBIDDEN_WORKSPACE_FILE = /^(?:\.env(?!\.example$)|auth\.json|\.credentia
 const MAX_WORKSPACE_ENTRIES = 50_000;
 const MIN_WORKSPACE_FREE_BYTES = 2n * 1024n * 1024n * 1024n;
 const MAX_WORKSPACE_FILESYSTEM_BYTES = 64n * 1024n * 1024n * 1024n;
+const MIN_PROVIDER_PLANE_CAPACITY_BYTES = 1n * 1024n * 1024n * 1024n;
+const MAX_PROVIDER_PLANE_CAPACITY_BYTES = 4n * 1024n * 1024n * 1024n;
+const MIN_PROVIDER_PLANE_FREE_BYTES = 512n * 1024n * 1024n;
+const WORKSPACE_STORAGE_ATTESTATION = 'PROVIDER_WORKSPACE_STORAGE_OK';
+const PROVIDER_PLANE_STORAGE_ATTESTATION = 'PROVIDER_PLANE_STORAGE_OK';
 
 function fail(message, code = 77) {
   const error = Object.assign(new Error(message), { exitCode: code });
@@ -115,7 +126,8 @@ function requirePinnedProviderCli(provider, { spawnCheck = spawnSync } = {}) {
 }
 
 function persistGlobalProviderPanic() {
-  secureRootDirectory(GLOBAL_PANIC_DIRECTORY, 0o077, 0);
+  validateProviderPlaneStorageBoundary({ requireReserve: false, requireHomes: false });
+  secureRootDirectory(GLOBAL_PANIC_DIRECTORY, 0o022, 0);
   try {
     const metadata = fs.lstatSync(GLOBAL_PANIC_FILE);
     if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.uid !== 0 ||
@@ -168,7 +180,8 @@ function globalProviderPanicLocked() {
 }
 
 function persistGlobalProviderRecovery() {
-  secureRootDirectory(GLOBAL_PANIC_DIRECTORY, 0o077, 0);
+  validateProviderPlaneStorageBoundary({ requireReserve: false, requireHomes: false });
+  secureRootDirectory(GLOBAL_PANIC_DIRECTORY, 0o022, 0);
   if (globalProviderRecoveryPending()) return { persisted: true, alreadyPending: true };
   const descriptor = fs.openSync(
     GLOBAL_RECOVERY_FILE,
@@ -391,7 +404,175 @@ function validateWorkspaceStorageBoundary(directory = WORKSPACE_ROOT, {
       freeBytes < MIN_WORKSPACE_FREE_BYTES) {
     fail('provider workspace filesystem size or free-space boundary is unsafe');
   }
-  return { totalBytes, freeBytes };
+  return { totalBytes, freeBytes, device: workspaceMetadata.dev };
+}
+
+function attestWorkspaceStorageBoundary({
+  validateStorage = validateWorkspaceStorageBoundary,
+} = {}) {
+  validateStorage(WORKSPACE_ROOT);
+  return WORKSPACE_STORAGE_ATTESTATION;
+}
+
+function resolveProviderPlaneIdentities({ lookup = spawnSync } = {}) {
+  const identities = {};
+  for (const provider of Object.keys(PROVIDER_PLANE_HOMES)) {
+    const name = `teleagent-${provider}-supervisor`;
+    const options = {
+      cwd: '/',
+      encoding: 'utf8',
+      timeout: 5000,
+      maxBuffer: 4096,
+      env: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    };
+    const passwdResult = lookup(GETENT, ['passwd', name], options);
+    const groupResult = lookup(GETENT, ['group', name], options);
+    const passwdLines = String(passwdResult?.stdout || '').trim().split('\n');
+    const groupLines = String(groupResult?.stdout || '').trim().split('\n');
+    const passwd = passwdLines.length === 1 ? passwdLines[0].split(':') : [];
+    const group = groupLines.length === 1 ? groupLines[0].split(':') : [];
+    const uid = passwd.length === 7 && passwd[0] === name && /^[0-9]+$/.test(passwd[2])
+      ? Number(passwd[2])
+      : NaN;
+    const primaryGid = passwd.length === 7 && /^[0-9]+$/.test(passwd[3])
+      ? Number(passwd[3])
+      : NaN;
+    const gid = group.length === 4 && group[0] === name && /^[0-9]+$/.test(group[2])
+      ? Number(group[2])
+      : NaN;
+    if (passwdResult?.error || passwdResult?.status !== 0 || passwdResult?.signal ||
+        groupResult?.error || groupResult?.status !== 0 || groupResult?.signal ||
+        !Number.isSafeInteger(uid) || uid <= 0 || uid >= 0xffffffff ||
+        !Number.isSafeInteger(gid) || gid <= 0 || gid >= 0xffffffff ||
+        primaryGid !== gid || passwd[5] !== PROVIDER_PLANE_HOMES[provider] ||
+        !['/usr/sbin/nologin', '/sbin/nologin'].includes(passwd[6])) {
+      fail('a provider supervisor storage identity is unavailable or unsafe');
+    }
+    identities[provider] = Object.freeze({ uid, gid });
+  }
+  return Object.freeze(identities);
+}
+
+function validateProviderPlaneStorageBoundary({
+  requireReserve = true,
+  requireHomes = true,
+  identities = null,
+  lookup = spawnSync,
+  lstat = fs.lstatSync,
+  stat = (filename) => fs.statSync(filename, { bigint: true }),
+  statfs = (filename) => fs.statfsSync(filename, { bigint: true }),
+  realpath = fs.realpathSync,
+} = {}) {
+  const expected = requireHomes
+    ? (identities || resolveProviderPlaneIdentities({ lookup }))
+    : null;
+  let parent;
+  let root;
+  let parentDevice;
+  let rootDevice;
+  let storage;
+  const homes = {};
+  const homeDevices = {};
+  try {
+    parent = lstat(PROVIDER_PLANE_PARENT);
+    root = lstat(PROVIDER_PLANE_ROOT);
+    parentDevice = stat(PROVIDER_PLANE_PARENT);
+    rootDevice = stat(PROVIDER_PLANE_ROOT);
+    storage = statfs(PROVIDER_PLANE_ROOT);
+    if (requireHomes) {
+      for (const [provider, directory] of Object.entries(PROVIDER_PLANE_HOMES)) {
+        homes[provider] = lstat(directory);
+        homeDevices[provider] = stat(directory);
+      }
+    }
+  } catch {
+    fail('provider plane storage boundary cannot be inspected');
+  }
+  if (!parent.isDirectory() || parent.isSymbolicLink() || parent.uid !== 0 ||
+      (parent.mode & 0o022) !== 0 || realpath(PROVIDER_PLANE_PARENT) !== PROVIDER_PLANE_PARENT ||
+      !root.isDirectory() || root.isSymbolicLink() || root.uid !== 0 || root.gid !== 0 ||
+      (root.mode & 0o7777) !== 0o751 || realpath(PROVIDER_PLANE_ROOT) !== PROVIDER_PLANE_ROOT ||
+      rootDevice.dev === parentDevice.dev) {
+    fail('provider plane requires one exact root-owned dedicated mountpoint');
+  }
+  if (requireHomes) {
+    for (const [provider, directory] of Object.entries(PROVIDER_PLANE_HOMES)) {
+      const identity = expected[provider];
+      const metadata = homes[provider];
+      if (!identity || !Number.isSafeInteger(identity.uid) || identity.uid <= 0 ||
+          !Number.isSafeInteger(identity.gid) || identity.gid <= 0 ||
+          !metadata.isDirectory() || metadata.isSymbolicLink() ||
+          metadata.uid !== identity.uid || metadata.gid !== identity.gid ||
+          (metadata.mode & 0o7777) !== 0o700 || realpath(directory) !== directory ||
+          homeDevices[provider].dev !== rootDevice.dev) {
+        fail('a provider supervisor home escaped its private storage boundary');
+      }
+    }
+  }
+  const blockSize = BigInt(storage.bsize);
+  const blocks = BigInt(storage.blocks);
+  const availableBlocks = BigInt(storage.bavail);
+  if (blockSize <= 0n || blocks <= 0n || availableBlocks < 0n || availableBlocks > blocks) {
+    fail('provider plane filesystem accounting is invalid');
+  }
+  const capacityBytes = blockSize * blocks;
+  const freeBytes = blockSize * availableBlocks;
+  if (capacityBytes < MIN_PROVIDER_PLANE_CAPACITY_BYTES ||
+      capacityBytes > MAX_PROVIDER_PLANE_CAPACITY_BYTES) {
+    fail('provider plane filesystem capacity is outside the fixed 1-4 GiB boundary');
+  }
+  const percentageReserve = capacityBytes / 5n;
+  const requiredFreeBytes = percentageReserve > MIN_PROVIDER_PLANE_FREE_BYTES
+    ? percentageReserve
+    : MIN_PROVIDER_PLANE_FREE_BYTES;
+  const admitted = freeBytes >= requiredFreeBytes;
+  if (requireReserve && !admitted) {
+    fail('provider plane filesystem reserve is exhausted');
+  }
+  return Object.freeze({
+    root: PROVIDER_PLANE_ROOT,
+    device: rootDevice.dev,
+    capacityBytes,
+    freeBytes,
+    requiredFreeBytes,
+    admitted,
+  });
+}
+
+function validateProviderStorageIsolation({
+  validateWorkspaceStorage = validateWorkspaceStorageBoundary,
+  validateProviderPlaneStorage = validateProviderPlaneStorageBoundary,
+} = {}) {
+  const workspace = validateWorkspaceStorage(WORKSPACE_ROOT);
+  const providerPlane = validateProviderPlaneStorage({ requireReserve: true });
+  const normalizeDevice = (value) => {
+    if (typeof value === 'bigint' && value > 0n) return value;
+    if (Number.isSafeInteger(value) && value > 0) return BigInt(value);
+    fail('provider storage device identity is invalid');
+  };
+  if (normalizeDevice(workspace?.device) === normalizeDevice(providerPlane?.device)) {
+    fail('provider workspace and provider plane require distinct filesystems');
+  }
+  return Object.freeze({ workspace, providerPlane });
+}
+
+function attestProviderPlaneStorageBoundary({
+  validateStorage = validateProviderPlaneStorageBoundary,
+} = {}) {
+  validateStorage({ requireReserve: true });
+  return PROVIDER_PLANE_STORAGE_ATTESTATION;
+}
+
+function assertSupervisorStartAdmitted({
+  validateStorageIsolation = validateProviderStorageIsolation,
+  panicLocked = globalProviderPanicLocked,
+  recoveryPending = globalProviderRecoveryPending,
+} = {}) {
+  validateStorageIsolation();
+  if (panicLocked() && !recoveryPending()) {
+    fail('provider supervisor start is panic-locked', 75);
+  }
 }
 
 function parseControl(argv, environment = process.env, { uid = process.getuid() } = {}) {
@@ -401,7 +582,8 @@ function parseControl(argv, environment = process.env, { uid = process.getuid() 
   const action = take(options, '--action');
   const globalAction = [
     'panic-all', 'recover-root-panic', 'assert-global-unlocked',
-    'assert-supervisor-start-admitted',
+    'assert-supervisor-start-admitted', 'attest-workspace-storage',
+    'attest-provider-plane-storage',
   ].includes(action);
   const provider = take(options, '--provider', !globalAction);
   const launchId = take(options, '--launch-id', action === 'launch' || action === 'terminate' || action === 'status');
@@ -416,8 +598,12 @@ function parseControl(argv, environment = process.env, { uid = process.getuid() 
       ? environment.SUDO_USER === 'teleagent-session-broker'
       : action === 'recover-root-panic'
         ? [undefined, 'teleagent-session-broker'].includes(environment.SUDO_USER)
-        : environment.SUDO_USER === undefined;
-    if (options.length || providerArgs.length || uid !== 0 ||
+        : ['attest-workspace-storage', 'attest-provider-plane-storage'].includes(action)
+          ? true
+          : environment.SUDO_USER === undefined;
+    if (options.length || providerArgs.length || provider !== null || launchId !== null ||
+        mode !== null || accessMode !== null || workspaceInput !== null ||
+        taskId !== null || sessionId !== null || uid !== 0 ||
         !validIdentity) {
       fail('global provider boundary identity is invalid');
     }
@@ -1583,14 +1769,20 @@ async function main(argv = process.argv.slice(2), environment = process.env, {
   checkProviderCli = requirePinnedProviderCli,
 } = {}) {
   const input = parseControl(argv, environment);
+  if (input.action === 'attest-workspace-storage') {
+    process.stdout.write(`${attestWorkspaceStorageBoundary()}\n`);
+    return 0;
+  }
+  if (input.action === 'attest-provider-plane-storage') {
+    process.stdout.write(`${attestProviderPlaneStorageBoundary()}\n`);
+    return 0;
+  }
   if (input.action === 'assert-global-unlocked') {
     if (globalProviderPanicLocked()) fail('global provider plane is panic-locked', 75);
     return 0;
   }
   if (input.action === 'assert-supervisor-start-admitted') {
-    if (globalProviderPanicLocked() && !globalProviderRecoveryPending()) {
-      fail('provider supervisor start is panic-locked', 75);
-    }
+    assertSupervisorStartAdmitted();
     return 0;
   }
   if (input.action === 'panic-all') {
@@ -1615,11 +1807,11 @@ async function main(argv = process.argv.slice(2), environment = process.env, {
     let globalLaunchLock = null;
     try {
       globalLaunchLock = createGlobalLaunchLock(input.launchId);
+      validateProviderStorageIsolation();
       assertGlobalProviderLaunchUnlocked();
       checkProviderCli(input.provider);
       validateWorkspaceAnchor(input.workspace);
       validateProviderWorkspace(input.workspace);
-      validateWorkspaceStorageBoundary();
       assertGlobalProviderLaunchUnlocked();
       credentialPath = createCapabilityFile(input.launchId, capability);
       readinessPath = createReadinessFile(input.provider, input.launchId);
@@ -1728,6 +1920,9 @@ if (require.main === module) {
 module.exports = {
   PROVIDER_MODELS,
   PROVIDERS,
+  attestProviderPlaneStorageBoundary,
+  attestWorkspaceStorageBoundary,
+  assertSupervisorStartAdmitted,
   assertGlobalProviderLaunchUnlocked,
   buildSystemdRunInvocation,
   capabilityFilePath,
@@ -1739,6 +1934,8 @@ module.exports = {
   globalProviderRecoveryPending,
   globalProviderPanicLocked,
   validateProviderWorkspace,
+  validateProviderPlaneStorageBoundary,
+  validateProviderStorageIsolation,
   validateWorkspaceAnchor,
   validateWorkspaceStorageBoundary,
   hasCancellationTombstone,
