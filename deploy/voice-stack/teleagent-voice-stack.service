@@ -3,9 +3,11 @@ Description=Teleagent guarded voice and SIP stack
 Documentation=file:/opt/teleagent/current/docs/PHONE-AGENT-ARCHITECTURE.md
 Requires=docker.service teleagent-sip-local-peer-fence.service teleagent-agent-controller.service
 Requires=teleagent-worker-session.service teleagent-provider-model-apparmor.service
+Requires=teleagent-voice-containers.slice
 After=local-fs.target network-online.target docker.service
 After=teleagent-sip-local-peer-fence.service teleagent-agent-controller.service
 After=teleagent-worker-session.service teleagent-provider-model-apparmor.service
+After=teleagent-voice-containers.slice
 Wants=network-online.target
 
 [Service]

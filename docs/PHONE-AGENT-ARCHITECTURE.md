@@ -183,7 +183,13 @@ The voice stack has no autonomous Docker restart policy. A systemd-owned gate
 starts it only after the local SIP fence, split provider plane, controller,
 privileged broker, identities, credentials, and configuration are verified.
 The root launcher itself is CPU-, memory-, swap-, I/O-, and task-bounded, and
-accepts at most 128 KiB from any controller health or panic response. The
+accepts at most 128 KiB from any controller health or panic response. Every
+Compose service is also assigned to the fixed
+`teleagent-voice-containers.slice` parent. That slice caps the four containers
+together at three CPUs, 3 GiB memory, zero swap, and 1024 tasks; the launcher
+first requires canonical Docker evidence for the `systemd` cgroup driver and
+cgroup v2. It then inspects every exact project container after startup and refuses activation if
+its cgroup parent or durable activation-generation label differs. The
 no-network credential preflight is separately capped at 0.5 CPU, 256 MiB, and
 64 tasks, mounts durable voice state read-only, and cannot consume swap. Every
 Compose service uses the bounded local log driver with three 10 MiB files, so a
@@ -200,30 +206,57 @@ or outbound call and exposes exhaustion as unhealthy, so it stops accepting
 new durable work before the hard capacity is reached.
 The normal CLI delegates voice start and stop to that exact systemd unit; it
 does not invoke Compose directly or inherit an image selector into activation.
-The two Teleagent voice services use one promoted image named by OCI digest in
-`/etc/teleagent-voice/voice-image.manifest.json`. That root-owned mode-0400
-manifest also records the resolved Docker image ID and reviewed source revision.
-The launcher verifies the digest reference, image ID, and OCI revision label
-before reading or projecting any voice credential; Compose has no production
-build path.
+The two Teleagent voice services use the exact `runtimeReference` in
+`/etc/teleagent-voice/voice-image.manifest.json`. This is the same canonical v2
+manifest emitted inside the immutable release: there is no caller-authored v1
+translation. The root-owned mode-0400 installed copy records the image config
+digest, reviewed source revision, target platform, and either an imported local
+config-digest reference or one promoted registry manifest reference. The
+launcher resolves that reference and verifies the exact Docker config ID, OCI
+revision label, and `linux/amd64` platform before reading or projecting any
+voice credential; Compose has no production build path.
 
 The release pipeline must build with `TELEAGENT_SOURCE_REVISION` set to the
 reviewed 40- or 64-hex source revision, publish the result, and stage one compact
 canonical JSON line with fields in this exact order:
 
 ```json
-{"version":1,"image":"registry.example/teleagent/voice-app@sha256:<64 lowercase hex>","imageId":"sha256:<64 lowercase hex>","sourceRevision":"<40 or 64 lowercase hex>"}
+{"version":2,"sourceRevision":"<40 or 64 lowercase hex>","platform":"linux/amd64","configDigest":"sha256:<64 lowercase hex>","runtimeReference":"sha256:<same config digest>","registryReference":null,"registryManifestDigest":null}
 ```
+
+Before registry promotion, `runtimeReference` must equal `configDigest` and
+both registry fields must be `null`. After promotion, `runtimeReference` and
+`registryReference` are the same
+`registry/repository@sha256:<manifest-digest>`, while
+`registryManifestDigest` is that suffix and `configDigest` continues to bind
+the inspected local image ID.
 
 The example placeholders are not valid activation data. The staged file must
 be a regular, single-link `root:root` file with mode `0400`; a tag-only image,
-missing local image, mismatched image ID, blank/mismatched OCI revision label,
-duplicate member, extra member, or noncanonical encoding refuses startup before
-credential access.
+missing local image, mismatched config ID, platform or OCI revision label,
+crossed offline/registry fields, duplicate member, extra member, or
+noncanonical encoding refuses startup before credential access.
 
 Before detached Compose startup, the gate durably records activation intent in
-the root-owned `/var/lib/teleagent-voice-stack` directory. Its unconditional
-`ExecStopPost` removes only containers bearing the exact
+the root-owned `/var/lib/teleagent-voice-stack` directory. The canonical state
+binds the full reviewed image manifest to an `activationGeneration` that
+increments before every attempted activation; that same generation labels all
+four containers. A
+missing state file is outcome-unknown, not an implicit inactive generation.
+Legacy v1 state must likewise pass explicit offline recovery before it can be
+migrated to v2. A malformed, reordered, noncanonical, or logically inconsistent
+state refuses both activation and automatic replacement.
+
+The disabled installer never creates, deletes, resets, or migrates activation
+state, so a reinstall preserves its last durable generation. A genuinely new
+installation—or a state file lost across a crash—therefore initializes only
+through the fixed `recover` operation: it proves the exact project empty,
+persists outcome-unknown intent, obtains positive coordinated controller panic,
+and only then commits inactive generation zero. State replacement fsyncs the
+new file before rename and fsyncs the parent directory afterward; if a crash
+still loses the rename, absence remains recovery-gated.
+
+The unconditional `ExecStopPost` removes only containers bearing the exact
 `com.docker.compose.project=teleagent-voice` label and proves none remain before
 removing projected credentials. This cleanup does not clear controller panic or
 convert an unknown panic outcome into success. If startup or shutdown was

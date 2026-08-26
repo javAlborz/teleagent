@@ -7,6 +7,9 @@ services:
     # release manifest, the OCI digest, the local image ID, and source label.
     image: "${TELEAGENT_VOICE_IMAGE:?TELEAGENT_VOICE_IMAGE must be an approved OCI digest}"
     restart: "no"
+    cgroup_parent: teleagent-voice-containers.slice
+    labels:
+      com.teleagent.voice.activation-generation: "${TELEAGENT_VOICE_ACTIVATION_GENERATION:?activation generation must come from the durable launcher}"
     ulimits:
       core: 0
     mem_limit: 256m
@@ -39,6 +42,9 @@ services:
     image: drachtio/drachtio-server:latest@sha256:c03001e7c01ead29d0026245d0b42a9ebc8eefb0ff9bd180f5ff1f72be6da457
     container_name: drachtio
     restart: "no"
+    cgroup_parent: teleagent-voice-containers.slice
+    labels:
+      com.teleagent.voice.activation-generation: "${TELEAGENT_VOICE_ACTIVATION_GENERATION:?activation generation must come from the durable launcher}"
     ulimits:
       core: 0
     mem_limit: 384m
@@ -75,6 +81,9 @@ services:
     image: drachtio/drachtio-freeswitch-mrf:latest@sha256:7a6ce26834ff1b8eb27e97f3b9db72980a511e83ef01897097ca92a0f2d5eb62
     container_name: freeswitch
     restart: "no"
+    cgroup_parent: teleagent-voice-containers.slice
+    labels:
+      com.teleagent.voice.activation-generation: "${TELEAGENT_VOICE_ACTIVATION_GENERATION:?activation generation must come from the durable launcher}"
     ulimits:
       core: 0
     mem_limit: 1g
@@ -121,6 +130,9 @@ services:
     image: "${TELEAGENT_VOICE_IMAGE:?TELEAGENT_VOICE_IMAGE must be an approved OCI digest}"
     container_name: voice-app
     restart: "no"
+    cgroup_parent: teleagent-voice-containers.slice
+    labels:
+      com.teleagent.voice.activation-generation: "${TELEAGENT_VOICE_ACTIVATION_GENERATION:?activation generation must come from the durable launcher}"
     ulimits:
       core: 0
     mem_limit: 1g

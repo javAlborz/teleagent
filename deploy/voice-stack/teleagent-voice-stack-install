@@ -6,6 +6,7 @@ node_runtime=/usr/local/libexec/teleagent-node
 source_verifier=$source_root/verify-voice-stack-identity
 installed_verifier=/usr/local/libexec/verify-voice-stack-identity
 unit=teleagent-voice-stack.service
+slice_unit=teleagent-voice-containers.slice
 systemctl_bin=/usr/bin/systemctl
 sysusers_bin=/usr/bin/systemd-sysusers
 tmpfiles_bin=/usr/bin/systemd-tmpfiles
@@ -36,6 +37,44 @@ assert_inactive() {
       ;;
     *) fail 'the voice stack load state is unsafe' ;;
   esac
+  assert_slice_inactive_or_absent
+}
+
+assert_slice_inactive_or_absent() {
+  local load_state active_state unit_file_state
+  load_state=$("$systemctl_bin" show "$slice_unit" --property=LoadState --value) ||
+    fail 'the voice container slice load state is unavailable'
+  active_state=$("$systemctl_bin" show "$slice_unit" --property=ActiveState --value) ||
+    fail 'the voice container slice active state is unavailable'
+  [ "$active_state" = inactive ] ||
+    fail 'the voice container slice must remain exactly inactive'
+  case "$load_state" in
+    loaded)
+      unit_file_state=$("$systemctl_bin" show "$slice_unit" --property=UnitFileState --value) ||
+        fail 'the voice container slice unit-file state is unavailable'
+      [ "$unit_file_state" = static ] ||
+        fail 'the voice container slice must remain static'
+      ;;
+    not-found)
+      [ ! -e /etc/systemd/system/teleagent-voice-containers.slice ] &&
+        [ ! -L /etc/systemd/system/teleagent-voice-containers.slice ] ||
+        fail 'the absent voice container slice conflicts with an installed unit file'
+      ;;
+    *) fail 'the voice container slice load state is unsafe' ;;
+  esac
+}
+
+assert_slice_installed_dormant() {
+  local load_state active_state unit_file_state
+  load_state=$("$systemctl_bin" show "$slice_unit" --property=LoadState --value) ||
+    fail 'the installed voice container slice load state is unavailable'
+  active_state=$("$systemctl_bin" show "$slice_unit" --property=ActiveState --value) ||
+    fail 'the installed voice container slice active state is unavailable'
+  unit_file_state=$("$systemctl_bin" show "$slice_unit" --property=UnitFileState --value) ||
+    fail 'the installed voice container slice unit-file state is unavailable'
+  [ "$load_state" = loaded ] && [ "$active_state" = inactive ] &&
+    [ "$unit_file_state" = static ] ||
+    fail 'the installed voice container slice must be loaded, static, and inactive'
 }
 
 assert_disabled() {
@@ -57,6 +96,7 @@ assert_disabled() {
   # state instead of interpreting that exit status as an enabled unit.
   [ "$unit_file_state" = static ] ||
     fail 'the dormant voice stack must remain a static unit'
+  assert_slice_installed_dormant
 }
 
 source_check() {
@@ -82,6 +122,7 @@ install_disabled() {
 
   local -a sources=(
     "$source_root/teleagent-voice-stack.service"
+    "$source_root/teleagent-voice-containers.slice"
     "$source_root/teleagent-voice-stack.sysusers"
     "$source_root/teleagent-voice-stack.tmpfiles"
     "$source_root/teleagent-voice-stack-launch.js"
@@ -90,13 +131,14 @@ install_disabled() {
   )
   local -a targets=(
     /etc/systemd/system/teleagent-voice-stack.service
+    /etc/systemd/system/teleagent-voice-containers.slice
     /etc/sysusers.d/teleagent-voice-stack.conf
     /etc/tmpfiles.d/teleagent-voice-stack.conf
     /usr/local/libexec/teleagent-voice-stack-launch
     /usr/local/libexec/verify-voice-stack-identity
     /usr/local/libexec/teleagent-voice-stack-install
   )
-  local -a modes=(644 644 644 755 755 755)
+  local -a modes=(644 644 644 644 755 755 755)
   local staging
   staging=$(/usr/bin/mktemp -d /run/teleagent-voice-install.XXXXXX)
   chmod 0700 "$staging"

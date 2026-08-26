@@ -11,30 +11,46 @@ const test = require('node:test');
 const {
   assertPanicQuiesced,
   assertVoiceExit,
+  activationGenerationForTransition,
   activationRequiresRecovery,
   cleanupEvidenceDisposition,
   cleanupExactProject,
   cleanupRequiresPanicRecovery,
+  normalizeActivationState,
   normalizeVoiceImageManifest,
+  parseDockerCgroupInfo,
+  parseVoiceContainerBoundary,
   parseVoiceEnvironmentFile,
   parseExactProjectContainerIds,
   requestJson,
   renderTemplateContents,
+  requireDockerCgroupBoundary,
   runOfflineRecovery,
   startFailureDisposition,
   verifyBoundedHostStateFilesystem,
   verifyVoiceAppRuntimeContract,
   verifyVoiceImage,
+  verifyExactProjectContainerBoundary,
   FIXED_VOICE_APP_BOUNDARY_ENV,
   MAX_CONTROL_RESPONSE_BYTES,
 } = require('../../deploy/voice-stack/teleagent-voice-stack-launch');
 const voiceAppRuntimeContract = require('../../lib/voice-app-runtime-env');
 
 const IMAGE_MANIFEST = Object.freeze({
-  version: 1,
-  image: `registry.example/teleagent/voice-app@sha256:${'a'.repeat(64)}`,
-  imageId: `sha256:${'b'.repeat(64)}`,
+  version: 2,
   sourceRevision: 'c'.repeat(40),
+  platform: 'linux/amd64',
+  configDigest: `sha256:${'b'.repeat(64)}`,
+  runtimeReference: `sha256:${'b'.repeat(64)}`,
+  registryReference: null,
+  registryManifestDigest: null,
+});
+
+const PROMOTED_IMAGE_MANIFEST = Object.freeze({
+  ...IMAGE_MANIFEST,
+  runtimeReference: `registry.example/teleagent/voice-app@sha256:${'a'.repeat(64)}`,
+  registryReference: `registry.example/teleagent/voice-app@sha256:${'a'.repeat(64)}`,
+  registryManifestDigest: `sha256:${'a'.repeat(64)}`,
 });
 
 function directoryMetadata({ uid = 0, gid = 0, mode = 0o755, dev = 100, ino = 1,
@@ -291,6 +307,11 @@ test('wrapper never puts credentials in Docker argv or inherited environment', (
     ['activationRequiresRecovery(readActivationState())', 'cleanupExactProject()'],
     ['verifyVoiceImage(imageManifest)', 'readCredentialSet(identity, settings)'],
     ["persistActivationState('starting'", "composeArgs('up'"],
+    ['beginActivation: true', "composeArgs('up'"],
+    ['requireActiveUnit(CONTAINER_SLICE)', "composeArgs('up'"],
+    ['requireDockerCgroupBoundary()', "composeArgs('up'"],
+    ['verifyExactProjectContainerBoundary(startingState.activationGeneration',
+      "persistActivationState('active'"],
     ['resolveVoiceIdentity()', 'verifyBoundedHostStateFilesystem(identity)'],
     ['verifyBoundedHostStateFilesystem(identity)', 'readEnvironmentFile(identity)'],
   ]) {
@@ -303,17 +324,25 @@ test('wrapper never puts credentials in Docker argv or inherited environment', (
 test('voice image release manifest is canonical, immutable, and resolved before use', () => {
   const encoded = `${JSON.stringify(IMAGE_MANIFEST)}\n`;
   assert.deepEqual(normalizeVoiceImageManifest(encoded), IMAGE_MANIFEST);
+  assert.deepEqual(normalizeVoiceImageManifest(
+    `${JSON.stringify(PROMOTED_IMAGE_MANIFEST)}\n`
+  ), PROMOTED_IMAGE_MANIFEST);
   for (const invalid of [
-    { ...IMAGE_MANIFEST, image: 'registry.example/teleagent/voice-app:latest' },
-    { ...IMAGE_MANIFEST, imageId: `sha256:${'z'.repeat(64)}` },
+    { ...IMAGE_MANIFEST, runtimeReference: 'registry.example/teleagent/voice-app:latest' },
+    { ...IMAGE_MANIFEST, configDigest: `sha256:${'z'.repeat(64)}` },
     { ...IMAGE_MANIFEST, sourceRevision: 'main' },
+    { ...IMAGE_MANIFEST, platform: 'linux/arm64' },
+    { ...PROMOTED_IMAGE_MANIFEST, registryManifestDigest: `sha256:${'d'.repeat(64)}` },
+    { ...PROMOTED_IMAGE_MANIFEST, runtimeReference: IMAGE_MANIFEST.configDigest },
   ]) {
     assert.throws(() => normalizeVoiceImageManifest(`${JSON.stringify(invalid)}\n`),
-      /immutable provenance/);
+      /(?:immutable provenance|not bound)/);
   }
   assert.throws(() => normalizeVoiceImageManifest(
-    `{"version":1,"version":1,"image":"${IMAGE_MANIFEST.image}",` +
-    `"imageId":"${IMAGE_MANIFEST.imageId}","sourceRevision":"${IMAGE_MANIFEST.sourceRevision}"}\n`
+    `{"version":2,"version":2,"sourceRevision":"${IMAGE_MANIFEST.sourceRevision}",` +
+    `"platform":"linux/amd64","configDigest":"${IMAGE_MANIFEST.configDigest}",` +
+    `"runtimeReference":"${IMAGE_MANIFEST.runtimeReference}","registryReference":null,` +
+    `"registryManifestDigest":null}\n`
   ), /not canonical/);
 
   const calls = [];
@@ -321,12 +350,14 @@ test('voice image release manifest is canonical, immutable, and resolved before 
     calls.push(args);
     return {
       status: 0,
-      stdout: args.includes('{{.Id}}') ? `${IMAGE_MANIFEST.imageId}\n` :
-        `${IMAGE_MANIFEST.sourceRevision}\n`,
+      stdout: args.includes('{{.Id}}') ? `${IMAGE_MANIFEST.configDigest}\n` :
+        args.includes('{{.Os}}/{{.Architecture}}') ? `${IMAGE_MANIFEST.platform}\n` :
+          `${IMAGE_MANIFEST.sourceRevision}\n`,
     };
   };
   assert.equal(verifyVoiceImage(IMAGE_MANIFEST, { runCommand, environment: {} }), true);
   assert.deepEqual(calls.map((args) => args.slice(0, 3)), [
+    ['image', 'inspect', '--format'],
     ['image', 'inspect', '--format'],
     ['image', 'inspect', '--format'],
   ]);
@@ -355,6 +386,141 @@ test('exact-project cleanup removes only the guarded Compose project and proves 
   assert.throws(() => parseExactProjectContainerIds('voice-app\n'), /listing is invalid/);
 });
 
+test('activation state is canonical, image-bound, generation-monotonic, and missing-safe', () => {
+  const active = {
+    version: 2,
+    project: 'teleagent-voice',
+    activationGeneration: 7,
+    phase: 'active',
+    previousPhase: 'starting',
+    panic: 'not_requested',
+    cleanup: 'required',
+    imageManifest: IMAGE_MANIFEST,
+    panicOutcomeUnknownAt: null,
+    interruptedStartRecoveredAt: null,
+    updatedAt: '2026-08-26T12:34:56.789Z',
+  };
+  assert.deepEqual(normalizeActivationState(`${JSON.stringify(active)}\n`), active);
+  assert.equal(activationGenerationForTransition(active, false), 7);
+  assert.equal(activationGenerationForTransition(active, true), 8);
+  assert.equal(activationGenerationForTransition(null, true), 1);
+  assert.throws(() => activationGenerationForTransition({
+    ...active, activationGeneration: Number.MAX_SAFE_INTEGER,
+  }, true), /generation is exhausted or invalid/);
+  for (const invalid of [
+    { ...active, activationGeneration: 0 },
+    { ...active, activationGeneration: 0, imageManifest: null },
+    {
+      ...active,
+      activationGeneration: 0,
+      phase: 'stopping',
+      panic: 'requested',
+      imageManifest: null,
+    },
+    { ...active, activationGeneration: 7.5 },
+    { ...active, phase: 'inactive' },
+    { ...active, updatedAt: 'today' },
+    { ...active, updatedAt: '9999-99-99T99:99:99.999Z' },
+    { ...active, unexpected: true },
+  ]) {
+    assert.throws(() => normalizeActivationState(`${JSON.stringify(invalid)}\n`),
+      /durable voice activation/);
+  }
+  assert.throws(() => normalizeActivationState(JSON.stringify(active, null, 2)),
+    /durable voice activation/);
+
+  const legacy = {
+    version: 1,
+    project: 'teleagent-voice',
+    phase: 'inactive',
+    previousPhase: 'stopping',
+    panic: 'quiesced',
+    cleanup: 'proved',
+    image: PROMOTED_IMAGE_MANIFEST.runtimeReference,
+    imageId: IMAGE_MANIFEST.configDigest,
+    sourceRevision: IMAGE_MANIFEST.sourceRevision,
+    panicOutcomeUnknownAt: null,
+    interruptedStartRecoveredAt: null,
+    updatedAt: '2026-08-26T12:34:56.789Z',
+  };
+  const normalizedLegacy = normalizeActivationState(`${JSON.stringify(legacy)}\n`);
+  assert.equal(normalizedLegacy.version, 1);
+  assert.equal(activationRequiresRecovery(normalizedLegacy), true);
+  assert.equal(cleanupRequiresPanicRecovery(normalizedLegacy), true);
+  assert.equal(activationRequiresRecovery(null), true);
+  assert.equal(cleanupRequiresPanicRecovery(null), true);
+});
+
+test('activation state replacement is file-synced, renamed, then directory-synced', () => {
+  const source = fs.readFileSync(
+    path.join(__dirname, '..', '..', 'deploy', 'voice-stack', 'teleagent-voice-stack-launch.js'),
+    'utf8',
+  );
+  const body = source.slice(source.indexOf('function atomicWriteActivationState('),
+    source.indexOf('function activationRequiresRecovery('));
+  const fileSync = body.indexOf('fs.fsyncSync(descriptor)');
+  const rename = body.indexOf('fs.renameSync(temporary, ACTIVATION_STATE)');
+  const directorySync = body.indexOf('fs.fsyncSync(directory)');
+  assert.ok(fileSync >= 0 && rename > fileSync && directorySync > rename);
+  assert.match(body, /O_EXCL[\s\S]*O_NOFOLLOW/);
+  assert.match(body, /fs\.rmSync\(temporary, \{ force: true \}\)/);
+});
+
+test('every exact Compose service proves the durable generation and aggregate cgroup parent', () => {
+  assert.deepEqual(parseDockerCgroupInfo('systemd\t2\n'), {
+    cgroupDriver: 'systemd', cgroupVersion: 2,
+  });
+  for (const invalid of ['cgroupfs\t2\n', 'systemd\t1\n', 'systemd\t2', 'systemd\t2\nextra\n']) {
+    assert.throws(() => parseDockerCgroupInfo(invalid), /systemd cgroup-v2 boundary/);
+  }
+  const dockerInfoCalls = [];
+  assert.deepEqual(requireDockerCgroupBoundary({
+    environment: {},
+    runCommand: (_filename, args) => {
+      dockerInfoCalls.push(args);
+      return { status: 0, stdout: 'systemd\t2\n' };
+    },
+  }), { cgroupDriver: 'systemd', cgroupVersion: 2 });
+  assert.deepEqual(dockerInfoCalls, [[
+    'info', '--format', '{{.CgroupDriver}}\t{{.CgroupVersion}}',
+  ]]);
+  assert.throws(() => requireDockerCgroupBoundary({
+    environment: {},
+    runCommand: () => ({ status: 1, stdout: '' }),
+  }), /Docker cgroup boundary is unverifiable/);
+
+  const generation = 9;
+  const services = ['voice-runtime-preflight', 'drachtio', 'freeswitch', 'voice-app'];
+  const evidence = services.map((service) =>
+    `${service}\t${generation}\tteleagent-voice-containers.slice`).join('\n') + '\n';
+  assert.deepEqual(parseVoiceContainerBoundary(evidence, generation), [...services].sort());
+  for (const invalid of [
+    evidence.replace('\t9\t', '\t8\t'),
+    evidence.replace('teleagent-voice-containers.slice', 'system.slice'),
+    evidence.replace('voice-app\t9', 'drachtio\t9'),
+    evidence.split('\n').slice(0, 3).join('\n'),
+  ]) {
+    assert.throws(() => parseVoiceContainerBoundary(invalid, generation),
+      /aggregate boundary|escaped/);
+  }
+
+  const identifiers = ['a', 'b', 'c', 'd'].map((value) => value.repeat(64));
+  const calls = [];
+  assert.equal(verifyExactProjectContainerBoundary(generation, {
+    environment: {},
+    runCommand: (_filename, args) => {
+      calls.push(args);
+      if (args[0] === 'container' && args[1] === 'ls') {
+        return { status: 0, stdout: `${identifiers.join('\n')}\n` };
+      }
+      return { status: 0, stdout: evidence };
+    },
+  }), 4);
+  assert.deepEqual(calls[1].slice(-4), identifiers);
+  assert.match(calls[1][3], /activation-generation/);
+  assert.match(calls[1][3], /CgroupParent/);
+});
+
 test('interrupted activation remains recovery-gated until coordinated panic is proven', () => {
   const unknownStates = [
     { phase: 'starting', panic: 'not_requested', cleanup: 'required' },
@@ -367,13 +533,13 @@ test('interrupted activation remains recovery-gated until coordinated panic is p
     assert.equal(cleanupRequiresPanicRecovery(state), true);
   }
   assert.equal(activationRequiresRecovery({
-    phase: 'inactive', panic: 'recovered', cleanup: 'proved',
+    version: 2, phase: 'inactive', panic: 'recovered', cleanup: 'proved',
   }), false);
   assert.equal(activationRequiresRecovery({
-    phase: 'inactive', panic: 'quiesced', cleanup: 'proved',
+    version: 2, phase: 'inactive', panic: 'quiesced', cleanup: 'proved',
   }), false);
   assert.equal(cleanupRequiresPanicRecovery({
-    phase: 'cleanup_outcome_unknown', panic: 'quiesced', cleanup: 'outcome_unknown',
+    version: 2, phase: 'cleanup_outcome_unknown', panic: 'quiesced', cleanup: 'outcome_unknown',
   }), false);
 
   const source = fs.readFileSync(
@@ -393,8 +559,8 @@ test('interrupted activation remains recovery-gated until coordinated panic is p
   assert.doesNotMatch(recoverBody, /unlock/);
 });
 
-test('offline recovery targets the fixed controller and retains partial or unavailable panic', async () => {
-  const prior = { phase: 'panic_outcome_unknown', panic: 'outcome_unknown', cleanup: 'proved' };
+test('offline recovery initializes missing state and retains partial or unavailable panic', async () => {
+  const prior = null;
   const successEvents = [];
   const successToken = Buffer.from('r'.repeat(32));
   const successPersisted = [];
@@ -513,12 +679,17 @@ test('cleanup primitive is control-independent and fails closed when Docker is u
 test('dormant systemd gate binds the private voice identity and every prerequisite', () => {
   const deploy = path.join(__dirname, '..', '..', 'deploy', 'voice-stack');
   const unit = fs.readFileSync(path.join(deploy, 'teleagent-voice-stack.service'), 'utf8');
+  const containerSlice = fs.readFileSync(
+    path.join(deploy, 'teleagent-voice-containers.slice'), 'utf8'
+  );
   const sysusers = fs.readFileSync(path.join(deploy, 'teleagent-voice-stack.sysusers'), 'utf8');
   const tmpfiles = fs.readFileSync(path.join(deploy, 'teleagent-voice-stack.tmpfiles'), 'utf8');
   const compose = fs.readFileSync(path.join(deploy, '..', '..', 'docker-compose.yml'), 'utf8');
   assert.match(unit, /^Requires=.*teleagent-sip-local-peer-fence\.service/m);
   assert.match(unit, /^Requires=.*teleagent-agent-controller\.service/m);
   assert.match(unit, /^Requires=teleagent-worker-session\.service teleagent-provider-model-apparmor\.service$/m);
+  assert.match(unit, /^Requires=teleagent-voice-containers\.slice$/m);
+  assert.match(unit, /^After=teleagent-voice-containers\.slice$/m);
   assert.match(unit,
     /^ExecStartPre=\/usr\/local\/libexec\/verify-voice-stack-identity --installed-check$/m);
   assert.match(unit, /^ExecStart=\/usr\/local\/libexec\/teleagent-voice-stack-launch start$/m);
@@ -533,6 +704,16 @@ test('dormant systemd gate binds the private voice identity and every prerequisi
   assert.match(unit, /^IOWeight=50$/m);
   assert.doesNotMatch(unit, /^Environment=.*(?:TOKEN|PASSWORD|SECRET|KEY)=/m);
   assert.doesNotMatch(unit, /^\[Install\]$/m);
+  assert.doesNotMatch(containerSlice, /^\[Install\]$/m);
+  for (const expected of [
+    /^StopWhenUnneeded=yes$/m,
+    /^CPUQuota=300%$/m,
+    /^MemoryHigh=2560M$/m,
+    /^MemoryMax=3G$/m,
+    /^MemorySwapMax=0$/m,
+    /^TasksMax=1024$/m,
+    /^IOWeight=50$/m,
+  ]) assert.match(containerSlice, expected);
   assert.match(sysusers,
     /^u teleagent-voice - "Teleagent private voice orchestrator" \/var\/lib\/teleagent-voice \/usr\/sbin\/nologin$/m);
   assert.match(tmpfiles,
@@ -562,6 +743,11 @@ test('dormant systemd gate binds the private voice identity and every prerequisi
     ));
     assert.ok(match, service);
     const block = match[0];
+    assert.match(block, /^    cgroup_parent: teleagent-voice-containers\.slice$/m, service);
+    assert.match(block,
+      /^      com\.teleagent\.voice\.activation-generation: "\$\{TELEAGENT_VOICE_ACTIVATION_GENERATION:\?/m,
+      `${service} activation generation`,
+    );
     assert.match(block, /^    read_only: true$/m, `${service} root filesystem`);
     assert.match(block, /^    logging:$/m, service);
     assert.match(block, /^      driver: local$/m, service);

@@ -28,6 +28,11 @@ const APPARMOR_PROFILES = '/sys/kernel/security/apparmor/profiles';
 const PROJECT = 'teleagent-voice';
 const PROJECT_LABEL = `com.docker.compose.project=${PROJECT}`;
 const IMAGE_REVISION_LABEL = 'org.opencontainers.image.revision';
+const ACTIVATION_GENERATION_LABEL = 'com.teleagent.voice.activation-generation';
+const CONTAINER_SLICE = 'teleagent-voice-containers.slice';
+const VOICE_SERVICES = Object.freeze([
+  'drachtio', 'freeswitch', 'voice-app', 'voice-runtime-preflight',
+]);
 const MAX_CONTROL_RESPONSE_BYTES = 128 * 1024;
 const HOST_STATE_ROOT = '/var/lib/teleagent-voice';
 const HOST_STATE_PARENT = '/var/lib';
@@ -99,7 +104,11 @@ function run(filename, args, {
   return result;
 }
 
-function fixedDockerEnvironment(settings = {}, imageManifest = null) {
+function fixedDockerEnvironment(settings = {}, imageManifest = null, activationGeneration = null) {
+  if (activationGeneration !== null &&
+      (!Number.isSafeInteger(activationGeneration) || activationGeneration < 1)) {
+    refuse('the voice activation generation is invalid');
+  }
   return Object.freeze({
     ...settings,
     PATH: '/usr/sbin:/usr/bin:/sbin:/bin',
@@ -107,7 +116,10 @@ function fixedDockerEnvironment(settings = {}, imageManifest = null) {
     DOCKER_CONFIG: `${RUNTIME_ROOT}/docker-config`,
     LANG: 'C.UTF-8',
     LC_ALL: 'C.UTF-8',
-    ...(imageManifest ? { TELEAGENT_VOICE_IMAGE: imageManifest.image } : {}),
+    ...(imageManifest ? { TELEAGENT_VOICE_IMAGE: imageManifest.runtimeReference } : {}),
+    ...(activationGeneration === null ? {} : {
+      TELEAGENT_VOICE_ACTIVATION_GENERATION: String(activationGeneration),
+    }),
   });
 }
 
@@ -221,15 +233,29 @@ function normalizeVoiceImageManifest(source) {
   try { manifest = JSON.parse(text); } catch { refuse('the voice image manifest is invalid'); }
   if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest) ||
       JSON.stringify(Object.keys(manifest)) !== JSON.stringify([
-        'version', 'image', 'imageId', 'sourceRevision',
+        'version', 'sourceRevision', 'platform', 'configDigest', 'runtimeReference',
+        'registryReference', 'registryManifestDigest',
       ]) || text !== `${JSON.stringify(manifest)}\n`) {
     refuse('the voice image manifest is not canonical');
   }
-  if (manifest.version !== 1 ||
-      !/^[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[1-9][0-9]{0,4})?(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)+@sha256:[a-f0-9]{64}$/u.test(manifest.image) ||
-      !/^sha256:[a-f0-9]{64}$/u.test(manifest.imageId) ||
+  if (manifest.version !== 2 || manifest.platform !== 'linux/amd64' ||
+      !/^sha256:[a-f0-9]{64}$/u.test(manifest.configDigest) ||
       !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(manifest.sourceRevision)) {
     refuse('the voice image manifest does not identify reviewed immutable provenance');
+  }
+  const registryReference = manifest.registryReference;
+  const registryDigest = manifest.registryManifestDigest;
+  if (registryReference === null || registryDigest === null) {
+    if (registryReference !== null || registryDigest !== null ||
+        manifest.runtimeReference !== manifest.configDigest) {
+      refuse('the offline voice image manifest is not bound to its config digest');
+    }
+  } else if (typeof registryReference !== 'string' ||
+      !/^[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[1-9][0-9]{0,4})?(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)+@sha256:[a-f0-9]{64}$/u.test(registryReference) ||
+      !/^sha256:[a-f0-9]{64}$/u.test(registryDigest) ||
+      !registryReference.endsWith(`@${registryDigest}`) ||
+      manifest.runtimeReference !== registryReference) {
+    refuse('the promoted voice image manifest is not bound to one registry manifest');
   }
   return Object.freeze({ ...manifest });
 }
@@ -247,16 +273,23 @@ function verifyVoiceImage(manifest, {
   environment = fixedDockerEnvironment(),
 } = {}) {
   const identity = runCommand(DOCKER, [
-    'image', 'inspect', '--format', '{{.Id}}', manifest.image,
+    'image', 'inspect', '--format', '{{.Id}}', manifest.runtimeReference,
   ], { capture: true, environment, timeoutMs: 10000 });
-  if (identity.status !== 0 || identity.stdout.trim() !== manifest.imageId) {
+  if (identity.status !== 0 || identity.stdout.trim() !== manifest.configDigest) {
     refuse('the resolved voice image ID differs from the reviewed manifest');
   }
   const revision = runCommand(DOCKER, [
-    'image', 'inspect', '--format', `{{index .Config.Labels "${IMAGE_REVISION_LABEL}"}}`, manifest.image,
+    'image', 'inspect', '--format', `{{index .Config.Labels "${IMAGE_REVISION_LABEL}"}}`,
+    manifest.runtimeReference,
   ], { capture: true, environment, timeoutMs: 10000 });
   if (revision.status !== 0 || revision.stdout.trim() !== manifest.sourceRevision) {
     refuse('the resolved voice image source revision differs from the reviewed manifest');
+  }
+  const platform = runCommand(DOCKER, [
+    'image', 'inspect', '--format', '{{.Os}}/{{.Architecture}}', manifest.runtimeReference,
+  ], { capture: true, environment, timeoutMs: 10000 });
+  if (platform.status !== 0 || platform.stdout.trim() !== manifest.platform) {
+    refuse('the resolved voice image platform differs from the reviewed manifest');
   }
   return true;
 }
@@ -442,6 +475,108 @@ function atomicReplaceFile(filename, contents, { mode, uid, gid }) {
   fs.renameSync(temporary, filename);
 }
 
+const ACTIVATION_STATE_KEYS = Object.freeze([
+  'version', 'project', 'activationGeneration', 'phase', 'previousPhase', 'panic', 'cleanup',
+  'imageManifest', 'panicOutcomeUnknownAt', 'interruptedStartRecoveredAt', 'updatedAt',
+]);
+const LEGACY_ACTIVATION_STATE_KEYS = Object.freeze([
+  'version', 'project', 'phase', 'previousPhase', 'panic', 'cleanup', 'image', 'imageId',
+  'sourceRevision', 'panicOutcomeUnknownAt', 'interruptedStartRecoveredAt', 'updatedAt',
+]);
+const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
+
+function validTimestamp(value, { nullable = false } = {}) {
+  if (value === null && nullable) return true;
+  if (typeof value !== 'string' || !ISO_TIMESTAMP.test(value)) return false;
+  try { return new Date(value).toISOString() === value; } catch { return false; }
+}
+
+function validActivationEvidence(state) {
+  if (state.phase === 'inactive') {
+    return state.cleanup === 'proved' &&
+      ['not_requested', 'quiesced', 'recovered'].includes(state.panic);
+  }
+  if (['starting', 'active'].includes(state.phase)) {
+    return state.panic === 'not_requested' && state.cleanup === 'required';
+  }
+  if (state.phase === 'stopping') {
+    return ['requested', 'quiesced'].includes(state.panic) && state.cleanup === 'required';
+  }
+  if (state.phase === 'panic_outcome_unknown') {
+    return ['requested', 'outcome_unknown'].includes(state.panic) &&
+      ['required', 'proved'].includes(state.cleanup);
+  }
+  return state.phase === 'cleanup_outcome_unknown' &&
+    PANIC_STATES.has(state.panic) && state.cleanup === 'outcome_unknown';
+}
+
+function normalizeLegacyActivationState(state, text) {
+  if (JSON.stringify(Object.keys(state)) !== JSON.stringify(LEGACY_ACTIVATION_STATE_KEYS) ||
+      text !== `${JSON.stringify(state)}\n` || state.project !== PROJECT ||
+      !ACTIVATION_PHASES.has(state.phase) ||
+      (state.previousPhase !== null && !ACTIVATION_PHASES.has(state.previousPhase)) ||
+      !PANIC_STATES.has(state.panic) || !CLEANUP_STATES.has(state.cleanup) ||
+      !validTimestamp(state.panicOutcomeUnknownAt, { nullable: true }) ||
+      !validTimestamp(state.interruptedStartRecoveredAt, { nullable: true }) ||
+      !validTimestamp(state.updatedAt)) {
+    refuse('the legacy durable voice activation state is invalid');
+  }
+  const allImageFieldsNull = state.image === null && state.imageId === null &&
+    state.sourceRevision === null;
+  const allImageFieldsValid =
+    typeof state.image === 'string' &&
+    /^[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[1-9][0-9]{0,4})?(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)+@sha256:[a-f0-9]{64}$/u.test(state.image) &&
+    typeof state.imageId === 'string' && /^sha256:[a-f0-9]{64}$/u.test(state.imageId) &&
+    typeof state.sourceRevision === 'string' &&
+      /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(state.sourceRevision);
+  if ((!allImageFieldsNull && !allImageFieldsValid) || !validActivationEvidence(state)) {
+    refuse('the legacy durable voice activation state is invalid');
+  }
+  return Object.freeze({ ...state });
+}
+
+function normalizeActivationState(source) {
+  const text = Buffer.isBuffer(source) ? source.toString('utf8') : String(source);
+  if (Buffer.byteLength(text) > 8192 || /\r|\0/u.test(text)) {
+    refuse('the durable voice activation state has invalid encoding');
+  }
+  let state;
+  try { state = JSON.parse(text); } catch {
+    refuse('the durable voice activation state is unreadable');
+  }
+  if (!state || typeof state !== 'object' || Array.isArray(state)) {
+    refuse('the durable voice activation state is invalid');
+  }
+  if (state.version === 1) return normalizeLegacyActivationState(state, text);
+  if (state.version !== 2 || state.project !== PROJECT ||
+      JSON.stringify(Object.keys(state)) !== JSON.stringify(ACTIVATION_STATE_KEYS) ||
+      text !== `${JSON.stringify(state)}\n` ||
+      !Number.isSafeInteger(state.activationGeneration) || state.activationGeneration < 0 ||
+      !ACTIVATION_PHASES.has(state.phase) ||
+      (state.previousPhase !== null && !ACTIVATION_PHASES.has(state.previousPhase)) ||
+      !PANIC_STATES.has(state.panic) || !CLEANUP_STATES.has(state.cleanup) ||
+      !validTimestamp(state.panicOutcomeUnknownAt, { nullable: true }) ||
+      !validTimestamp(state.interruptedStartRecoveredAt, { nullable: true }) ||
+      !validTimestamp(state.updatedAt) || !validActivationEvidence(state)) {
+    refuse('the durable voice activation state is invalid');
+  }
+  let imageManifest = null;
+  if (state.imageManifest !== null) {
+    if (typeof state.imageManifest !== 'object' || Array.isArray(state.imageManifest)) {
+      refuse('the durable voice activation image binding is invalid');
+    }
+    imageManifest = normalizeVoiceImageManifest(`${JSON.stringify(state.imageManifest)}\n`);
+  }
+  if ((state.activationGeneration === 0) !== (imageManifest === null)) {
+    refuse('the durable voice activation generation is not bound to one image');
+  }
+  if (['starting', 'active', 'stopping'].includes(state.phase) &&
+      state.activationGeneration < 1) {
+    refuse('the durable voice activation state has no generation truth');
+  }
+  return Object.freeze({ ...state, imageManifest });
+}
+
 function readActivationState() {
   inspectRootPath(ACTIVATION_ROOT, { directory: true, mode: 0o700 });
   if (!fs.existsSync(ACTIVATION_STATE)) return null;
@@ -449,16 +584,7 @@ function readActivationState() {
   if (metadata.size < 2 || metadata.size > 8192) {
     refuse('the durable voice activation state has an unsafe size');
   }
-  let state;
-  try { state = JSON.parse(fs.readFileSync(ACTIVATION_STATE, 'utf8')); } catch {
-    refuse('the durable voice activation state is unreadable');
-  }
-  if (!state || typeof state !== 'object' || Array.isArray(state) || state.version !== 1 ||
-      state.project !== PROJECT || !ACTIVATION_PHASES.has(state.phase) ||
-      !PANIC_STATES.has(state.panic) || !CLEANUP_STATES.has(state.cleanup)) {
-    refuse('the durable voice activation state is invalid');
-  }
-  return state;
+  return normalizeActivationState(fs.readFileSync(ACTIVATION_STATE));
 }
 
 function atomicWriteActivationState(state) {
@@ -495,13 +621,13 @@ function atomicWriteActivationState(state) {
 }
 
 function activationRequiresRecovery(state) {
-  if (!state) return false;
+  if (!state || state.version !== 2) return true;
   if (state.phase !== 'inactive' || state.cleanup !== 'proved') return true;
   return !['not_requested', 'quiesced', 'recovered'].includes(state.panic);
 }
 
 function cleanupRequiresPanicRecovery(state) {
-  if (!state) return false;
+  if (!state || state.version !== 2) return true;
   if (state.panic === 'outcome_unknown' || state.phase === 'panic_outcome_unknown') return true;
   const panicProved = ['quiesced', 'recovered'].includes(state.panic);
   return !panicProved && [
@@ -520,34 +646,59 @@ function cleanupEvidenceDisposition(state) {
   return Object.freeze({ phase: 'inactive', panic: null, cleanup: 'proved' });
 }
 
+function activationGenerationForTransition(previous, beginActivation) {
+  if (typeof beginActivation !== 'boolean') {
+    refuse('the voice activation generation transition is invalid');
+  }
+  const previousGeneration = previous?.version === 2 ? previous.activationGeneration : 0;
+  if (!Number.isSafeInteger(previousGeneration) || previousGeneration < 0 ||
+      (beginActivation && previousGeneration === Number.MAX_SAFE_INTEGER)) {
+    refuse('the voice activation generation is exhausted or invalid');
+  }
+  return previousGeneration + (beginActivation ? 1 : 0);
+}
+
 function persistActivationState(phase, {
   imageManifest = null,
   panic = null,
   cleanup = null,
+  beginActivation = false,
+  now = new Date(),
 } = {}) {
   if (!ACTIVATION_PHASES.has(phase)) refuse('the voice activation phase is invalid');
+  if ((phase === 'starting') !== beginActivation) {
+    refuse('the voice activation generation transition is invalid');
+  }
   const previous = readActivationState();
   const nextPanic = panic || previous?.panic || 'not_requested';
   const nextCleanup = cleanup || previous?.cleanup || 'required';
   if (!PANIC_STATES.has(nextPanic) || !CLEANUP_STATES.has(nextCleanup)) {
     refuse('the voice activation evidence is invalid');
   }
+  const activationGeneration = activationGenerationForTransition(previous, beginActivation);
+  const nextImageManifest = imageManifest ||
+    (previous?.version === 2 ? previous.imageManifest : null);
+  if ((activationGeneration === 0) !== (nextImageManifest === null) ||
+      (beginActivation && imageManifest === null)) {
+    refuse('the voice activation generation is not bound to one image');
+  }
+  const timestamp = new Date(now).toISOString();
   const state = {
-    version: 1,
+    version: 2,
     project: PROJECT,
+    activationGeneration,
     phase,
     previousPhase: previous?.phase || null,
     panic: nextPanic,
     cleanup: nextCleanup,
-    image: imageManifest?.image || previous?.image || null,
-    imageId: imageManifest?.imageId || previous?.imageId || null,
-    sourceRevision: imageManifest?.sourceRevision || previous?.sourceRevision || null,
-    panicOutcomeUnknownAt: phase === 'panic_outcome_unknown' ? new Date().toISOString() :
+    imageManifest: nextImageManifest,
+    panicOutcomeUnknownAt: phase === 'panic_outcome_unknown' ? timestamp :
       previous?.panicOutcomeUnknownAt || null,
     interruptedStartRecoveredAt: phase === 'inactive' && previous?.phase === 'starting' ?
-      new Date().toISOString() : previous?.interruptedStartRecoveredAt || null,
-    updatedAt: new Date().toISOString(),
+      timestamp : previous?.interruptedStartRecoveredAt || null,
+    updatedAt: timestamp,
   };
+  normalizeActivationState(`${JSON.stringify(state)}\n`);
   atomicWriteActivationState(state);
   return Object.freeze(state);
 }
@@ -807,6 +958,72 @@ function listExactProjectContainerIds(runCommand, environment) {
   return parseExactProjectContainerIds(listing.stdout);
 }
 
+function parseDockerCgroupInfo(output) {
+  const text = String(output || '');
+  if (Buffer.byteLength(text) > 128 || text !== 'systemd\t2\n') {
+    refuse('Docker is not using the reviewed systemd cgroup-v2 boundary');
+  }
+  return Object.freeze({ cgroupDriver: 'systemd', cgroupVersion: 2 });
+}
+
+function requireDockerCgroupBoundary({
+  runCommand = run,
+  environment = fixedDockerEnvironment(),
+} = {}) {
+  const information = runCommand(DOCKER, [
+    'info', '--format', '{{.CgroupDriver}}\t{{.CgroupVersion}}',
+  ], { capture: true, allowFailure: true, environment, timeoutMs: 10000 });
+  if (information.status !== 0) {
+    refuse('the Docker cgroup boundary is unverifiable');
+  }
+  return parseDockerCgroupInfo(information.stdout);
+}
+
+function parseVoiceContainerBoundary(output, activationGeneration) {
+  if (!Number.isSafeInteger(activationGeneration) || activationGeneration < 1) {
+    refuse('the voice activation generation is invalid');
+  }
+  const text = String(output || '');
+  if (Buffer.byteLength(text) > 8192 || /\r|\0/u.test(text)) {
+    refuse('the voice container boundary evidence is invalid');
+  }
+  const rows = text.trim() ? text.trim().split('\n').map((line) => line.split('\t')) : [];
+  if (rows.length !== VOICE_SERVICES.length || rows.some((fields) => fields.length !== 3)) {
+    refuse('the exact voice services are not all inside the aggregate boundary');
+  }
+  const services = rows.map(([service, generation, cgroupParent]) => {
+    if (!VOICE_SERVICES.includes(service) || generation !== String(activationGeneration) ||
+        cgroupParent !== CONTAINER_SLICE) {
+      refuse('a voice container escaped its activation generation or aggregate boundary');
+    }
+    return service;
+  });
+  if (new Set(services).size !== VOICE_SERVICES.length) {
+    refuse('the exact voice services are not all inside the aggregate boundary');
+  }
+  return Object.freeze([...services].sort());
+}
+
+function verifyExactProjectContainerBoundary(activationGeneration, {
+  runCommand = run,
+  environment = fixedDockerEnvironment(),
+} = {}) {
+  const identifiers = listExactProjectContainerIds(runCommand, environment);
+  if (identifiers.length !== VOICE_SERVICES.length) {
+    refuse('the exact voice services are not all inside the aggregate boundary');
+  }
+  const inspection = runCommand(DOCKER, [
+    'container', 'inspect', '--format',
+    `{{index .Config.Labels "com.docker.compose.service"}}\t` +
+      `{{index .Config.Labels "${ACTIVATION_GENERATION_LABEL}"}}\t` +
+      '{{.HostConfig.CgroupParent}}',
+    ...identifiers,
+  ], { capture: true, allowFailure: true, environment, timeoutMs: 10000 });
+  if (inspection.status !== 0) refuse('the voice container boundary is unverifiable');
+  parseVoiceContainerBoundary(inspection.stdout, activationGeneration);
+  return identifiers.length;
+}
+
 function cleanupExactProject({
   runCommand = run,
   environment = fixedDockerEnvironment(),
@@ -851,10 +1068,11 @@ async function start() {
     refuse('durable voice activation evidence requires explicit offline recovery');
   }
   requireActiveUnit('docker.service');
+  requireActiveUnit(CONTAINER_SLICE);
   ensureDockerConfigDirectory();
+  requireDockerCgroupBoundary();
   cleanupExactProject();
   removeRuntimeProjection();
-  persistActivationState('inactive', { cleanup: 'proved' });
 
   const imageManifest = readVoiceImageManifest();
   verifyVoiceImage(imageManifest);
@@ -874,12 +1092,15 @@ async function start() {
   const settings = readEnvironmentFile(identity);
   await requireControllerReady();
   await requirePrivilegedBrokerReady(settings);
-  const environment = fixedDockerEnvironment(settings, imageManifest);
-  persistActivationState('starting', {
+  const startingState = persistActivationState('starting', {
     imageManifest,
     panic: 'not_requested',
     cleanup: 'required',
+    beginActivation: true,
   });
+  const environment = fixedDockerEnvironment(
+    settings, imageManifest, startingState.activationGeneration
+  );
   let activationAttempted = false;
   try {
     const credentials = readCredentialSet(identity, settings);
@@ -890,6 +1111,7 @@ async function start() {
     activationAttempted = true;
     run(DOCKER, composeArgs('up', '--detach', '--no-build', '--pull', 'never'), { environment });
     await waitForHealth();
+    verifyExactProjectContainerBoundary(startingState.activationGeneration, { environment });
     persistActivationState('active', {
       imageManifest,
       panic: 'not_requested',
@@ -920,8 +1142,11 @@ async function start() {
 
 async function stop() {
   let activationEvidenceError = null;
+  let stoppingState = null;
   try {
-    persistActivationState('stopping', { panic: 'requested', cleanup: 'required' });
+    stoppingState = persistActivationState('stopping', {
+      panic: 'requested', cleanup: 'required',
+    });
   } catch (error) {
     activationEvidenceError = error;
   }
@@ -966,9 +1191,11 @@ async function stop() {
     tokenBuffer.fill(0);
   }
   if (activationEvidenceError) throw activationEvidenceError;
-  persistActivationState('stopping', { panic: 'quiesced', cleanup: 'required' });
-  const imageManifest = readVoiceImageManifest();
-  const environment = fixedDockerEnvironment(settings, imageManifest);
+  stoppingState = persistActivationState('stopping', { panic: 'quiesced', cleanup: 'required' });
+  const imageManifest = stoppingState.imageManifest;
+  const environment = fixedDockerEnvironment(
+    settings, imageManifest, stoppingState.activationGeneration
+  );
   try {
     run(DOCKER, composeArgs('stop', '--timeout', '25', 'voice-app'), {
       environment,
@@ -1109,20 +1336,26 @@ async function main() {
 module.exports = {
   assertPanicQuiesced,
   assertVoiceExit,
+  activationGenerationForTransition,
   activationRequiresRecovery,
   cleanupEvidenceDisposition,
   cleanupExactProject,
   cleanupRequiresPanicRecovery,
+  normalizeActivationState,
   normalizeVoiceImageManifest,
+  parseDockerCgroupInfo,
   parseVoiceEnvironmentFile,
   parseExactProjectContainerIds,
+  parseVoiceContainerBoundary,
   requestJson,
   renderTemplate,
   renderTemplateContents,
+  requireDockerCgroupBoundary,
   runOfflineRecovery,
   startFailureDisposition,
   verifyBoundedHostStateFilesystem,
   verifyVoiceAppRuntimeContract,
+  verifyExactProjectContainerBoundary,
   verifyVoiceImage,
   FIXED_VOICE_APP_BOUNDARY_ENV,
   MAX_CONTROL_RESPONSE_BYTES,

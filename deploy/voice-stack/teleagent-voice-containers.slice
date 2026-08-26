@@ -1,0 +1,20 @@
+[Unit]
+Description=Aggregate resource boundary for Teleagent voice containers
+Documentation=file:/opt/teleagent/current/docs/PHONE-AGENT-ARCHITECTURE.md
+StopWhenUnneeded=yes
+
+[Slice]
+CPUAccounting=yes
+CPUQuota=300%
+CPUWeight=50
+MemoryAccounting=yes
+MemoryHigh=2560M
+MemoryMax=3G
+MemorySwapMax=0
+TasksAccounting=yes
+TasksMax=1024
+IOAccounting=yes
+IOWeight=50
+
+# Deliberately dormant and non-enableable. The guarded voice unit activates
+# this parent only while Docker creates the four reviewed Compose containers.

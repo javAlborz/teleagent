@@ -20,6 +20,7 @@ const COLLISION_IDENTITIES = Object.freeze([
 ]);
 const REVIEWED_ASSETS = Object.freeze([
   ['teleagent-voice-stack.service', '/etc/systemd/system/teleagent-voice-stack.service', 0o644],
+  ['teleagent-voice-containers.slice', '/etc/systemd/system/teleagent-voice-containers.slice', 0o644],
   ['teleagent-voice-stack.sysusers', '/etc/sysusers.d/teleagent-voice-stack.conf', 0o644],
   ['teleagent-voice-stack.tmpfiles', '/etc/tmpfiles.d/teleagent-voice-stack.conf', 0o644],
   ['teleagent-voice-stack-launch.js', '/usr/local/libexec/teleagent-voice-stack-launch', 0o755],
@@ -52,6 +53,8 @@ function sourceCheck(sourceRoot = SOURCE_ROOT) {
   const sysusers = fs.readFileSync(path.join(sourceRoot, 'teleagent-voice-stack.sysusers'), 'utf8');
   const tmpfiles = fs.readFileSync(path.join(sourceRoot, 'teleagent-voice-stack.tmpfiles'), 'utf8');
   const service = fs.readFileSync(path.join(sourceRoot, 'teleagent-voice-stack.service'), 'utf8');
+  const slice = fs.readFileSync(path.join(sourceRoot, 'teleagent-voice-containers.slice'), 'utf8');
+  const compose = fs.readFileSync(path.resolve(sourceRoot, '..', '..', 'docker-compose.yml'), 'utf8');
   if (JSON.stringify(meaningfulLines(sysusers)) !== JSON.stringify([
     'g teleagent-voice -',
     'u teleagent-voice - "Teleagent private voice orchestrator" /var/lib/teleagent-voice /usr/sbin/nologin',
@@ -64,7 +67,25 @@ function sourceCheck(sourceRoot = SOURCE_ROOT) {
     'd /var/lib/teleagent-voice-stack 0700 root root -',
     'd /run/teleagent-voice-stack 0700 root root -',
   ])) refuse('the tmpfiles directory contract drifted');
-  if (/^\[Install\]$/mu.test(service) ||
+  if (JSON.stringify(meaningfulLines(slice)) !== JSON.stringify([
+    '[Unit]',
+    'Description=Aggregate resource boundary for Teleagent voice containers',
+    'Documentation=file:/opt/teleagent/current/docs/PHONE-AGENT-ARCHITECTURE.md',
+    'StopWhenUnneeded=yes',
+    '[Slice]',
+    'CPUAccounting=yes',
+    'CPUQuota=300%',
+    'CPUWeight=50',
+    'MemoryAccounting=yes',
+    'MemoryHigh=2560M',
+    'MemoryMax=3G',
+    'MemorySwapMax=0',
+    'TasksAccounting=yes',
+    'TasksMax=1024',
+    'IOAccounting=yes',
+    'IOWeight=50',
+  ])) refuse('the aggregate voice-container slice contract drifted');
+  if (/^\[Install\]$/mu.test(service) || /^\[Install\]$/mu.test(slice) ||
       /^Environment=.*(?:TOKEN|PASSWORD|SECRET|API_KEY|PRIVATE_KEY)=/imu.test(service)) {
     refuse('the voice unit became enableable or embeds a credential');
   }
@@ -82,6 +103,14 @@ function sourceCheck(sourceRoot = SOURCE_ROOT) {
     'the unconditional cleanup command');
   exactlyOnce(service, /^User=root$/gmu, 'the root orchestrator user');
   exactlyOnce(service, /^Group=root$/gmu, 'the root orchestrator group');
+  exactlyOnce(service, /^Requires=teleagent-voice-containers\.slice$/gmu,
+    'the aggregate voice-container slice dependency');
+  if ((compose.match(/^    cgroup_parent: teleagent-voice-containers\.slice$/gmu) || []).length !== 4 ||
+      (compose.match(/^      com\.teleagent\.voice\.activation-generation: /gmu) || []).length !== 4 ||
+      (compose.match(/^\s+cgroup_parent:/gmu) || []).length !== 4 ||
+      (compose.match(/^\s+com\.teleagent\.voice\.activation-generation:/gmu) || []).length !== 4) {
+    refuse('the Compose aggregate cgroup/generation contract drifted');
+  }
   for (const dependency of [
     'teleagent-sip-local-peer-fence.service',
     'teleagent-agent-controller.service',
