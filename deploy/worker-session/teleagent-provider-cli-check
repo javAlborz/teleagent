@@ -6,6 +6,8 @@ const fs = require('node:fs');
 
 const MANIFEST = '/usr/local/libexec/teleagent-provider-cli.manifest.json';
 const PROVIDERS = new Set(['claude', 'codex']);
+const TARGET_ROOT = '/opt/teleagent/agent-tools';
+const PRIVATE_STAGE_PREFIX = '.provider-cli-stage-';
 
 class ProviderCliCheckRefusal extends Error {}
 
@@ -62,6 +64,15 @@ function readManifest() {
   return manifest;
 }
 
+function assertNoPrivateStages(targetRoot = TARGET_ROOT, {
+  readDirectory = fs.readdirSync,
+} = {}) {
+  const entries = readDirectory(targetRoot);
+  if (entries.some((entry) => entry.startsWith(PRIVATE_STAGE_PREFIX))) {
+    fail('an interrupted provider CLI stage requires operator review');
+  }
+}
+
 async function checkArtifact(artifact, { expectedUid = 0, expectedGid = 0 } = {}) {
   const metadata = fs.lstatSync(artifact.path);
   if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.uid !== expectedUid ||
@@ -81,9 +92,11 @@ async function main() {
       !PROVIDERS.has(process.argv[3])) fail('use the fixed root CLI checker entrypoint');
   const provider = process.argv[3];
   const manifest = readManifest();
+  assertNoPrivateStages();
   for (const artifact of manifest.artifacts.filter((entry) => entry.provider === provider)) {
     await checkArtifact(artifact);
   }
+  assertNoPrivateStages();
   process.stdout.write(`PROVIDER_CLI_OK ${provider}\n`);
 }
 
@@ -98,6 +111,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  assertNoPrivateStages,
   checkArtifact,
   digestFile,
 };

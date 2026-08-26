@@ -10,6 +10,8 @@ const MANIFEST = '/usr/local/libexec/teleagent-provider-cli.manifest.json';
 const CHECKER = '/usr/local/libexec/teleagent-provider-cli-check';
 const SYSTEMCTL = '/usr/bin/systemctl';
 const TARGET_ROOT = '/opt/teleagent/agent-tools';
+const PRIVATE_STAGE_PREFIX = '.provider-cli-stage-';
+const PRIVATE_STAGE_NAME = `${PRIVATE_STAGE_PREFIX}active`;
 
 class ProviderCliInstallRefusal extends Error {}
 
@@ -176,14 +178,27 @@ function assertTargetKnownOrAbsent(artifact) {
   }
 }
 
+function assertNoPrivateStages(targetRoot = TARGET_ROOT, {
+  readDirectory = fs.readdirSync,
+} = {}) {
+  const entries = readDirectory(targetRoot);
+  if (entries.some((entry) => entry.startsWith(PRIVATE_STAGE_PREFIX))) {
+    fail('an interrupted provider CLI stage requires operator review');
+  }
+}
+
 function installArtifactsInPrivateStage(manifest, artifacts, sources, {
   targetRoot = TARGET_ROOT,
   expectedUid = 0,
   expectedGid = 0,
   copySource = copySourceToStage,
 } = {}) {
-  const stage = fs.mkdtempSync(path.join(targetRoot, '.provider-cli-stage-'));
+  assertNoPrivateStages(targetRoot);
+  const stage = path.join(targetRoot, PRIVATE_STAGE_NAME);
+  let stageCreated = false;
   try {
+    fs.mkdirSync(stage, { mode: 0o700 });
+    stageCreated = true;
     const stageMetadata = fs.lstatSync(stage);
     if (!stageMetadata.isDirectory() || stageMetadata.isSymbolicLink() ||
         stageMetadata.uid !== expectedUid || stageMetadata.gid !== expectedGid ||
@@ -205,7 +220,10 @@ function installArtifactsInPrivateStage(manifest, artifacts, sources, {
   } finally {
     // All refusal and unexpected-error paths unwind here. Internal validation
     // must never terminate the process before a potentially huge stage is gone.
-    fs.rmSync(stage, { recursive: true, force: true });
+    // A crash or SIGKILL can bypass this block. The fixed, exclusive stage
+    // name and the pre-creation scan make that orphan a persistent refusal
+    // instead of permitting an unbounded sequence of large stages.
+    if (stageCreated) fs.rmSync(stage, { recursive: true, force: true });
   }
 }
 
@@ -277,6 +295,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  assertNoPrivateStages,
   copySourceToStage,
   installArtifactsInPrivateStage,
   sameSourceSnapshot,

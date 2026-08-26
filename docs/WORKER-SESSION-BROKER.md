@@ -145,6 +145,13 @@ for `--version`. Captured version strings remain release provenance. The later
 managed provider canary is the sole activation execution proof and runs through
 the unprivileged supervisor/worker boundary.
 
+Any entry named `.provider-cli-stage-*` under
+`/opt/teleagent/agent-tools` is fail-closed evidence of an interrupted CLI
+install. Do not retry installation or activate the provider plane. First prove
+the provider plane is quiescent; then root must inspect the entry and remove
+only the exact reviewed orphan before retrying. The installer and checker never
+delete an orphan automatically.
+
 Activation is a later, explicit root operation. It requires a root review,
 provider-specific credentials with project-side billing limits plus local
 conservative request/reserved-token allowances, the activation sentinel, and a

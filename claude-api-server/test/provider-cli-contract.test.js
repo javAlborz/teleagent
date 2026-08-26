@@ -7,9 +7,11 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const {
+  assertNoPrivateStages: assertInstallerHasNoPrivateStages,
   installArtifactsInPrivateStage,
 } = require('../../deploy/worker-session/teleagent-provider-cli-install');
 const {
+  assertNoPrivateStages: assertCheckerHasNoPrivateStages,
   checkArtifact,
 } = require('../../deploy/worker-session/teleagent-provider-cli-check');
 const {
@@ -208,4 +210,66 @@ test('provider CLI installation removes private stages on every pre-commit failu
       [],
     );
   }
+});
+
+test('one interrupted provider CLI stage blocks install and check without creating another', (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'provider-cli-orphan-stage-'));
+  fs.chmodSync(directory, 0o700);
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const orphan = path.join(directory, '.provider-cli-stage-interrupted');
+  fs.mkdirSync(orphan, { mode: 0o700 });
+  fs.writeFileSync(path.join(orphan, 'partial-vendor'), 'partial fixture\n', { mode: 0o600 });
+
+  assert.throws(
+    () => assertInstallerHasNoPrivateStages(directory),
+    /interrupted provider CLI stage requires operator review/,
+  );
+  assert.throws(
+    () => assertCheckerHasNoPrivateStages(directory),
+    /interrupted provider CLI stage requires operator review/,
+  );
+
+  let copyCalls = 0;
+  assert.throws(
+    () => installArtifactsInPrivateStage({ artifacts: [] }, {}, {}, {
+      targetRoot: directory,
+      expectedUid: process.getuid(),
+      expectedGid: process.getgid(),
+      copySource: () => { copyCalls += 1; },
+    }),
+    /interrupted provider CLI stage requires operator review/,
+  );
+  assert.equal(copyCalls, 0);
+  assert.deepEqual(
+    fs.readdirSync(directory).filter((name) => name.startsWith('.provider-cli-stage-')),
+    ['.provider-cli-stage-interrupted'],
+  );
+  assert.equal(fs.existsSync(path.join(directory, '.provider-cli-stage-active')), false);
+});
+
+test('provider CLI orphan detection rejects stage-shaped files and links', (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'provider-cli-stage-types-'));
+  fs.chmodSync(directory, 0o700);
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const unrelated = path.join(directory, 'unrelated');
+  fs.writeFileSync(unrelated, 'fixture\n', { mode: 0o600 });
+
+  for (const [name, create] of [
+    ['.provider-cli-stage-file', (filename) => fs.writeFileSync(filename, 'fixture\n')],
+    ['.provider-cli-stage-link', (filename) => fs.symlinkSync(unrelated, filename)],
+  ]) {
+    const candidate = path.join(directory, name);
+    create(candidate);
+    assert.throws(
+      () => assertInstallerHasNoPrivateStages(directory),
+      /interrupted provider CLI stage requires operator review/,
+    );
+    assert.throws(
+      () => assertCheckerHasNoPrivateStages(directory),
+      /interrupted provider CLI stage requires operator review/,
+    );
+    fs.unlinkSync(candidate);
+  }
+  assert.doesNotThrow(() => assertInstallerHasNoPrivateStages(directory));
+  assert.doesNotThrow(() => assertCheckerHasNoPrivateStages(directory));
 });
