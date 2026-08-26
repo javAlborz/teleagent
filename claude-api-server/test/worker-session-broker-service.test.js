@@ -58,6 +58,7 @@ test('service config requires the worker UID contract and one named inherited so
   assert.ok(Number.isInteger(lookupSystemGroupGid()));
   const config = normalizeWorkerSessionServiceConfig(environment(), {
     uid: 1234,
+    gid: 1235,
     username: FIXED_BROKER_USER,
     pid: 4242,
     controllerGid: 5678,
@@ -158,6 +159,7 @@ test('a lifetime-lock loser performs no store open, recovery, tmux, or listen wo
   await assert.rejects(startWorkerSessionBroker({
     config: {
       uid: 1234,
+      gid: 1235,
       controllerGid: 5678,
       listenFd: 3,
       brokerSocket: FIXED_BROKER_SOCKET,
@@ -170,13 +172,17 @@ test('a lifetime-lock loser performs no store open, recovery, tmux, or listen wo
     Store: ForbiddenStore,
     Inspector: ForbiddenInspector,
     assertSocketBoundary() { calls.push('socket_checked'); },
+    createStorageGuard() {
+      calls.push('storage_checked');
+      return { assertNewWork() {} };
+    },
     acquireSingleton() {
       calls.push('lock_attempted');
       throw new Error('Another worker session broker holds the lifetime lock.');
     },
     createBroker() { calls.push('broker'); },
   }), /holds the lifetime lock/);
-  assert.deepEqual(calls, ['socket_checked', 'lock_attempted']);
+  assert.deepEqual(calls, ['storage_checked', 'socket_checked', 'lock_attempted']);
 });
 
 test('independent brokers race once and SIGKILL releases the kernel lifetime lock', async () => {

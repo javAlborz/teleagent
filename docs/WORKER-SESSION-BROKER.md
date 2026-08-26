@@ -80,6 +80,28 @@ is persisted before tmux input; ambiguous delivery is reconciled and never
 blindly resent. Restarted post-boundary operations remain outcome-unknown until
 the exact pane/session marker and final provider response prove completion.
 
+Worker durability is isolated from the host root filesystem. Before activation,
+the operator must provision `/var/lib/teleagent-worker-state` as an exact
+dedicated filesystem mount between 1 GiB and 8 GiB, owned by `root:root` at mode
+0751. Tmpfiles then creates private mode-0700 `session-broker`, `claude-egress`,
+and `codex-egress` directories for the matching service identities. The broker
+and egress units order themselves after that mount, and both activation checks
+and every process startup prove that the exact state root has a different
+device from `/var/lib`, that no role directory crosses to another device, and
+that all ownership and modes remain exact.
+
+Every new operation, pane identity, egress capability, and budget reservation
+rechecks the filesystem. New durable work is refused when free space falls
+below the larger of 512 MiB or 10 percent of total capacity. Existing
+idempotency records and panic, revocation, completion, and outcome-unknown
+recovery remain writable so pressure cannot erase or misreport crash truth.
+The session broker does not prune unresolved or terminal operation truth;
+the dedicated mount is its hard host-containment boundary. Egress startup
+removes only reservations and already-revoked capabilities older than 14 days,
+never active or recent capability state. The broker is also capped at 512 MiB
+RAM, zero swap, 128 tasks, and 50 percent of one CPU; egress services retain
+their independent recovery-plane resource caps.
+
 ## Session parity and deliberate limits
 
 Only sessions created on the broker-owned tmux socket are visible. Historical

@@ -52,7 +52,7 @@ ReadOnlyPaths=/usr/local/libexec /sys/kernel/security/apparmor/profiles
 ReadWritePaths=/run/teleagent-voice-stack /var/lib/teleagent-voice
 ReadWritePaths=/var/lib/teleagent-voice-stack
 InaccessiblePaths=/etc/teleagent/provider-egress-secrets /etc/teleagent/privileged-action
-InaccessiblePaths=/var/lib/teleagent-provider-plane /var/lib/teleagent-session-broker
+InaccessiblePaths=/var/lib/teleagent-provider-plane /var/lib/teleagent-worker-state
 
 # Deliberately no [Install] section. A root operator must complete every
 # activation canary and start this dormant unit explicitly.

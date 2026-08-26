@@ -217,3 +217,50 @@ test('panic is durable, terminalizes each delivery boundary truthfully, and gate
 function valueHash(value) {
   return requestHash(value);
 }
+
+test('state reserve blocks only new identities and preserves recovery truth', (t) => {
+  let exhausted = false;
+  const store = new WorkerSessionOperationStore({
+    admitNewWork() {
+      if (exhausted) {
+        const error = new Error('state reserve exhausted');
+        error.code = 'WORKER_STATE_CAPACITY_EXHAUSTED';
+        throw error;
+      }
+    },
+  });
+  t.after(() => store.close());
+  const value = request({ operationId: 'job_storage_reserve_existing' });
+  const input = preparedInput(value);
+  assert.equal(store.prepare(input).created, true);
+  const pane = {
+    creationId: 'session_abcdef0123456789',
+    sessionName: 'phone-claude-abcdef01',
+    provider: 'claude',
+    providerUser: 'teleagent-claude-worker',
+    providerSessionId: '123e4567-e89b-42d3-a456-426614174099',
+    workspace: '/srv/teleagent-agent-workspaces/phone',
+    launcherPath: '/usr/local/libexec/teleagent-session-pane-entry',
+  };
+  assert.equal(store.planPaneAttestation(pane).created, true);
+
+  exhausted = true;
+  assert.equal(store.prepare(input).created, false, 'idempotent replay must remain readable');
+  assert.equal(store.planPaneAttestation(pane).created, false);
+  assert.throws(
+    () => store.prepare(preparedInput(request({ operationId: 'job_storage_reserve_new' }))),
+    { code: 'WORKER_SESSION_STORAGE_CAPACITY_EXHAUSTED' }
+  );
+  assert.throws(
+    () => store.planPaneAttestation({
+      ...pane,
+      creationId: 'session_abcdef0123456790',
+      sessionName: 'phone-claude-abcdef02',
+      providerSessionId: '123e4567-e89b-42d3-a456-426614174100',
+    }),
+    { code: 'WORKER_SESSION_STORAGE_CAPACITY_EXHAUSTED' }
+  );
+  assert.equal(store.outcomeUnknown(value.operationId, new Error('ambiguous')).state, 'outcome_unknown');
+  assert.equal(store.get(value.operationId).state, 'outcome_unknown');
+  assert.equal(store.panic({ reason: 'storage_low', source: 'test' }).persisted, true);
+});

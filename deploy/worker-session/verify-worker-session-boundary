@@ -54,10 +54,67 @@ esac
 
 broker=/run/teleagent-worker-session/broker.sock
 tmux_socket=/run/teleagent-worker-session/tmux.sock
-state=/var/lib/teleagent-session-broker/operations.sqlite
+state_root=/var/lib/teleagent-worker-state
+state=/var/lib/teleagent-worker-state/session-broker/operations.sqlite
 workspace=/srv/teleagent-agent-workspaces/phone
 controller_user=teleagent-control
 provider_launcher=/usr/local/libexec/teleagent-provider-supervisor-client
+
+# Durable worker/budget state must be unable to exhaust the host root. The
+# exact worker-state root is a 1-8 GiB mount distinct from /var/lib, and every
+# role receives only its private directory. Runtime admission preserves at
+# least 512 MiB or 10%, whichever is greater.
+[ "$(/usr/bin/readlink -f -- /var/lib)" = /var/lib ] &&
+  [ "$(/usr/bin/stat -c '%u:%g' /var/lib)" = 0:0 ] &&
+  [ $((0$(/usr/bin/stat -c '%a' /var/lib) & 0022)) -eq 0 ] || {
+  echo "worker state parent is replaceable or unsafe" >&2
+  exit 77
+}
+[ "$(/usr/bin/stat -c '%d' "$state_root")" != \
+  "$(/usr/bin/stat -c '%d' /var/lib)" ] || {
+  echo "worker state is not an exact dedicated mount" >&2
+  exit 77
+}
+[ "$(/usr/bin/readlink -f -- "$state_root")" = "$state_root" ] &&
+  [ "$(/usr/bin/stat -c '%u:%g:%a' "$state_root")" = 0:0:751 ] || {
+  echo "worker state mount metadata is unsafe" >&2
+  exit 77
+}
+state_fs=$(/usr/bin/stat -f -c '%S:%b:%a' "$state_root")
+state_block_size=${state_fs%%:*}
+state_rest=${state_fs#*:}
+state_blocks=${state_rest%%:*}
+state_available=${state_rest##*:}
+case "$state_block_size:$state_blocks:$state_available" in
+  ''|*[!0-9:]*|::*|*::) echo "worker state filesystem accounting is invalid" >&2; exit 77 ;;
+esac
+state_capacity=$((state_block_size * state_blocks))
+state_free=$((state_block_size * state_available))
+state_min=$((1024 * 1024 * 1024))
+state_max=$((8 * 1024 * 1024 * 1024))
+state_reserve=$((state_capacity / 10))
+[ "$state_reserve" -ge $((512 * 1024 * 1024)) ] || state_reserve=$((512 * 1024 * 1024))
+[ "$state_capacity" -ge "$state_min" ] && [ "$state_capacity" -le "$state_max" ] &&
+  [ "$state_free" -ge "$state_reserve" ] || {
+  echo "worker state capacity or reserve is unsafe" >&2
+  exit 77
+}
+for state_role in session-broker claude-egress codex-egress; do
+  case "$state_role" in
+    session-broker) state_user=teleagent-session-broker ;;
+    claude-egress) state_user=teleagent-claude-egress ;;
+    codex-egress) state_user=teleagent-codex-egress ;;
+  esac
+  state_directory="$state_root/$state_role"
+  [ "$(/usr/bin/readlink -f -- "$state_directory")" = "$state_directory" ] &&
+    [ "$(/usr/bin/stat -c '%u:%g:%a' "$state_directory")" = \
+      "$(/usr/bin/id -u "$state_user"):$(/usr/bin/id -g "$state_user"):700" ] &&
+    [ "$(/usr/bin/stat -c '%d' "$state_directory")" = \
+      "$(/usr/bin/stat -c '%d' "$state_root")" ] || {
+    echo "worker state role directory is unsafe" >&2
+    exit 77
+  }
+done
 
 # Real provider homes must be credential-free. ENOENT is the required state,
 # not a substitute for a DAC test: model-compatible API keys live only in the
@@ -157,7 +214,7 @@ const deniedSockets = [
   "/run/teleagent-privileged-action/broker.sock",
 ];
 const deniedFiles = [
-  "/var/lib/teleagent-session-broker/operations.sqlite",
+  "/var/lib/teleagent-worker-state/session-broker/operations.sqlite",
   otherHome,
   supervisorHome,
   "/var/lib/teleagent-control",
@@ -279,7 +336,7 @@ const deniedSockets = [
     .map((candidate) => `/run/teleagent-provider-egress/${candidate}.sock`),
 ];
 const deniedFiles = [
-  "/var/lib/teleagent-session-broker/operations.sqlite",
+  "/var/lib/teleagent-worker-state/session-broker/operations.sqlite",
   "/var/lib/teleagent-control",
   process.argv[2],
 ];
@@ -427,8 +484,8 @@ protected_directories='
 /etc/teleagent-voice
 /var/lib/teleagent-control
 /var/lib/teleagent-privileged-action
-/var/lib/teleagent-claude-egress
-/var/lib/teleagent-codex-egress
+/var/lib/teleagent-worker-state/claude-egress
+/var/lib/teleagent-worker-state/codex-egress
 '
 probe_arguments=
 created_probes=

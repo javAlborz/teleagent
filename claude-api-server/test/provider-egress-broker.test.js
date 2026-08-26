@@ -22,6 +22,7 @@ const {
   normalizeAllowedAnthropicBeta,
   openBudgetStore,
   parseRequestBody,
+  pruneBudgetHistory,
   recoverCapabilities,
   rejectUnsafeEnvironment,
   registerCapability,
@@ -230,7 +231,7 @@ test('credential broker refuses Node/TLS debug injection without echoing secret 
   assert.doesNotThrow(() => rejectUnsafeEnvironment({
     CREDENTIALS_DIRECTORY: '/run/credentials/teleagent-provider-egress@claude.service',
     TELEAGENT_PROVIDER: 'claude',
-    HOME: '/var/lib/teleagent-claude-egress',
+    HOME: PROVIDERS.claude.home,
     LISTEN_PID: '1234',
     LISTEN_FDS: '2',
     LISTEN_FDNAMES: 'egress-claude:egress-control-claude',
@@ -278,6 +279,105 @@ test('per-launch and daily reservations are atomic and expose only sanitized bud
   assert.equal(status.usedReservedTokens, 800);
   assert.deepEqual(status.models, [{ model: 'gpt-5.6-sol', requests: 2, reservedTokens: 800 }]);
   assert.doesNotMatch(JSON.stringify(status), /capability|credential|prompt|path/i);
+});
+
+test('provider state reserve blocks new capabilities and reservations but not revocation', (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'provider-egress-capacity-'));
+  let exhausted = false;
+  const db = openBudgetStore(path.join(directory, 'budget.sqlite'), {
+    uid: process.getuid(),
+    gid: process.getgid(),
+    storageAdmission() {
+      if (exhausted) {
+        const error = new Error('state reserve exhausted');
+        error.code = 'WORKER_STATE_CAPACITY_EXHAUSTED';
+        throw error;
+      }
+    },
+  });
+  t.after(() => {
+    db.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+  const selectedPolicy = policy();
+  const expiresAtMs = Date.now() + 60_000;
+  assert.equal(register(db, selectedPolicy, { expiresAtMs }).registered, true);
+  exhausted = true;
+  assert.equal(register(db, selectedPolicy, { expiresAtMs }).idempotent, true);
+  assert.throws(() => register(db, selectedPolicy, {
+    launchId: 'launch_99999999999999999999999999999999',
+    capability: OTHER_CAPABILITY,
+  }), { code: 'PROVIDER_STATE_CAPACITY_EXHAUSTED' });
+  assert.throws(() => reserveBudget(db, selectedPolicy, {
+    reservationId: 'reservation_capacity', launchId: LAUNCH_ID,
+    capability: CAPABILITY, model: 'gpt-5.6-sol', routeKind: 'inference',
+    reasoningEffort: 'high', requestBytes: 100, reservedTokens: 200,
+  }), { code: 'PROVIDER_STATE_CAPACITY_EXHAUSTED' });
+  assert.equal(revokeCapability(db, { launchId: LAUNCH_ID }).persisted, true);
+  assert.equal(recoverCapabilities(db).persisted, true);
+});
+
+test('provider state retention prunes only old revoked accounting history', (t) => {
+  const { db, policy: selectedPolicy } = harness(t);
+  const old = new Date('2026-07-01T00:00:00.000Z');
+  const recent = new Date('2026-08-20T00:00:00.000Z');
+  const oldActiveLaunchId = 'launch_33333333333333333333333333333333';
+  const recentRevokedLaunchId = 'launch_22222222222222222222222222222222';
+  register(db, selectedPolicy, {
+    expiresAtMs: old.getTime() + 60_000,
+    now: old,
+  });
+  reserveBudget(db, selectedPolicy, {
+    reservationId: 'reservation_old', launchId: LAUNCH_ID,
+    capability: CAPABILITY, model: 'gpt-5.6-sol', routeKind: 'inference',
+    reasoningEffort: 'high', requestBytes: 100, reservedTokens: 200,
+    now: old,
+  });
+  revokeCapability(db, { launchId: LAUNCH_ID, now: old });
+  register(db, selectedPolicy, {
+    launchId: oldActiveLaunchId,
+    capability: 'ef'.repeat(32),
+    expiresAtMs: old.getTime() + 60_000,
+    now: old,
+  });
+  reserveBudget(db, selectedPolicy, {
+    reservationId: 'reservation_old_active', launchId: oldActiveLaunchId,
+    capability: 'ef'.repeat(32), model: 'gpt-5.6-sol', routeKind: 'inference',
+    reasoningEffort: 'high', requestBytes: 100, reservedTokens: 200,
+    now: old,
+  });
+  register(db, selectedPolicy, {
+    launchId: recentRevokedLaunchId,
+    capability: OTHER_CAPABILITY,
+    expiresAtMs: recent.getTime() + 60_000,
+    now: recent,
+  });
+  reserveBudget(db, selectedPolicy, {
+    reservationId: 'reservation_recent', launchId: recentRevokedLaunchId,
+    capability: OTHER_CAPABILITY, model: 'gpt-5.6-sol', routeKind: 'inference',
+    reasoningEffort: 'high', requestBytes: 100, reservedTokens: 200,
+    now: recent,
+  });
+  revokeCapability(db, { launchId: recentRevokedLaunchId, now: recent });
+  assert.deepEqual(pruneBudgetHistory(db, {
+    now: new Date('2026-08-26T00:00:00.000Z'),
+  }), {
+    cutoff: '2026-08-12',
+    reservations: 1,
+    capabilities: 1,
+  });
+  assert.deepEqual(db.prepare(
+    'SELECT launch_id, state FROM provider_egress_capabilities ORDER BY launch_id'
+  ).all(), [
+    { launch_id: recentRevokedLaunchId, state: 'canceled' },
+    { launch_id: oldActiveLaunchId, state: 'active' },
+  ]);
+  assert.deepEqual(db.prepare(
+    'SELECT reservation_id FROM provider_egress_reservations ORDER BY reservation_id'
+  ).all(), [
+    { reservation_id: 'reservation_old_active' },
+    { reservation_id: 'reservation_recent' },
+  ]);
 });
 
 test('input reservations use a worst-case byte bound plus output and fixed framing', (t) => {
@@ -1286,11 +1386,15 @@ test('broker process startup revokes persisted launch capabilities before either
     config: {
       provider: 'codex',
       uid: process.getuid(),
+      gid: process.getgid(),
       spec: { ...PROVIDERS.codex, database: path.join(t.mock ? '' : '/', 'unused') },
       policy: selectedPolicy,
       credential: 'upstream-secret-that-never-returns',
       dataFd: 3,
       controlFd: 4,
+    },
+    createStorageGuard() {
+      return { assertNewWork() {} };
     },
     openStore() {
       return {

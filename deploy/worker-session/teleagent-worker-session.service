@@ -3,6 +3,7 @@ Description=Teleagent isolated workspace and tmux session broker
 Documentation=file:/opt/teleagent/current/docs/WORKER-SESSION-BROKER.md
 Requires=teleagent-worker-session.socket
 After=local-fs.target teleagent-worker-session.socket
+RequiresMountsFor=/var/lib/teleagent-worker-state
 ConditionPathExists=/etc/teleagent/worker-session/ENABLE
 
 [Service]
@@ -12,14 +13,15 @@ Group=teleagent-session-broker
 SupplementaryGroups=teleagent-agent-workspace teleagent-provider-launch
 UMask=0077
 WorkingDirectory=/opt/teleagent/current
-Environment=HOME=/var/lib/teleagent-session-broker
+Environment=HOME=/var/lib/teleagent-worker-state/session-broker
 Environment=PATH=/opt/teleagent/agent-tools:/usr/local/bin:/usr/bin:/bin
 Environment=LANG=C.UTF-8
 Environment=LC_ALL=C.UTF-8
 Environment=WORKER_SESSION_BROKER_SOCKET_PATH=/run/teleagent-worker-session/broker.sock
 Environment=WORKER_SESSION_TMUX_SOCKET_PATH=/run/teleagent-worker-session/tmux.sock
-Environment=WORKER_SESSION_DB_PATH=/var/lib/teleagent-session-broker/operations.sqlite
-Environment=WORKER_SESSION_SINGLETON_DB_PATH=/var/lib/teleagent-session-broker/lifetime-lock.sqlite
+Environment=WORKER_SESSION_DB_PATH=/var/lib/teleagent-worker-state/session-broker/operations.sqlite
+Environment=WORKER_SESSION_SINGLETON_DB_PATH=/var/lib/teleagent-worker-state/session-broker/lifetime-lock.sqlite
+Environment=WORKER_SESSION_PROVIDER_VIEW=/var/lib/teleagent-worker-state/session-broker/provider-view
 Environment=WORKER_SESSION_WORKSPACE_ROOT=/srv/teleagent-agent-workspaces
 Environment=WORKER_SESSION_INSPECTION_ROOTS=/srv/teleagent-agent-workspaces/phone
 ExecStart=/opt/teleagent/node/bin/node /opt/teleagent/current/claude-api-server/worker-session-broker-service.js
@@ -28,6 +30,14 @@ RestartSec=2s
 KillMode=control-group
 TimeoutStopSec=20s
 LimitCORE=0
+MemoryHigh=384M
+MemoryMax=512M
+MemorySwapMax=0
+TasksMax=128
+CPUQuota=50%
+CPUWeight=100
+IOAccounting=yes
+IOWeight=100
 NoNewPrivileges=yes
 CapabilityBoundingSet=
 AmbientCapabilities=
@@ -38,8 +48,8 @@ PrivateTmp=no
 ProtectSystem=strict
 ProtectHome=yes
 ReadOnlyPaths=/srv/teleagent-agent-workspaces
-ReadWritePaths=/var/lib/teleagent-session-broker /run/teleagent-worker-session
-InaccessiblePaths=/var/lib/teleagent-control /run/teleagent-privileged-action
+ReadWritePaths=/var/lib/teleagent-worker-state/session-broker /run/teleagent-worker-session
+InaccessiblePaths=/var/lib/teleagent-control /var/lib/teleagent-worker-state/claude-egress /var/lib/teleagent-worker-state/codex-egress /run/teleagent-privileged-action
 ProtectControlGroups=yes
 ProtectKernelLogs=yes
 ProtectKernelModules=yes

@@ -11,6 +11,11 @@ const { WorkerSessionOperationStore } = require('./worker-session-operation-stor
 const { AttestedWorkerSessionInspector } = require('./worker-session-attested-inspector');
 const { WorkerSessionPaneManager } = require('./worker-session-pane-manager');
 const {
+  FIXED_WORKER_STATE_ROOT,
+  STATE_DIRECTORIES,
+  createWorkerStateStorageGuard,
+} = require('./worker-state-storage-boundary');
+const {
   panicProviderPlaneRoot,
   panicProviderSupervisors,
   unlockProviderPlaneRoot,
@@ -18,13 +23,13 @@ const {
 } = require('./provider-supervisor-client');
 
 const FIXED_BROKER_USER = 'teleagent-session-broker';
-const FIXED_BROKER_HOME = '/var/lib/teleagent-session-broker';
-const FIXED_PROVIDER_VIEW = '/var/lib/teleagent-session-broker/provider-view';
+const FIXED_BROKER_HOME = STATE_DIRECTORIES['session-broker'];
+const FIXED_PROVIDER_VIEW = `${FIXED_BROKER_HOME}/provider-view`;
 const FIXED_WORKSPACE_ROOT = '/srv/teleagent-agent-workspaces';
 const FIXED_BROKER_SOCKET = '/run/teleagent-worker-session/broker.sock';
 const FIXED_TMUX_SOCKET = '/run/teleagent-worker-session/tmux.sock';
-const FIXED_STATE_DB = '/var/lib/teleagent-session-broker/operations.sqlite';
-const FIXED_SINGLETON_DB = '/var/lib/teleagent-session-broker/lifetime-lock.sqlite';
+const FIXED_STATE_DB = `${FIXED_BROKER_HOME}/operations.sqlite`;
+const FIXED_SINGLETON_DB = `${FIXED_BROKER_HOME}/lifetime-lock.sqlite`;
 const FIXED_CONTROLLER_GROUP = 'teleagent-control';
 const SENSITIVE_ENVIRONMENT_NAME = /(?:TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|API_KEY|AUTH(?:ORIZATION)?)/i;
 
@@ -217,12 +222,14 @@ function listenOnInheritedSocket(fd, expectedPath, Server = http.Server) {
 
 function normalizeWorkerSessionServiceConfig(environment = process.env, {
   uid = typeof process.getuid === 'function' ? process.getuid() : null,
+  gid = typeof process.getgid === 'function' ? process.getgid() : null,
   username = os.userInfo().username,
   pid = process.pid,
   controllerGid = lookupSystemGroupGid(),
 } = {}) {
   assertCredentialFreeEnvironment(environment);
-  if (!Number.isInteger(uid) || uid === 0 || username !== FIXED_BROKER_USER) {
+  if (!Number.isInteger(uid) || uid === 0 || !Number.isInteger(gid) || gid === 0 ||
+      username !== FIXED_BROKER_USER) {
     throw new Error(`Worker session broker must run as the non-root ${FIXED_BROKER_USER} identity.`);
   }
   const home = fixedPath(environment.HOME, FIXED_BROKER_HOME, 'HOME');
@@ -238,6 +245,7 @@ function normalizeWorkerSessionServiceConfig(environment = process.env, {
   );
   return Object.freeze({
     uid,
+    gid,
     controllerGid,
     home,
     providerView,
@@ -278,9 +286,15 @@ async function startWorkerSessionBroker({
   PaneManager = WorkerSessionPaneManager,
   createBroker = createWorkerSessionBroker,
   acquireSingleton = acquireWorkerSessionSingletonLock,
+  createStorageGuard = createWorkerStateStorageGuard,
   assertSocketBoundary = assertInheritedSocketBoundary,
   adoptInheritedSocket = listenOnInheritedSocket,
 } = {}) {
+  const storage = createStorageGuard({
+    role: 'session-broker',
+    expectedUid: config.uid,
+    expectedGid: config.gid,
+  });
   assertSocketBoundary(
     config.listenFd,
     config.brokerSocket,
@@ -303,6 +317,7 @@ async function startWorkerSessionBroker({
       dbPath: config.stateDb,
       expectedUid: config.uid,
       strictOwnership: true,
+      admitNewWork: () => storage.assertNewWork(),
     });
   } catch (error) {
     if (inheritedServer.listening) {
@@ -364,7 +379,7 @@ async function startWorkerSessionBroker({
     })();
     return shutdownPromise;
   };
-  return { broker, store, shutdown };
+  return { broker, store, storage, shutdown };
 }
 
 if (require.main === module) {
@@ -393,6 +408,7 @@ module.exports = {
   FIXED_STATE_DB,
   FIXED_TMUX_SOCKET,
   FIXED_WORKSPACE_ROOT,
+  FIXED_WORKER_STATE_ROOT,
   acquireWorkerSessionSingletonLock,
   assertCredentialFreeEnvironment,
   assertInheritedSocketBoundary,

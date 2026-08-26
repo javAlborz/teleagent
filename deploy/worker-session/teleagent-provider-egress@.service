@@ -2,6 +2,7 @@
 Description=Teleagent credential-holding %i provider egress broker
 Requires=teleagent-provider-egress@%i.socket teleagent-provider-egress-control@%i.socket
 After=local-fs.target network-online.target teleagent-provider-egress@%i.socket teleagent-provider-egress-control@%i.socket
+RequiresMountsFor=/var/lib/teleagent-worker-state
 ConditionPathExists=/etc/teleagent/worker-session/ENABLE
 ConditionPathExists=/etc/teleagent/provider-egress/%i.json
 ConditionPathExists=/etc/teleagent/provider-egress-secrets/%i.api-key
@@ -14,8 +15,8 @@ User=teleagent-%i-egress
 Group=teleagent-%i-egress
 Sockets=teleagent-provider-egress@%i.socket teleagent-provider-egress-control@%i.socket
 UMask=0077
-WorkingDirectory=/var/lib/teleagent-%i-egress
-Environment=HOME=/var/lib/teleagent-%i-egress
+WorkingDirectory=/var/lib/teleagent-worker-state/%i-egress
+Environment=HOME=/var/lib/teleagent-worker-state/%i-egress
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 Environment=LANG=C.UTF-8
 Environment=LC_ALL=C.UTF-8
@@ -40,7 +41,7 @@ UnsetEnvironment=LD_PRELOAD LD_LIBRARY_PATH OPENAI_API_KEY ANTHROPIC_API_KEY CLA
 Environment=TELEAGENT_PROVIDER=%i
 Environment=PROVIDER_EGRESS_SOCKET_PATH=/run/teleagent-provider-egress/%i.sock
 Environment=PROVIDER_EGRESS_CONTROL_SOCKET_PATH=/run/teleagent-provider-egress-control/%i.sock
-Environment=PROVIDER_EGRESS_DB_PATH=/var/lib/teleagent-%i-egress/budget.sqlite
+Environment=PROVIDER_EGRESS_DB_PATH=/var/lib/teleagent-worker-state/%i-egress/budget.sqlite
 Environment=PROVIDER_EGRESS_POLICY_PATH=/etc/teleagent/provider-egress/%i.json
 LoadCredential=provider-api-key:/etc/teleagent/provider-egress-secrets/%i.api-key
 ExecStartPre=+/usr/local/libexec/teleagent-provider-egress-credential-check %i
@@ -67,8 +68,8 @@ ProtectSystem=strict
 ProtectHome=yes
 ReadOnlyPaths=/opt/teleagent/current /etc/teleagent/provider-egress
 BindReadOnlyPaths=/run/systemd/resolve/resolv.conf:/etc/resolv.conf
-ReadWritePaths=/var/lib/teleagent-%i-egress
-InaccessiblePaths=/var/lib/teleagent-control /var/lib/teleagent-session-broker -/var/lib/teleagent-claude-worker -/var/lib/teleagent-codex-worker /srv/teleagent-agent-workspaces /run/teleagent-worker-session /run/teleagent-provider-launch /run/teleagent-privileged-action /opt/teleagent/current/voice-app/audio /opt/teleagent/current/voice-app/static
+ReadWritePaths=/var/lib/teleagent-worker-state/%i-egress
+InaccessiblePaths=/var/lib/teleagent-control /var/lib/teleagent-worker-state/session-broker -/var/lib/teleagent-claude-worker -/var/lib/teleagent-codex-worker /srv/teleagent-agent-workspaces /run/teleagent-worker-session /run/teleagent-provider-launch /run/teleagent-privileged-action /opt/teleagent/current/voice-app/audio /opt/teleagent/current/voice-app/static
 ProtectControlGroups=yes
 ProtectKernelLogs=yes
 ProtectKernelModules=yes

@@ -268,6 +268,7 @@ test('workspace mounts use one non-replaceable root anchor and one global launch
       proved: true,
       removed: true,
       launchId: stale.launchId,
+      orphanCount: 0,
     });
     assert.equal(fs.existsSync(filename), false);
 
@@ -312,6 +313,11 @@ test('global launch lock publication is crash-atomic at every commit phase', asy
         const replacement = boundary.createGlobalLaunchLock(launchId, options);
         boundary.removeGlobalLaunchLock(replacement, launchId, options);
         assert.equal(fs.existsSync(filename), false);
+        assert.deepEqual(boundary.clearStaleGlobalLaunchLockAfterQuiescence({
+          ...options,
+          quiesced: true,
+          readStartTime: () => null,
+        }), { proved: true, removed: false, orphanCount: 1 });
       } else {
         const metadata = fs.lstatSync(filename);
         assert.equal(metadata.isFile(), true);
@@ -326,6 +332,7 @@ test('global launch lock publication is crash-atomic at every commit phase', asy
           proved: true,
           removed: true,
           launchId,
+          orphanCount: 0,
         });
         assert.equal(fs.existsSync(filename), false);
         assert.deepEqual(

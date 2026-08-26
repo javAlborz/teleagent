@@ -1,43 +1,127 @@
 #!/bin/sh
 set -eu
 
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+unset ENV BASH_ENV CDPATH LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT GCONV_PATH \
+  NODE_OPTIONS NODE_PATH PYTHONPATH PERL5LIB RUBYOPT
+umask 077
+
 app_root=/opt/teleagent/current
 manifest="$app_root/deploy/worker-session/provider-libexec.manifest"
 target_root=/usr/local/libexec
 installed_manifest=/etc/teleagent/provider-runtime/provider-libexec.manifest
+systemctl_bin=/usr/bin/systemctl
+cgroup_root=/sys/fs/cgroup
+expected_uid=0
+expected_gid=0
 
-if [ "$(id -u)" -ne 0 ]; then
+fail() {
+  echo "provider libexec installation refused: $1" >&2
+  exit "${2:-77}"
+}
+
+case "${TELEAGENT_PROVIDER_LIBEXEC_TEST_ONLY:-}" in
+  '') ;;
+  1) ;;
+  *) fail 'invalid test-only selector' ;;
+esac
+
+if [ "${TELEAGENT_PROVIDER_LIBEXEC_TEST_ONLY:-}" = 1 ]; then
+  test_root=$(/usr/bin/readlink -f -- "${TELEAGENT_PROVIDER_LIBEXEC_TEST_ROOT:-}")
+  case "$test_root" in /tmp/teleagent-provider-libexec-test-*) ;; *) fail 'unsafe test root' ;; esac
+  expected_uid=$(/usr/bin/id -u)
+  expected_gid=$(/usr/bin/id -g)
+  [ -d "$test_root" ] && [ ! -L "$test_root" ] &&
+    [ "$(/usr/bin/stat -c '%u:%g:%a' "$test_root")" = \
+      "${expected_uid}:${expected_gid}:700" ] || fail 'unsafe test root metadata'
+  systemctl_bin=${TELEAGENT_PROVIDER_LIBEXEC_TEST_SYSTEMCTL:-}
+  [ -f "$systemctl_bin" ] && [ ! -L "$systemctl_bin" ] &&
+    [ "$(/usr/bin/stat -c '%u:%g:%a:%h' "$systemctl_bin")" = \
+      "${expected_uid}:${expected_gid}:700:1" ] &&
+    [ "$(/usr/bin/readlink -f -- "$systemctl_bin")" = "$systemctl_bin" ] ||
+    fail 'unsafe test systemctl'
+  cgroup_root="$test_root/cgroup"
+  [ "$#" -eq 1 ] && [ "$1" = --quiescence-check ] || fail 'invalid test arguments'
+else
+  [ -z "${TELEAGENT_PROVIDER_LIBEXEC_TEST_ROOT:-}" ] &&
+    [ -z "${TELEAGENT_PROVIDER_LIBEXEC_TEST_SYSTEMCTL:-}" ] ||
+    fail 'test overrides require the isolated test lane'
+  [ "$#" -eq 0 ] || fail 'unexpected arguments'
+fi
+
+unit_property() {
+  value=$($systemctl_bin show "$1" --property="$2" --value) ||
+    fail 'provider unit state query failed' 75
+  case "$value" in *'
+'*) fail 'provider unit state query was malformed' 75 ;; esac
+  printf '%s\n' "$value"
+}
+
+assert_cgroup_empty() {
+  control_group=$1
+  [ -n "$control_group" ] || return 0
+  case "$control_group" in
+    /*) ;;
+    *) fail 'provider unit control group is malformed' 75 ;;
+  esac
+  case "$control_group" in *..*) fail 'provider unit control group is malformed' 75 ;; esac
+  events="$cgroup_root$control_group/cgroup.events"
+  [ -f "$events" ] && [ ! -L "$events" ] || fail 'provider cgroup truth is unavailable' 75
+  populated=$(/usr/bin/awk '
+    $1 == "populated" && $2 ~ /^[01]$/ && NF == 2 { count += 1; value = $2 }
+    END { if (count != 1) exit 1; print value }
+  ' "$events") || fail 'provider cgroup truth is malformed' 75
+  [ "$populated" = 0 ] || fail 'provider cgroup is populated' 75
+}
+
+require_quiescent_provider_plane() {
+  for unit in \
+    teleagent-worker-session.service \
+    teleagent-worker-session.socket \
+    teleagent-provider-supervisor@claude.service \
+    teleagent-provider-supervisor@codex.service \
+    teleagent-provider-supervisor@claude.socket \
+    teleagent-provider-supervisor@codex.socket \
+    teleagent-provider-egress@claude.service \
+    teleagent-provider-egress@codex.service \
+    teleagent-provider-egress@claude.socket \
+    teleagent-provider-egress@codex.socket \
+    teleagent-provider-egress-control@claude.socket \
+    teleagent-provider-egress-control@codex.socket; do
+    load_state=$(unit_property "$unit" LoadState)
+    active_state=$(unit_property "$unit" ActiveState)
+    control_group=$(unit_property "$unit" ControlGroup)
+    [ "$load_state" = loaded ] && [ "$active_state" = inactive ] ||
+      fail 'provider libexec update requires exactly loaded inactive units' 75
+    assert_cgroup_empty "$control_group"
+  done
+  units=$($systemctl_bin list-units --all --plain --no-legend \
+    'teleagent-provider-launch-*.service') ||
+    fail 'provider transient-unit enumeration failed' 75
+  case "$units" in *[![:space:]]*) fail 'provider libexec update requires zero transient launch units' 75 ;; esac
+}
+
+require_quiescent_provider_plane
+
+if [ "${TELEAGENT_PROVIDER_LIBEXEC_TEST_ONLY:-}" = 1 ]; then
+  printf 'PROVIDER_LIBEXEC_QUIESCENT_OK\n'
+  exit 0
+fi
+
+if [ "$(/usr/bin/id -u)" -ne 0 ]; then
   echo "provider libexec installation requires root" >&2
   exit 77
 fi
 
-# No root wrapper may be replaced while a caller or transient provider cgroup
-# can execute it. Socket units are included to close activation during the
-# short atomic installation window.
-for unit in \
-  teleagent-provider-supervisor@claude.service \
-  teleagent-provider-supervisor@codex.service \
-  teleagent-provider-supervisor@claude.socket \
-  teleagent-provider-supervisor@codex.socket; do
-  if systemctl is-active --quiet "$unit"; then
-    echo "provider libexec update requires stopped supervisor planes" >&2
-    exit 75
-  fi
-done
-if systemctl list-units --all --plain --no-legend \
-  'teleagent-provider-launch-*.service' | grep -q '[^[:space:]]'; then
-  echo "provider libexec update requires zero transient launch units" >&2
-  exit 75
-fi
-
-if [ "$(stat -Lc '%U:%G:%a' "$manifest")" != root:root:444 ] || [ -L "$manifest" ]; then
+if [ "$(/usr/bin/stat -Lc '%U:%G:%a' "$manifest")" != root:root:444 ] || [ -L "$manifest" ]; then
   echo "provider libexec manifest metadata is unsafe" >&2
   exit 77
 fi
 
-stage=$(mktemp -d "$target_root/.teleagent-provider-libexec.XXXXXX")
+stage=$(/usr/bin/mktemp -d "$target_root/.teleagent-provider-libexec.XXXXXX")
 cleanup() {
-  rm -rf "$stage"
+  /usr/bin/rm -rf "$stage"
 }
 trap cleanup EXIT INT TERM
 
@@ -48,24 +132,41 @@ while IFS=' ' read -r digest source target mode extra; do
     [0-9a-f][0-9a-f]*:claude-api-server/*:teleagent-provider-*:0755: ) ;;
     *) echo "provider libexec manifest entry is invalid" >&2; exit 77 ;;
   esac
-  if [ "${#digest}" -ne 64 ] || [ "$(basename "$target")" != "$target" ]; then
+  if [ "${#digest}" -ne 64 ] || [ "$(/usr/bin/basename "$target")" != "$target" ]; then
     echo "provider libexec manifest identity is invalid" >&2
     exit 77
   fi
   source_path="$app_root/$source"
-  if [ ! -f "$source_path" ] || [ -L "$source_path" ] ||
-     [ "$(stat -Lc '%U:%G' "$source_path")" != root:root ] ||
-     find "$source_path" -maxdepth 0 -perm /022 | grep -q .; then
+  source_metadata=$(/usr/bin/stat -Lc '%U:%G:%a' "$source_path") || {
+    echo "provider libexec source metadata is unavailable" >&2
+    exit 77
+  }
+  case "$mode:$source_metadata" in
+    0755:root:root:555 | 0444:root:root:444) ;;
+    *)
+      echo "provider libexec source metadata is unsafe" >&2
+      exit 77
+      ;;
+  esac
+  if [ ! -f "$source_path" ] || [ -L "$source_path" ]; then
     echo "provider libexec source metadata is unsafe" >&2
     exit 77
   fi
-  actual=$(sha256sum "$source_path" | awk '{print $1}')
+  actual_output=$(/usr/bin/sha256sum -- "$source_path") || {
+    echo "provider libexec source digest is unavailable" >&2
+    exit 77
+  }
+  actual=${actual_output%% *}
   if [ "$actual" != "$digest" ]; then
     echo "provider libexec source digest is unreviewed" >&2
     exit 77
   fi
-  install -o root -g root -m "$mode" "$source_path" "$stage/$target"
-  staged=$(sha256sum "$stage/$target" | awk '{print $1}')
+  /usr/bin/install -o root -g root -m "$mode" "$source_path" "$stage/$target"
+  staged_output=$(/usr/bin/sha256sum -- "$stage/$target") || {
+    echo "provider libexec staged digest is unavailable" >&2
+    exit 77
+  }
+  staged=${staged_output%% *}
   if [ "$staged" != "$digest" ]; then
     echo "provider libexec staged digest mismatch" >&2
     exit 77
@@ -73,17 +174,21 @@ while IFS=' ' read -r digest source target mode extra; do
 done < "$manifest"
 
 while IFS=' ' read -r digest _source target mode _extra; do
-  mv -f "$stage/$target" "$target_root/$target"
-  sync -d "$target_root/$target"
-  installed=$(sha256sum "$target_root/$target" | awk '{print $1}')
+  /usr/bin/mv -f "$stage/$target" "$target_root/$target"
+  /usr/bin/sync -d "$target_root/$target"
+  installed_output=$(/usr/bin/sha256sum -- "$target_root/$target") || {
+    echo "installed provider libexec digest is unavailable" >&2
+    exit 77
+  }
+  installed=${installed_output%% *}
   if [ "$installed" != "$digest" ] ||
-     [ "$(stat -Lc '%U:%G:%a' "$target_root/$target")" != "root:root:${mode#0}" ] ||
+     [ "$(/usr/bin/stat -Lc '%U:%G:%a' "$target_root/$target")" != "root:root:${mode#0}" ] ||
      [ -L "$target_root/$target" ]; then
     echo "installed provider libexec boundary is unsafe" >&2
     exit 77
   fi
 done < "$manifest"
-install -o root -g root -m 0444 "$manifest" "$installed_manifest"
-sync -d "$target_root" "$installed_manifest"
+/usr/bin/install -o root -g root -m 0444 "$manifest" "$installed_manifest"
+/usr/bin/sync -d "$target_root" "$installed_manifest"
 trap - EXIT INT TERM
-rmdir "$stage"
+/usr/bin/rmdir "$stage"

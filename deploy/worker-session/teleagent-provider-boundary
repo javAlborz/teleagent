@@ -782,6 +782,30 @@ function removeGlobalLaunchLock(filename, launchId, {
   fsyncDirectory(directory);
 }
 
+function clearQuiescentGlobalLaunchTemps({
+  directory = CAPABILITY_DIRECTORY,
+  uid = 0,
+  gid = 0,
+} = {}) {
+  let removed = 0;
+  for (const entry of fs.readdirSync(directory)) {
+    if (!/^\.global-provider-launch\.lock\.tmp\.[1-9][0-9]*\.[a-f0-9]{32}$/u.test(entry)) {
+      continue;
+    }
+    const filename = path.join(directory, entry);
+    const metadata = fs.lstatSync(filename);
+    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.uid !== uid ||
+        metadata.gid !== gid || (metadata.mode & 0o777) !== 0o600 ||
+        metadata.nlink !== 1 || metadata.size > 1024 ||
+        fs.realpathSync(filename) !== filename) {
+      fail('a quiescent global provider launch lock stage is unsafe');
+    }
+    fs.unlinkSync(filename);
+    removed += 1;
+  }
+  return removed;
+}
+
 function clearStaleGlobalLaunchLockAfterQuiescence({
   quiesced,
   directory = CAPABILITY_DIRECTORY,
@@ -795,7 +819,11 @@ function clearStaleGlobalLaunchLockAfterQuiescence({
   let inspected;
   try { inspected = inspectGlobalLaunchLockState(filename, { directory, uid, gid }); }
   catch (error) {
-    if (error?.code === 'ENOENT') return { proved: true, removed: false };
+    if (error?.code === 'ENOENT') {
+      const orphanCount = clearQuiescentGlobalLaunchTemps({ directory, uid, gid });
+      if (orphanCount > 0) fsyncDirectory(directory);
+      return { proved: true, removed: false, orphanCount };
+    }
     throw error;
   }
   const { record, companion } = inspected;
@@ -811,8 +839,9 @@ function clearStaleGlobalLaunchLockAfterQuiescence({
     }
     fs.unlinkSync(companion);
   }
+  const orphanCount = clearQuiescentGlobalLaunchTemps({ directory, uid, gid });
   fsyncDirectory(directory);
-  return { proved: true, removed: true, launchId: record.launchId };
+  return { proved: true, removed: true, launchId: record.launchId, orphanCount };
 }
 
 function assertGlobalProviderLaunchUnlocked({
@@ -1180,7 +1209,7 @@ function buildSystemdRunInvocation(input) {
       : [`BindPaths=${input.workspace}:${input.workspace}`]),
     `BindReadOnlyPaths=${input.spec.egressSocket}:${input.spec.egressSocket}`,
     `BindPaths=${input.readinessPath}:${input.readinessPath}`,
-    `InaccessiblePaths=/opt/teleagent/current /var/run /var/lib/teleagent-control /var/lib/teleagent-session-broker /var/lib/teleagent-privileged-action /var/lib/teleagent-claude-egress /var/lib/teleagent-codex-egress -/var/lib/teleagent-claude-worker -/var/lib/teleagent-codex-worker -${input.spec.workerHome} -${input.spec.otherHome} /run/teleagent-worker-session /run/teleagent-provider-launch /run/teleagent-provider-egress-control /run/teleagent-privileged-action /etc/teleagent/provider-egress-secrets -/etc/teleagent/credentials -/etc/teleagent-control -/etc/teleagent/controller -/etc/teleagent/privileged-action -/etc/teleagent-voice -${input.workspace}/.codex -${input.workspace}/.claude`,
+    `InaccessiblePaths=/opt/teleagent/current /var/run /var/lib/teleagent-control /var/lib/teleagent-worker-state /var/lib/teleagent-privileged-action -/var/lib/teleagent-claude-worker -/var/lib/teleagent-codex-worker -${input.spec.workerHome} -${input.spec.otherHome} /run/teleagent-worker-session /run/teleagent-provider-launch /run/teleagent-provider-egress-control /run/teleagent-privileged-action /etc/teleagent/provider-egress-secrets -/etc/teleagent/credentials -/etc/teleagent-control -/etc/teleagent/controller -/etc/teleagent/privileged-action -/etc/teleagent-voice -${input.workspace}/.codex -${input.workspace}/.claude`,
     // SETPCAP is required for setpriv to drop the descendant bounding set;
     // KILL lets the root wrapper terminate its two different-UID children.
     // Both descendants assert Cap*=0 and NoNewPrivs=1 before provider start.

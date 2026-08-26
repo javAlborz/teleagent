@@ -9,6 +9,10 @@ const path = require('node:path');
 const Database = require('better-sqlite3');
 const { validateProviderCredential } = require('../lib/provider-secret');
 const {
+  STATE_DIRECTORIES,
+  createWorkerStateStorageGuard,
+} = require('./worker-state-storage-boundary');
+const {
   ANTHROPIC_COUNT_BETAS_BY_MODEL,
   ANTHROPIC_INFERENCE_BETAS_BY_MODEL,
   ANTHROPIC_VERSION,
@@ -22,13 +26,14 @@ const MAX_POLICY_BYTES = 64 * 1024;
 const MAX_CONTROL_BYTES = 64 * 1024;
 const LAUNCH_ID = /^launch_[a-f0-9]{32}$/;
 const LAUNCH_CAPABILITY = /^[a-f0-9]{64}$/;
+const STORAGE_ADMISSIONS = new WeakMap();
 const PROVIDERS = Object.freeze({
   claude: Object.freeze({
     user: 'teleagent-claude-egress',
-    home: '/var/lib/teleagent-claude-egress',
+    home: STATE_DIRECTORIES['claude-egress'],
     socket: '/run/teleagent-provider-egress/claude.sock',
     controlSocket: '/run/teleagent-provider-egress-control/claude.sock',
-    database: '/var/lib/teleagent-claude-egress/budget.sqlite',
+    database: `${STATE_DIRECTORIES['claude-egress']}/budget.sqlite`,
     policy: '/etc/teleagent/provider-egress/claude.json',
     upstreamHost: 'api.anthropic.com',
     routes: Object.freeze({
@@ -38,10 +43,10 @@ const PROVIDERS = Object.freeze({
   }),
   codex: Object.freeze({
     user: 'teleagent-codex-egress',
-    home: '/var/lib/teleagent-codex-egress',
+    home: STATE_DIRECTORIES['codex-egress'],
     socket: '/run/teleagent-provider-egress/codex.sock',
     controlSocket: '/run/teleagent-provider-egress-control/codex.sock',
-    database: '/var/lib/teleagent-codex-egress/budget.sqlite',
+    database: `${STATE_DIRECTORIES['codex-egress']}/budget.sqlite`,
     policy: '/etc/teleagent/provider-egress/codex.json',
     upstreamHost: 'api.openai.com',
     routes: Object.freeze({
@@ -195,13 +200,14 @@ function socketPathForFd(fd) {
 
 function normalizeConfig(environment = process.env, {
   uid = process.getuid(),
+  gid = process.getgid(),
   username = os.userInfo().username,
   pid = process.pid,
   clientGid = null,
 } = {}) {
   const provider = String(environment.TELEAGENT_PROVIDER || '').trim();
   const spec = PROVIDERS[provider];
-  if (!spec || uid === 0 || username !== spec.user || environment.HOME !== spec.home) {
+  if (!spec || uid === 0 || gid === 0 || username !== spec.user || environment.HOME !== spec.home) {
     throw new Error('Provider egress identity does not match its fixed provider.');
   }
   rejectUnsafeEnvironment(environment);
@@ -253,14 +259,18 @@ function normalizeConfig(environment = process.env, {
   // not harmless file formatting. Validation errors never include the value.
   const credential = validateProviderCredential(fs.readFileSync(credentialPath));
   const policy = readPolicy(spec.policy, provider);
-  return Object.freeze({ provider, spec, uid, dataFd, controlFd, credential, policy });
+  return Object.freeze({ provider, spec, uid, gid, dataFd, controlFd, credential, policy });
 }
 
-function openBudgetStore(filename, { uid = process.getuid() } = {}) {
+function openBudgetStore(filename, {
+  uid = process.getuid(),
+  gid = process.getgid(),
+  storageAdmission = null,
+} = {}) {
   const directory = path.dirname(filename);
   const metadata = fs.lstatSync(directory);
   if (!metadata.isDirectory() || metadata.isSymbolicLink() ||
-      metadata.uid !== uid || (metadata.mode & 0o077) !== 0) {
+      metadata.uid !== uid || metadata.gid !== gid || (metadata.mode & 0o077) !== 0) {
     throw new Error('Provider egress state directory is unsafe.');
   }
   const db = new Database(filename);
@@ -310,7 +320,31 @@ function openBudgetStore(filename, { uid = process.getuid() } = {}) {
       db.exec(`ALTER TABLE provider_egress_capabilities ADD COLUMN ${name} ${definition}`);
     }
   }
+  if (storageAdmission !== null) {
+    if (typeof storageAdmission !== 'function') {
+      db.close();
+      throw new Error('Provider egress storage admission guard is invalid.');
+    }
+    STORAGE_ADMISSIONS.set(db, storageAdmission);
+  }
   return db;
+}
+
+function assertNewProviderStateAdmission(db) {
+  const admission = STORAGE_ADMISSIONS.get(db);
+  if (!admission) return;
+  try {
+    admission();
+  } catch (error) {
+    if (error?.code === 'WORKER_STATE_CAPACITY_EXHAUSTED') {
+      throw codedError(
+        'PROVIDER_STATE_CAPACITY_EXHAUSTED',
+        'Provider state reserve is exhausted; new durable work is refused.',
+        503
+      );
+    }
+    throw codedError('PROVIDER_STATE_BOUNDARY_INVALID', 'Provider state boundary is unavailable.', 503);
+  }
 }
 
 function capabilityHash(value) {
@@ -366,6 +400,7 @@ function registerCapability(db, policy, {
       }
       throw codedError('PROVIDER_CAPABILITY_CONFLICT', 'Provider launch capability conflicts.', 409);
     }
+    assertNewProviderStateAdmission(db);
     db.prepare(`
       INSERT INTO provider_egress_capabilities (
         launch_id, capability_hash, state, expires_at_ms, max_requests,
@@ -417,6 +452,37 @@ function recoverCapabilities(db, { now = new Date() } = {}) {
     WHERE state = 'active'
   `).run(now.toISOString());
   return { persisted: true, revokedCount: result.changes };
+}
+
+function pruneBudgetHistory(db, { now = new Date(), retentionDays = 14 } = {}) {
+  if (!(now instanceof Date) || !Number.isFinite(now.getTime()) ||
+      !Number.isSafeInteger(retentionDays) || retentionDays < 7 || retentionDays > 31) {
+    throw codedError('PROVIDER_STATE_RETENTION_INVALID', 'Provider state retention is invalid.', 500);
+  }
+  const cutoff = new Date(now.getTime() - retentionDays * 24 * 60 * 60 * 1000)
+    .toISOString().slice(0, 10);
+  const transaction = db.transaction(() => {
+    const reservations = db.prepare(`
+      DELETE FROM provider_egress_reservations
+      WHERE substr(created_at, 1, 10) < ? AND EXISTS (
+        SELECT 1 FROM provider_egress_capabilities
+        WHERE provider_egress_capabilities.launch_id = provider_egress_reservations.launch_id
+          AND provider_egress_capabilities.state != 'active'
+          AND provider_egress_capabilities.revoked_at IS NOT NULL
+          AND substr(provider_egress_capabilities.revoked_at, 1, 10) < ?
+      )
+    `).run(cutoff, cutoff).changes;
+    const capabilities = db.prepare(`
+      DELETE FROM provider_egress_capabilities
+      WHERE state != 'active' AND revoked_at IS NOT NULL AND substr(revoked_at, 1, 10) < ?
+        AND NOT EXISTS (
+          SELECT 1 FROM provider_egress_reservations
+          WHERE provider_egress_reservations.launch_id = provider_egress_capabilities.launch_id
+        )
+    `).run(cutoff).changes;
+    return { cutoff, reservations, capabilities };
+  });
+  return transaction.immediate();
 }
 
 const DENIED_PROVIDER_TOOL_IDENTITY = /^(?:web[_-]?(?:search|fetch)|mcp|computer|container|code[_-]?(?:interpreter|execution)|file[_-]?search|image[_-]?generation|background)(?:[_:-]|$)/i;
@@ -1044,6 +1110,7 @@ function reserveBudget(db, policy, {
         totals.tokens + reservedTokens > policy.maxDailyReservedTokens) {
       throw codedError('PROVIDER_EGRESS_BUDGET_EXHAUSTED', 'Provider daily budget is exhausted.', 429);
     }
+    assertNewProviderStateAdmission(db);
     db.prepare(`
       INSERT INTO provider_egress_reservations (
         reservation_id, launch_id, budget_day, model, route_kind,
@@ -1458,9 +1525,19 @@ async function startProviderEgressBroker({
   config = normalizeConfig(),
   openStore = openBudgetStore,
   createBroker = createProviderEgressBroker,
+  createStorageGuard = createWorkerStateStorageGuard,
   verifySocketPaths = true,
 } = {}) {
-  const db = openStore(config.spec.database, { uid: config.uid });
+  const storage = createStorageGuard({
+    role: `${config.provider}-egress`,
+    expectedUid: config.uid,
+    expectedGid: config.gid,
+  });
+  const db = openStore(config.spec.database, {
+    uid: config.uid,
+    gid: config.gid,
+    storageAdmission: () => storage.assertNewWork(),
+  });
   // A broker-only crash must never resurrect a bearer capability whose prior
   // request outcome may be ambiguous. Revoke synchronously before either
   // inherited listener becomes ready; the still-running provider process then
@@ -1468,6 +1545,7 @@ async function startProviderEgressBroker({
   let startupRecovery;
   try {
     startupRecovery = recoverCapabilities(db);
+    pruneBudgetHistory(db);
   } catch (error) {
     db.close();
     throw error;
@@ -1495,6 +1573,7 @@ async function startProviderEgressBroker({
   }
   return Object.freeze({
     ...broker,
+    storage,
     startupRecovery: Object.freeze({ ...startupRecovery }),
     async close() {
       await broker.close();
@@ -1540,6 +1619,7 @@ module.exports = {
   readPolicy,
   rejectUnsafeEnvironment,
   recoverCapabilities,
+  pruneBudgetHistory,
   registerCapability,
   reserveBudget,
   revokeCapability,

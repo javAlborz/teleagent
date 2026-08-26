@@ -83,9 +83,14 @@ class WorkerSessionOperationStore {
     expectedUid = typeof process.getuid === 'function' ? process.getuid() : 0,
     strictOwnership = dbPath !== ':memory:',
     now = () => new Date(),
+    admitNewWork = () => {},
   } = {}) {
     if (strictOwnership && dbPath !== ':memory:') secureStateDirectory(dbPath, expectedUid);
     this.now = now;
+    if (typeof admitNewWork !== 'function') {
+      storeError('WORKER_SESSION_STORAGE_UNSAFE', 'Worker state admission guard is invalid.');
+    }
+    this.admitNewWork = admitNewWork;
     this.db = new Database(dbPath);
     this.db.pragma('foreign_keys = ON');
     this.db.pragma('busy_timeout = 5000');
@@ -212,6 +217,20 @@ class WorkerSessionOperationStore {
     ).get();
     if (!row || row.panic_locked !== 0) {
       storeError('WORKER_SESSION_PANIC_LOCKED', 'Worker mutation is locked by panic.');
+    }
+  }
+
+  _assertNewWorkAdmission() {
+    try {
+      this.admitNewWork();
+    } catch (error) {
+      if (error?.code === 'WORKER_STATE_CAPACITY_EXHAUSTED') {
+        storeError(
+          'WORKER_SESSION_STORAGE_CAPACITY_EXHAUSTED',
+          'Worker state reserve is exhausted; new operations are refused.'
+        );
+      }
+      storeError('WORKER_SESSION_STORAGE_UNSAFE', 'Worker state admission could not be proved.');
     }
   }
 
@@ -416,6 +435,7 @@ class WorkerSessionOperationStore {
         }
         return { created: false, row: existing };
       }
+      this._assertNewWorkAdmission();
       this.db.prepare(`
         INSERT INTO worker_session_pane_attestations (
           creation_id, session_name, provider, provider_user, provider_session_id,
@@ -574,6 +594,7 @@ class WorkerSessionOperationStore {
         this._assertIdentity(existing, normalized);
         return { created: false, row: existing };
       }
+      this._assertNewWorkAdmission();
       this.db.prepare(`
         INSERT INTO worker_session_operations (
           operation_id, request_hash, target, stable_target, session_fingerprint,
