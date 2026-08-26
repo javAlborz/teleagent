@@ -47,16 +47,20 @@ INTERPRETER_TARGETS = (
 
 # These files either execute on the host or are bind-mounted into the voice
 # containers.  Requiring them explicitly prevents an image at revision A from
-# being paired with mutable host orchestration from tree B.  agent-cli.js is
-# also the non-self-contained provider canary's current imported module.
+# being paired with mutable host orchestration from tree B.  The installed
+# provider canary is self-contained; agent-cli.js remains bound because it is
+# the API server's host-side provider adapter.
 BOUND_SOURCE_PATHS = (
     "claude-api-server/agent-cli.js",
+    "deploy/voice-stack/drachtio.conf.xml.template",
+    "deploy/voice-stack/freeswitch-event-socket.conf.xml.template",
     "deploy/voice-stack/teleagent-voice-stack-launch.js",
     "deploy/voice-stack/teleagent-voice-stack.service",
     "deploy/worker-session/teleagent-provider-canary",
     "docker-compose.yml",
     "freeswitch/entrypoint.sh",
     "freeswitch/mrf.xml",
+    "freeswitch/switch.conf.xml",
     "lib/voice-app-runtime-env.js",
 )
 

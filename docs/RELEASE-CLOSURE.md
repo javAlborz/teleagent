@@ -72,11 +72,11 @@ artifacts/sbom/voice-image.cdx.json
 ```
 
 The Codex wrapper remains source-owned and enters the provider binding through
-`deploy/worker-session/teleagent-codex-cli-wrapper`. The provider canary is not
-currently self-contained, so the closure explicitly requires both
-`deploy/worker-session/teleagent-provider-canary` and its imported
-`claude-api-server/agent-cli.js`. A future self-contained installed canary may
-replace that pair, but it must remain inside the inventory.
+`deploy/worker-session/teleagent-codex-cli-wrapper`. The installed provider
+canary is self-contained and digest-pinned; it never imports mutable
+application JavaScript. The closure still binds `claude-api-server/agent-cli.js`
+as the API server's host-side provider adapter. Both files remain inside the
+complete inventory.
 
 ## Filesystem policy
 
@@ -127,7 +127,7 @@ records use the exact order emitted by `release_closure.py`; duplicate or
 unknown keys are invalid. Its v2 shape is:
 
 ```json
-{"version":2,"application":"teleagent","source":{"repository":"https://github.com/javAlborz/teleagent.git","revision":"<40-or-64-lowercase-hex>","tree":"<40-or-64-lowercase-hex>"},"target":{"os":"linux","architecture":"amd64","libc":"glibc","nodeVersion":"v24.x.y","nodeModulesAbi":"137"},"files":{"path":"teleagent-release.files.tsv","sha256":"sha256:<64hex>","size":123,"entries":456},"hostRuntime":{"nodePath":"runtime/node/bin/node","nodeSha256":"sha256:<64hex>","interpreterTargets":["/opt/teleagent/node/bin/node","/usr/local/libexec/teleagent-node"],"apiLockPath":"claude-api-server/package-lock.json","apiLockSha256":"sha256:<64hex>","nodeModulesPath":"claude-api-server/node_modules","nativeModules":[{"path":"claude-api-server/node_modules/better-sqlite3/build/Release/better_sqlite3.node","sha256":"sha256:<64hex>","size":123},{"path":"claude-api-server/node_modules/node-pty/build/Release/pty.node","sha256":"sha256:<64hex>","size":123}],"boundSourcePaths":["claude-api-server/agent-cli.js","deploy/voice-stack/teleagent-voice-stack-launch.js","deploy/voice-stack/teleagent-voice-stack.service","deploy/worker-session/teleagent-provider-canary","docker-compose.yml","freeswitch/entrypoint.sh","freeswitch/mrf.xml","lib/voice-app-runtime-env.js"]},"providerCli":{"manifestPath":"deploy/worker-session/provider-cli.manifest.json","manifestSha256":"sha256:<64hex>","artifacts":[{"id":"claude","path":"artifacts/provider-cli/claude","sha256":"sha256:<64hex>","size":247905800},{"id":"codex-wrapper","path":"deploy/worker-session/teleagent-codex-cli-wrapper","sha256":"sha256:<64hex>","size":69},{"id":"codex-vendor","path":"artifacts/provider-cli/codex-vendor","sha256":"sha256:<64hex>","size":258227840}]},"voiceImage":{"manifestPath":"artifacts/voice/voice-image.manifest.json","manifestSha256":"sha256:<64hex>","archivePath":"artifacts/voice/voice-image.docker.tar","archiveSha256":"sha256:<64hex>","archiveSize":89710080,"configDigest":"sha256:<64hex>","runtimeReference":"sha256:<64hex>","registryReference":null,"registryManifestDigest":null,"sourceRevision":"<same-source-revision>","platform":"linux/amd64"},"sbom":{"format":"cyclonedx-json-1.6","releasePath":"artifacts/sbom/teleagent-release.cdx.json","releaseSha256":"sha256:<64hex>","voiceImagePath":"artifacts/sbom/voice-image.cdx.json","voiceImageSha256":"sha256:<64hex>"}}
+{"version":2,"application":"teleagent","source":{"repository":"https://github.com/javAlborz/teleagent.git","revision":"<40-or-64-lowercase-hex>","tree":"<40-or-64-lowercase-hex>"},"target":{"os":"linux","architecture":"amd64","libc":"glibc","nodeVersion":"v24.x.y","nodeModulesAbi":"137"},"files":{"path":"teleagent-release.files.tsv","sha256":"sha256:<64hex>","size":123,"entries":456},"hostRuntime":{"nodePath":"runtime/node/bin/node","nodeSha256":"sha256:<64hex>","interpreterTargets":["/opt/teleagent/node/bin/node","/usr/local/libexec/teleagent-node"],"apiLockPath":"claude-api-server/package-lock.json","apiLockSha256":"sha256:<64hex>","nodeModulesPath":"claude-api-server/node_modules","nativeModules":[{"path":"claude-api-server/node_modules/better-sqlite3/build/Release/better_sqlite3.node","sha256":"sha256:<64hex>","size":123},{"path":"claude-api-server/node_modules/node-pty/build/Release/pty.node","sha256":"sha256:<64hex>","size":123}],"boundSourcePaths":["claude-api-server/agent-cli.js","deploy/voice-stack/drachtio.conf.xml.template","deploy/voice-stack/freeswitch-event-socket.conf.xml.template","deploy/voice-stack/teleagent-voice-stack-launch.js","deploy/voice-stack/teleagent-voice-stack.service","deploy/worker-session/teleagent-provider-canary","docker-compose.yml","freeswitch/entrypoint.sh","freeswitch/mrf.xml","freeswitch/switch.conf.xml","lib/voice-app-runtime-env.js"]},"providerCli":{"manifestPath":"deploy/worker-session/provider-cli.manifest.json","manifestSha256":"sha256:<64hex>","artifacts":[{"id":"claude","path":"artifacts/provider-cli/claude","sha256":"sha256:<64hex>","size":247905800},{"id":"codex-wrapper","path":"deploy/worker-session/teleagent-codex-cli-wrapper","sha256":"sha256:<64hex>","size":69},{"id":"codex-vendor","path":"artifacts/provider-cli/codex-vendor","sha256":"sha256:<64hex>","size":258227840}]},"voiceImage":{"manifestPath":"artifacts/voice/voice-image.manifest.json","manifestSha256":"sha256:<64hex>","archivePath":"artifacts/voice/voice-image.docker.tar","archiveSha256":"sha256:<64hex>","archiveSize":89710080,"configDigest":"sha256:<64hex>","runtimeReference":"sha256:<64hex>","registryReference":null,"registryManifestDigest":null,"sourceRevision":"<same-source-revision>","platform":"linux/amd64"},"sbom":{"format":"cyclonedx-json-1.6","releasePath":"artifacts/sbom/teleagent-release.cdx.json","releaseSha256":"sha256:<64hex>","voiceImagePath":"artifacts/sbom/voice-image.cdx.json","voiceImageSha256":"sha256:<64hex>"}}
 ```
 
 The native-module array must equal every `*.node` file under the declared host
@@ -216,12 +216,15 @@ not part of the release and not an approval:
     ],
     "boundSourcePaths": [
       "claude-api-server/agent-cli.js",
+      "deploy/voice-stack/drachtio.conf.xml.template",
+      "deploy/voice-stack/freeswitch-event-socket.conf.xml.template",
       "deploy/voice-stack/teleagent-voice-stack-launch.js",
       "deploy/voice-stack/teleagent-voice-stack.service",
       "deploy/worker-session/teleagent-provider-canary",
       "docker-compose.yml",
       "freeswitch/entrypoint.sh",
       "freeswitch/mrf.xml",
+      "freeswitch/switch.conf.xml",
       "lib/voice-app-runtime-env.js"
     ]
   },
