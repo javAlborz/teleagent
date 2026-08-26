@@ -273,16 +273,19 @@ The source verifier resolves `/opt/teleagent/current` once to the exact
 and verifier identity, and performs the whole source check through that resolved
 immutable root; a moving or chained release selector cannot mix source trees.
 
-The unconditional `ExecStopPost` removes only containers bearing the exact
+The unconditional `ExecStopPost` uses the host-owned shell installer rather
+than the release Node runtime, so a failed release start gate cannot invoke
+release-derived cleanup code. It removes only containers bearing the exact
 `com.docker.compose.project=teleagent-voice` label and proves none remain before
 removing projected credentials. This cleanup does not clear controller panic or
-convert an unknown panic outcome into success. If startup or shutdown was
-interrupted before coordinated panic was positively quiescent, cleanup records
-durable `panic_outcome_unknown` even after all voice containers are gone, and a
-later start refuses. The launcher records that same outcome before invoking
-`docker compose up`, because a failing Docker call may already have partially
-created or started the stack; successful container cleanup cannot prove that
-controller-visible work never began.
+convert an unknown panic outcome into success, and it never edits durable
+activation state. If startup or shutdown was interrupted, the launcher's
+already-fsynced `starting`, `cleanup_outcome_unknown`, or panic evidence remains
+authoritative even after all voice containers are gone, and a later start
+refuses. The launcher records start intent before invoking `docker compose up`,
+because a failing Docker call may already have partially created or started the
+stack; successful container cleanup cannot prove that controller-visible work
+never began.
 
 Recovery is explicit and two-stage. With the voice containers absent, a root
 operator invokes the fixed launcher with `recover`; it re-proves zero exact

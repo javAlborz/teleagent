@@ -28,8 +28,11 @@ function voiceInstallerFixture(t) {
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const systemd = path.join(directory, 'etc/systemd/system');
   const libexec = path.join(directory, 'usr/local/libexec');
+  const runtimeRoot = path.join(directory, 'run/teleagent-voice-stack');
   fs.mkdirSync(systemd, { recursive: true, mode: 0o755 });
   fs.mkdirSync(libexec, { recursive: true, mode: 0o755 });
+  fs.mkdirSync(runtimeRoot, { recursive: true, mode: 0o700 });
+  fs.chmodSync(runtimeRoot, 0o700);
   for (const unit of ['teleagent-voice-stack.service', 'teleagent-voice-containers.slice']) {
     fs.writeFileSync(path.join(systemd, unit), '[Unit]\n', { mode: 0o644 });
   }
@@ -99,6 +102,31 @@ function voiceInstallerFixture(t) {
     '',
   ].join('\n'), { mode: 0o700 });
   fs.chmodSync(verifier, 0o700);
+  const dockerCalls = path.join(directory, 'docker.calls');
+  const dockerState = path.join(directory, 'docker.state');
+  const docker = path.join(directory, 'docker');
+  fs.writeFileSync(docker, [
+    '#!/bin/bash',
+    'set -euo pipefail',
+    'printf \'%s\\n\' "$*" >>"$FAKE_DOCKER_LOG"',
+    'if [ "$*" = "container ls --all --no-trunc --quiet --filter label=com.docker.compose.project=teleagent-voice" ]; then',
+    '  [ "${FAKE_DOCKER_LIST_FAILURE:-0}" = 0 ] || exit 70',
+    '  if [ "${FAKE_DOCKER_OVERSIZED:-0}" = 1 ]; then /usr/bin/printf \'%09000d\' 0; exit 0; fi',
+    '  if [ "${FAKE_DOCKER_INVALID:-0}" = 1 ]; then printf \'not-a-container-id\\n\'; exit 0; fi',
+    '  [ -s "$FAKE_DOCKER_STATE" ] && /usr/bin/cat -- "$FAKE_DOCKER_STATE" || true',
+    '  exit 0',
+    'fi',
+    '[ "${1:-} ${2:-} ${3:-}" = "container rm --force" ] || exit 64',
+    '[ "${FAKE_DOCKER_REMOVE_FAILURE:-0}" = 0 ] || exit 71',
+    'shift 3',
+    '[ "$#" -ge 1 ] || exit 64',
+    'for identifier in "$@"; do /usr/bin/grep -Fqx -- "$identifier" "$FAKE_DOCKER_STATE" || exit 64; done',
+    'printf \'%s\\n\' "$@"',
+    '[ "${FAKE_DOCKER_KEEP_AFTER_REMOVE:-0}" = 0 ] || exit 0',
+    ': >"$FAKE_DOCKER_STATE"',
+    '',
+  ].join('\n'), { mode: 0o700 });
+  fs.chmodSync(docker, 0o700);
   const environment = {
     PATH: '/usr/sbin:/usr/bin:/sbin:/bin',
     LANG: 'C.UTF-8',
@@ -111,11 +139,26 @@ function voiceInstallerFixture(t) {
   return {
     calls,
     directory,
+    dockerCalls,
+    dockerState,
+    runtimeRoot,
     run: (additions = {}) => spawnSync(VOICE_INSTALLER, ['--check'], {
       cwd: '/',
       encoding: 'utf8',
       env: { ...environment, ...additions },
       timeout: 10_000,
+    }),
+    runEmergency: (additions = {}) => spawnSync(VOICE_INSTALLER, ['--emergency-cleanup'], {
+      cwd: '/',
+      encoding: 'utf8',
+      env: {
+        ...environment,
+        TELEAGENT_VOICE_INSTALL_TEST_DOCKER: docker,
+        FAKE_DOCKER_LOG: dockerCalls,
+        FAKE_DOCKER_STATE: dockerState,
+        ...additions,
+      },
+      timeout: 25_000,
     }),
   };
 }
@@ -158,7 +201,7 @@ test('voice deployment source is dormant and contains only the reviewed identity
   assert.match(unit,
     /^ExecStartPre=\/usr\/local\/libexec\/verify-voice-stack-identity --installed-check$/m);
   assert.match(unit,
-    /^ExecStopPost=\/usr\/local\/libexec\/teleagent-voice-stack-launch cleanup$/m);
+    /^ExecStopPost=\/usr\/local\/libexec\/teleagent-voice-stack-install --emergency-cleanup$/m);
   assert.doesNotMatch(unit, /^\[Install\]$/m);
   assert.doesNotMatch(unit, /^Environment=.*(?:TOKEN|PASSWORD|SECRET|API_KEY|PRIVATE_KEY)=/mi);
 });
@@ -374,7 +417,7 @@ test('voice installer can only install or check a disabled stack and never provi
   ]) assert.equal(scrubbed.has(variable), true, variable);
   assert.equal(scrubbed.has('TELEAGENT_VOICE_INSTALL_TEST_ONLY'), false);
   assert.equal(scrubbed.has('FAKE_SYSTEMCTL_LOG'), false);
-  assert.match(installer, /--source-check\|--install-disabled\|--check/);
+  assert.match(installer, /--source-check\|--install-disabled\|--check\|--emergency-cleanup/);
   assert.match(installer, /systemd-sysusers/);
   assert.match(installer, /systemd-tmpfiles/);
   assert.match(installer, /^slice_unit=teleagent-voice-containers\.slice$/m);
@@ -397,7 +440,14 @@ test('voice installer can only install or check a disabled stack and never provi
   assert.match(installer, /assert_slice_installed_dormant/);
   assert.doesNotMatch(installer, /is-enabled(?:\s|$)/);
   assert.doesNotMatch(installer, /"\$systemctl_bin"\s+(?:start|enable|restart)\b/);
-  assert.doesNotMatch(installer, /\/usr\/bin\/(?:docker|nft)\b/);
+  assert.match(installer, /capture_docker 'voice project enumeration'/);
+  assert.match(installer, /container rm --force/);
+  assert.match(installer, /label=com\.docker\.compose\.project=teleagent-voice/);
+  assert.match(installer, /emergency cleanup requires the fixed host-owned entrypoint/);
+  const installBody = /install_disabled\(\) \{([\s\S]*?)\n\}/u.exec(installer)?.[1] ?? '';
+  const checkBody = /check_installed\(\) \{([\s\S]*?)\n\}/u.exec(installer)?.[1] ?? '';
+  assert.doesNotMatch(installBody, /capture_docker|container (?:ls|rm)/u);
+  assert.doesNotMatch(checkBody, /capture_docker|container (?:ls|rm)/u);
   assert.doesNotMatch(installer, /\/etc\/teleagent-voice\/credentials\//);
   assert.doesNotMatch(installer, /activation-state\.json/);
   assert.doesNotMatch(installer, /\/var\/lib\/teleagent-voice-stack\/(?:\*|[^'" ]+)/);
@@ -445,6 +495,58 @@ test('voice installed check rejects stale loaded service and slice policy before
       assert.equal(fs.existsSync(path.join(drifted.directory, 'verifier-observed')), false);
     }
   });
+
+test('host-owned emergency cleanup is exact, bounded, and independent of release Node', (t) => {
+  if (process.getuid() === 0) return t.skip('the isolated installer lane rejects root');
+  const first = 'a'.repeat(64);
+  const second = 'b'.repeat(64);
+  const prepare = (fixture) => {
+    fs.writeFileSync(fixture.dockerState, `${first}\n${second}\n`, { mode: 0o600 });
+    for (const directory of ['voice-secrets', 'voice-secrets.new-123']) {
+      const target = path.join(fixture.runtimeRoot, directory);
+      fs.mkdirSync(target, { mode: 0o700 });
+      fs.writeFileSync(path.join(target, 'secret'), 'not-a-real-secret\n', { mode: 0o600 });
+    }
+    for (const filename of [
+      'drachtio.conf.xml',
+      'drachtio.conf.xml.new-123',
+      'freeswitch-event-socket.conf.xml',
+      'freeswitch-event-socket.conf.xml.new-123',
+    ]) fs.writeFileSync(path.join(fixture.runtimeRoot, filename), 'fixture\n', { mode: 0o600 });
+  };
+
+  const healthy = voiceInstallerFixture(t);
+  prepare(healthy);
+  let result = healthy.runEmergency();
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, 'VOICE_STACK_EMERGENCY_CLEANUP_OK\n');
+  assert.equal(fs.readFileSync(healthy.dockerState, 'utf8'), '');
+  assert.deepEqual(
+    fs.readdirSync(healthy.runtimeRoot).filter((name) =>
+      name.startsWith('voice-secrets') || name.includes('.conf.xml')),
+    [],
+  );
+  assert.deepEqual(fs.readFileSync(healthy.dockerCalls, 'utf8').trim().split('\n'), [
+    'container ls --all --no-trunc --quiet --filter label=com.docker.compose.project=teleagent-voice',
+    `container rm --force ${first} ${second}`,
+    'container ls --all --no-trunc --quiet --filter label=com.docker.compose.project=teleagent-voice',
+  ]);
+
+  for (const [environment, message] of [
+    [{ FAKE_DOCKER_INVALID: '1' }, /invalid container identity/u],
+    [{ FAKE_DOCKER_OVERSIZED: '1' }, /exceeded its fixed byte bound/u],
+    [{ FAKE_DOCKER_LIST_FAILURE: '1' }, /failed or timed out/u],
+    [{ FAKE_DOCKER_REMOVE_FAILURE: '1' }, /failed or timed out/u],
+    [{ FAKE_DOCKER_KEEP_AFTER_REMOVE: '1' }, /could not prove the voice project quiescent/u],
+  ]) {
+    const refused = voiceInstallerFixture(t);
+    prepare(refused);
+    result = refused.runEmergency(environment);
+    assert.equal(result.status, 77, `${JSON.stringify(environment)} ${result.stderr}`);
+    assert.match(result.stderr, message);
+    assert.equal(fs.existsSync(path.join(refused.runtimeRoot, 'voice-secrets/secret')), true);
+  }
+});
 
 test('SIP fence atomically reconciles, detects drift, and removes through a non-root fake nft', (t) => {
   if (process.getuid() === 0) {

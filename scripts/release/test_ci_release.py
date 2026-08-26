@@ -345,6 +345,11 @@ class CiReleaseTests(unittest.TestCase):
                 self.assertEqual(execution_lines.count(RELEASE_START_GATE), 1, relative)
                 self.assertEqual(execution_lines[0], RELEASE_START_GATE, relative)
                 self.assertNotIn("ExecReload=", source, relative)
+                for line in source.splitlines():
+                    if line.startswith("ExecStopPost="):
+                        self.assertNotIn("/opt/teleagent/current/", line, relative)
+                        self.assertNotIn("teleagent-node", line, relative)
+                        self.assertNotIn("teleagent-voice-stack-launch", line, relative)
                 self.assertFalse(
                     any("--check-runtime" in line for line in execution_lines),
                     f"{relative} would amplify a full release scan at service start",

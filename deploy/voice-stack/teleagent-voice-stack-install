@@ -10,7 +10,8 @@ unset ENV BASH_ENV CDPATH LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT GCONV_PATH \
   all_proxy no_proxy OPENAI_API_KEY OPENAI_WEBHOOK_SECRET SIP_PBX_AUTH_SECRET \
   ANTHROPIC_API_KEY CLAUDE_API_KEY CLAUDE_API_TOKEN CODEX_API_KEY API_KEY \
   API_TOKEN AUTH_TOKEN ACCESS_TOKEN PROVIDER_TOKEN PROVIDER_SECRET \
-  OPENAI_API_KEY_FILE OPENAI_WEBHOOK_SECRET_FILE SIP_PBX_AUTH_SECRET_FILE
+  OPENAI_API_KEY_FILE OPENAI_WEBHOOK_SECRET_FILE SIP_PBX_AUTH_SECRET_FILE \
+  DOCKER_HOST DOCKER_CONTEXT DOCKER_CONFIG
 umask 077
 
 source_root=/opt/teleagent/current/deploy/voice-stack
@@ -22,8 +23,13 @@ slice_unit=teleagent-voice-containers.slice
 systemctl_bin=/usr/bin/systemctl
 sysusers_bin=/usr/bin/systemd-sysusers
 tmpfiles_bin=/usr/bin/systemd-tmpfiles
+docker_bin=/usr/bin/docker
 root_prefix=
 test_only=0
+docker_output=
+emergency_capture=
+requested_action=${1:-}
+declare -a voice_container_ids=()
 service_unit_properties=LoadState,ActiveState,SubState,UnitFileState,FragmentPath,NeedDaemonReload,DropInPaths,User,Group
 slice_unit_properties=LoadState,ActiveState,SubState,UnitFileState,FragmentPath,NeedDaemonReload,DropInPaths
 
@@ -60,12 +66,19 @@ configure_environment() {
     installed_verifier=$root_prefix/usr/local/libexec/verify-voice-stack-identity
     validate_test_dependency "$systemctl_bin"
     validate_test_dependency "$installed_verifier"
+    if [ "$requested_action" = --emergency-cleanup ]; then
+      docker_bin=${TELEAGENT_VOICE_INSTALL_TEST_DOCKER:-}
+      validate_test_dependency "$docker_bin"
+    elif [ -n "${TELEAGENT_VOICE_INSTALL_TEST_DOCKER:-}" ]; then
+      fail 'the fake Docker dependency is restricted to emergency-cleanup tests'
+    fi
     test_only=1
     return
   fi
   [ -z "${TELEAGENT_VOICE_INSTALL_TEST_ONLY:-}" ] &&
     [ -z "${TELEAGENT_VOICE_INSTALL_TEST_ROOT:-}" ] &&
-    [ -z "${TELEAGENT_VOICE_INSTALL_TEST_SYSTEMCTL:-}" ] ||
+    [ -z "${TELEAGENT_VOICE_INSTALL_TEST_SYSTEMCTL:-}" ] &&
+    [ -z "${TELEAGENT_VOICE_INSTALL_TEST_DOCKER:-}" ] ||
     fail 'voice installer test overrides require the isolated test lane'
 }
 
@@ -86,9 +99,130 @@ run_systemctl() {
 
 target_unit=$(host_path /etc/systemd/system/teleagent-voice-stack.service)
 target_slice=$(host_path /etc/systemd/system/teleagent-voice-containers.slice)
+runtime_root=$(host_path /run/teleagent-voice-stack)
+installed_entrypoint=$(host_path /usr/local/libexec/teleagent-voice-stack-install)
 
 require_root() {
   [ "$test_only" -eq 1 ] || [ "$(id -u)" -eq 0 ] || fail 'root is required'
+}
+
+cleanup_emergency_capture() {
+  if [ -n "$emergency_capture" ]; then
+    /usr/bin/rm -f -- "$emergency_capture"
+    emergency_capture=
+  fi
+}
+
+capture_docker() {
+  local label=$1
+  shift
+  local status=0 size last_byte unsafe_bytes
+  local -a command=("$docker_bin")
+  if [ "$test_only" -eq 0 ]; then
+    command=(/usr/bin/env -i HOME="$runtime_root" DOCKER_CONFIG="$runtime_root/docker-config"
+      PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 "$docker_bin")
+  fi
+  emergency_capture=$(/usr/bin/mktemp "$runtime_root/.emergency-cleanup.XXXXXX") ||
+    fail 'the emergency cleanup output capture could not be created'
+  /usr/bin/timeout --signal=TERM --kill-after=2s 20s \
+    "${command[@]}" "$@" 2>&1 |
+    /usr/bin/head -c 8193 >"$emergency_capture" || status=$?
+  size=$(/usr/bin/stat -c '%s' -- "$emergency_capture")
+  [ "$size" -le 8192 ] || fail "$label output exceeded its fixed byte bound"
+  [ "$status" -eq 0 ] || fail "$label failed or timed out"
+  if [ "$size" -gt 0 ]; then
+    last_byte=$(/usr/bin/od -An -tu1 -j "$((size - 1))" -N 1 -- "$emergency_capture")
+    unsafe_bytes=$(LC_ALL=C /usr/bin/tr -d '\012\040-\176' <"$emergency_capture" |
+      /usr/bin/wc -c)
+    [ "$last_byte" -eq 10 ] && [ "$unsafe_bytes" -eq 0 ] ||
+      fail "$label returned unsafe output framing"
+  fi
+  docker_output=$(/usr/bin/cat -- "$emergency_capture")
+  cleanup_emergency_capture
+}
+
+list_voice_container_ids() {
+  local identifier
+  local -A seen=()
+  voice_container_ids=()
+  capture_docker 'voice project enumeration' container ls --all --no-trunc --quiet \
+    --filter label=com.docker.compose.project=teleagent-voice
+  if [ -n "$docker_output" ]; then
+    while IFS= read -r identifier; do
+      [[ "$identifier" =~ ^[0-9a-f]{64}$ ]] ||
+        fail 'voice project enumeration returned an invalid container identity'
+      [ -z "${seen[$identifier]:-}" ] ||
+        fail 'voice project enumeration returned a duplicate container identity'
+      seen[$identifier]=1
+      voice_container_ids+=("$identifier")
+      [ "${#voice_container_ids[@]}" -le 16 ] ||
+        fail 'voice project enumeration exceeded its fixed container bound'
+    done <<<"$docker_output"
+  fi
+}
+
+remove_runtime_projection() {
+  local target
+  local -a secret_directories=()
+  local -a generated_files=()
+  shopt -s nullglob
+  secret_directories=("$runtime_root/voice-secrets" "$runtime_root"/voice-secrets.new-*)
+  generated_files=(
+    "$runtime_root/drachtio.conf.xml"
+    "$runtime_root/freeswitch-event-socket.conf.xml"
+    "$runtime_root"/drachtio.conf.xml.new-*
+    "$runtime_root"/freeswitch-event-socket.conf.xml.new-*
+  )
+  shopt -u nullglob
+  for target in "${secret_directories[@]}"; do
+    [ -e "$target" ] || [ -L "$target" ] || continue
+    ! /usr/bin/mountpoint -q -- "$target" ||
+      fail 'a runtime secret projection unexpectedly became a mountpoint'
+    /usr/bin/rm -rf --one-file-system -- "$target"
+  done
+  for target in "${generated_files[@]}"; do
+    [ -e "$target" ] || [ -L "$target" ] || continue
+    [ ! -d "$target" ] || [ -L "$target" ] ||
+      fail 'a generated voice configuration path became a directory'
+    /usr/bin/rm -f -- "$target"
+  done
+  /usr/bin/sync -d "$runtime_root"
+}
+
+emergency_cleanup() {
+  require_root
+  local expected_runtime_owner=0:0
+  if [ "$test_only" -eq 1 ]; then
+    expected_runtime_owner="$(/usr/bin/id -u):$(/usr/bin/id -g)"
+  fi
+  if [ "$test_only" -eq 0 ]; then
+    [ "$(/usr/bin/readlink -f -- "$0")" = "$installed_entrypoint" ] ||
+      fail 'emergency cleanup requires the fixed host-owned entrypoint'
+    [ -f "$docker_bin" ] && [ ! -L "$docker_bin" ] &&
+      [ "$(/usr/bin/readlink -f -- "$docker_bin")" = "$docker_bin" ] ||
+      fail 'the fixed Docker client is unsafe'
+    case "$(/usr/bin/stat -c '%u:%g:%a:%h' -- "$docker_bin")" in
+      0:0:755:1|0:0:555:1) ;;
+      *) fail 'the fixed Docker client metadata is unsafe' ;;
+    esac
+  fi
+  [ -d "$runtime_root" ] && [ ! -L "$runtime_root" ] &&
+    [ "$(/usr/bin/readlink -f -- "$runtime_root")" = "$runtime_root" ] &&
+    [ "$(/usr/bin/stat -c '%u:%g:%a' -- "$runtime_root")" = \
+      "${expected_runtime_owner}:700" ] ||
+    fail 'the emergency cleanup runtime root is unsafe'
+  trap cleanup_emergency_capture EXIT INT TERM
+  list_voice_container_ids
+  if [ "${#voice_container_ids[@]}" -gt 0 ]; then
+    capture_docker 'voice project removal' container rm --force "${voice_container_ids[@]}"
+  fi
+  list_voice_container_ids
+  [ "${#voice_container_ids[@]}" -eq 0 ] ||
+    fail 'emergency cleanup could not prove the voice project quiescent'
+  remove_runtime_projection
+  trap - EXIT INT TERM
+  cleanup_emergency_capture
+  printf 'VOICE_STACK_EMERGENCY_CLEANUP_OK\n'
 }
 
 assert_unit_truth() {
@@ -316,8 +450,9 @@ check_installed() {
   printf 'VOICE_STACK_INSTALLED_DISABLED_OK\n'
 }
 
-if [ "$test_only" -eq 1 ] && [ "${1:-}" != --check ]; then
-  fail 'the isolated voice installer test lane permits only --check'
+if [ "$test_only" -eq 1 ] &&
+   [ "${1:-}" != --check ] && [ "${1:-}" != --emergency-cleanup ]; then
+  fail 'the isolated voice installer test lane permits only --check or --emergency-cleanup'
 fi
 
 case "${1:-}" in
@@ -333,7 +468,11 @@ case "${1:-}" in
     [ "$#" -eq 1 ] || fail 'unexpected arguments'
     check_installed
     ;;
+  --emergency-cleanup)
+    [ "$#" -eq 1 ] || fail 'unexpected arguments'
+    emergency_cleanup
+    ;;
   *)
-    fail 'usage: teleagent-voice-stack-install --source-check|--install-disabled|--check'
+    fail 'usage: teleagent-voice-stack-install --source-check|--install-disabled|--check|--emergency-cleanup'
     ;;
 esac

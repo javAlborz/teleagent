@@ -694,7 +694,8 @@ test('dormant systemd gate binds the private voice identity and every prerequisi
     /^ExecStartPre=\/usr\/local\/libexec\/verify-voice-stack-identity --installed-check$/m);
   assert.match(unit, /^ExecStart=\/usr\/local\/libexec\/teleagent-voice-stack-launch start$/m);
   assert.match(unit, /^ExecStop=\/usr\/local\/libexec\/teleagent-voice-stack-launch stop$/m);
-  assert.match(unit, /^ExecStopPost=\/usr\/local\/libexec\/teleagent-voice-stack-launch cleanup$/m);
+  assert.match(unit,
+    /^ExecStopPost=\/usr\/local\/libexec\/teleagent-voice-stack-install --emergency-cleanup$/m);
   assert.match(unit, /^NoNewPrivileges=yes$/m);
   assert.match(unit, /^CPUQuota=100%$/m);
   assert.match(unit, /^MemoryHigh=384M$/m);

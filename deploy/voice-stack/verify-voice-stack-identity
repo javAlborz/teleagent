@@ -202,8 +202,8 @@ function sourceCheck(sourceRoot = SOURCE_ROOT, { sourceUid = 0, sourceGid = 0 } 
     /^ExecStop=\/usr\/local\/libexec\/teleagent-voice-stack-launch stop$/gmu,
     'the fixed stop command');
   exactlyOnce(service,
-    /^ExecStopPost=\/usr\/local\/libexec\/teleagent-voice-stack-launch cleanup$/gmu,
-    'the unconditional cleanup command');
+    /^ExecStopPost=\/usr\/local\/libexec\/teleagent-voice-stack-install --emergency-cleanup$/gmu,
+    'the host-owned emergency cleanup command');
   exactlyOnce(service, /^User=root$/gmu, 'the root orchestrator user');
   exactlyOnce(service, /^Group=root$/gmu, 'the root orchestrator group');
   exactlyOnce(service, /^Requires=teleagent-voice-containers\.slice$/gmu,

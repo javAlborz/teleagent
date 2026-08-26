@@ -21,7 +21,7 @@ ExecStartPre=+/usr/bin/env -i HOME=/var/empty PATH=/usr/sbin:/usr/bin:/sbin:/bin
 ExecStartPre=/usr/local/libexec/verify-voice-stack-identity --installed-check
 ExecStart=/usr/local/libexec/teleagent-voice-stack-launch start
 ExecStop=/usr/local/libexec/teleagent-voice-stack-launch stop
-ExecStopPost=/usr/local/libexec/teleagent-voice-stack-launch cleanup
+ExecStopPost=/usr/local/libexec/teleagent-voice-stack-install --emergency-cleanup
 TimeoutStartSec=120s
 TimeoutStopSec=150s
 KillMode=control-group
