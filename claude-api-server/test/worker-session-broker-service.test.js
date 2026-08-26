@@ -174,7 +174,7 @@ test('a lifetime-lock loser performs no store open, recovery, tmux, or listen wo
     assertSocketBoundary() { calls.push('socket_checked'); },
     createStorageGuard() {
       calls.push('storage_checked');
-      return { assertNewWork() {} };
+      return { assertNewWork() { calls.push('storage_admitted'); } };
     },
     acquireSingleton() {
       calls.push('lock_attempted');
@@ -182,7 +182,45 @@ test('a lifetime-lock loser performs no store open, recovery, tmux, or listen wo
     },
     createBroker() { calls.push('broker'); },
   }), /holds the lifetime lock/);
-  assert.deepEqual(calls, ['storage_checked', 'socket_checked', 'lock_attempted']);
+  assert.deepEqual(calls, [
+    'storage_checked',
+    'storage_admitted',
+    'socket_checked',
+    'lock_attempted',
+  ]);
+});
+
+test('storage exhaustion refuses startup before socket or singleton access', async () => {
+  const calls = [];
+  const capacityError = Object.assign(new Error('state reserve exhausted'), {
+    code: 'WORKER_STATE_CAPACITY_EXHAUSTED',
+  });
+  await assert.rejects(startWorkerSessionBroker({
+    config: {
+      uid: 1234,
+      gid: 1235,
+      controllerGid: 5678,
+      listenFd: 3,
+      brokerSocket: FIXED_BROKER_SOCKET,
+      singletonDb: FIXED_SINGLETON_DB,
+      stateDb: FIXED_STATE_DB,
+      inspectionRoots: [FIXED_WORKSPACE_ROOT],
+      providerView: FIXED_PROVIDER_VIEW,
+      tmuxSocket: FIXED_TMUX_SOCKET,
+    },
+    createStorageGuard() {
+      calls.push('storage_checked');
+      return {
+        assertNewWork() {
+          calls.push('storage_refused');
+          throw capacityError;
+        },
+      };
+    },
+    assertSocketBoundary() { calls.push('socket_checked'); },
+    acquireSingleton() { calls.push('lock_attempted'); },
+  }), { code: 'WORKER_STATE_CAPACITY_EXHAUSTED' });
+  assert.deepEqual(calls, ['storage_checked', 'storage_refused']);
 });
 
 test('independent brokers race once and SIGKILL releases the kernel lifetime lock', async () => {

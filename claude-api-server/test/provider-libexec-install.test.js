@@ -30,7 +30,9 @@ case "\${1:-}" in
     if [ "$scenario" = query-failure ] && [ "$property" = ActiveState ]; then exit 1; fi
     case "$property" in
       LoadState) [ "$scenario" = missing ] && printf 'not-found\\n' || printf 'loaded\\n' ;;
+      UnitFileState) [ "$scenario" = enabled ] && printf 'enabled\\n' || printf 'static\\n' ;;
       ActiveState) [ "$scenario" = active ] && printf 'active\\n' || printf 'inactive\\n' ;;
+      SubState) [ "$scenario" = transitional ] && printf 'start-pre\\n' || printf 'dead\\n' ;;
       ControlGroup) printf '/provider-test\\n' ;;
       *) exit 64 ;;
     esac
@@ -85,7 +87,9 @@ test('provider libexec updater proves exact inactive units, empty cgroups, and z
   assert.deepEqual(fs.readFileSync(value.log, 'utf8').trim().split('\n'), [
     ...units.flatMap((unit) => [
       `LoadState\t${unit}`,
+      `UnitFileState\t${unit}`,
       `ActiveState\t${unit}`,
+      `SubState\t${unit}`,
       `ControlGroup\t${unit}`,
     ]),
     'list-units',
@@ -95,7 +99,10 @@ test('provider libexec updater proves exact inactive units, empty cgroups, and z
 test('provider libexec updater fails closed on every unit, cgroup, and enumeration ambiguity', (t) => {
   const value = fixture();
   t.after(() => fs.rmSync(value.root, { recursive: true, force: true }));
-  for (const scenario of ['missing', 'active', 'query-failure', 'list-failure', 'transient']) {
+  for (const scenario of [
+    'missing', 'enabled', 'active', 'transitional',
+    'query-failure', 'list-failure', 'transient',
+  ]) {
     const result = runCheck(value, scenario);
     assert.equal(result.status, 75, `${scenario}: ${result.stderr}`);
   }

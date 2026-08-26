@@ -1533,6 +1533,7 @@ async function startProviderEgressBroker({
     expectedUid: config.uid,
     expectedGid: config.gid,
   });
+  storage.assertNewWork();
   const db = openStore(config.spec.database, {
     uid: config.uid,
     gid: config.gid,

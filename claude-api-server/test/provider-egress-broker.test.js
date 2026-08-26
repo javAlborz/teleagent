@@ -1394,9 +1394,11 @@ test('broker process startup revokes persisted launch capabilities before either
       controlFd: 4,
     },
     createStorageGuard() {
-      return { assertNewWork() {} };
+      order.push('storage_checked');
+      return { assertNewWork() { order.push('storage_admitted'); } };
     },
     openStore() {
+      order.push('store_opened');
       return {
         ...db,
         prepare: (...args) => db.prepare(...args),
@@ -1415,7 +1417,14 @@ test('broker process startup revokes persisted launch capabilities before either
   });
   t.after(() => started.close());
 
-  assert.deepEqual(order, ['create:0', 'listen', 'listen']);
+  assert.deepEqual(order, [
+    'storage_checked',
+    'storage_admitted',
+    'store_opened',
+    'create:0',
+    'listen',
+    'listen',
+  ]);
   assert.equal(started.startupRecovery.persisted, true);
   assert.equal(started.startupRecovery.revokedCount, 1);
   const row = db.prepare(
@@ -1431,4 +1440,31 @@ test('broker process startup revokes persisted launch capabilities before either
     requestBytes: 100,
     reservedTokens: 200,
   }), (error) => error.code === 'PROVIDER_CAPABILITY_DENIED');
+});
+
+test('provider startup refuses exhausted state before opening SQLite', async () => {
+  const calls = [];
+  const capacityError = Object.assign(new Error('state reserve exhausted'), {
+    code: 'WORKER_STATE_CAPACITY_EXHAUSTED',
+  });
+  await assert.rejects(startProviderEgressBroker({
+    config: {
+      provider: 'codex',
+      uid: 1234,
+      gid: 1235,
+      spec: PROVIDERS.codex,
+    },
+    createStorageGuard() {
+      calls.push('storage_checked');
+      return {
+        assertNewWork() {
+          calls.push('storage_refused');
+          throw capacityError;
+        },
+      };
+    },
+    openStore() { calls.push('store_opened'); },
+    verifySocketPaths: false,
+  }), { code: 'WORKER_STATE_CAPACITY_EXHAUSTED' });
+  assert.deepEqual(calls, ['storage_checked', 'storage_refused']);
 });

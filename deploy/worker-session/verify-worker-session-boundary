@@ -63,7 +63,7 @@ provider_launcher=/usr/local/libexec/teleagent-provider-supervisor-client
 # Durable worker/budget state must be unable to exhaust the host root. The
 # exact worker-state root is a 1-8 GiB mount distinct from /var/lib, and every
 # role receives only its private directory. Runtime admission preserves at
-# least 512 MiB or 10%, whichever is greater.
+# least 512 MiB or 20%, whichever is greater.
 [ "$(/usr/bin/readlink -f -- /var/lib)" = /var/lib ] &&
   [ "$(/usr/bin/stat -c '%u:%g' /var/lib)" = 0:0 ] &&
   [ $((0$(/usr/bin/stat -c '%a' /var/lib) & 0022)) -eq 0 ] || {
@@ -92,7 +92,7 @@ state_capacity=$((state_block_size * state_blocks))
 state_free=$((state_block_size * state_available))
 state_min=$((1024 * 1024 * 1024))
 state_max=$((8 * 1024 * 1024 * 1024))
-state_reserve=$((state_capacity / 10))
+state_reserve=$((state_capacity / 5))
 [ "$state_reserve" -ge $((512 * 1024 * 1024)) ] || state_reserve=$((512 * 1024 * 1024))
 [ "$state_capacity" -ge "$state_min" ] && [ "$state_capacity" -le "$state_max" ] &&
   [ "$state_free" -ge "$state_reserve" ] || {

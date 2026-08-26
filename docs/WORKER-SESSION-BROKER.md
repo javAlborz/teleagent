@@ -92,11 +92,12 @@ that all ownership and modes remain exact.
 
 Every new operation, pane identity, egress capability, and budget reservation
 rechecks the filesystem. New durable work is refused when free space falls
-below the larger of 512 MiB or 10 percent of total capacity. Existing
-idempotency records and panic, revocation, completion, and outcome-unknown
-recovery remain writable so pressure cannot erase or misreport crash truth.
-The session broker does not prune unresolved or terminal operation truth;
-the dedicated mount is its hard host-containment boundary. Egress startup
+below the larger of 512 MiB or 20 percent of total capacity. Startup refuses to
+open any singleton or SQLite store below that reserve. While a service remains
+running, existing idempotency records and panic, revocation, completion, and
+outcome-unknown recovery remain writable so pressure cannot erase or misreport
+crash truth. The session broker does not prune unresolved or terminal operation
+truth; the dedicated mount is its hard host-containment boundary. Egress startup
 removes only reservations and already-revoked capabilities older than 14 days,
 never active or recent capability state. The broker is also capped at 512 MiB
 RAM, zero swap, 128 tasks, and 50 percent of one CPU; egress services retain

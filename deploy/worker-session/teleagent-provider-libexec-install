@@ -90,10 +90,13 @@ require_quiescent_provider_plane() {
     teleagent-provider-egress-control@claude.socket \
     teleagent-provider-egress-control@codex.socket; do
     load_state=$(unit_property "$unit" LoadState)
+    unit_file_state=$(unit_property "$unit" UnitFileState)
     active_state=$(unit_property "$unit" ActiveState)
+    sub_state=$(unit_property "$unit" SubState)
     control_group=$(unit_property "$unit" ControlGroup)
-    [ "$load_state" = loaded ] && [ "$active_state" = inactive ] ||
-      fail 'provider libexec update requires exactly loaded inactive units' 75
+    [ "$load_state" = loaded ] && [ "$unit_file_state" = static ] &&
+      [ "$active_state" = inactive ] && [ "$sub_state" = dead ] ||
+      fail 'provider libexec update requires exactly loaded static inactive dead units' 75
     assert_cgroup_empty "$control_group"
   done
   units=$($systemctl_bin list-units --all --plain --no-legend \

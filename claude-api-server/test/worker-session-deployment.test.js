@@ -154,6 +154,8 @@ test('session broker, RPC socket, state DB, and tmux socket exclude provider ide
   assert.match(libexecInstall, /source digest is unreviewed/);
   assert.match(libexecInstall, /^PATH=\/usr\/sbin:\/usr\/bin:\/sbin:\/bin$/m);
   assert.match(libexecInstall, /--property="\$2" --value/);
+  assert.match(libexecInstall, /unit_file_state.*static/);
+  assert.match(libexecInstall, /sub_state.*dead/);
   assert.match(libexecInstall, /provider cgroup is populated/);
   assert.doesNotMatch(libexecInstall, /systemctl is-active/);
   assert.match(apparmorInstall,
@@ -255,6 +257,7 @@ test('activation verification requires clean provider homes, synthetic DAC denia
   assert.match(verifier, /worker state is not an exact dedicated mount/);
   assert.match(verifier, /state_max=\$\(\(8 \* 1024 \* 1024 \* 1024\)\)/);
   assert.match(verifier, /state_reserve=.*512 \* 1024 \* 1024/);
+  assert.match(verifier, /state_reserve=\$\(\(state_capacity \/ 5\)\)/);
   assert.match(verifier, /session-broker claude-egress codex-egress/);
   assert.match(verifier, /expected_libexec_targets=[\s\S]*teleagent-provider-egress-credential-check/);
   assert.match(verifier, /provider libexec manifest closure is incomplete/);

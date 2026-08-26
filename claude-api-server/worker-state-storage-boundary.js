@@ -10,6 +10,7 @@ const FIXED_WORKER_STATE_PARENT = path.dirname(FIXED_WORKER_STATE_ROOT);
 const MIN_STATE_CAPACITY_BYTES = 1n * GIB;
 const MAX_STATE_CAPACITY_BYTES = 8n * GIB;
 const MIN_STATE_FREE_BYTES = 512n * MIB;
+const MIN_STATE_FREE_PERCENT = 20n;
 const STATE_DIRECTORIES = Object.freeze({
   'session-broker': `${FIXED_WORKER_STATE_ROOT}/session-broker`,
   'claude-egress': `${FIXED_WORKER_STATE_ROOT}/claude-egress`,
@@ -95,7 +96,7 @@ function inspectWorkerStateStorage({
       'Worker state filesystem capacity is outside the fixed 1-8 GiB boundary.'
     );
   }
-  const percentageReserve = capacityBytes / 10n;
+  const percentageReserve = capacityBytes * MIN_STATE_FREE_PERCENT / 100n;
   const requiredFreeBytes = percentageReserve > MIN_STATE_FREE_BYTES
     ? percentageReserve
     : MIN_STATE_FREE_BYTES;
@@ -117,19 +118,20 @@ function createWorkerStateStorageGuard({
   inspect = inspectWorkerStateStorage,
 } = {}) {
   const inspectCurrent = () => inspect({ role, expectedUid, expectedGid });
-  inspectCurrent();
+  const assertNewWork = () => {
+    const health = inspectCurrent();
+    if (health?.admitted !== true) {
+      storageError(
+        'WORKER_STATE_CAPACITY_EXHAUSTED',
+        'Worker state reserve is exhausted; new durable work is refused.'
+      );
+    }
+    return health;
+  };
+  assertNewWork();
   return Object.freeze({
     inspect: inspectCurrent,
-    assertNewWork() {
-      const health = inspectCurrent();
-      if (health?.admitted !== true) {
-        storageError(
-          'WORKER_STATE_CAPACITY_EXHAUSTED',
-          'Worker state reserve is exhausted; new durable work is refused.'
-        );
-      }
-      return health;
-    },
+    assertNewWork,
   });
 }
 
@@ -139,6 +141,7 @@ module.exports = {
   MAX_STATE_CAPACITY_BYTES,
   MIN_STATE_CAPACITY_BYTES,
   MIN_STATE_FREE_BYTES,
+  MIN_STATE_FREE_PERCENT,
   STATE_DIRECTORIES,
   WorkerStateStorageError,
   createWorkerStateStorageGuard,

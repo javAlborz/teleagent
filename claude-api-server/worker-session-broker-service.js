@@ -295,6 +295,7 @@ async function startWorkerSessionBroker({
     expectedUid: config.uid,
     expectedGid: config.gid,
   });
+  storage.assertNewWork();
   assertSocketBoundary(
     config.listenFd,
     config.brokerSocket,

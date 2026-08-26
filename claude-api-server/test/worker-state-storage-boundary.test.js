@@ -5,6 +5,7 @@ const test = require('node:test');
 const {
   FIXED_WORKER_STATE_PARENT,
   FIXED_WORKER_STATE_ROOT,
+  MIN_STATE_FREE_PERCENT,
   STATE_DIRECTORIES,
   createWorkerStateStorageGuard,
   inspectWorkerStateStorage,
@@ -64,6 +65,8 @@ test('worker state requires the exact bounded submount and private role director
   assert.equal(health.root, FIXED_WORKER_STATE_ROOT);
   assert.equal(health.directory, STATE_DIRECTORIES['session-broker']);
   assert.equal(health.capacityBytes, 4n * GIB);
+  assert.equal(health.requiredFreeBytes, 4n * GIB / 5n);
+  assert.equal(MIN_STATE_FREE_PERCENT, 20n);
   assert.equal(health.admitted, true);
   assert.throws(() => inspect({ rootDev: 1n }), { code: 'WORKER_STATE_BOUNDARY_INVALID' });
   assert.throws(() => inspect({ directoryDev: 3n }), { code: 'WORKER_STATE_BOUNDARY_INVALID' });
@@ -72,15 +75,29 @@ test('worker state requires the exact bounded submount and private role director
   assert.throws(() => inspect({ capacity: 9n * GIB }), { code: 'WORKER_STATE_BOUNDARY_INVALID' });
 });
 
-test('worker state keeps recovery available but refuses every new write below reserve', () => {
-  const low = inspect({ free: 511n * 1024n * 1024n });
+test('worker state refuses guard startup below the 20-percent reserve', () => {
+  const low = inspect({ free: 700n * 1024n * 1024n });
   assert.equal(low.admitted, false);
-  const guard = createWorkerStateStorageGuard({
+  assert.throws(() => createWorkerStateStorageGuard({
     role: 'session-broker',
     expectedUid: 991,
     expectedGid: 992,
     inspect: () => low,
+  }), { code: 'WORKER_STATE_CAPACITY_EXHAUSTED' });
+});
+
+test('worker state rechecks the reserve before every new durable write', () => {
+  const healthy = inspect();
+  const low = inspect({ free: 700n * 1024n * 1024n });
+  let current = healthy;
+  const guard = createWorkerStateStorageGuard({
+    role: 'session-broker',
+    expectedUid: 991,
+    expectedGid: 992,
+    inspect: () => current,
   });
+  assert.equal(guard.inspect().admitted, true);
+  current = low;
   assert.equal(guard.inspect().admitted, false);
   assert.throws(() => guard.assertNewWork(), { code: 'WORKER_STATE_CAPACITY_EXHAUSTED' });
 });
