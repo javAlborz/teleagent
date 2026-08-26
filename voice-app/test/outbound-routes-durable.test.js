@@ -13,7 +13,7 @@ const express = require('express');
 const {
   panicOutboundCalls,
   router,
-  setupRoutes,
+  setupRoutes: setupRoutesRaw,
   shutdownOutboundCalls,
   unlockOutboundCalls,
 } = require('../lib/outbound-routes');
@@ -23,6 +23,9 @@ const { openVoiceRuntimeState } = require('../lib/voice-runtime-state');
 const { createOutboundRoutingConfig } = require('../lib/outbound-routing-config');
 
 const VALID_TOKEN = 'outbound-test-token-0123456789abcdef0123456789abcdef';
+const HEALTHY_STATE_CAPACITY_GUARD = Object.freeze({
+  check: () => ({ ok: true, code: null }),
+});
 const ROUTING_CONFIG = createOutboundRoutingConfig({
   host: '127.0.0.1',
   port: 5060,
@@ -45,6 +48,13 @@ function createTestRuntimeFence() {
       return { changed: true };
     },
   };
+}
+
+function setupRoutes(deps) {
+  return setupRoutesRaw({
+    stateCapacityGuard: HEALTHY_STATE_CAPACITY_GUARD,
+    ...deps,
+  });
 }
 
 function listen(app) {
@@ -223,6 +233,58 @@ test('outbound API fails closed and exact retries return the durable call ID', a
   assert.equal(conflict.status, 409);
   assert.equal((await conflict.json()).error, 'idempotency_conflict');
   assert.equal(store.getOutboundCall(reservation.idempotencyKey).callId, 'stable-route-call-id');
+});
+
+test('outbound admission returns 503 before durable reservation when state capacity is exhausted', async (t) => {
+  useOutboundToken(t);
+  const store = new VoiceStateStore({ dbPath: ':memory:' });
+  const runtimeFence = createTestRuntimeFence();
+  let capacityAvailable = true;
+  t.after(() => store.close());
+  t.after(() => runtimeFence.release());
+  setupRoutes({
+    httpHost: '127.0.0.1',
+    srf: {},
+    mediaServer: {},
+    voiceStateStore: store,
+    runtimeFence,
+    routingConfig: ROUTING_CONFIG,
+    stateCapacityGuard: {
+      check: () => capacityAvailable
+        ? { ok: true, code: null }
+        : { ok: false, code: 'VOICE_STATE_CAPACITY_EXHAUSTED' },
+    },
+  });
+  capacityAvailable = false;
+
+  const app = express();
+  app.use(express.json());
+  app.use('/api', router);
+  const server = await listen(app);
+  t.after(async () => {
+    await shutdownOutboundCalls({ timeoutMs: 100 });
+    await close(server);
+  });
+  const idempotencyKey = 'capacity:outbound-admission';
+  const response = await fetch(
+    `http://127.0.0.1:${server.address().port}/api/outbound-call`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${VALID_TOKEN}`,
+        'Content-Type': 'application/json',
+        'Idempotency-Key': idempotencyKey,
+      },
+      body: JSON.stringify({
+        to: '1001',
+        message: 'This must not be durably accepted.',
+        idempotencyKey,
+      }),
+    },
+  );
+  assert.equal(response.status, 503);
+  assert.equal((await response.json()).error, 'voice_state_capacity_unavailable');
+  assert.equal(store.getOutboundCall(idempotencyKey), null);
 });
 
 test('client SIP routes are rejected and only dedicated trunk auth reaches the configured PBX', async (t) => {

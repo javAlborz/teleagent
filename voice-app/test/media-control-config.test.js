@@ -92,8 +92,29 @@ test('canonical Compose gates both control daemons behind the no-network file pr
   assert.doesNotMatch(compose, /media-control-preflight:/);
   assert.equal((compose.match(/condition: service_completed_successfully/g) || []).length, 2);
   assert.match(compose, /voice-runtime-preflight:[\s\S]*network_mode: none/);
+  const preflight = compose.slice(
+    compose.indexOf('  voice-runtime-preflight:'),
+    compose.indexOf('\n  drachtio:'),
+  );
+  assert.match(preflight, /^    mem_limit: 256m$/m);
+  assert.match(preflight, /^    memswap_limit: 256m$/m);
+  assert.match(preflight, /^    cpus: 0\.5$/m);
+  assert.match(preflight, /^    pids_limit: 64$/m);
+  assert.match(preflight, /VOICE_STATE_DIR[^\n]+:\/app\/state:ro"$/m);
   assert.match(compose, /drachtio\.conf\.xml:\/etc\/drachtio\.conf\.xml:ro/);
   assert.match(compose, /freeswitch-event-socket\.conf\.xml:.*event_socket\.conf\.xml:ro/);
+  for (const name of ['voice-runtime-preflight', 'drachtio', 'freeswitch', 'voice-app']) {
+    const block = compose.match(new RegExp(
+      `^  ${name}:\\n[\\s\\S]*?(?=^  [a-z][^\\n]*:\\n|(?![\\s\\S]))`, 'm'))?.[0] || '';
+    assert.match(block, /^    read_only: true$/m, name);
+    const tmpfsRemainder = block.slice(block.indexOf('    tmpfs:\n') + '    tmpfs:\n'.length);
+    const nextKey = tmpfsRemainder.search(/^    [a-z_][a-z0-9_-]*:/m);
+    const tmpfs = tmpfsRemainder.slice(0, nextKey === -1 ? undefined : nextKey);
+    for (const line of tmpfs.match(/^      - \/[^\n]+$/gm) || []) {
+      assert.match(line, /(?:rw|ro),noexec,nosuid,nodev,/u, name);
+      assert.match(line, /size=[1-9][0-9]*$/u, name);
+    }
+  }
   assert.doesNotMatch(compose, /--(?:secret|password)\b/);
   assert.doesNotMatch(compose, /(?:DRACHTIO_SECRET|FREESWITCH_SECRET):/);
   assert.doesNotMatch(example, /^DRACHTIO_SECRET=/m);

@@ -8,6 +8,7 @@ const path = require('node:path');
 const test = require('node:test');
 const {
   VOICE_RUNTIME_PATHS,
+  VoiceStateCapacityGuard,
   validateVoiceRuntimePreflight,
 } = require('../lib/voice-runtime-preflight');
 const { SECRET_PATHS } = require('../lib/runtime-secrets');
@@ -27,7 +28,9 @@ const RUNTIME_SECRETS = Object.freeze({
   [SECRET_PATHS.outboundApiToken]: 'outbound_0123456789abcdef_ABCDEFGH',
 });
 
-function metadata({ type = 'file', uid = 0, gid = GID, mode = 0o440, nlink = 1, size = 64 } = {}) {
+function metadata({
+  type = 'file', uid = 0, gid = GID, mode = 0o440, nlink = 1, size = 64, dev = 100,
+} = {}) {
   return {
     isDirectory: () => type === 'directory',
     isFile: () => type === 'file',
@@ -37,6 +40,7 @@ function metadata({ type = 'file', uid = 0, gid = GID, mode = 0o440, nlink = 1, 
     mode,
     nlink,
     size,
+    dev,
   };
 }
 
@@ -50,7 +54,10 @@ function buildFilesystem(overrides = {}) {
       stat: metadata({ type: 'directory', uid: 0, gid: GID, mode: 0o750, size: 0 }),
     }],
     [VOICE_RUNTIME_PATHS.stateDirectory, {
-      stat: metadata({ type: 'directory', uid: UID, gid: GID, mode: 0o700, size: 0 }),
+      stat: metadata({
+        type: 'directory', uid: UID, gid: GID, mode: 0o700, size: 0, dev: 200,
+      }),
+      statfs: { bsize: 4096n, blocks: 1048576n, bavail: 524288n },
     }],
     [VOICE_RUNTIME_PATHS.deviceConfigFile, {
       value: Buffer.from('{"1001":{"extension":"1001"}}'),
@@ -81,6 +88,11 @@ function buildFilesystem(overrides = {}) {
       if (!entry) throw new Error('missing');
       return entry.stat;
     },
+    statfsSync(filename) {
+      const entry = values.get(filename);
+      if (!entry?.statfs) throw new Error('missing');
+      return entry.statfs;
+    },
     openSync(filename) {
       const entry = values.get(filename);
       if (!entry) throw new Error('missing');
@@ -100,6 +112,69 @@ test('preflight accepts only dedicated runtime paths and root:voice 0440 secrets
     effectiveUid: UID,
     effectiveGid: GID,
   }), { ok: true, uid: UID, gid: GID });
+});
+
+test('preflight requires a separate bounded state filesystem with a free-space reserve', () => {
+  const statePath = VOICE_RUNTIME_PATHS.stateDirectory;
+  const validState = metadata({
+    type: 'directory', uid: UID, gid: GID, mode: 0o700, size: 0, dev: 200,
+  });
+  const invalid = [
+    {
+      stat: metadata({
+        type: 'directory', uid: UID, gid: GID, mode: 0o700, size: 0, dev: 100,
+      }),
+      statfs: { bsize: 4096n, blocks: 1048576n, bavail: 524288n },
+      message: /not on a dedicated bounded filesystem/,
+    },
+    {
+      stat: validState,
+      statfs: { bsize: 4096n, blocks: 2621440n, bavail: 2097152n },
+      message: /4-8 GiB hard capacity/,
+    },
+    {
+      stat: validState,
+      statfs: { bsize: 4096n, blocks: 1048576n, bavail: 65536n },
+      message: /free-space reserve is exhausted/,
+    },
+  ];
+  for (const fixture of invalid) {
+    assert.throws(() => validateVoiceRuntimePreflight({
+      fsModule: buildFilesystem({ [statePath]: fixture }),
+      effectiveUid: UID,
+      effectiveGid: GID,
+    }), fixture.message);
+  }
+});
+
+test('runtime capacity guard reports bounded JSON-safe health and fails closed after exhaustion', () => {
+  const healthy = new VoiceStateCapacityGuard({
+    fsModule: buildFilesystem(),
+    effectiveUid: UID,
+    effectiveGid: GID,
+  }).check();
+  assert.deepEqual(healthy, {
+    ok: true,
+    code: null,
+    capacityBytes: 4 * 1024 * 1024 * 1024,
+    availableBytes: 2 * 1024 * 1024 * 1024,
+    requiredFreeBytes: Math.ceil((4 * 1024 * 1024 * 1024) / 5),
+  });
+  assert.doesNotThrow(() => JSON.stringify(healthy));
+
+  const exhausted = new VoiceStateCapacityGuard({
+    fsModule: buildFilesystem({
+      [VOICE_RUNTIME_PATHS.stateDirectory]: {
+        statfs: { bsize: 4096n, blocks: 1048576n, bavail: 65536n },
+      },
+    }),
+    effectiveUid: UID,
+    effectiveGid: GID,
+  }).check();
+  assert.deepEqual(exhausted, {
+    ok: false,
+    code: 'VOICE_STATE_CAPACITY_EXHAUSTED',
+  });
 });
 
 test('preflight rejects root, owner UID/GID 1000, and unsafe runtime paths', () => {

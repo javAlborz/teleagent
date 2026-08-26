@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const { spawn } = require('node:child_process');
 const { once } = require('node:events');
 const fs = require('node:fs');
+const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
@@ -16,9 +17,13 @@ const {
   cleanupRequiresPanicRecovery,
   normalizeVoiceImageManifest,
   parseExactProjectContainerIds,
+  requestJson,
   renderTemplateContents,
   runOfflineRecovery,
+  startFailureDisposition,
+  verifyBoundedHostStateFilesystem,
   verifyVoiceImage,
+  MAX_CONTROL_RESPONSE_BYTES,
 } = require('../../deploy/voice-stack/teleagent-voice-stack-launch');
 
 const IMAGE_MANIFEST = Object.freeze({
@@ -26,6 +31,67 @@ const IMAGE_MANIFEST = Object.freeze({
   image: `registry.example/teleagent/voice-app@sha256:${'a'.repeat(64)}`,
   imageId: `sha256:${'b'.repeat(64)}`,
   sourceRevision: 'c'.repeat(40),
+});
+
+function directoryMetadata({ uid = 0, gid = 0, mode = 0o755, dev = 100, ino = 1,
+  symlink = false } = {}) {
+  return {
+    uid,
+    gid,
+    mode,
+    dev,
+    ino,
+    isDirectory: () => !symlink,
+    isSymbolicLink: () => symlink,
+  };
+}
+
+function hostStateFilesystem({ stateDevice = 200, stateSymlink = false,
+  replacementInode = null } = {}) {
+  const ancestors = new Map([
+    ['/', directoryMetadata({ ino: 1 })],
+    ['/var', directoryMetadata({ ino: 2 })],
+    ['/var/lib', directoryMetadata({ ino: 3 })],
+  ]);
+  let stateReads = 0;
+  return {
+    lstatSync(filename) {
+      if (filename !== '/var/lib/teleagent-voice') return ancestors.get(filename);
+      stateReads += 1;
+      return directoryMetadata({
+        uid: 989,
+        gid: 989,
+        mode: 0o700,
+        dev: stateDevice,
+        ino: stateReads > 1 && replacementInode !== null ? replacementInode : 4,
+        symlink: stateSymlink,
+      });
+    },
+    realpathSync(filename) { return filename; },
+    statfsSync() {
+      return { bsize: 4096n, blocks: 1048576n, bavail: 524288n };
+    },
+  };
+}
+
+test('root launcher requires the exact voice-state path to be a bounded submount', () => {
+  assert.deepEqual(verifyBoundedHostStateFilesystem({ uid: 989, gid: 989 }, {
+    fsModule: hostStateFilesystem(),
+  }), {
+    capacity: 4n * 1024n * 1024n * 1024n,
+    available: 2n * 1024n * 1024n * 1024n,
+    requiredFree: 858993460n,
+  });
+
+  assert.throws(() => verifyBoundedHostStateFilesystem({ uid: 989, gid: 989 }, {
+    fsModule: hostStateFilesystem({ stateDevice: 100 }),
+  }), /not an exact dedicated filesystem mountpoint/);
+  assert.throws(() => verifyBoundedHostStateFilesystem({ uid: 989, gid: 989 }, {
+    fsModule: hostStateFilesystem({ stateSymlink: true }),
+  }), /mountpoint has unsafe metadata/);
+  assert.throws(() => verifyBoundedHostStateFilesystem({ uid: 989, gid: 989 }, {
+    fsModule: hostStateFilesystem({ replacementInode: 99 }),
+  }), /changed during verification/);
 });
 
 test('stack shutdown refuses persisted-but-unquiesced panic and forced exits', () => {
@@ -40,6 +106,78 @@ test('stack shutdown refuses persisted-but-unquiesced panic and forced exits', (
   for (const state of ['exited 1', 'exited 137', 'running 0', '']) {
     assert.throws(() => assertVoiceExit(state), /clean, quiescent shutdown/);
   }
+});
+
+test('failed stack start never clears panic evidence after Compose activation was attempted', () => {
+  assert.deepEqual(startFailureDisposition(false), {
+    phase: 'inactive', panic: 'not_requested', cleanup: 'proved',
+  });
+  assert.deepEqual(startFailureDisposition(true), {
+    phase: 'panic_outcome_unknown', panic: 'outcome_unknown', cleanup: 'proved',
+  });
+  assert.throws(() => startFailureDisposition('yes'), /attempt evidence is invalid/);
+
+  const source = fs.readFileSync(
+    path.join(__dirname, '..', '..', 'deploy', 'voice-stack', 'teleagent-voice-stack-launch.js'),
+    'utf8',
+  );
+  const startBody = source.slice(source.indexOf('async function start()'),
+    source.indexOf('async function stop()'));
+  assert.ok(startBody.indexOf('activationAttempted = true') < startBody.indexOf("composeArgs('up'"));
+  assert.match(startBody, /startFailureDisposition\(activationAttempted\)/);
+  assert.doesNotMatch(startBody,
+    /catch \(error\)[\s\S]*rollbackStartedStack\(environment\)[\s\S]*persistActivationState\('inactive'/);
+});
+
+test('root control client bounds advertised and streamed response bodies', async (t) => {
+  const server = http.createServer((request, response) => {
+    if (request.url === '/valid') {
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      response.end('{"success":true}');
+      return;
+    }
+    if (request.url === '/advertised-too-large') {
+      response.writeHead(200, {
+        'Content-Type': 'application/json',
+        'Content-Length': String(MAX_CONTROL_RESPONSE_BYTES + 1),
+      });
+      response.end('{}');
+      return;
+    }
+    if (request.url === '/slow-trickle') {
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      response.write('{');
+      const interval = setInterval(() => response.write(' '), 10);
+      response.once('close', () => clearInterval(interval));
+      return;
+    }
+    response.writeHead(200, { 'Content-Type': 'application/json' });
+    response.write(Buffer.alloc(MAX_CONTROL_RESPONSE_BYTES, 0x20));
+    response.end('x');
+  });
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const port = server.address().port;
+
+  assert.deepEqual(await requestJson({ method: 'GET', pathname: '/valid', port }), {
+    status: 200,
+    body: { success: true },
+  });
+  await assert.rejects(
+    requestJson({ method: 'GET', pathname: '/advertised-too-large', port }),
+    /exceeded its byte bound/,
+  );
+  await assert.rejects(
+    requestJson({ method: 'GET', pathname: '/streamed-too-large', port }),
+    /exceeded its byte bound/,
+  );
+  await assert.rejects(
+    requestJson({ method: 'GET', pathname: '/slow-trickle', port, timeoutMs: 80 }),
+    /total deadline/,
+  );
 });
 
 test('protected media templates require every exact placeholder once', () => {
@@ -85,6 +223,8 @@ test('wrapper never puts credentials in Docker argv or inherited environment', (
     ['activationRequiresRecovery(readActivationState())', 'cleanupExactProject()'],
     ['verifyVoiceImage(imageManifest)', 'readCredentialSet(identity, settings)'],
     ["persistActivationState('starting'", "composeArgs('up'"],
+    ['resolveVoiceIdentity()', 'verifyBoundedHostStateFilesystem(identity)'],
+    ['verifyBoundedHostStateFilesystem(identity)', 'readEnvironmentFile(identity)'],
   ]) {
     assert.notEqual(startBody.indexOf(before), -1);
     assert.notEqual(startBody.indexOf(after), -1);
@@ -317,6 +457,12 @@ test('dormant systemd gate binds the private voice identity and every prerequisi
   assert.match(unit, /^ExecStop=\/usr\/local\/libexec\/teleagent-voice-stack-launch stop$/m);
   assert.match(unit, /^ExecStopPost=\/usr\/local\/libexec\/teleagent-voice-stack-launch cleanup$/m);
   assert.match(unit, /^NoNewPrivileges=yes$/m);
+  assert.match(unit, /^CPUQuota=100%$/m);
+  assert.match(unit, /^MemoryHigh=384M$/m);
+  assert.match(unit, /^MemoryMax=512M$/m);
+  assert.match(unit, /^MemorySwapMax=0$/m);
+  assert.match(unit, /^TasksMax=128$/m);
+  assert.match(unit, /^IOWeight=50$/m);
   assert.doesNotMatch(unit, /^Environment=.*(?:TOKEN|PASSWORD|SECRET|KEY)=/m);
   assert.doesNotMatch(unit, /^\[Install\]$/m);
   assert.match(sysusers,
@@ -329,6 +475,78 @@ test('dormant systemd gate binds the private voice identity and every prerequisi
   assert.match(tmpfiles, /^d \/run\/teleagent-voice-stack 0700 root root -$/m);
   assert.equal((compose.match(/image: "\$\{TELEAGENT_VOICE_IMAGE:\?/g) || []).length, 2);
   assert.doesNotMatch(compose, /^\s+build:/m);
+  const preflight = compose.slice(
+    compose.indexOf('  voice-runtime-preflight:'),
+    compose.indexOf('\n  drachtio:'),
+  );
+  for (const expected of [
+    /^    mem_limit: 256m$/m,
+    /^    memswap_limit: 256m$/m,
+    /^    cpus: 0\.5$/m,
+    /^    pids_limit: 64$/m,
+    /^      core: 0$/m,
+    /VOICE_STATE_DIR[^\n]+:\/app\/state:ro"$/m,
+  ]) assert.match(preflight, expected);
+  for (const service of ['voice-runtime-preflight', 'drachtio', 'freeswitch', 'voice-app']) {
+    const match = compose.match(new RegExp(
+      `^  ${service}:\\n[\\s\\S]*?(?=^  [a-z][^\\n]*:\\n|(?![\\s\\S]))`,
+      'm',
+    ));
+    assert.ok(match, service);
+    const block = match[0];
+    assert.match(block, /^    read_only: true$/m, `${service} root filesystem`);
+    assert.match(block, /^    logging:$/m, service);
+    assert.match(block, /^      driver: local$/m, service);
+    assert.match(block, /^        max-size: "10m"$/m, service);
+    assert.match(block, /^        max-file: "3"$/m, service);
+    const scratchMounts = block.match(/^      - \/[^\n]+$/gm) || [];
+    const tmpfsRemainder = block.slice(block.indexOf('    tmpfs:\n') + '    tmpfs:\n'.length);
+    const nextKey = tmpfsRemainder.search(/^    [a-z_][a-z0-9_-]*:/m);
+    const tmpfsBlock = tmpfsRemainder.slice(0, nextKey === -1 ? undefined : nextKey);
+    const tmpfsMounts = tmpfsBlock.match(/^      - \/[^\n]+$/gm) || [];
+    assert.ok(tmpfsMounts.length > 0, `${service} bounded scratch mounts`);
+    for (const mount of tmpfsMounts) {
+      assert.match(mount, /(?:rw|ro),noexec,nosuid,nodev,/u, `${service} tmpfs security`);
+      assert.match(mount, /size=[1-9][0-9]*$/u, `${service} tmpfs size`);
+    }
+    assert.ok(scratchMounts.length >= tmpfsMounts.length, service);
+  }
+  const drachtio = compose.slice(compose.indexOf('  drachtio:'), compose.indexOf('\n  freeswitch:'));
+  const freeswitch = compose.slice(compose.indexOf('  freeswitch:'), compose.indexOf('\n  voice-app:'));
+  assert.match(drachtio, /^    mem_limit: 384m\n    memswap_limit: 384m$/m);
+  assert.match(drachtio, /^      - \/config:[^\n]+size=1048576$/m);
+  assert.match(freeswitch, /^    mem_limit: 1g\n    memswap_limit: 1g$/m);
+  for (const mountpoint of ['db', 'log', 'recordings', 'run', 'sounds']) {
+    assert.match(freeswitch, new RegExp(
+      `^      - \/usr\/local\/freeswitch\/${mountpoint}:[^\\n]+size=[1-9][0-9]*$`, 'm'));
+  }
+  assert.match(freeswitch,
+    /switch\.conf\.xml:\/usr\/local\/freeswitch\/conf\/autoload_configs\/switch\.conf\.xml:ro/);
+  const switchConfig = fs.readFileSync(path.join(deploy, '..', '..', 'freeswitch',
+    'switch.conf.xml'), 'utf8');
+  assert.match(switchConfig, /name="rtp-start-port" value="30000"/);
+  assert.match(switchConfig, /name="rtp-end-port" value="30100"/);
+  assert.match(switchConfig, /name="max-sessions" value="32"/);
+  const entrypoint = fs.readFileSync(path.join(deploy, '..', '..', 'freeswitch',
+    'entrypoint.sh'), 'utf8');
+  assert.doesNotMatch(entrypoint, /\bsed\b/);
+  assert.match(entrypoint, /accepts only its reviewed fixed entrypoint/);
+  assert.match(entrypoint, /-storage \/tmp\/freeswitch-storage/);
+  const mediaCanaryPath = path.join(deploy, '..', '..', 'scripts',
+    'test-media-images-read-only.sh');
+  const mediaCanary = fs.readFileSync(mediaCanaryPath, 'utf8');
+  assert.equal(fs.statSync(mediaCanaryPath).mode & 0o777, 0o755);
+  assert.match(mediaCanary, /--network none/);
+  assert.equal((mediaCanary.match(/--read-only/g) || []).length, 2);
+  assert.equal((mediaCanary.match(/--cap-drop ALL/g) || []).length, 2);
+  assert.equal((mediaCanary.match(/--security-opt no-new-privileges/g) || []).length, 2);
+  for (const digest of [
+    'c03001e7c01ead29d0026245d0b42a9ebc8eefb0ff9bd180f5ff1f72be6da457',
+    '7a6ce26834ff1b8eb27e97f3b9db72980a511e83ef01897097ca92a0f2d5eb62',
+  ]) {
+    assert.match(compose, new RegExp(digest));
+    assert.match(mediaCanary, new RegExp(digest));
+  }
 });
 
 test('voice launcher projects the exact eleven reviewed credential classes', () => {
@@ -365,5 +583,18 @@ test('SIP fence bundle is app-local, atomic, and removal is Docker-quiesced', ()
   assert.match(unit, /^CapabilityBoundingSet=CAP_NET_ADMIN$/m);
   assert.match(installer,
     /! systemctl is-active --quiet docker\.service \|\| fail 'stop Docker before removing its SIP fence'/);
+  assert.doesNotMatch(installer, /"\$\{target_helper\}" reconcile/);
+  const installStart = installer.indexOf('install_fence()');
+  const installBody = installer.slice(
+    installStart,
+    installer.indexOf('\nvalidate_source\n', installStart),
+  );
+  assert.ok(installBody.indexOf('systemctl enable --now "${unit}"') <
+    installBody.lastIndexOf('  check_live\n'));
+  assert.match(installer, /trap rollback_install ERR/);
+  assert.match(installer, /systemctl disable --now "\$\{unit\}"/);
+  assert.match(installer, /prior disabled state restored/);
+  assert.match(unit, /^RuntimeDirectory=teleagent-sip-local-peer-fence$/m);
+  assert.match(unit, /^RuntimeDirectoryMode=0700$/m);
   assert.match(installer, /--source-check/);
 });

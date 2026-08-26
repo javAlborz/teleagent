@@ -12,6 +12,7 @@ source_unit=${app_root}/deploy/voice-stack/teleagent-sip-local-peer-fence.servic
 target_helper=/usr/local/libexec/teleagent-sip-local-peer-fence
 target_unit=/etc/systemd/system/teleagent-sip-local-peer-fence.service
 unit=teleagent-sip-local-peer-fence.service
+runtime_dir=/run/teleagent-sip-local-peer-fence
 
 fail() {
   printf 'Teleagent SIP fence install: %s\n' "$*" >&2
@@ -50,6 +51,62 @@ check_live() {
   "${target_helper}" check
 }
 
+install_fence() {
+  ! systemctl is-active --quiet teleagent-voice-stack.service ||
+    fail 'stop the voice stack before changing its SIP fence'
+  require_known_or_absent "${source_helper}" "${target_helper}"
+  require_known_or_absent "${source_unit}" "${target_unit}"
+
+  # An already-active exact installation is idempotent and needs no rewrite.
+  if systemctl is-active --quiet "${unit}"; then
+    check_live
+    return
+  fi
+
+  local helper_existed=0 unit_existed=0 unit_was_enabled=0 committed=0
+  [[ -e "${target_helper}" || -L "${target_helper}" ]] && helper_existed=1
+  [[ -e "${target_unit}" || -L "${target_unit}" ]] && unit_existed=1
+  systemctl is-enabled --quiet "${unit}" && unit_was_enabled=1
+
+  rollback_install() {
+    local status=$?
+    local rollback_failed=0
+    trap - ERR
+    set +e
+    systemctl disable --now "${unit}" >/dev/null 2>&1 || rollback_failed=1
+    if [[ -x "${target_helper}" && -d "${runtime_dir}" && ! -L "${runtime_dir}" ]]; then
+      "${target_helper}" remove >/dev/null 2>&1 || rollback_failed=1
+    fi
+    ((unit_existed == 1)) || rm -f "${target_unit}" || rollback_failed=1
+    ((helper_existed == 1)) || rm -f "${target_helper}" || rollback_failed=1
+    systemctl daemon-reload >/dev/null 2>&1 || rollback_failed=1
+    if ((unit_was_enabled == 1)); then
+      systemctl enable "${unit}" >/dev/null 2>&1 || rollback_failed=1
+    fi
+    set -e
+    if ((rollback_failed != 0)); then
+      printf 'Teleagent SIP fence install: activation failed and rollback was incomplete\n' >&2
+      exit 77
+    fi
+    if ((committed == 0)); then
+      printf 'Teleagent SIP fence install: activation failed; prior disabled state restored\n' >&2
+    fi
+    exit "${status}"
+  }
+  trap rollback_install ERR
+
+  install -d -o root -g root -m 0755 /usr/local/libexec
+  install -o root -g root -m 0755 "${source_helper}" "${target_helper}"
+  install -o root -g root -m 0644 "${source_unit}" "${target_unit}"
+  systemctl daemon-reload
+  # systemd creates the root-only RuntimeDirectory before ExecStart. The
+  # service monitor performs the sole atomic initial reconciliation there.
+  systemctl enable --now "${unit}"
+  check_live
+  committed=1
+  trap - ERR
+}
+
 validate_source
 case "${1:---source-check}" in
   --source-check)
@@ -65,16 +122,7 @@ case "${1:---source-check}" in
   --install)
     [[ $# == 1 ]] || fail 'select exactly one mode'
     require_root
-    ! systemctl is-active --quiet teleagent-voice-stack.service || fail 'stop the voice stack before changing its SIP fence'
-    require_known_or_absent "${source_helper}" "${target_helper}"
-    require_known_or_absent "${source_unit}" "${target_unit}"
-    install -d -o root -g root -m 0755 /usr/local/libexec
-    install -o root -g root -m 0755 "${source_helper}" "${target_helper}"
-    install -o root -g root -m 0644 "${source_unit}" "${target_unit}"
-    systemctl daemon-reload
-    "${target_helper}" reconcile
-    systemctl enable --now "${unit}"
-    check_live
+    install_fence
     ;;
   --remove)
     [[ $# == 1 ]] || fail 'select exactly one mode'

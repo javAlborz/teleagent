@@ -182,6 +182,22 @@ exact no-follow paths.
 The voice stack has no autonomous Docker restart policy. A systemd-owned gate
 starts it only after the local SIP fence, split provider plane, controller,
 privileged broker, identities, credentials, and configuration are verified.
+The root launcher itself is CPU-, memory-, swap-, I/O-, and task-bounded, and
+accepts at most 128 KiB from any controller health or panic response. The
+no-network credential preflight is separately capped at 0.5 CPU, 256 MiB, and
+64 tasks, mounts durable voice state read-only, and cannot consume swap. Every
+Compose service uses the bounded local log driver with three 10 MiB files, so a
+chatty media process cannot fill the host filesystem through Docker logs.
+Drachtio and FreeSWITCH also run with read-only root filesystems; every vendor
+image `VOLUME` and writable runtime path is overridden by an explicit,
+size-capped, noexec/nosuid/nodev tmpfs. Activation additionally proves the exact
+`/var/lib/teleagent-voice` path is a canonical mountpoint whose device differs
+from its immediate `/var/lib` parent, then requires that filesystem to be 4–8
+GiB with at least 512 MiB and 20% free. This hard boundary keeps the append-only
+SQLite ledger and media daemons from consuming the host root filesystem. The running
+voice process repeats that admission check before every authenticated inbound
+or outbound call and exposes exhaustion as unhealthy, so it stops accepting
+new durable work before the hard capacity is reached.
 The normal CLI delegates voice start and stop to that exact systemd unit; it
 does not invoke Compose directly or inherit an image selector into activation.
 The two Teleagent voice services use one promoted image named by OCI digest in
@@ -213,7 +229,10 @@ removing projected credentials. This cleanup does not clear controller panic or
 convert an unknown panic outcome into success. If startup or shutdown was
 interrupted before coordinated panic was positively quiescent, cleanup records
 durable `panic_outcome_unknown` even after all voice containers are gone, and a
-later start refuses.
+later start refuses. The launcher records that same outcome before invoking
+`docker compose up`, because a failing Docker call may already have partially
+created or started the stack; successful container cleanup cannot prove that
+controller-visible work never began.
 
 Recovery is explicit and two-stage. With the voice containers absent, a root
 operator invokes the fixed launcher with `recover`; it re-proves zero exact

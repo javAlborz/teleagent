@@ -40,6 +40,7 @@ var outboundPanicLocked = false;
 var outboundRecoveryBlocked = false;
 var outboundRuntimeFence = null;
 var outboundRoutingConfig = null;
+var stateCapacityGuard = null;
 const outboundOperations = new Map();
 var outboundRecoveryImmediate = null;
 
@@ -93,6 +94,19 @@ function runtimeFenceHeld() {
     outboundAccepting = false;
     outboundPanicLocked = true;
     return false;
+  }
+}
+
+function currentStateCapacity() {
+  try {
+    const health = stateCapacityGuard?.check?.();
+    if (health?.ok === true) return health;
+    return {
+      ok: false,
+      code: health?.code || 'VOICE_STATE_BOUNDARY_INVALID',
+    };
+  } catch {
+    return { ok: false, code: 'VOICE_STATE_BOUNDARY_INVALID' };
   }
 }
 
@@ -327,6 +341,7 @@ function projectOutboundCall(record) {
 function getOutboundPlaneStatus() {
   const barriers = refreshRecoveryBarrier();
   const runtimeFenceHealthy = runtimeFenceHeld();
+  const stateCapacity = currentStateCapacity();
   let active = [];
   let stateAvailable = true;
   try {
@@ -340,12 +355,14 @@ function getOutboundPlaneStatus() {
     ...barriers.map((record) => record.callId),
   ])];
   const configured = Boolean(
-    outboundApiToken && outboundRoutingConfig && srf && mediaServer && voiceStateStore
+    outboundApiToken && outboundRoutingConfig && srf && mediaServer && voiceStateStore &&
+    stateCapacityGuard
   );
   const recoveryRequired = outboundRecoveryBlocked;
   return {
     configured,
-    accepting: Boolean(outboundAccepting && !recoveryRequired && runtimeFenceHealthy),
+    accepting: Boolean(outboundAccepting && !recoveryRequired && runtimeFenceHealthy &&
+      stateCapacity.ok),
     locked: Boolean(outboundPanicLocked || recoveryRequired),
     quiesced: stateAvailable && !recoveryRequired && activeIds.length === 0,
     recoveryRequired,
@@ -353,16 +370,19 @@ function getOutboundPlaneStatus() {
     activeCount: activeIds.length,
     activeIds,
     runtimeFenceHeld: runtimeFenceHealthy,
+    stateCapacity,
     error: !stateAvailable
       ? 'outbound_state_unavailable'
-      : (recoveryRequired ? 'outbound_recovery_required' : null),
+      : (recoveryRequired
+        ? 'outbound_recovery_required'
+        : (!stateCapacity.ok ? 'voice_state_capacity_unavailable' : null)),
   };
 }
 
 function scheduleOutboundCall(record) {
   refreshRecoveryBarrier();
   if (!record || !voiceStateStore || !outboundAccepting ||
-      !runtimeFenceHeld() || outboundRecoveryBlocked ||
+      !runtimeFenceHeld() || !currentStateCapacity().ok || outboundRecoveryBlocked ||
       outboundOperations.has(record.callId)) {
     return record ? outboundOperations.get(record.callId)?.promise || null : null;
   }
@@ -702,7 +722,8 @@ function unlockOutboundCalls() {
     };
   }
   const ready = Boolean(
-    outboundApiToken && srf && mediaServer && voiceStateStore && runtimeFenceHeld()
+    outboundApiToken && srf && mediaServer && voiceStateStore && runtimeFenceHeld() &&
+    currentStateCapacity().ok
   );
   if (!ready) {
     outboundPanicLocked = true;
@@ -745,9 +766,11 @@ router.post('/outbound-call', authorizeOutboundApi, async function(req, res) {
       return res.status(503).json({
         success: false,
         queued: false,
-        error: planeStatus.recoveryRequired
+        error: !planeStatus.stateCapacity.ok
+          ? 'voice_state_capacity_unavailable'
+          : (planeStatus.recoveryRequired
           ? 'outbound_recovery_required'
-          : (outboundPanicLocked ? 'voice_execution_locked' : 'outbound_api_draining'),
+          : (outboundPanicLocked ? 'voice_execution_locked' : 'outbound_api_draining')),
         recoveryCallIds: planeStatus.recoveryCallIds,
       });
     }
@@ -1032,6 +1055,7 @@ function setupRoutes(deps) {
   outboundPanicLocked = false;
   outboundRecoveryBlocked = false;
   outboundRoutingConfig = null;
+  stateCapacityGuard = null;
   const configuredOutboundToken = normalizeOutboundApiToken(
     Object.hasOwn(deps, 'outboundApiToken')
       ? deps.outboundApiToken
@@ -1063,6 +1087,14 @@ function setupRoutes(deps) {
   } catch {
     outboundRoutingConfig = null;
     throw new Error('A validated server-side outbound SIP routing configuration is required');
+  }
+  if (typeof deps.stateCapacityGuard?.check !== 'function') {
+    throw new Error('A durable voice state capacity guard is required');
+  }
+  stateCapacityGuard = deps.stateCapacityGuard;
+  if (!currentStateCapacity().ok) {
+    stateCapacityGuard = null;
+    throw new Error('The durable voice state capacity boundary is unavailable');
   }
   if (!runtimeFenceHeld()) {
     outboundRuntimeFence = null;

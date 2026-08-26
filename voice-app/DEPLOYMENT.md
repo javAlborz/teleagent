@@ -110,13 +110,44 @@ is missing or stale. Provision these host paths before start:
 - `/etc/teleagent-voice/config/devices.json`: root:`teleagent-voice`, mode `0440`;
 - `/etc/teleagent-voice/credentials`: root:`teleagent-voice`, mode `0750`;
 - each signer/SIP credential: root:`teleagent-voice`, mode `0440`, one link;
-- `/var/lib/teleagent-voice`: `teleagent-voice`:`teleagent-voice`, mode `0700`.
+- `/var/lib/teleagent-voice`: the root of a dedicated 4–8 GiB filesystem,
+  `teleagent-voice`:`teleagent-voice`, mode `0700`, with at least 512 MiB and
+  20% free before activation.
 
 A no-network `voice-runtime-preflight` runs under the resolved UID/GID before
 either Drachtio or FreeSWITCH. It securely opens the device configuration,
 Ed25519 signer, and two distinct SIP credentials with `O_NOFOLLOW`, verifies
 their owner/group/mode/link/type and the state/config directories, and fails
-the dependency graph closed before any SIP, media, or HTTP listener starts.
+the dependency graph closed before any SIP, media, or HTTP listener starts. It
+mounts voice state read-only and is limited to 0.5 CPU, 256 MiB, no additional
+swap, and 64 processes. It also requires the state and configuration mounts to
+have distinct device IDs and verifies the 4–8 GiB state capacity/free-space
+reserve with `statfs`. Independently, the host launcher requires the exact
+`/var/lib/teleagent-voice` directory to be a canonical mountpoint on a device
+different from its immediate `/var/lib` parent; a shared `/var` or `/srv`
+filesystem does not qualify. The host launcher has an independent 512
+MiB/128-task cgroup ceiling and rejects controller responses above 128 KiB.
+The long-lived voice process repeats the same check in its health endpoint and
+after SIP/API authentication but before accepting each new inbound or outbound
+call. Exhaustion returns 503 without reading caller identity, reserving a call,
+or starting media/provider work; existing calls drain inside the hard storage
+boundary.
+
+All four Compose services use Docker's rotating `local` log driver with at
+most three 10 MiB files each. This setting is part of the deployment contract;
+do not rely on the daemon's unbounded default `json-file` driver. A failed
+`docker compose up` leaves durable `panic_outcome_unknown` even when exact
+project cleanup succeeds, and only the explicit offline recovery flow may
+clear that activation evidence.
+
+Drachtio and FreeSWITCH have read-only root filesystems. Every writable vendor
+`VOLUME` is replaced by an explicit size-capped tmpfs with noexec, nosuid, and
+nodev; FreeSWITCH uses a fixed read-only core configuration and a 101-port RTP
+range. Run `scripts/test-media-images-read-only.sh` on the bounded CI runner
+whenever either exact media-image digest, its entrypoint, or its mount contract
+changes. The canary starts both daemons without a network namespace and proves
+their loopback control sockets answer while the root filesystems remain
+read-only.
 
 `voice-app` does not use Compose `env_file`. Compose reads `.env` for
 interpolation, but passes only the reviewed names in the explicit service

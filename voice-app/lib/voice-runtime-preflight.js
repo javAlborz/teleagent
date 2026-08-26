@@ -19,6 +19,11 @@ const VOICE_RUNTIME_PATHS = Object.freeze({
 
 const MAX_PRIVATE_KEY_BYTES = 16 * 1024;
 const MAX_DEVICE_CONFIG_BYTES = 1024 * 1024;
+const GIB = 1024n * 1024n * 1024n;
+const MIB = 1024n * 1024n;
+const MIN_STATE_CAPACITY_BYTES = 4n * GIB;
+const MAX_STATE_CAPACITY_BYTES = 8n * GIB;
+const MIN_STATE_FREE_BYTES = 512n * MIB;
 
 class VoiceRuntimePreflightError extends Error {
   constructor(message) {
@@ -46,6 +51,106 @@ function verifyDirectory(fsModule, filename, label, {
   if (!metadata.isDirectory?.() || metadata.isSymbolicLink?.() || metadata.uid !== uid ||
       metadata.gid !== gid || (metadata.mode & 0o777) !== mode) {
     reject(`${label} metadata is unsafe`);
+  }
+  return metadata;
+}
+
+function exactNonnegativeBigInt(value, label) {
+  if (typeof value === 'bigint' && value >= 0n) return value;
+  if (Number.isSafeInteger(value) && value >= 0) return BigInt(value);
+  reject(`${label} is invalid`);
+}
+
+function verifyBoundedStateFilesystem(fsModule, filename, {
+  configDevice,
+  stateDevice,
+}) {
+  const normalizedConfigDevice = exactNonnegativeBigInt(
+    configDevice, 'device configuration filesystem identity');
+  const normalizedStateDevice = exactNonnegativeBigInt(
+    stateDevice, 'durable state filesystem identity');
+  if (normalizedConfigDevice === normalizedStateDevice) {
+    reject('durable state is not on a dedicated bounded filesystem');
+  }
+  let statistics;
+  try {
+    statistics = fsModule.statfsSync(filename, { bigint: true });
+  } catch {
+    reject('durable state filesystem capacity is unverifiable');
+  }
+  const blockSize = exactNonnegativeBigInt(statistics?.bsize,
+    'durable state filesystem block size');
+  const blocks = exactNonnegativeBigInt(statistics?.blocks,
+    'durable state filesystem block count');
+  const availableBlocks = exactNonnegativeBigInt(statistics?.bavail,
+    'durable state filesystem available block count');
+  if (blockSize === 0n || availableBlocks > blocks) {
+    reject('durable state filesystem capacity is invalid');
+  }
+  const capacity = blockSize * blocks;
+  const available = blockSize * availableBlocks;
+  if (capacity < MIN_STATE_CAPACITY_BYTES || capacity > MAX_STATE_CAPACITY_BYTES) {
+    reject('durable state filesystem must have a 4-8 GiB hard capacity');
+  }
+  const percentageReserve = (capacity + 4n) / 5n;
+  const requiredFree = percentageReserve > MIN_STATE_FREE_BYTES
+    ? percentageReserve
+    : MIN_STATE_FREE_BYTES;
+  if (available < requiredFree) {
+    reject('durable state filesystem free-space reserve is exhausted');
+  }
+  return Object.freeze({ capacity, available, requiredFree });
+}
+
+class VoiceStateCapacityGuard {
+  constructor({
+    fsModule = fs,
+    paths = VOICE_RUNTIME_PATHS,
+    effectiveUid = typeof process.geteuid === 'function' ? process.geteuid() : -1,
+    effectiveGid = typeof process.getegid === 'function' ? process.getegid() : -1,
+  } = {}) {
+    this.fsModule = fsModule;
+    this.paths = paths;
+    this.effectiveUid = effectiveUid;
+    this.effectiveGid = effectiveGid;
+  }
+
+  check() {
+    try {
+      const configDirectory = verifyDirectory(
+        this.fsModule,
+        this.paths.configDirectory,
+        'device configuration directory',
+        { uid: 0, gid: this.effectiveGid, mode: 0o750 },
+      );
+      const stateDirectory = verifyDirectory(
+        this.fsModule,
+        this.paths.stateDirectory,
+        'durable state directory',
+        { uid: this.effectiveUid, gid: this.effectiveGid, mode: 0o700 },
+      );
+      const result = verifyBoundedStateFilesystem(
+        this.fsModule,
+        this.paths.stateDirectory,
+        { configDevice: configDirectory.dev, stateDevice: stateDirectory.dev },
+      );
+      return Object.freeze({
+        ok: true,
+        code: null,
+        capacityBytes: Number(result.capacity),
+        availableBytes: Number(result.available),
+        requiredFreeBytes: Number(result.requiredFree),
+      });
+    } catch (error) {
+      const exhausted = error instanceof VoiceRuntimePreflightError &&
+        /free-space reserve is exhausted/u.test(error.message);
+      return Object.freeze({
+        ok: false,
+        code: exhausted
+          ? 'VOICE_STATE_CAPACITY_EXHAUSTED'
+          : 'VOICE_STATE_BOUNDARY_INVALID',
+      });
+    }
   }
 }
 
@@ -108,15 +213,20 @@ function validateVoiceRuntimePreflight({
     reject('the process is not the dedicated non-root teleagent-voice identity');
   }
 
-  verifyDirectory(fsModule, paths.configDirectory, 'device configuration directory', {
+  const configDirectory = verifyDirectory(
+    fsModule, paths.configDirectory, 'device configuration directory', {
     uid: 0,
     gid: effectiveGid,
     mode: 0o750,
   });
-  verifyDirectory(fsModule, paths.stateDirectory, 'durable state directory', {
+  const stateDirectory = verifyDirectory(fsModule, paths.stateDirectory, 'durable state directory', {
     uid: effectiveUid,
     gid: effectiveGid,
     mode: 0o700,
+  });
+  verifyBoundedStateFilesystem(fsModule, paths.stateDirectory, {
+    configDevice: configDirectory.dev,
+    stateDevice: stateDirectory.dev,
   });
 
   const deviceConfig = readSecureFile(
@@ -214,6 +324,11 @@ function validateVoiceRuntimePreflight({
 
 module.exports = {
   VOICE_RUNTIME_PATHS,
+  VoiceStateCapacityGuard,
   VoiceRuntimePreflightError,
+  verifyBoundedStateFilesystem,
   validateVoiceRuntimePreflight,
+  MAX_STATE_CAPACITY_BYTES,
+  MIN_STATE_CAPACITY_BYTES,
+  MIN_STATE_FREE_BYTES,
 };

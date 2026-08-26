@@ -28,6 +28,14 @@ const APPARMOR_PROFILES = '/sys/kernel/security/apparmor/profiles';
 const PROJECT = 'teleagent-voice';
 const PROJECT_LABEL = `com.docker.compose.project=${PROJECT}`;
 const IMAGE_REVISION_LABEL = 'org.opencontainers.image.revision';
+const MAX_CONTROL_RESPONSE_BYTES = 128 * 1024;
+const HOST_STATE_ROOT = '/var/lib/teleagent-voice';
+const HOST_STATE_PARENT = '/var/lib';
+const GIB = 1024n * 1024n * 1024n;
+const MIB = 1024n * 1024n;
+const MIN_STATE_CAPACITY_BYTES = 4n * GIB;
+const MAX_STATE_CAPACITY_BYTES = 8n * GIB;
+const MIN_STATE_FREE_BYTES = 512n * MIB;
 
 const ACTIVATION_PHASES = new Set([
   'starting',
@@ -103,6 +111,95 @@ function inspectRootPath(filename, { directory = false, mode = null, nlink = nul
     refuse('a required voice-stack path has unsafe metadata');
   }
   return metadata;
+}
+
+function exactNonnegativeBigInt(value) {
+  if (typeof value === 'bigint' && value >= 0n) return value;
+  if (Number.isSafeInteger(value) && value >= 0) return BigInt(value);
+  refuse('the dedicated voice-state filesystem reported invalid capacity');
+}
+
+function sameInode(left, right) {
+  return left.dev === right.dev && left.ino === right.ino && left.uid === right.uid &&
+    left.gid === right.gid && (left.mode & 0o7777) === (right.mode & 0o7777);
+}
+
+function inspectCanonicalRootDirectory(fsModule, filename) {
+  let metadata;
+  try { metadata = fsModule.lstatSync(filename); } catch {
+    refuse('a dedicated voice-state ancestor is missing');
+  }
+  if (!metadata.isDirectory() || metadata.isSymbolicLink() || metadata.uid !== 0 ||
+      metadata.gid !== 0 || (metadata.mode & 0o022) !== 0) {
+    refuse('a dedicated voice-state ancestor has unsafe metadata');
+  }
+  let resolved;
+  try { resolved = fsModule.realpathSync(filename); } catch {
+    refuse('a dedicated voice-state ancestor is not canonical');
+  }
+  if (resolved !== filename) refuse('a dedicated voice-state ancestor is not canonical');
+  return metadata;
+}
+
+function verifyBoundedHostStateFilesystem(identity, {
+  fsModule = fs,
+  stateRoot = HOST_STATE_ROOT,
+  stateParent = HOST_STATE_PARENT,
+} = {}) {
+  if (!identity || !Number.isSafeInteger(identity.uid) || !Number.isSafeInteger(identity.gid) ||
+      identity.uid <= 0 || identity.gid <= 0) {
+    refuse('the dedicated voice-state identity is invalid');
+  }
+  for (const ancestor of ['/', '/var', stateParent]) {
+    inspectCanonicalRootDirectory(fsModule, ancestor);
+  }
+  let before;
+  try { before = fsModule.lstatSync(stateRoot); } catch {
+    refuse('the dedicated voice-state mountpoint is missing');
+  }
+  if (!before.isDirectory() || before.isSymbolicLink() || before.uid !== identity.uid ||
+      before.gid !== identity.gid || (before.mode & 0o777) !== 0o700) {
+    refuse('the dedicated voice-state mountpoint has unsafe metadata');
+  }
+  let resolved;
+  try { resolved = fsModule.realpathSync(stateRoot); } catch {
+    refuse('the dedicated voice-state mountpoint is not canonical');
+  }
+  if (resolved !== stateRoot) refuse('the dedicated voice-state mountpoint is not canonical');
+  const parent = inspectCanonicalRootDirectory(fsModule, stateParent);
+  if (before.dev === parent.dev) {
+    refuse('the voice-state path is not an exact dedicated filesystem mountpoint');
+  }
+  let statistics;
+  try { statistics = fsModule.statfsSync(stateRoot, { bigint: true }); } catch {
+    refuse('the dedicated voice-state filesystem capacity is unverifiable');
+  }
+  const blockSize = exactNonnegativeBigInt(statistics?.bsize);
+  const blocks = exactNonnegativeBigInt(statistics?.blocks);
+  const availableBlocks = exactNonnegativeBigInt(statistics?.bavail);
+  if (blockSize === 0n || blocks === 0n || availableBlocks > blocks) {
+    refuse('the dedicated voice-state filesystem reported invalid capacity');
+  }
+  const capacity = blockSize * blocks;
+  const available = blockSize * availableBlocks;
+  if (capacity < MIN_STATE_CAPACITY_BYTES || capacity > MAX_STATE_CAPACITY_BYTES) {
+    refuse('the dedicated voice-state filesystem must have a 4-8 GiB hard capacity');
+  }
+  const percentageReserve = (capacity + 4n) / 5n;
+  const requiredFree = percentageReserve > MIN_STATE_FREE_BYTES
+    ? percentageReserve
+    : MIN_STATE_FREE_BYTES;
+  if (available < requiredFree) {
+    refuse('the dedicated voice-state filesystem free-space reserve is exhausted');
+  }
+  let after;
+  try { after = fsModule.lstatSync(stateRoot); } catch {
+    refuse('the dedicated voice-state mountpoint changed during verification');
+  }
+  if (!sameInode(before, after)) {
+    refuse('the dedicated voice-state mountpoint changed during verification');
+  }
+  return Object.freeze({ capacity, available, requiredFree });
 }
 
 function normalizeVoiceImageManifest(source) {
@@ -470,6 +567,20 @@ function requestJson({
   socketPath = null,
 }) {
   return new Promise((resolve, reject) => {
+    let settled = false;
+    let absoluteTimer = null;
+    const succeed = (value) => {
+      if (settled) return;
+      settled = true;
+      if (absoluteTimer) clearTimeout(absoluteTimer);
+      resolve(value);
+    };
+    const fail = (error) => {
+      if (settled) return;
+      settled = true;
+      if (absoluteTimer) clearTimeout(absoluteTimer);
+      reject(error);
+    };
     const payload = body === null ? null : Buffer.from(JSON.stringify(body));
     const request = http.request({
       ...(socketPath ? { socketPath } : { host: '127.0.0.1', port }),
@@ -482,18 +593,57 @@ function requestJson({
       },
       timeout: timeoutMs,
     }, (response) => {
+      const advertised = response.headers['content-length'];
+      if (advertised !== undefined &&
+          (typeof advertised !== 'string' || !/^(?:0|[1-9][0-9]*)$/u.test(advertised) ||
+           BigInt(advertised) > BigInt(MAX_CONTROL_RESPONSE_BYTES))) {
+        fail(new Error('voice control response exceeded its byte bound'));
+        response.destroy();
+        return;
+      }
       const chunks = [];
-      response.on('data', (chunk) => chunks.push(chunk));
+      let bytes = 0;
+      response.on('data', (chunk) => {
+        if (settled) return;
+        bytes += chunk.length;
+        if (bytes > MAX_CONTROL_RESPONSE_BYTES) {
+          fail(new Error('voice control response exceeded its byte bound'));
+          response.destroy();
+          return;
+        }
+        chunks.push(chunk);
+      });
+      response.on('aborted', () => fail(new Error('voice control response was aborted')));
+      response.on('error', fail);
       response.on('end', () => {
+        if (settled) return;
         try {
           const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-          resolve({ status: response.statusCode, body: parsed });
-        } catch { reject(new Error('voice control returned invalid JSON')); }
+          succeed({ status: response.statusCode, body: parsed });
+        } catch { fail(new Error('voice control returned invalid JSON')); }
       });
     });
+    absoluteTimer = setTimeout(() => {
+      request.destroy(new Error('voice control exceeded its total deadline'));
+    }, timeoutMs);
     request.on('timeout', () => request.destroy(new Error('voice control timed out')));
-    request.on('error', reject);
+    request.on('error', fail);
     if (payload) request.end(payload); else request.end();
+  });
+}
+
+function startFailureDisposition(activationAttempted) {
+  if (typeof activationAttempted !== 'boolean') {
+    refuse('voice activation attempt evidence is invalid');
+  }
+  return activationAttempted ? Object.freeze({
+    phase: 'panic_outcome_unknown',
+    panic: 'outcome_unknown',
+    cleanup: 'proved',
+  }) : Object.freeze({
+    phase: 'inactive',
+    panic: 'not_requested',
+    cleanup: 'proved',
   });
 }
 
@@ -670,6 +820,7 @@ async function start() {
     });
   }
   const identity = resolveVoiceIdentity();
+  verifyBoundedHostStateFilesystem(identity);
   const settings = readEnvironmentFile(identity);
   await requireControllerReady();
   await requirePrivilegedBrokerReady(settings);
@@ -679,10 +830,14 @@ async function start() {
     panic: 'not_requested',
     cleanup: 'required',
   });
+  let activationAttempted = false;
   try {
     const credentials = readCredentialSet(identity, settings);
     projectRuntime(identity, credentials);
     run(DOCKER, composeArgs('config', '--quiet'), { environment });
+    // The Docker call can partially create or start containers before it
+    // returns an error, so intent becomes outcome-unknown before invocation.
+    activationAttempted = true;
     run(DOCKER, composeArgs('up', '--detach', '--no-build', '--pull', 'never'), { environment });
     await waitForHealth();
     persistActivationState('active', {
@@ -693,7 +848,12 @@ async function start() {
   } catch (error) {
     try {
       rollbackStartedStack(environment);
-      persistActivationState('inactive', { imageManifest, cleanup: 'proved' });
+      const disposition = startFailureDisposition(activationAttempted);
+      persistActivationState(disposition.phase, {
+        imageManifest,
+        panic: disposition.panic,
+        cleanup: disposition.cleanup,
+      });
     } catch (rollbackError) {
       try {
         persistActivationState('cleanup_outcome_unknown', {
@@ -905,10 +1065,14 @@ module.exports = {
   cleanupRequiresPanicRecovery,
   normalizeVoiceImageManifest,
   parseExactProjectContainerIds,
+  requestJson,
   renderTemplate,
   renderTemplateContents,
   runOfflineRecovery,
+  startFailureDisposition,
+  verifyBoundedHostStateFilesystem,
   verifyVoiceImage,
+  MAX_CONTROL_RESPONSE_BYTES,
 };
 
 if (require.main === module) {

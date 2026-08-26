@@ -22,6 +22,7 @@ function authenticatedAdmission() {
   let consumed = false;
   return {
     inboundAdmission: admission,
+    stateCapacityGuard: { check: () => ({ ok: true, code: null }) },
     inboundTrunkAuthenticator: {
       consumeAdmission(value) {
         if (consumed || value !== admission) return false;
@@ -31,6 +32,24 @@ function authenticatedAdmission() {
     },
   };
 }
+
+test('authenticated inbound admission rejects exhausted state before identity or media work', async () => {
+  const req = sipRequest({ From: '<sip:1001@pbx>', To: '<sip:7@pbx>' });
+  const statuses = [];
+  let mediaCalls = 0;
+  const admission = authenticatedAdmission();
+  const result = await handleInvite(req, { send(value) { statuses.push(value); } }, {
+    ...admission,
+    stateCapacityGuard: {
+      check: () => ({ ok: false, code: 'VOICE_STATE_CAPACITY_EXHAUSTED' }),
+    },
+    mediaServer: { async connectCaller() { mediaCalls += 1; } },
+  });
+  assert.equal(result.unavailable, 'VOICE_STATE_CAPACITY_EXHAUSTED');
+  assert.deepEqual(statuses, [503]);
+  assert.deepEqual(req.requested, []);
+  assert.equal(mediaCalls, 0);
+});
 
 test('SIP identity parsing uses From/To and never reads an untrusted Contact route', () => {
   const req = sipRequest({

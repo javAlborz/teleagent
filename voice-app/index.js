@@ -42,6 +42,7 @@ var loadPrivilegedActionConfig = require("./lib/privileged-action-config").loadP
 var loadSipTrunkSecurityConfig = require("./lib/sip-trunk-auth").loadSipTrunkSecurityConfig;
 var loadMediaControlEndpoints = require("./lib/media-control-endpoints").loadMediaControlEndpoints;
 var loadLegacySpeechConfig = require("./lib/legacy-speech-config").loadLegacySpeechConfig;
+var VoiceStateCapacityGuard = require("./lib/voice-runtime-preflight").VoiceStateCapacityGuard;
 var runtimeSecretsModule = require("./lib/runtime-secrets");
 var configureRuntimeSecrets = runtimeSecretsModule.configureRuntimeSecrets;
 var loadRuntimeSecrets = runtimeSecretsModule.loadRuntimeSecrets;
@@ -158,6 +159,7 @@ var drachtioConnected = false;
 var freeswitchConnected = false;
 var isReady = false;
 var voiceStateStore = null;
+var stateCapacityGuard = null;
 var agentJobBroker = null;
 var outboundRuntimeFence = null;
 var inboundCallRegistry = new InboundCallRegistry();
@@ -258,6 +260,11 @@ function initializeServers() {
     runtimeFence: outboundRuntimeFence
   });
   voiceStateStore = runtimeState.stateStore;
+  stateCapacityGuard = new VoiceStateCapacityGuard();
+  var initialCapacityHealth = stateCapacityGuard.check();
+  if (!initialCapacityHealth.ok) {
+    throw new Error("Durable voice state capacity boundary is unavailable");
+  }
   var voiceExecutionControl = new VoiceExecutionControl({ lockFile: config.voice_execution_lock_path });
   var privilegedActionBridge = config.privileged_actions.enabled
     ? new PrivilegedActionBridge({ apiToken: config.privileged_actions.apiToken })
@@ -323,6 +330,7 @@ function initializeServers() {
     voiceStateStore: voiceStateStore,
     agentJobBroker: agentJobBroker,
     runtimeFence: outboundRuntimeFence,
+    stateCapacityGuard: stateCapacityGuard,
     routingConfig: config.outbound_routing,
     wsPort: config.ws_port,
     httpHost: config.http_host
@@ -344,9 +352,11 @@ function initializeServers() {
 
   httpServer.app.get("/api/realtime-health", requireLoopback, function(req, res) {
     var stateHealth = voiceStateStore.health();
+    var capacityHealth = stateCapacityGuard.check();
     var executionHealth = agentJobBroker.getExecutionLock();
-    res.status(stateHealth.ok ? 200 : 503).json({
-      status: stateHealth.ok ? "healthy" : "unhealthy",
+    var healthy = stateHealth.ok && capacityHealth.ok;
+    res.status(healthy ? 200 : 503).json({
+      status: healthy ? "healthy" : "unhealthy",
       configured: !!getRealtimeApiKey(),
       model: config.realtime_endpoint.model,
       approvalCapabilities: {
@@ -362,7 +372,10 @@ function initializeServers() {
         persistent: executionHealth.persistent,
         remotePanicPending: executionHealth.remotePanicPending
       },
-      state: stateHealth
+      state: {
+        ...stateHealth,
+        capacity: capacityHealth
+      }
     });
   });
 
@@ -405,6 +418,7 @@ function checkReadyState() {
           wsPort: config.ws_port,
           inboundTrunkAuthenticator: config.sip_trunk_security.inboundAuthenticator,
           inboundAdmission: inboundAdmission,
+          stateCapacityGuard: stateCapacityGuard,
           signal: inboundOperation.signal,
           onResources: inboundOperation.onResources
         });

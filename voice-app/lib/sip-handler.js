@@ -82,6 +82,16 @@ async function handleInvite(req, res, options) {
     try { res.send(403); } catch {}
     return { callerId: null, callUuid: null, unauthorized: true };
   }
+  let capacityHealth = null;
+  try { capacityHealth = options.stateCapacityGuard?.check?.(); } catch {}
+  if (capacityHealth?.ok !== true) {
+    try { res.send(503); } catch {}
+    return {
+      callerId: null,
+      callUuid: null,
+      unavailable: capacityHealth?.code || 'VOICE_STATE_BOUNDARY_INVALID',
+    };
+  }
 
   const callerId = extractCallerId(req);
   const dialedExt = extractDialedExtension(req);

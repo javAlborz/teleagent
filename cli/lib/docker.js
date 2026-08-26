@@ -122,6 +122,12 @@ services:
     # release manifest and the locally resolved immutable image identity.
     image: "\${TELEAGENT_VOICE_IMAGE:?TELEAGENT_VOICE_IMAGE must be an approved OCI digest}"
     restart: "no"
+    ulimits:
+      core: 0
+    mem_limit: 256m
+    memswap_limit: 256m
+    cpus: 0.5
+    pids_limit: 64
     network_mode: none
     user: "\${VOICE_APP_UID:?VOICE_APP_UID must resolve teleagent-voice}:\${VOICE_APP_GID:?VOICE_APP_GID must resolve teleagent-voice}"
     read_only: true
@@ -131,9 +137,14 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
     volumes:
       - "\${DEVICE_CONFIG_DIR:?DEVICE_CONFIG_DIR must be provisioned}:/app/config:ro"
-      - "\${VOICE_STATE_DIR:?VOICE_STATE_DIR must be provisioned}:/app/state"
+      - "\${VOICE_STATE_DIR:?VOICE_STATE_DIR must be provisioned}:/app/state:ro"
       - /run/teleagent-voice-stack/voice-secrets:/run/secrets:ro
     command: ["node", "voice-runtime-preflight.js"]
 
@@ -152,6 +163,11 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
     tmpfs:
       - /tmp
     volumes:
@@ -176,6 +192,11 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
     tmpfs:
       - /tmp
     entrypoint: /usr/local/bin/entrypoint-hermes-freeswitch.sh
@@ -212,6 +233,11 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
     environment:
 ${voiceAppEnvironment}
     volumes:

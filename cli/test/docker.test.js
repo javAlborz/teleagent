@@ -464,7 +464,7 @@ test('docker compose generation', async (t) => {
     );
     assert.doesNotMatch(compose, /(?:DRACHTIO_SECRET|FREESWITCH_SECRET|EXECUTOR_API_TOKEN|VOICE_CONTROL_TOKEN|PRIVILEGED_ACTION_API_TOKEN|OUTBOUND_API_TOKEN):/);
     assert.doesNotMatch(compose, /--(?:secret|password)\b/);
-    assert.equal((compose.match(/core: 0/g) || []).length, 3);
+    assert.equal((compose.match(/core: 0/g) || []).length, 4);
     assert.equal((compose.match(/restart: "no"/g) || []).length, 4);
     assert.doesNotMatch(compose, /sip:\*:/);
 
