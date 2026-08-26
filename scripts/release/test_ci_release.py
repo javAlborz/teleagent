@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from ci_release_support import (
     CiReleaseError,
+    PROMOTION_BLOCKERS,
     compare_and_publish,
     load_ci_config,
     normalize_cyclonedx,
@@ -51,9 +52,127 @@ REVISION = "a" * 40
 TREE = "b" * 40
 CONFIG_DIGEST = f"sha256:{'c' * 64}"
 
+HOST_RUNTIME_ENTRYPOINTS = (
+    "claude-api-server/provider-egress-broker.js",
+    "claude-api-server/provider-egress-shim.js",
+    "claude-api-server/provider-supervisor-service.js",
+    "claude-api-server/server.js",
+    "claude-api-server/worker-session-broker-service.js",
+    "privileged-action-broker/control.js",
+    "privileged-action-broker/index.js",
+    "realtime-sip-gateway/src/index.js",
+)
+
+PACKAGE_SCOPE_PATHS = (
+    "claude-api-server/package.json",
+    "package.json",
+    "privileged-action-broker/package.json",
+    "realtime-sip-gateway/package.json",
+)
+
+VOICE_AND_HOST_SOURCE_PATHS = (
+    "deploy/host/teleagent-disabled-host-install",
+    "deploy/voice-stack/drachtio.conf.xml.template",
+    "deploy/voice-stack/freeswitch-event-socket.conf.xml.template",
+    "deploy/voice-stack/teleagent-sip-local-peer-fence",
+    "deploy/voice-stack/teleagent-sip-local-peer-fence-install",
+    "deploy/voice-stack/teleagent-sip-local-peer-fence.service",
+    "deploy/voice-stack/teleagent-voice-containers.slice",
+    "deploy/voice-stack/teleagent-voice-stack-install",
+    "deploy/voice-stack/teleagent-voice-stack-launch.js",
+    "deploy/voice-stack/teleagent-voice-stack.service",
+    "deploy/voice-stack/teleagent-voice-stack.sysusers",
+    "deploy/voice-stack/teleagent-voice-stack.tmpfiles",
+    "deploy/voice-stack/verify-voice-stack-identity",
+    "docker-compose.yml",
+    "freeswitch/entrypoint.sh",
+    "freeswitch/mrf.xml",
+    "freeswitch/switch.conf.xml",
+    "lib/voice-app-runtime-env.js",
+)
+
+EXPECTED_PROMOTION_BLOCKERS = (
+    "persistent-docker-group-self-hosted-runner-is-not-an-external-trust-boundary",
+    "voice-image-build-toolchain-is-not-hermetic",
+    "separate-trusted-ephemeral-attestation-job-is-not-defined",
+    "universal-current-boot-release-gate-enforcement-at-"
+    "credential-bearing-service-restart-is-not-proven",
+    "dedicated-staging-proof-including-non-root-media-containers-is-missing",
+)
+
+RELEASE_START_GATE = (
+    "ExecStartPre=+/usr/bin/env -i HOME=/var/empty "
+    "PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 "
+    "/usr/local/libexec/verify-teleagent-release-closure --check-start-gate"
+)
+
+EXPECTED_START_GATED_UNITS = (
+    "deploy/controller/teleagent-agent-controller.service",
+    "deploy/privileged-action/teleagent-privileged-action.service",
+    "deploy/voice-stack/teleagent-voice-stack.service",
+    "deploy/worker-session/teleagent-provider-egress@.service",
+    "deploy/worker-session/teleagent-provider-libexec-install.service",
+    "deploy/worker-session/teleagent-provider-supervisor@.service",
+    "deploy/worker-session/teleagent-worker-session.service",
+    "realtime-sip-gateway/deploy/teleagent-realtime-sip-gateway.service",
+)
+
 
 def sha256(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
+
+
+def local_module_closure(entrypoints: tuple[str, ...]) -> set[str]:
+    """Derive the exact local JavaScript graph loaded by host entrypoints."""
+
+    patterns = (
+        re.compile(r"require\(\s*['\"]([^'\"]+)['\"]\s*\)"),
+        re.compile(r"\bfrom\s+['\"]([^'\"]+)['\"]"),
+        re.compile(r"\bimport\s+['\"]([^'\"]+)['\"]"),
+    )
+    pending = list(entrypoints)
+    closure: set[str] = set()
+    while pending:
+        relative = pending.pop()
+        if relative in closure:
+            continue
+        closure.add(relative)
+        source = (REPOSITORY_ROOT / relative).read_text("utf-8")
+        for expression in patterns:
+            for specifier in expression.findall(source):
+                if not specifier.startswith("."):
+                    continue
+                target = Path(os.path.normpath(
+                    (Path(relative).parent / specifier).as_posix()
+                ))
+                if not target.suffix:
+                    target = target.with_suffix(".js")
+                normalized = target.as_posix()
+                if not (REPOSITORY_ROOT / normalized).is_file():
+                    raise AssertionError(
+                        f"unresolved host-local import: {relative} -> {specifier}"
+                    )
+                pending.append(normalized)
+    return closure
+
+
+def component_manifest_sources(filename: Path, field: int, prefix: str = "") -> set[str]:
+    result = set()
+    for line in filename.read_text("utf-8").splitlines():
+        if line:
+            result.add(f"{prefix}{line.split()[field]}")
+    return result
+
+
+def nearest_package_scope(relative: str) -> str:
+    parent = Path(relative).parent
+    while True:
+        candidate = parent / "package.json"
+        if (REPOSITORY_ROOT / candidate).is_file():
+            return candidate.as_posix()
+        if parent == Path("."):
+            raise AssertionError(f"host JavaScript has no package scope: {relative}")
+        parent = parent.parent
 
 
 def provider_record(
@@ -124,6 +243,113 @@ class CiReleaseTests(unittest.TestCase):
                 list(REALTIME_SIP_NATIVE_MODULE_PATHS),
             )
             self.assertEqual(stat.S_IMODE(destination.stat().st_mode), 0o444)
+
+    def test_bound_source_paths_are_the_exact_production_host_closure(self) -> None:
+        worker_installer = (
+            REPOSITORY_ROOT / "deploy/worker-session/teleagent-worker-session-install"
+        ).read_text("utf-8")
+        worker_direct = set(re.findall(
+            r"\badd_asset\s+(deploy/worker-session/[^\s\\]+)", worker_installer
+        ))
+        worker_manifest = component_manifest_sources(
+            REPOSITORY_ROOT / "deploy/worker-session/provider-libexec.manifest", 1
+        )
+        controller_manifest_path = (
+            REPOSITORY_ROOT / "deploy/controller/control-plane-install.manifest"
+        )
+        controller_sources = component_manifest_sources(controller_manifest_path, 2)
+        controller_sources.add("deploy/controller/control-plane-install.manifest")
+        sip_manifest_path = (
+            REPOSITORY_ROOT
+            / "realtime-sip-gateway/deploy/realtime-sip-gateway-install.manifest"
+        )
+        sip_sources = component_manifest_sources(
+            sip_manifest_path, 1, "realtime-sip-gateway/"
+        )
+        sip_sources.add(
+            "realtime-sip-gateway/deploy/realtime-sip-gateway-install.manifest"
+        )
+
+        expected = (
+            local_module_closure(HOST_RUNTIME_ENTRYPOINTS)
+            | set(PACKAGE_SCOPE_PATHS)
+            | set(VOICE_AND_HOST_SOURCE_PATHS)
+            | worker_direct
+            | worker_manifest
+            | controller_sources
+            | sip_sources
+        )
+        self.assertEqual(BOUND_SOURCE_PATHS, tuple(sorted(expected)))
+        self.assertEqual(len(BOUND_SOURCE_PATHS), 130)
+        self.assertEqual(len(BOUND_SOURCE_PATHS), len(set(BOUND_SOURCE_PATHS)))
+        package_scopes = {
+            nearest_package_scope(relative)
+            for relative in BOUND_SOURCE_PATHS
+            if relative.endswith(".js")
+        }
+        self.assertEqual(package_scopes, set(PACKAGE_SCOPE_PATHS))
+        self.assertTrue(package_scopes.issubset(BOUND_SOURCE_PATHS))
+        self.assertEqual(
+            tuple(path for path in BOUND_SOURCE_PATHS if path.startswith(
+                "realtime-sip-gateway/src/"
+            )),
+            (
+                "realtime-sip-gateway/src/app.js",
+                "realtime-sip-gateway/src/call-gateway.js",
+                "realtime-sip-gateway/src/call-registry.js",
+                "realtime-sip-gateway/src/config.js",
+                "realtime-sip-gateway/src/gateway-singleton.js",
+                "realtime-sip-gateway/src/gateway-state-store.js",
+                "realtime-sip-gateway/src/http-server.js",
+                "realtime-sip-gateway/src/index.js",
+                "realtime-sip-gateway/src/logger.js",
+                "realtime-sip-gateway/src/openai-call-service.js",
+                "realtime-sip-gateway/src/sideband-session.js",
+                "realtime-sip-gateway/src/sip-event.js",
+                "realtime-sip-gateway/src/state-storage-boundary.js",
+                "realtime-sip-gateway/src/webhook-handler.js",
+            ),
+        )
+        for relative in BOUND_SOURCE_PATHS:
+            filename = REPOSITORY_ROOT / relative
+            metadata = filename.lstat()
+            self.assertTrue(stat.S_ISREG(metadata.st_mode), relative)
+            self.assertFalse(filename.is_symlink(), relative)
+            self.assertNotIn("/test/", relative)
+            self.assertFalse(relative.startswith("docs/"), relative)
+            self.assertFalse(relative.endswith("README.md"), relative)
+            self.assertFalse(relative.endswith(".env.example"), relative)
+
+    def test_every_release_consuming_unit_starts_with_the_cheap_boot_gate(self) -> None:
+        candidates: list[str] = []
+        for relative in BOUND_SOURCE_PATHS:
+            if not relative.endswith(".service"):
+                continue
+            source = (REPOSITORY_ROOT / relative).read_text("utf-8")
+            execution_lines = tuple(
+                line for line in source.splitlines()
+                if line.startswith(("ExecCondition=", "ExecStartPre=", "ExecStart="))
+            )
+            directly_executes_current = any(
+                "/opt/teleagent/current/" in line for line in execution_lines
+            )
+            launches_current_consumer = any(
+                command in execution_lines
+                for command in (
+                    "ExecStart=/usr/local/libexec/teleagent-provider-libexec-install",
+                    "ExecStart=/usr/local/libexec/teleagent-voice-stack-launch start",
+                )
+            )
+            if directly_executes_current or launches_current_consumer:
+                candidates.append(relative)
+                self.assertEqual(execution_lines.count(RELEASE_START_GATE), 1, relative)
+                self.assertEqual(execution_lines[0], RELEASE_START_GATE, relative)
+                self.assertNotIn("ExecReload=", source, relative)
+                self.assertFalse(
+                    any("--check-runtime" in line for line in execution_lines),
+                    f"{relative} would amplify a full release scan at service start",
+                )
+        self.assertEqual(tuple(sorted(candidates)), EXPECTED_START_GATED_UNITS)
 
     def test_voice_manifest_is_one_canonical_v2_identity(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -291,6 +517,15 @@ class CiReleaseTests(unittest.TestCase):
             self.assertEqual(summary["determinism"]["freshAssemblies"], 2)
             self.assertEqual(summary["authorization"], "non-promotable-build-evidence-only")
             self.assertEqual(summary["promotionEligibility"]["status"], "blocked")
+            self.assertEqual(PROMOTION_BLOCKERS, EXPECTED_PROMOTION_BLOCKERS)
+            self.assertEqual(
+                summary["promotionEligibility"]["reasons"],
+                list(EXPECTED_PROMOTION_BLOCKERS),
+            )
+            self.assertNotIn(
+                "host-executed-bound-source-integration-is-pending",
+                summary["promotionEligibility"]["reasons"],
+            )
             self.assertEqual(summary["buildToolchain"]["syft"]["version"], "1.51.0")
             self.assertTrue((output / "SHA256SUMS").is_file())
 
@@ -333,8 +568,8 @@ class CiReleaseTests(unittest.TestCase):
         self.assertEqual(
             uses,
             [
-                "actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09",
-                "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+                "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd",
+                "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
             ],
         )
         for use in uses:

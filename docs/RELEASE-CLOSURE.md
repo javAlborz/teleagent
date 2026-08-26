@@ -9,11 +9,11 @@ Status: source-side build contract. This document and the tools under
 evidence workflow. It is restricted to the exact repo-scoped
 `hephaestus-ci-build-vm01-teleagent` runner with the `self-hosted`, `Linux`,
 `X64`, `ci-build`, and `teleagent` labels. Third-party Actions use immutable
-commit SHAs, checkout does not persist credentials, jobs time out, concurrent
-runs queue instead of cancelling one another, and the workflow has only
-`contents: read`. It has no pull-request/push trigger, secrets, OIDC token,
-attestation permission, registry permission, deploy step, service activation,
-or image push.
+commit SHAs (`actions/checkout` v6.0.2 and `actions/upload-artifact` v7.0.1),
+checkout does not persist credentials, jobs time out, concurrent runs queue
+instead of cancelling one another, and the workflow has only `contents: read`.
+It has no pull-request/push trigger, secrets, OIDC token, attestation permission,
+registry permission, deploy step, service activation, or image push.
 
 The runner user is a member of the Docker group, which is root-equivalent, and
 the guest is currently long-lived. Therefore every uploaded artifact is
@@ -23,6 +23,12 @@ stronger without supplying an independent build boundary. Promotion remains
 blocked until an external system resets or creates a clean immutable guest for
 each job, verifies that generation outside the guest, and performs attestation
 in a separate ephemeral trust domain.
+
+The voice image build is also not hermetic: its Dockerfile still resolves
+mutable Alpine `apk` inputs and npm build dependencies over the network. Two
+assemblies can detect divergence during one run, but cannot prove that those
+inputs are reproducible later. This lane therefore cannot be promoted even if
+the two current-run outputs match.
 
 Dependency lifecycle scripts, native smoke loads, repository tests, and lint do
 not run in the Docker-group host context. They run in a digest-pinned throwaway
@@ -41,12 +47,23 @@ the voice image, produces CycloneDX 1.6 SBOMs, assembles the current v2-shaped
 tree and deterministic archive twice, and uploads only evidence. It never deploys,
 starts, imports on a target, provisions credentials, or pushes to a registry.
 
-This baseline also records `host-executed-bound-source-integration-is-pending`
-in `release-summary.json`: controller, privileged, and bounded realtime-SIP
-installer/runtime assets are landing in parallel and still need one canonical
-`BOUND_SOURCE_PATHS` integration commit. Until that commit and its mirrored
-homelab verifier land, this lane must not be described as a complete release
-closure even in a future ephemeral builder.
+`release-summary.json` keeps `promotionEligibility.status` exactly `blocked`
+and emits these five machine-readable reasons, in this order:
+
+```text
+persistent-docker-group-self-hosted-runner-is-not-an-external-trust-boundary
+voice-image-build-toolchain-is-not-hermetic
+separate-trusted-ephemeral-attestation-job-is-not-defined
+universal-current-boot-release-gate-enforcement-at-credential-bearing-service-restart-is-not-proven
+dedicated-staging-proof-including-non-root-media-containers-is-missing
+```
+
+The old `host-executed-bound-source-integration-is-pending` blocker is closed:
+the source-side manifest now carries the complete production host closure.
+That does not remove any blocker above. In particular, the target still needs
+one universal boot-bound gate before every credential-bearing service start or
+restart, and dedicated staging still must prove the full dormant/install/
+activation behavior including the non-root media containers.
 
 ## Security decision
 
@@ -169,19 +186,24 @@ their decimal byte size and SHA-256. Duplicate or unsorted paths fail closed.
 `teleagent-release.manifest.json` is ASCII JSON on exactly one line with one
 trailing LF. It contains no insignificant whitespace. Object keys and array
 records use the exact order emitted by `release_closure.py`; duplicate or
-unknown keys are invalid. Its v2 shape is:
+unknown keys are invalid. The v2 top-level order is exactly:
 
-```json
-{"version":2,"application":"teleagent","source":{"repository":"https://github.com/javAlborz/teleagent.git","revision":"<40-or-64-lowercase-hex>","tree":"<40-or-64-lowercase-hex>"},"target":{"os":"linux","architecture":"amd64","libc":"glibc","nodeVersion":"v24.x.y","nodeModulesAbi":"137"},"files":{"path":"teleagent-release.files.tsv","sha256":"sha256:<64hex>","size":123,"entries":456},"hostRuntime":{"nodePath":"runtime/node/bin/node","nodeSha256":"sha256:<64hex>","interpreterTargets":["/opt/teleagent/node/bin/node","/usr/local/libexec/teleagent-node"],"apiLockPath":"claude-api-server/package-lock.json","apiLockSha256":"sha256:<64hex>","nodeModulesPath":"claude-api-server/node_modules","nativeModules":[{"path":"claude-api-server/node_modules/better-sqlite3/build/Release/better_sqlite3.node","sha256":"sha256:<64hex>","size":123},{"path":"claude-api-server/node_modules/node-pty/build/Release/pty.node","sha256":"sha256:<64hex>","size":123}],"boundSourcePaths":["claude-api-server/agent-cli.js","deploy/voice-stack/drachtio.conf.xml.template","deploy/voice-stack/freeswitch-event-socket.conf.xml.template","deploy/voice-stack/teleagent-voice-stack-launch.js","deploy/voice-stack/teleagent-voice-stack.service","deploy/worker-session/teleagent-provider-canary","docker-compose.yml","freeswitch/entrypoint.sh","freeswitch/mrf.xml","freeswitch/switch.conf.xml","lib/voice-app-runtime-env.js"]},"providerCli":{"manifestPath":"deploy/worker-session/provider-cli.manifest.json","manifestSha256":"sha256:<64hex>","artifacts":[{"id":"claude","path":"artifacts/provider-cli/claude","sha256":"sha256:<64hex>","size":247905800},{"id":"codex-wrapper","path":"deploy/worker-session/teleagent-codex-cli-wrapper","sha256":"sha256:<64hex>","size":69},{"id":"codex-vendor","path":"artifacts/provider-cli/codex-vendor","sha256":"sha256:<64hex>","size":258227840}]},"voiceImage":{"manifestPath":"artifacts/voice/voice-image.manifest.json","manifestSha256":"sha256:<64hex>","archivePath":"artifacts/voice/voice-image.docker.tar","archiveSha256":"sha256:<64hex>","archiveSize":89710080,"configDigest":"sha256:<64hex>","runtimeReference":"sha256:<64hex>","registryReference":null,"registryManifestDigest":null,"sourceRevision":"<same-source-revision>","platform":"linux/amd64"},"sbom":{"format":"cyclonedx-json-1.6","releasePath":"artifacts/sbom/teleagent-release.cdx.json","releaseSha256":"sha256:<64hex>","voiceImagePath":"artifacts/sbom/voice-image.cdx.json","voiceImageSha256":"sha256:<64hex>"}}
+```text
+version, application, source, target, files, hostRuntime, providerCli, voiceImage, sbom
 ```
+
+The generator and verifier in `release_closure.py` are the canonical schema;
+the focused tests compare the generated structure and canonical bytes. The
+130-entry `hostRuntime.boundSourcePaths` array is emitted dynamically from the
+single reviewed `BOUND_SOURCE_PATHS` tuple rather than copied into the workflow
+or this document.
 
 The native-module array must equal every `*.node` file under the declared host
 `node_modules`. Dependencies are installed in the builder and copied as bytes;
 the target never runs `npm`, downloads a prebuild, or compiles an addon.
 
-The long one-line example above illustrates the original API dependency
-binding. The current v2 `hostRuntime` schema additionally requires, in exact
-key order, these package-local bindings:
+The v2 `hostRuntime` schema requires, in exact key order, these package-local
+bindings in addition to the API dependency binding:
 
 ```json
 {"privilegedBrokerLockPath":"privileged-action-broker/package-lock.json","privilegedBrokerLockSha256":"sha256:<64hex>","privilegedBrokerNodeModulesPath":"privileged-action-broker/node_modules","privilegedBrokerNativeModules":[{"path":"privileged-action-broker/node_modules/better-sqlite3/build/Release/better_sqlite3.node","sha256":"sha256:<64hex>","size":123}],"realtimeSipLockPath":"realtime-sip-gateway/package-lock.json","realtimeSipLockSha256":"sha256:<64hex>","realtimeSipNodeModulesPath":"realtime-sip-gateway/node_modules","realtimeSipNativeModules":[{"path":"realtime-sip-gateway/node_modules/better-sqlite3/build/Release/better_sqlite3.node","sha256":"sha256:<64hex>","size":123}]}
@@ -199,6 +221,50 @@ supervisor, and egress services use `/opt/teleagent/node/bin/node`. The same
 release-contained Node file must provision both targets, and the authoritative
 installed check must compare both installed copies to `nodeSha256` before any
 release code runs.
+
+## Production host source closure
+
+`BOUND_SOURCE_PATHS` is one explicit, duplicate-free, byte-sorted 130-path
+tuple. It is derived from production consumption boundaries, not from a broad
+directory glob:
+
+- the local-import closure rooted at the controller, worker-session broker,
+  provider supervisor/egress/shim, privileged broker/control CLI, and realtime
+  SIP entrypoints;
+- all four nearest package-scope `package.json` files (including the repository
+  root for `lib/*.js` and the host launcher) that determine host Node module
+  semantics, while each `package-lock.json` and production `node_modules` tree
+  remains independently bound by dedicated manifest fields;
+- every source and component manifest consumed by the worker/provider,
+  controller/privileged, and realtime-SIP disabled installers, including every
+  installed unit, socket, slice, sysusers, tmpfiles, sudoers, AppArmor, fixed
+  libexec, empty provider configuration, and verifier input;
+- all fourteen realtime-SIP `src/*.js` imports, its unit, sysusers, tmpfiles,
+  verifier, install manifest, and installer;
+- the voice unit/slice/sysusers/tmpfiles, launcher/verifier/installer, Compose
+  file, rendered configuration templates, three FreeSWITCH bind inputs, and
+  the launcher-loaded runtime-environment module;
+- the SIP peer-fence helper/unit/installer and the aggregate
+  `deploy/host/teleagent-disabled-host-install` entrypoint.
+
+Documentation, tests, example policies/configuration, and unused legacy assets
+are deliberately absent. They remain covered by the complete release file
+inventory, but are not mislabeled as production host execution inputs. A
+focused regression independently derives the import and component-manifest
+sets, requires exact equality with the reviewed tuple, proves all 130 paths are
+real regular files, derives every host JavaScript file's nearest package scope,
+and pins the complete realtime-SIP import list.
+
+The same regression derives the eight systemd services that directly execute
+the selected release or an installed launcher that consumes it. Each must make
+the host-owned `verify-teleagent-release-closure --check-start-gate` command its
+first execution directive, exactly once. That start gate checks the current
+boot, approval, canonical manifest, selected release identity, and installed
+runtime metadata without scanning or hashing the complete release. Full tree
+and runtime hashing remains serialized in the dedicated staging handoff;
+putting it in every service preflight would multiply large reads during boot.
+The release remains non-promotable until the cheap start gate and the complete
+handoff are proven under real systemd on a dedicated staging host.
 
 The provider section cross-checks `provider-cli.manifest.json` against the
 actual bundled Claude binary, Codex wrapper, and Codex vendor binary. IDs,
@@ -245,79 +311,25 @@ must reject null registry fields.
 
 ## Build input
 
-The generator accepts an external JSON description. This file is build input,
-not part of the release and not an approval:
+The generator accepts an external canonical JSON description. This file is
+build input, not part of the release and not an approval. The dormant CI lane
+creates it from the reviewed commit and tree without copying the 130-path host
+closure into shell or workflow code:
 
-```json
-{
-  "version": 1,
-  "source": {
-    "repository": "https://github.com/javAlborz/teleagent.git",
-    "revision": "<reviewed commit>",
-    "tree": "<reviewed Git tree>"
-  },
-  "target": {
-    "os": "linux",
-    "architecture": "amd64",
-    "libc": "glibc",
-    "nodeVersion": "v24.x.y",
-    "nodeModulesAbi": "137"
-  },
-  "hostRuntime": {
-    "nodePath": "runtime/node/bin/node",
-    "interpreterTargets": [
-      "/opt/teleagent/node/bin/node",
-      "/usr/local/libexec/teleagent-node"
-    ],
-    "apiLockPath": "claude-api-server/package-lock.json",
-    "nodeModulesPath": "claude-api-server/node_modules",
-    "nativeModulePaths": [
-      "claude-api-server/node_modules/better-sqlite3/build/Release/better_sqlite3.node",
-      "claude-api-server/node_modules/node-pty/build/Release/pty.node"
-    ],
-    "privilegedBrokerLockPath": "privileged-action-broker/package-lock.json",
-    "privilegedBrokerNodeModulesPath": "privileged-action-broker/node_modules",
-    "privilegedBrokerNativeModulePaths": [
-      "privileged-action-broker/node_modules/better-sqlite3/build/Release/better_sqlite3.node"
-    ],
-    "realtimeSipLockPath": "realtime-sip-gateway/package-lock.json",
-    "realtimeSipNodeModulesPath": "realtime-sip-gateway/node_modules",
-    "realtimeSipNativeModulePaths": [
-      "realtime-sip-gateway/node_modules/better-sqlite3/build/Release/better_sqlite3.node"
-    ],
-    "boundSourcePaths": [
-      "claude-api-server/agent-cli.js",
-      "deploy/voice-stack/drachtio.conf.xml.template",
-      "deploy/voice-stack/freeswitch-event-socket.conf.xml.template",
-      "deploy/voice-stack/teleagent-voice-stack-launch.js",
-      "deploy/voice-stack/teleagent-voice-stack.service",
-      "deploy/worker-session/teleagent-provider-canary",
-      "docker-compose.yml",
-      "freeswitch/entrypoint.sh",
-      "freeswitch/mrf.xml",
-      "freeswitch/switch.conf.xml",
-      "lib/voice-app-runtime-env.js"
-    ]
-  },
-  "providerCli": {
-    "manifestPath": "deploy/worker-session/provider-cli.manifest.json",
-    "artifacts": [
-      {"id": "claude", "path": "artifacts/provider-cli/claude"},
-      {"id": "codex-wrapper", "path": "deploy/worker-session/teleagent-codex-cli-wrapper"},
-      {"id": "codex-vendor", "path": "artifacts/provider-cli/codex-vendor"}
-    ]
-  },
-  "voiceImage": {
-    "manifestPath": "artifacts/voice/voice-image.manifest.json",
-    "archivePath": "artifacts/voice/voice-image.docker.tar"
-  },
-  "sbom": {
-    "format": "cyclonedx-json-1.6",
-    "releasePath": "artifacts/sbom/teleagent-release.cdx.json",
-    "voiceImagePath": "artifacts/sbom/voice-image.cdx.json"
-  }
-}
+```bash
+python3 scripts/release/ci_release_support.py write-build-input \
+  --destination /build/teleagent-release-input.json \
+  --revision <reviewed-commit> \
+  --tree <reviewed-tree>
 ```
+
+The emitted object has the exact top-level order `version`, `source`, `target`,
+`hostRuntime`, `providerCli`, `voiceImage`, and `sbom`. `hostRuntime` binds both
+interpreter targets, each package-local lockfile/dependency/native-addon tree,
+and the exact byte-sorted `BOUND_SOURCE_PATHS` tuple. The provider, image, and
+SBOM objects then bind their fixed artifact paths. The focused test suite
+validates the complete generated object rather than maintaining a second
+handwritten example.
 
 Unknown fields, reordered semantic arrays, missing interpreter destinations,
 or missing host binding paths are rejected.
@@ -417,7 +429,8 @@ scripts/hermes-safe-test python3 -m unittest -v \
 
 Tests cover canonicalization, traversal, extra/missing/tampered files,
 symlinks, hardlinks, FIFOs, xattrs, modes, all three exact package-local native
-dependency trees, provider/image/SBOM cross-binding, dynamic host-bound source
-input, lifecycle-container isolation, immutable Action/tool pins, manual
-default-branch runner gating, non-promotable authorization, and byte-identical
-double packaging. These static/unit tests do not run Docker or download tools.
+dependency trees, provider/image/SBOM cross-binding, the exact derived 130-path
+host closure, lifecycle-container isolation, immutable Action/tool pins, manual
+default-branch runner gating, all five exact non-promotable blockers, and
+byte-identical double packaging. These static/unit tests do not run Docker or
+download tools.

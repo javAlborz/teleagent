@@ -45,6 +45,17 @@ REVISION_RE = re.compile(r"^(?:[a-f0-9]{40}|[a-f0-9]{64})$")
 DIGEST_RE = re.compile(r"^sha256:[a-f0-9]{64}$")
 HEX_RE = re.compile(r"^[a-f0-9]{64}$")
 
+# These are authorization blockers, not advisory warnings.  Evidence remains
+# non-promotable until a later reviewed pipeline removes every exact reason.
+PROMOTION_BLOCKERS = (
+    "persistent-docker-group-self-hosted-runner-is-not-an-external-trust-boundary",
+    "voice-image-build-toolchain-is-not-hermetic",
+    "separate-trusted-ephemeral-attestation-job-is-not-defined",
+    "universal-current-boot-release-gate-enforcement-at-"
+    "credential-bearing-service-restart-is-not-proven",
+    "dedicated-staging-proof-including-non-root-media-containers-is-missing",
+)
+
 
 class CiReleaseError(ValueError):
     """A CI input or generated artifact violates the release contract."""
@@ -627,11 +638,7 @@ def compare_and_publish(
         "authorization": "non-promotable-build-evidence-only",
         "promotionEligibility": {
             "status": "blocked",
-            "reasons": [
-                "persistent-docker-group-self-hosted-runner-is-not-an-external-trust-boundary",
-                "host-executed-bound-source-integration-is-pending",
-                "trusted-ephemeral-attestation-job-is-not-yet-defined",
-            ],
+            "reasons": list(PROMOTION_BLOCKERS),
         },
     }
     summary_path = output / "release-summary.json"

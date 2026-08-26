@@ -446,10 +446,13 @@ class ReleaseClosureTests(unittest.TestCase):
             with self.assertRaisesRegex(ClosureError, "CycloneDX 1.6"):
                 sbom.generate()
 
-    def test_host_bound_source_set_cannot_omit_canary_dependency(self) -> None:
+    def test_host_bound_source_set_cannot_omit_aggregate_installer(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             fixture = self.fixture(Path(temporary))
-            fixture.config["hostRuntime"]["boundSourcePaths"] = list(BOUND_SOURCE_PATHS[:-1])
+            fixture.config["hostRuntime"]["boundSourcePaths"] = [
+                path for path in BOUND_SOURCE_PATHS
+                if path != "deploy/host/teleagent-disabled-host-install"
+            ]
             with self.assertRaisesRegex(ClosureError, "source bindings are incomplete"):
                 fixture.generate()
 
