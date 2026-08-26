@@ -39,6 +39,15 @@ function voiceAppEnvironmentEntries(compose) {
   };
 }
 
+function composeServiceBlock(compose, name) {
+  const match = compose.match(new RegExp(
+    `^  ${name}:\\n[\\s\\S]*?(?=^  [a-zA-Z0-9_-]+:\\n|(?![\\s\\S]))`,
+    'm'
+  ));
+  assert.ok(match, `generated Compose must define ${name}`);
+  return match[0];
+}
+
 test('docker compose generation', async (t) => {
   await t.test('uses the fixed protected Drachtio configuration instead of inline SIP or secret flags', () => {
     const config = {
@@ -163,7 +172,10 @@ test('docker compose generation', async (t) => {
 
     // Verify other settings remain intact
     assert.ok(compose.includes('network_mode: host'), 'Should use host networking');
-    assert.ok(compose.includes('--sip-port 5080'), 'FreeSWITCH should use port 5080');
+    assert.ok(compose.includes('command: ["freeswitch"]'),
+      'FreeSWITCH should use its fixed configuration-only entrypoint');
+    assert.ok(compose.includes('switch.conf.xml:/usr/local/freeswitch/conf/autoload_configs/switch.conf.xml:ro'),
+      'FreeSWITCH should mount the fixed RTP/core configuration');
     assert.ok(compose.includes('/etc/drachtio.conf.xml'), 'Drachtio should use fixed config');
     assert.ok(!compose.includes('192.168.1.50'), 'Host configuration cannot redirect SIP/media');
   });
@@ -253,7 +265,18 @@ test('docker compose generation', async (t) => {
     assert.ok(!envFile.includes('DRACHTIO_SIP_TRANSPORT='));
     assert.ok(envFile.includes('OPENAI_REALTIME_HARD_MAX_SPOKEN_WORDS=240'));
     assert.ok(envFile.includes('OPENAI_REALTIME_CONTEXT_TOKEN_LIMIT=16000'));
-    assert.ok(envFile.includes('VOICE_STATE_DB_PATH=/app/state/voice-state.sqlite'));
+    assert.ok(!envFile.includes('VOICE_STATE_DB_PATH='));
+    assert.ok(!envFile.includes('VOICE_APP_EXECUTION_LOCK_FILE='));
+    for (const fixedName of [
+      'HTTP_HOST',
+      'WS_HOST',
+      'WS_CONNECT_HOST',
+      'WS_ALLOWED_PEERS',
+      'WS_NON_LOOPBACK_ENABLED',
+      'OUTBOUND_API_NON_LOOPBACK_ENABLED',
+    ]) {
+      assert.ok(!envFile.includes(`${fixedName}=`), `${fixedName} stays image-owned`);
+    }
     assert.ok(!envFile.includes('SIP_AUTH_ID='));
     assert.ok(!envFile.includes('SIP_AUTH_PASSWORD='));
   });
@@ -411,6 +434,23 @@ test('docker compose generation', async (t) => {
     const envFile = generateVoiceEnv(config);
     const generatedAgain = generateVoiceEnv(config);
     const voiceEnvironment = voiceAppEnvironmentEntries(compose);
+    const canonicalCompose = fs.readFileSync(
+      new URL('../../docker-compose.yml', import.meta.url),
+      'utf8'
+    );
+    let normalizedCompose = compose;
+    for (const [relative, destination] of [
+      ['entrypoint.sh', '/usr/local/bin/entrypoint-hermes-freeswitch.sh'],
+      ['mrf.xml', '/usr/local/freeswitch/conf/sip_profiles/mrf.xml'],
+      ['switch.conf.xml', '/usr/local/freeswitch/conf/autoload_configs/switch.conf.xml'],
+    ]) {
+      normalizedCompose = normalizedCompose.replace(
+        JSON.stringify(`/srv/teleagent/freeswitch/${relative}:${destination}:ro`),
+        `./freeswitch/${relative}:${destination}:ro`
+      );
+    }
+    assert.equal(normalizedCompose, canonicalCompose,
+      'standard generated Compose must differ only by absolute bind-source paths');
     const env = Object.fromEntries(envFile.split('\n').filter((line) => (
       line && !line.startsWith('#') && line.includes('=')
     )).map((line) => {
@@ -428,7 +468,7 @@ test('docker compose generation', async (t) => {
     );
     assert.doesNotMatch(compose, /VOICE_APP_(?:UID|GID):-/);
     assert.doesNotMatch(compose, /(?:uid|gid)=1000|user: "1000:1000"/);
-    assert.match(compose, /read_only: true/);
+    assert.equal((compose.match(/^    read_only: true$/gm) || []).length, 4);
     assert.match(
       compose,
       /\/tmp:rw,noexec,nosuid,nodev,uid=\$\{VOICE_APP_UID:\?[^}]+},gid=\$\{VOICE_APP_GID:\?[^}]+},mode=0700,size=536870912/
@@ -456,6 +496,25 @@ test('docker compose generation', async (t) => {
     assert.ok(!voiceEnvironment.entries.has('CODEX_COMMAND'));
     assert.ok(!voiceEnvironment.entries.has('CLAUDE_COMMAND'));
     assert.equal((compose.match(/cap_drop:/g) || []).length, 4);
+    const drachtio = composeServiceBlock(compose, 'drachtio');
+    const freeswitch = composeServiceBlock(compose, 'freeswitch');
+    const voiceApp = composeServiceBlock(compose, 'voice-app');
+    assert.match(drachtio, /^    mem_limit: 384m\n    memswap_limit: 384m$/m);
+    assert.match(drachtio,
+      /^      - \/config:rw,noexec,nosuid,nodev,mode=0700,size=1048576$/m);
+    assert.match(drachtio,
+      /^      - \/tmp:rw,noexec,nosuid,nodev,mode=0700,size=16777216$/m);
+    assert.match(freeswitch, /^    mem_limit: 1g\n    memswap_limit: 1g$/m);
+    assert.match(freeswitch, /^    pids_limit: 512$/m);
+    for (const mountpoint of ['db', 'log', 'recordings', 'run', 'sounds']) {
+      assert.match(freeswitch, new RegExp(
+        `^      - \/usr\/local\/freeswitch\/${mountpoint}:(?:rw|ro),noexec,nosuid,nodev,[^\\n]*size=[1-9][0-9]*$`,
+        'm'
+      ));
+    }
+    assert.match(freeswitch, /^    command: \["freeswitch"\]$/m);
+    assert.doesNotMatch(freeswitch, /--sip-port|--rtp-range/);
+    assert.match(voiceApp, /^    mem_limit: 1g\n    memswap_limit: 1g$/m);
     assert.doesNotMatch(compose, /media-control-preflight:/);
     assert.match(compose, /voice-runtime-preflight:[\s\S]*network_mode: none/);
     assert.match(
@@ -474,11 +533,12 @@ test('docker compose generation', async (t) => {
       'VOICE_CONTROL_TOKEN', 'PRIVILEGED_ACTION_API_TOKEN', 'OUTBOUND_API_TOKEN',
       'OPENAI_REALTIME_API_KEY', 'OPENAI_SAFETY_IDENTIFIER_SALT', 'STT_API_KEY', 'TTS_API_KEY',
     ]) assert.equal(env[name], undefined, `${name} must not be written to the env file`);
-    assert.equal(env.HTTP_HOST, '127.0.0.1');
-    assert.equal(env.WS_HOST, '127.0.0.1');
-    assert.equal(env.WS_CONNECT_HOST, '127.0.0.1');
-    assert.equal(env.WS_NON_LOOPBACK_ENABLED, 'false');
-    assert.equal(env.OUTBOUND_API_NON_LOOPBACK_ENABLED, 'false');
+    assert.equal(env.HTTP_HOST, undefined);
+    assert.equal(env.WS_HOST, undefined);
+    assert.equal(env.WS_CONNECT_HOST, undefined);
+    assert.equal(env.WS_ALLOWED_PEERS, undefined);
+    assert.equal(env.WS_NON_LOOPBACK_ENABLED, undefined);
+    assert.equal(env.OUTBOUND_API_NON_LOOPBACK_ENABLED, undefined);
     assert.equal(env.SIP_TRUNK_HOST, undefined);
     assert.equal(env.SIP_TRUNK_PORT, undefined);
     assert.equal(env.SIP_TRUNK_TRANSPORT, undefined);

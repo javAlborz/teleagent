@@ -1,6 +1,7 @@
 import { spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import {
   getDockerComposePath,
   getEnvPath,
@@ -16,13 +17,6 @@ import {
   resolveVoiceRuntimeIdentity,
   VOICE_RUNTIME_PATH_BINDINGS,
 } from './voice-runtime-identity.js';
-import voiceAppRuntimeEnv from '../../lib/voice-app-runtime-env.js';
-
-const {
-  VOICE_APP_FIXED_ENV,
-  VOICE_APP_RUNTIME_ENV_GROUPS
-} = voiceAppRuntimeEnv;
-
 const DRACHTIO_SERVER_IMAGE =
   'drachtio/drachtio-server:latest@sha256:c03001e7c01ead29d0026245d0b42a9ebc8eefb0ff9bd180f5ff1f72be6da457';
 const DRACHTIO_SERVER_PI_IMAGE =
@@ -35,23 +29,18 @@ const VOICE_STACK_SYSTEMCTL = '/usr/bin/systemctl';
 const VOICE_STACK_DOCKER = '/usr/bin/docker';
 const VOICE_STACK_UNIT = 'teleagent-voice-stack.service';
 const VOICE_STACK_PROJECT_LABEL = 'com.docker.compose.project=teleagent-voice';
+const CANONICAL_COMPOSE_PATH = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '..',
+  '..',
+  'docker-compose.yml'
+);
 
-function renderVoiceAppEnvironment(indent = '      ') {
-  const lines = [
-    `${indent}# Fixed security boundary; never inherited from the host .env.`,
-    ...Object.entries(VOICE_APP_FIXED_ENV).map(([key, value]) => (
-      `${indent}${key}: ${JSON.stringify(value)}`
-    )),
-  ];
-
-  for (const { name, keys } of VOICE_APP_RUNTIME_ENV_GROUPS) {
-    lines.push(`${indent}# ${name}`);
-    for (const key of keys) {
-      lines.push(`${indent}${key}: "\${${key}:-}"`);
-    }
+function replaceExactly(source, expected, replacement, label) {
+  if (source.split(expected).length !== 2) {
+    throw new Error(`Canonical voice Compose ${label} drifted`);
   }
-
-  return lines.join('\n');
+  return source.replace(expected, replacement);
 }
 
 /**
@@ -105,149 +94,37 @@ export async function checkDocker() {
 export function generateDockerCompose(config) {
   const voiceAppPath = path.resolve(config.paths.voiceApp);
   const projectRoot = path.dirname(voiceAppPath);
-
-  // Determine if running on Pi (ARM64) - use specific versions with platform
   const isPiMode = config.deployment && config.deployment.mode === 'pi-split';
-  const drachtioImage = isPiMode ? DRACHTIO_SERVER_PI_IMAGE : DRACHTIO_SERVER_IMAGE;
-  const freeswitchImage = FREESWITCH_IMAGE;
-  const platformLine = isPiMode ? '\n    platform: linux/arm64' : '';
-  const voiceAppEnvironment = renderVoiceAppEnvironment();
+  let compose = fs.readFileSync(CANONICAL_COMPOSE_PATH, 'utf8');
 
-  return `# CRITICAL: SIP/media containers use network_mode: host. The one-shot
-# control credential preflight has no network namespace at all.
+  if (isPiMode) {
+    compose = replaceExactly(
+      compose,
+      `    image: ${DRACHTIO_SERVER_IMAGE}`,
+      `    image: ${DRACHTIO_SERVER_PI_IMAGE}\n    platform: linux/arm64`,
+      'Drachtio image'
+    );
+    compose = replaceExactly(
+      compose,
+      `    image: ${FREESWITCH_IMAGE}`,
+      `    image: ${FREESWITCH_IMAGE}\n    platform: linux/arm64`,
+      'FreeSWITCH image'
+    );
+  }
 
-services:
-  voice-runtime-preflight:
-    # Production activation injects this only after verifying the root-owned
-    # release manifest and the locally resolved immutable image identity.
-    image: "\${TELEAGENT_VOICE_IMAGE:?TELEAGENT_VOICE_IMAGE must be an approved OCI digest}"
-    restart: "no"
-    ulimits:
-      core: 0
-    mem_limit: 256m
-    memswap_limit: 256m
-    cpus: 0.5
-    pids_limit: 64
-    network_mode: none
-    user: "\${VOICE_APP_UID:?VOICE_APP_UID must resolve teleagent-voice}:\${VOICE_APP_GID:?VOICE_APP_GID must resolve teleagent-voice}"
-    read_only: true
-    tmpfs:
-      - /tmp:rw,noexec,nosuid,nodev,uid=\${VOICE_APP_UID:?VOICE_APP_UID must resolve teleagent-voice},gid=\${VOICE_APP_GID:?VOICE_APP_GID must resolve teleagent-voice},mode=0700,size=16777216
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-    logging:
-      driver: local
-      options:
-        max-size: "10m"
-        max-file: "3"
-    volumes:
-      - "\${DEVICE_CONFIG_DIR:?DEVICE_CONFIG_DIR must be provisioned}:/app/config:ro"
-      - "\${VOICE_STATE_DIR:?VOICE_STATE_DIR must be provisioned}:/app/state:ro"
-      - /run/teleagent-voice-stack/voice-secrets:/run/secrets:ro
-    command: ["node", "voice-runtime-preflight.js"]
-
-  drachtio:
-    image: ${drachtioImage}${platformLine}
-    container_name: drachtio
-    restart: "no"
-    ulimits:
-      core: 0
-    mem_limit: 384m
-    memswap_limit: 512m
-    cpus: 1.0
-    pids_limit: 256
-    network_mode: host
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-    logging:
-      driver: local
-      options:
-        max-size: "10m"
-        max-file: "3"
-    tmpfs:
-      - /tmp
-    volumes:
-      - /run/teleagent-voice-stack/drachtio.conf.xml:/etc/drachtio.conf.xml:ro
-    command: ["drachtio", "-f", "/etc/drachtio.conf.xml"]
-    depends_on:
-      voice-runtime-preflight:
-        condition: service_completed_successfully
-
-  freeswitch:
-    image: ${freeswitchImage}${platformLine}
-    container_name: freeswitch
-    restart: "no"
-    ulimits:
-      core: 0
-    mem_limit: 1g
-    memswap_limit: 1280m
-    cpus: 2.0
-    pids_limit: 1024
-    network_mode: host
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-    logging:
-      driver: local
-      options:
-        max-size: "10m"
-        max-file: "3"
-    tmpfs:
-      - /tmp
-    entrypoint: /usr/local/bin/entrypoint-hermes-freeswitch.sh
-    volumes:
-      - ${JSON.stringify(`${projectRoot}/freeswitch/entrypoint.sh:/usr/local/bin/entrypoint-hermes-freeswitch.sh:ro`)}
-      - ${JSON.stringify(`${projectRoot}/freeswitch/mrf.xml:/usr/local/freeswitch/conf/sip_profiles/mrf.xml:ro`)}
-      - /run/teleagent-voice-stack/freeswitch-event-socket.conf.xml:/usr/local/freeswitch/conf/autoload_configs/event_socket.conf.xml:ro
-    command: >
-      freeswitch
-      --sip-port 5080
-      --rtp-range-start 30000
-      --rtp-range-end 30100
-    # RTP ports 30000-30100 avoid conflict with the local PBX.
-    depends_on:
-      voice-runtime-preflight:
-        condition: service_completed_successfully
-
-  voice-app:
-    image: "\${TELEAGENT_VOICE_IMAGE:?TELEAGENT_VOICE_IMAGE must be an approved OCI digest}"
-    container_name: voice-app
-    restart: "no"
-    ulimits:
-      core: 0
-    mem_limit: 1g
-    memswap_limit: 1280m
-    cpus: 2.0
-    pids_limit: 512
-    network_mode: host
-    user: "\${VOICE_APP_UID:?VOICE_APP_UID must resolve teleagent-voice}:\${VOICE_APP_GID:?VOICE_APP_GID must resolve teleagent-voice}"
-    read_only: true
-    tmpfs:
-      - /tmp:rw,noexec,nosuid,nodev,uid=\${VOICE_APP_UID:?VOICE_APP_UID must resolve teleagent-voice},gid=\${VOICE_APP_GID:?VOICE_APP_GID must resolve teleagent-voice},mode=0700,size=536870912
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-    logging:
-      driver: local
-      options:
-        max-size: "10m"
-        max-file: "3"
-    environment:
-${voiceAppEnvironment}
-    volumes:
-      - "\${DEVICE_CONFIG_DIR:?DEVICE_CONFIG_DIR must be provisioned}:/app/config:ro"
-      - "\${VOICE_STATE_DIR:?VOICE_STATE_DIR must be provisioned}:/app/state"
-      - /run/teleagent-voice-stack/voice-secrets:/run/secrets:ro
-    depends_on:
-      - drachtio
-      - freeswitch
-`;
+  for (const [relative, destination] of [
+    ['entrypoint.sh', '/usr/local/bin/entrypoint-hermes-freeswitch.sh'],
+    ['mrf.xml', '/usr/local/freeswitch/conf/sip_profiles/mrf.xml'],
+    ['switch.conf.xml', '/usr/local/freeswitch/conf/autoload_configs/switch.conf.xml'],
+  ]) {
+    compose = replaceExactly(
+      compose,
+      `      - ./freeswitch/${relative}:${destination}:ro`,
+      `      - ${JSON.stringify(`${projectRoot}/freeswitch/${relative}:${destination}:ro`)}`,
+      `FreeSWITCH ${relative} bind`
+    );
+  }
+  return compose;
 }
 
 /**
@@ -351,7 +228,6 @@ export function generateEnvFile(config, voiceIdentity) {
     `OPENAI_REALTIME_HARD_MAX_SPOKEN_WORDS=${realtimeHardMaxSpokenWords}`,
     `OPENAI_REALTIME_CONTEXT_TOKEN_LIMIT=${realtimeContextTokenLimit}`,
     `OPENAI_REALTIME_CONTEXT_RETENTION_RATIO=${realtimeContextRetentionRatio}`,
-    'VOICE_STATE_DB_PATH=/app/state/voice-state.sqlite',
     'VOICE_APPROVAL_CAPABILITY_ENABLED=false',
     '',
     '# Legacy local TTS/STT are disabled in hardened production.',
@@ -359,17 +235,12 @@ export function generateEnvFile(config, voiceIdentity) {
     `TTS_VOICE=${defaultVoice}`,
     '',
     '# Application Settings',
-    'HTTP_HOST=127.0.0.1',
     `HTTP_PORT=${config.server.httpPort}`,
-    'WS_HOST=127.0.0.1',
-    'WS_CONNECT_HOST=127.0.0.1',
-    'WS_NON_LOOPBACK_ENABLED=false',
     'WS_PORT=3001',
     '',
     '# Outbound Call Settings',
     'MAX_CONVERSATION_TURNS=10',
     'OUTBOUND_RING_TIMEOUT=30',
-    'OUTBOUND_API_NON_LOOPBACK_ENABLED=false',
     ''
   ];
 
