@@ -77,6 +77,7 @@ test('collectors split raw database and live network while composition remains o
 test('browser keeps the token in memory and invalidates stale safety output', () => {
   const app = read('evaluation/hermes-preview/static/app.js');
   const html = read('evaluation/hermes-preview/static/index.html');
+  const favicon = read('evaluation/hermes-preview/static/favicon.svg');
 
   assert.match(app, /window\.location\.hash/u);
   assert.match(app, /window\.history\.replaceState/u);
@@ -92,6 +93,8 @@ test('browser keeps the token in memory and invalidates stale safety output', ()
   assert.match(app, /window\.addEventListener\('focus'/u);
   assert.doesNotMatch(app, /localStorage|sessionStorage|document\.cookie|method: ['"]POST/u);
   assert.doesNotMatch(html, /<form|<audio|<video/iu);
+  assert.match(html, /<link rel="icon" type="image\/svg\+xml" href="\/favicon\.svg">/u);
+  assert.match(favicon, /<svg[^>]+viewBox="0 0 32 32"/u);
   assert.match(html, /Snapshot composed/u);
   assert.match(html, /Trial began · fixed epoch/u);
   assert.match(html, /Current evidence window began · max 14 days/u);

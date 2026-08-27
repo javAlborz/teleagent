@@ -33,6 +33,7 @@ function loadStaticAssets(staticDirectory = STATIC_DIRECTORY) {
   return new Map([
     ['/', { type: 'text/html; charset=utf-8', body: fs.readFileSync(path.join(staticDirectory, 'index.html')) }],
     ['/app.js', { type: 'text/javascript; charset=utf-8', body: fs.readFileSync(path.join(staticDirectory, 'app.js')) }],
+    ['/favicon.svg', { type: 'image/svg+xml', body: fs.readFileSync(path.join(staticDirectory, 'favicon.svg')) }],
     ['/styles.css', { type: 'text/css; charset=utf-8', body: fs.readFileSync(path.join(staticDirectory, 'styles.css')) }],
   ]);
 }
