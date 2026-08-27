@@ -85,20 +85,28 @@ function inheritedSocketFd(environment = process.env, pid = process.pid) {
   return 3;
 }
 
-function lookupSystemGroupGid(groupName = FIXED_CONTROLLER_GROUP, groupFile = '/etc/group') {
-  const metadata = fs.lstatSync(groupFile);
+function lookupSystemGroupGid(
+  groupName = FIXED_CONTROLLER_GROUP,
+  groupFile = '/etc/group',
+  fileSystem = fs
+) {
+  const metadata = fileSystem.lstatSync(groupFile);
   if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.uid !== 0 ||
       (metadata.mode & 0o022) !== 0) {
     throw new Error('The system group database is unsafe.');
   }
-  const matches = fs.readFileSync(groupFile, 'utf8').split('\n').filter((line) => {
+  const matches = fileSystem.readFileSync(groupFile, 'utf8').split('\n').filter((line) => {
     if (!line || line.startsWith('#')) return false;
     return line.split(':', 1)[0] === groupName;
   });
   if (matches.length !== 1) throw new Error(`Required system group ${groupName} is missing.`);
   const fields = matches[0].split(':');
-  const gid = Number.parseInt(fields[2], 10);
-  if (!Number.isInteger(gid) || gid < 0) throw new Error(`${groupName} has an invalid GID.`);
+  const gidText = fields[2];
+  const gid = Number(gidText);
+  if (fields.length !== 4 || !/^\d+$/.test(gidText) ||
+      !Number.isSafeInteger(gid) || gid <= 0) {
+    throw new Error(`${groupName} has an invalid GID.`);
+  }
   return gid;
 }
 

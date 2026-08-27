@@ -54,8 +54,30 @@ function environment(overrides = {}) {
   };
 }
 
+function groupDatabase(contents, overrides = {}) {
+  return {
+    lstatSync(filename) {
+      assert.equal(filename, '/etc/group');
+      return {
+        uid: overrides.uid ?? 0,
+        mode: overrides.mode ?? 0o100644,
+        isFile: () => overrides.isFile ?? true,
+        isSymbolicLink: () => overrides.isSymbolicLink ?? false,
+      };
+    },
+    readFileSync(filename, encoding) {
+      assert.equal(filename, '/etc/group');
+      assert.equal(encoding, 'utf8');
+      return contents;
+    },
+  };
+}
+
+function lookupControllerGid(contents, metadata = {}) {
+  return lookupSystemGroupGid(undefined, undefined, groupDatabase(contents, metadata));
+}
+
 test('service config requires the worker UID contract and one named inherited socket', () => {
-  assert.ok(Number.isInteger(lookupSystemGroupGid()));
   const config = normalizeWorkerSessionServiceConfig(environment(), {
     uid: 1234,
     gid: 1235,
@@ -71,14 +93,64 @@ test('service config requires the worker UID contract and one named inherited so
   assert.equal(config.tmuxSocket, FIXED_TMUX_SOCKET);
   assert.deepEqual(config.inspectionRoots, [`${FIXED_WORKSPACE_ROOT}/phone`]);
 
-  assert.throws(() => normalizeWorkerSessionServiceConfig(environment(), {
-    uid: 0, username: 'root', pid: 4242, controllerGid: 5678,
-  }), /non-root teleagent-session-broker/);
+  for (const identity of [
+    { uid: 0, gid: 1235, username: FIXED_BROKER_USER },
+    { uid: 1234, gid: 0, username: FIXED_BROKER_USER },
+    { uid: 1234, gid: 1235, username: 'another-user' },
+  ]) {
+    assert.throws(() => normalizeWorkerSessionServiceConfig(environment(), {
+      ...identity, pid: 4242, controllerGid: 5678,
+    }), /non-root teleagent-session-broker/);
+  }
   assert.throws(() => inheritedSocketFd(environment({ LISTEN_FDS: '2' }), 4242), /exactly one/);
+  assert.throws(
+    () => inheritedSocketFd(environment({ LISTEN_FDNAMES: 'another-socket' }), 4242),
+    /unexpected socket name/
+  );
   assert.throws(() => normalizeWorkerSessionServiceConfig(
     environment({ WORKER_SESSION_TMUX_SOCKET_PATH: '/tmp/other.sock' }),
-    { uid: 1234, username: FIXED_BROKER_USER, pid: 4242, controllerGid: 5678 }
+    { uid: 1234, gid: 1235, username: FIXED_BROKER_USER, pid: 4242, controllerGid: 5678 }
   ), /WORKER_SESSION_TMUX_SOCKET_PATH/);
+});
+
+test('system group lookup requires one trusted canonical controller-group record', () => {
+  const validDatabase = [
+    'root:x:0:',
+    'teleagent-control:x:5678:teleagent-session-broker',
+    '',
+  ].join('\n');
+  assert.equal(lookupControllerGid(validDatabase), 5678);
+
+  for (const metadata of [
+    { uid: 1000 },
+    { mode: 0o100664 },
+    { isFile: false },
+    { isSymbolicLink: true },
+  ]) {
+    assert.throws(() => lookupControllerGid(validDatabase, metadata), /database is unsafe/);
+  }
+  assert.throws(
+    () => lookupControllerGid('root:x:0:\n'),
+    /Required system group teleagent-control is missing/
+  );
+  assert.throws(
+    () => lookupControllerGid([
+      'teleagent-control:x:5678:',
+      'teleagent-control:x:5679:',
+    ].join('\n')),
+    /Required system group teleagent-control is missing/
+  );
+  for (const invalidRecord of [
+    'teleagent-control:x:5678trailing:\n',
+    'teleagent-control:x:5678\n',
+    'teleagent-control:x:5678::extra\n',
+    'teleagent-control:x:0:\n',
+  ]) {
+    assert.throws(
+      () => lookupControllerGid(invalidRecord),
+      /teleagent-control has an invalid GID/
+    );
+  }
 });
 
 test('inspection roots cannot escape the fixed worker workspace', () => {
