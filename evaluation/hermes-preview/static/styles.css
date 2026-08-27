@@ -123,7 +123,8 @@ footer p { margin-bottom: 0; } footer strong { color: var(--ink); }
   .shell { padding: 28px 18px 50px; }
   .masthead, .decision, .manual { align-items: stretch; flex-direction: column; }
   .timestamp { margin-top: 20px; text-align: left; }
-  .boundary { align-items: start; flex-wrap: wrap; }.boundary .badge { margin-left: 62px; }
+  .boundary { align-items: start; display: grid; grid-template-columns: 42px minmax(0, 1fr); }
+  .boundary .badge { grid-column: 2; justify-self: start; }
   .score { border-left: 0; border-top: 1px solid var(--line); flex-basis: auto; padding: 20px 0 0; }
   .metric-field { grid-template-columns: repeat(2, 1fr); }.metric:nth-child(3) { border-right: 1px solid var(--line); }.metric:nth-child(even) { border-right: 0; }
   .manual { gap: 20px; } footer { grid-template-columns: 1fr; }
