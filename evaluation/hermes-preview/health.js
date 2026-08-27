@@ -70,14 +70,19 @@ function exactCapacityProjection(body, expected) {
     capacity.ok === expected;
 }
 
-function selectCapacityHealth(realtimeResult, realtimeAccepted) {
+function selectCapacityObservation(realtimeResult, realtimeAccepted) {
   const body = realtimeResult?.body;
-  if (realtimeAccepted && exactCapacityProjection(body, true)) return true;
+  if (realtimeAccepted && exactCapacityProjection(body, true)) {
+    return { healthy: true, observation: 'proven_healthy' };
+  }
   if (realtimeResult?.response?.status === 503 && body?.status === 'unhealthy' &&
       exactCapacityProjection(body, false)) {
-    return false;
+    return { healthy: false, observation: 'reported_unhealthy' };
   }
-  return null;
+  if (realtimeAccepted && !Object.hasOwn(body.state, 'capacity')) {
+    return { healthy: null, observation: 'unsupported' };
+  }
+  return { healthy: null, observation: 'not_proven' };
 }
 
 function canonicalRealtimeHealthy(realtimeResult) {
@@ -100,7 +105,7 @@ async function readLoopbackHealth({ fetchImpl = fetch, now = () => new Date() } 
   const controllerBody = controllerResult?.body || {};
   const realtimeAccepted = canonicalRealtimeHealthy(realtimeResult);
   const realtimeDetails = realtimeAccepted ? realtimeBody : {};
-  const capacityHealthy = selectCapacityHealth(realtimeResult, realtimeAccepted);
+  const capacity = selectCapacityObservation(realtimeResult, realtimeAccepted);
   const sampledAt = typeof now === 'function' ? now() : now;
   const sampledTime = sampledAt instanceof Date ? new Date(sampledAt.getTime()) : new Date(sampledAt);
   if (!Number.isFinite(sampledTime.getTime())) throw new Error('invalid sample time');
@@ -116,7 +121,8 @@ async function readLoopbackHealth({ fetchImpl = fetch, now = () => new Date() } 
       healthy: realtimeAccepted,
       configured: booleanOrNull(realtimeDetails.configured),
       stateHealthy: booleanOrNull(realtimeDetails.state?.ok),
-      capacityHealthy,
+      capacityHealthy: capacity.healthy,
+      capacityObservation: capacity.observation,
       voiceExecutionLocked: booleanOrNull(realtimeDetails.voiceExecution?.locked),
       voiceExecutionPersistent: booleanOrNull(realtimeDetails.voiceExecution?.persistent),
     },

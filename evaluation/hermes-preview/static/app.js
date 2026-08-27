@@ -154,8 +154,8 @@ function render(payload) {
   badge.textContent = lockProven ? 'Fenced' : 'Stop';
   badge.className = `badge ${lockProven ? 'pass' : 'fail'}`;
 
-  const capacityUnknown = health.realtime.capacityHealthy === null;
-  document.querySelector('#capacity-limit').hidden = !capacityUnknown;
+  const capacityUnsupported = health.realtime.capacityObservation === 'unsupported';
+  document.querySelector('#capacity-limit').hidden = !capacityUnsupported;
   setText('#decision-title', eligibilityHeadline(scorecard));
   setText('#score-value', scorecard.passed);
   setText('#score-total',
@@ -171,11 +171,11 @@ function render(payload) {
   const checks = document.querySelector('#checks');
   checks.replaceChildren(...scorecard.checks.map((check) => {
     const row = document.createElement('li');
-    const isLegacyCapacityBlock = capacityUnknown &&
+    const isLegacyCapacityBlock = capacityUnsupported && check.status === 'unknown' &&
       (check.key === 'realtime_health' || check.key === 'realtime_capacity');
     const allowedStatus = ['pass', 'fail', 'unknown', 'blocked'].includes(check.status)
       ? check.status : 'unknown';
-    row.className = isLegacyCapacityBlock ? 'unknown' : allowedStatus;
+    row.className = allowedStatus;
     const label = document.createElement('span');
     label.textContent = check.label;
     const observed = document.createElement('strong');
@@ -203,7 +203,7 @@ function render(payload) {
   setText('#health-capacity', healthText(health.realtime.capacityHealthy, {
     positive: 'Healthy · proven',
     negative: 'Unhealthy · reported',
-    unknown: 'Unknown · unsupported',
+    unknown: capacityUnsupported ? 'Unknown · unsupported' : 'Unknown · not proven',
   }));
   setText('#health-controller', healthText(health.controller.reachable, {
     positive: 'Responded · readiness fenced',

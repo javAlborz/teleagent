@@ -18,7 +18,7 @@ stages:
 2. A separate one-shot health collector retains the host network solely to read
    the three fixed loopback health URLs. It sees no database, home directory,
    launch token, epoch, or facade snapshot. Its stdout contains an allowlist of
-   booleans and the provider count only.
+   booleans, one fixed capacity-observation enum, and the provider count only.
 3. A network-isolated composer validates both sanitized outputs, discards every
    unknown field, constructs the scorecard, and atomically publishes one mode
    `0600` snapshot. The snapshot expires after 75 seconds.
@@ -96,9 +96,11 @@ green output.
 
 The legacy voice runtime currently running on Hermes predates the hardened
 `state.capacity.ok` durable-state admission field. The collector therefore emits
-`capacityHealthy: null`. The dashboard displays this as **Unknown ·
-unsupported**, not unhealthy: missing proof does not show that capacity is
-exhausted.
+`capacityHealthy: null` with the fixed `capacityObservation: unsupported`
+provenance. Only that exact provenance displays as **Unknown · unsupported**.
+An unreachable, malformed, or noncanonical response instead displays **Unknown
+· not proven** and never downgrades another Realtime failure to a legacy
+limitation. Missing proof does not show that capacity is exhausted.
 
 The distinction does not weaken the gate. Machine eligibility is intentionally
 blocked until a hardened runtime explicitly reports healthy durable-state
@@ -192,13 +194,16 @@ surface:
 Passing those prerequisites authorizes, at most, a separately executed and
 time-boxed node trial. It does not authorize daily use or production.
 
-The dashboard displays the manual rubric but does not store answers. Record
-owner-only observations with
-[`docs/HERMES-EVALUATION-RUBRIC.md`](HERMES-EVALUATION-RUBRIC.md), which forbids
-caller identifiers, transcripts, prompts, responses, and raw audio. A refresh
-failure hides the old dashboard and marks the safety state unknown. The local
-`expiresAt` deadline independently hides it if refresh is delayed, hung, or
-suspended.
+The dashboard displays the manual rubric but does not store answers. Use
+[`docs/HERMES-EVALUATION-RUBRIC.md`](HERMES-EVALUATION-RUBRIC.md) only as a
+blank tracked template. Never fill or commit it. Record owner-only observations
+in its mode-`0600` copy at
+`/home/alborz/.local/state/teleagent-hermes-evaluation-preview/manual-rubric.txt`,
+outside every Git worktree and outside the collector/facade mount boundary. The
+rubric forbids caller identifiers, transcripts, prompts, responses, raw audio,
+and exact call dates. A refresh failure hides the old dashboard and marks the
+safety state unknown. The local `expiresAt` deadline independently hides it if
+refresh is delayed, hung, or suspended.
 
 Agent jobs are displayed as completed/total and are explicitly descriptive, not
 scored. Zero jobs can still pass the machine evidence score because persistent

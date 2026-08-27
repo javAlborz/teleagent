@@ -35,13 +35,27 @@ function element(initial = {}) {
   };
 }
 
-function payload({ capacityHealthy = true, expiresAt = '2026-08-27T12:01:15.000Z' } = {}) {
+function capacityObservationFor(value) {
+  if (value === true) return 'proven_healthy';
+  if (value === false) return 'reported_unhealthy';
+  return 'unsupported';
+}
+
+function payload({
+  capacityHealthy = true,
+  capacityObservation = capacityObservationFor(capacityHealthy),
+  realtimeReachable = true,
+  realtimeHealthy = capacityHealthy !== false,
+  expiresAt = '2026-08-27T12:01:15.000Z',
+} = {}) {
   const capacityUnknown = capacityHealthy === null;
-  const capacityBlocks = capacityHealthy !== true;
+  const panicPreserved = realtimeReachable && realtimeHealthy;
+  const realtimeGateStatus = !panicPreserved || capacityHealthy === false
+    ? 'fail' : (capacityUnknown ? 'unknown' : 'pass');
   return {
     generatedAt: '2026-08-27T12:00:00.000Z',
     expiresAt,
-    boundary: { panicPreserved: true, productionAuthorized: false },
+    boundary: { panicPreserved, productionAuthorized: false },
     evidence: {
       trialStartedAt: '2026-08-01T00:00:00.000Z',
       windowStartedAt: '2026-08-13T12:00:00.000Z',
@@ -53,21 +67,31 @@ function payload({ capacityHealthy = true, expiresAt = '2026-08-27T12:01:15.000Z
     health: {
       voiceApp: { healthy: true },
       realtime: {
-        reachable: true, healthy: true, configured: true, stateHealthy: true,
+        reachable: realtimeReachable,
+        healthy: realtimeHealthy,
+        configured: realtimeHealthy ? true : null,
+        stateHealthy: realtimeHealthy ? true : null,
         capacityHealthy,
+        capacityObservation,
       },
       // Readiness is intentionally false while persistent panic is held. The
       // dashboard reports this as a connectivity observation, not health.
       controller: { reachable: true, healthy: false },
     },
     scorecard: {
-      decision: capacityBlocks
-        ? 'continue_bounded_hermes_evaluation' : 'machine_evidence_threshold_met',
-      headline: capacityBlocks
-        ? 'Continue the bounded Hermes evaluation' : 'Machine evidence threshold met; manual review required',
-      passed: capacityBlocks ? 9 : 10,
-      unknown: capacityUnknown ? 1 : 0,
-      failed: capacityHealthy === false ? 1 : 0,
+      decision: !panicPreserved
+        ? 'stop_and_restore_panic_lock'
+        : (capacityUnknown
+            ? 'continue_bounded_hermes_evaluation'
+            : 'machine_evidence_threshold_met'),
+      headline: !panicPreserved
+        ? 'Stop: restore the persistent panic lock'
+        : (capacityUnknown
+            ? 'Continue the bounded Hermes evaluation'
+            : 'Machine evidence threshold met; manual review required'),
+      passed: realtimeGateStatus === 'pass' ? 10 : 9,
+      unknown: realtimeGateStatus === 'unknown' ? 1 : 0,
+      failed: realtimeGateStatus === 'fail' ? 1 : 0,
       total: 10,
       productionAuthorized: false,
       manualReviewRequired: true,
@@ -75,8 +99,9 @@ function payload({ capacityHealthy = true, expiresAt = '2026-08-27T12:01:15.000Z
       checks: [{
         key: 'realtime_health',
         label: 'Realtime state and durable-state capacity healthy',
-        status: capacityUnknown ? 'unknown' : (capacityBlocks ? 'fail' : 'pass'),
-        observed: capacityUnknown ? 'unknown' : (capacityBlocks ? 'not healthy' : 'healthy'),
+        status: realtimeGateStatus,
+        observed: realtimeGateStatus === 'pass'
+          ? 'healthy' : (realtimeGateStatus === 'unknown' ? 'unknown' : 'not healthy'),
       }],
       manualChecks: ['Record lived call quality outside this surface'],
     },
@@ -202,6 +227,26 @@ test('reported unhealthy capacity remains distinct from unsupported telemetry', 
   assert.equal(harness.elements.get('#capacity-limit').hidden, true);
   assert.equal(harness.elements.get('#health-capacity').textContent, 'Unhealthy · reported');
   assert.equal(harness.elements.get('#checks').children[0].className, 'fail');
+});
+
+test('unreachable Realtime stays failed and never appears as a legacy capacity limitation', async () => {
+  const harness = makeHarness([response(payload({
+    capacityHealthy: null,
+    capacityObservation: 'not_proven',
+    realtimeReachable: false,
+    realtimeHealthy: false,
+  }))]);
+  await settle();
+  await settle();
+
+  assert.equal(harness.elements.get('#boundary-badge').textContent, 'Stop');
+  assert.equal(harness.elements.get('#capacity-limit').hidden, true);
+  assert.equal(harness.elements.get('#health-capacity').textContent, 'Unknown · not proven');
+  assert.equal(harness.elements.get('#checks').children[0].className, 'fail');
+  assert.equal(harness.elements.get('#checks').children[0].children[1].textContent,
+    'not healthy');
+  assert.doesNotMatch(harness.elements.get('#checks').children[0].children[1].textContent,
+    /legacy|unsupported/u);
 });
 
 test('a failed refresh hides and invalidates a previously successful safety snapshot', async () => {

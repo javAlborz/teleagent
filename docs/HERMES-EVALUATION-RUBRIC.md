@@ -4,6 +4,19 @@ Use this operator-owned rubric for the bounded Hermes trial. It records lived
 call quality that the read-only evaluation dashboard cannot measure. It is not
 an execution approval, production sign-off, or purchasing authorization.
 
+## Storage boundary
+
+This tracked document is a blank template only. Never fill it with observations
+or commit a completed rubric. Make one owner-only mode-`0600` copy outside every
+Git worktree at:
+
+```text
+/home/alborz/.local/state/teleagent-hermes-evaluation-preview/manual-rubric.txt
+```
+
+Only that private copy receives answers. The evaluation collectors do not mount
+it, and the facade does not serve it.
+
 ## Privacy and safety rules
 
 - Use only owner-controlled calls and keep the persistent voice panic locked.
@@ -23,7 +36,7 @@ Copy this block once for each owner-controlled call:
 
 ```text
 Trial label: trial-__
-UTC date: YYYY-MM-DD
+Trial day ordinal: day-__
 Ended normally: yes / no / unknown
 
 Audio clarity (1 unusable – 5 clear): __

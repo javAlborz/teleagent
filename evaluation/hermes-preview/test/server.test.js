@@ -60,6 +60,7 @@ function passingHealth() {
       configured: true,
       stateHealthy: true,
       capacityHealthy: true,
+      capacityObservation: 'proven_healthy',
       voiceExecutionLocked: true,
       voiceExecutionPersistent: true,
     },
@@ -87,11 +88,17 @@ test('realtime gate distinguishes explicit false from unknown and requires exact
   for (const key of ['healthy', 'configured', 'stateHealthy', 'capacityHealthy']) {
     const failedHealth = passingHealth();
     failedHealth.realtime[key] = false;
+    if (key === 'capacityHealthy') {
+      failedHealth.realtime.capacityObservation = 'reported_unhealthy';
+    }
     const failed = buildScorecard(passingEvidence(), failedHealth);
     assert.equal(failed.checks.find((check) => check.key === 'realtime_health').status, 'fail');
 
     const unknownHealth = passingHealth();
     unknownHealth.realtime[key] = null;
+    if (key === 'capacityHealthy') {
+      unknownHealth.realtime.capacityObservation = 'unsupported';
+    }
     const unknown = buildScorecard(passingEvidence(), unknownHealth);
     assert.equal(unknown.checks.find((check) => check.key === 'realtime_health').status,
       'unknown');
@@ -101,12 +108,14 @@ test('realtime gate distinguishes explicit false from unknown and requires exact
 
   const capacityUnknown = passingHealth();
   capacityUnknown.realtime.capacityHealthy = null;
+  capacityUnknown.realtime.capacityObservation = 'unsupported';
   const unknownResult = buildScorecard(passingEvidence(), capacityUnknown);
   assert.equal(unknownResult.unknown, 1);
   assert.equal(unknownResult.failed, 0);
 
   const capacityFailed = passingHealth();
   capacityFailed.realtime.capacityHealthy = false;
+  capacityFailed.realtime.capacityObservation = 'reported_unhealthy';
   const failedResult = buildScorecard(passingEvidence(), capacityFailed);
   assert.equal(failedResult.failed, 1);
   assert.equal(failedResult.unknown, 0);
@@ -175,6 +184,17 @@ test('snapshot composition validates chronology and aggregate relations before s
   rejected((evidence) => { evidence.usage.records -= 1; });
   rejected((evidence) => { evidence.usage.totalTokens += 1; });
   rejected((evidence) => { evidence.usage.cachedInputTokens = evidence.usage.inputTokens + 1; });
+  rejected((_evidence, health) => {
+    health.realtime.capacityObservation = 'SENSITIVE_NONCANONICAL_OBSERVATION';
+  });
+  rejected((_evidence, health) => { health.realtime.capacityObservation = 'unsupported'; });
+  rejected((_evidence, health) => {
+    health.realtime.capacityHealthy = null;
+    health.realtime.capacityObservation = 'reported_unhealthy';
+  });
+  for (const stateHealthy of [false, null]) {
+    rejected((_evidence, health) => { health.realtime.stateHealthy = stateHealthy; });
+  }
   for (const service of ['voiceApp', 'realtime', 'controller']) {
     rejected((_evidence, health) => {
       health[service].reachable = false;

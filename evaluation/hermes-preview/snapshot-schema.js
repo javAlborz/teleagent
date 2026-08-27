@@ -5,6 +5,12 @@ const { buildScorecard } = require('./scorecard');
 const SNAPSHOT_TTL_MS = 75 * 1000;
 const MAX_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
 const MAX_COLLECTION_SPAN_MS = 10 * 1000;
+const CAPACITY_OBSERVATIONS = new Set([
+  'proven_healthy',
+  'reported_unhealthy',
+  'unsupported',
+  'not_proven',
+]);
 
 function exactIso(value) {
   if (typeof value !== 'string') throw new Error('invalid timestamp');
@@ -22,6 +28,11 @@ function requiredBoolean(value) {
 
 function optionalBoolean(value) {
   if (value !== null && typeof value !== 'boolean') throw new Error('invalid optional boolean');
+  return value;
+}
+
+function capacityObservation(value) {
+  if (!CAPACITY_OBSERVATIONS.has(value)) throw new Error('invalid capacity observation');
   return value;
 }
 
@@ -184,6 +195,7 @@ function sanitizeHealth(value, sampledAtValue = value?.healthSampledAt) {
       configured: optionalBoolean(realtime.configured),
       stateHealthy: optionalBoolean(realtime.stateHealthy),
       capacityHealthy: optionalBoolean(realtime.capacityHealthy),
+      capacityObservation: capacityObservation(realtime.capacityObservation),
       voiceExecutionLocked: optionalBoolean(realtime.voiceExecutionLocked),
       voiceExecutionPersistent: optionalBoolean(realtime.voiceExecutionPersistent),
     },
@@ -199,6 +211,18 @@ function sanitizeHealth(value, sampledAtValue = value?.healthSampledAt) {
       throw new Error('healthy service is unreachable');
     }
   }
+  const capacity = sanitized.realtime;
+  const capacityConsistent =
+    (capacity.capacityHealthy === true && capacity.capacityObservation === 'proven_healthy' &&
+      capacity.reachable === true && capacity.healthy === true &&
+      capacity.stateHealthy === true) ||
+    (capacity.capacityHealthy === false &&
+      capacity.capacityObservation === 'reported_unhealthy' &&
+      capacity.reachable === true && capacity.healthy === false) ||
+    (capacity.capacityHealthy === null && capacity.capacityObservation === 'unsupported' &&
+      capacity.reachable === true && capacity.healthy === true && capacity.stateHealthy === true) ||
+    (capacity.capacityHealthy === null && capacity.capacityObservation === 'not_proven');
+  if (!capacityConsistent) throw new Error('inconsistent capacity observation');
   return sanitized;
 }
 

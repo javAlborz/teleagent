@@ -512,11 +512,13 @@ test('loopback health selector discards upstream diagnostics and identities', as
   assert.equal(result.healthSampledAt, NOW.toISOString());
   assert.equal(result.voiceApp.healthy, true);
   assert.equal(result.realtime.capacityHealthy, true);
+  assert.equal(result.realtime.capacityObservation, 'proven_healthy');
   assert.equal(result.realtime.voiceExecutionLocked, true);
   assert.equal(result.realtime.voiceExecutionPersistent, true);
   assert.equal(result.controller.providerCount, 2);
   assert.deepEqual(Object.keys(result.realtime).sort(), [
     'capacityHealthy',
+    'capacityObservation',
     'configured',
     'healthy',
     'reachable',
@@ -549,6 +551,7 @@ test('canonical Realtime capacity refusal reports false without accepting other 
   assert.equal(result.realtime.reachable, true);
   assert.equal(result.realtime.healthy, false);
   assert.equal(result.realtime.capacityHealthy, false);
+  assert.equal(result.realtime.capacityObservation, 'reported_unhealthy');
   assert.equal(result.realtime.configured, null);
   assert.equal(result.realtime.stateHealthy, null);
   assert.equal(result.realtime.voiceExecutionLocked, null);
@@ -574,6 +577,7 @@ test('health collection rejects non-2xx, malformed, and oversized bodies without
   assert.equal(result.realtime.reachable, false);
   assert.equal(result.realtime.healthy, false);
   assert.equal(result.realtime.capacityHealthy, null);
+  assert.equal(result.realtime.capacityObservation, 'not_proven');
   assert.equal(result.controller.reachable, false);
   assert.equal(result.controller.healthy, false);
   assert.doesNotMatch(JSON.stringify(result), /SENSITIVE|diagnostic|malformed/u);
@@ -593,6 +597,7 @@ test('missing Realtime capacity remains unknown rather than passing by default',
   assert.equal(result.realtime.healthy, true);
   assert.equal(result.realtime.stateHealthy, true);
   assert.equal(result.realtime.capacityHealthy, null);
+  assert.equal(result.realtime.capacityObservation, 'unsupported');
 });
 
 test('malformed, oversized, and noncanonical capacity reports remain unknown', async () => {
@@ -635,6 +640,7 @@ test('malformed, oversized, and noncanonical capacity reports remain unknown', a
       : new Response(JSON.stringify({ status: 'healthy' }), { status: 200 });
     const result = await readLoopbackHealth({ fetchImpl, now: () => NOW });
     assert.equal(result.realtime.capacityHealthy, null);
+    assert.equal(result.realtime.capacityObservation, 'not_proven');
     assert.doesNotMatch(JSON.stringify(result), /SENSITIVE|diagnostic/u);
   }
 });
@@ -654,6 +660,7 @@ test('nonhealthy Realtime responses cannot assert panic-lock proof', async () =>
   assert.equal(result.realtime.healthy, false);
   assert.equal(result.realtime.configured, null);
   assert.equal(result.realtime.capacityHealthy, null);
+  assert.equal(result.realtime.capacityObservation, 'not_proven');
   assert.equal(result.realtime.voiceExecutionLocked, null);
   assert.equal(result.realtime.voiceExecutionPersistent, null);
 });
