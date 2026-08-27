@@ -122,6 +122,7 @@ test('operator wrapper fixes provenance, namespaces, cached refresh, and route c
   assert.match(wrapper, /NoNewPrivileges=yes/u);
   assert.match(wrapper, /RestrictSUIDSGID=yes/u);
   assert.match(wrapper, /LockPersonality=yes/u);
+  assert.match(wrapper, /RestrictAddressFamilies=AF_UNIX AF_INET AF_NETLINK/u);
   assert.match(wrapper, /--on-active=2h/u);
   assert.match(wrapper, /RuntimeMaxSec=2m/u);
   assert.match(wrapper, /Restart=on-failure/u);

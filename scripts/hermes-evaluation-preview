@@ -399,7 +399,7 @@ start_preview() {
     --property=TasksAccounting=yes --property=TasksMax=192 --property=LimitNOFILE=256 \
     --property=Nice=10 --property=IOSchedulingClass=idle \
     --property=NoNewPrivileges=yes --property=RestrictSUIDSGID=yes --property=LockPersonality=yes \
-    --property="RestrictAddressFamilies=AF_UNIX AF_INET" --property=UMask=0077 \
+    --property="RestrictAddressFamilies=AF_UNIX AF_INET AF_NETLINK" --property=UMask=0077 \
     -- "$script_path" _run >/dev/null
 
   local attempt
