@@ -49,7 +49,9 @@ var mediaControlEndpoints = require("./lib/media-control-endpoints");
 var buildFreeswitchConnectionOptions = mediaControlEndpoints.buildFreeswitchConnectionOptions;
 var loadMediaControlEndpoints = mediaControlEndpoints.loadMediaControlEndpoints;
 var loadLegacySpeechConfig = require("./lib/legacy-speech-config").loadLegacySpeechConfig;
-var VoiceStateCapacityGuard = require("./lib/voice-runtime-preflight").VoiceStateCapacityGuard;
+var voiceRuntimePreflight = require("./lib/voice-runtime-preflight");
+var projectStateCapacityHealth = voiceRuntimePreflight.projectStateCapacityHealth;
+var VoiceStateCapacityGuard = voiceRuntimePreflight.VoiceStateCapacityGuard;
 var runtimeSecretsModule = require("./lib/runtime-secrets");
 var configureRuntimeSecrets = runtimeSecretsModule.configureRuntimeSecrets;
 var loadRuntimeSecrets = runtimeSecretsModule.loadRuntimeSecrets;
@@ -360,8 +362,9 @@ function initializeServers() {
   httpServer.app.get("/api/realtime-health", requireLoopback, function(req, res) {
     var stateHealth = voiceStateStore.health();
     var capacityHealth = stateCapacityGuard.check();
+    var publicCapacityHealth = projectStateCapacityHealth(capacityHealth);
     var executionHealth = agentJobBroker.getExecutionLock();
-    var healthy = stateHealth.ok && capacityHealth.ok;
+    var healthy = stateHealth.ok === true && publicCapacityHealth.ok;
     res.status(healthy ? 200 : 503).json({
       status: healthy ? "healthy" : "unhealthy",
       configured: !!getRealtimeApiKey(),
@@ -383,7 +386,7 @@ function initializeServers() {
       },
       state: {
         ...stateHealth,
-        capacity: capacityHealth
+        capacity: publicCapacityHealth
       }
     });
   });

@@ -496,7 +496,7 @@ test('loopback health selector discards upstream diagnostics and identities', as
       status: 'healthy',
       configured: true,
       model: sensitive,
-      state: { ok: true, capacity: { ok: true, path: sensitive } },
+      state: { ok: true, capacity: { ok: true } },
       voiceExecution: { locked: true, persistent: true, reason: sensitive },
     }],
     ['http://127.0.0.1:3333/health', {
@@ -511,10 +511,49 @@ test('loopback health selector discards upstream diagnostics and identities', as
   const result = await readLoopbackHealth({ fetchImpl, now: () => NOW });
   assert.equal(result.healthSampledAt, NOW.toISOString());
   assert.equal(result.voiceApp.healthy, true);
+  assert.equal(result.realtime.capacityHealthy, true);
   assert.equal(result.realtime.voiceExecutionLocked, true);
   assert.equal(result.realtime.voiceExecutionPersistent, true);
   assert.equal(result.controller.providerCount, 2);
+  assert.deepEqual(Object.keys(result.realtime).sort(), [
+    'capacityHealthy',
+    'configured',
+    'healthy',
+    'reachable',
+    'stateHealthy',
+    'voiceExecutionLocked',
+    'voiceExecutionPersistent',
+  ]);
   assert.doesNotMatch(JSON.stringify(result), /SENSITIVE|private-provider|error|path|reason/u);
+});
+
+test('canonical Realtime capacity refusal reports false without accepting other health proof', async () => {
+  const sensitive = 'SENSITIVE_503_DIAGNOSTIC_PATH_IDENTITY';
+  const fetchImpl = async (url) => {
+    if (!url.endsWith('/api/realtime-health')) {
+      return new Response(JSON.stringify({ status: 'healthy' }), { status: 200 });
+    }
+    return new Response(JSON.stringify({
+      status: 'unhealthy',
+      configured: true,
+      state: {
+        ok: true,
+        capacity: { ok: false },
+      },
+      voiceExecution: { locked: true, persistent: true, reason: sensitive },
+      identity: sensitive,
+    }), { status: 503 });
+  };
+
+  const result = await readLoopbackHealth({ fetchImpl, now: () => NOW });
+  assert.equal(result.realtime.reachable, true);
+  assert.equal(result.realtime.healthy, false);
+  assert.equal(result.realtime.capacityHealthy, false);
+  assert.equal(result.realtime.configured, null);
+  assert.equal(result.realtime.stateHealthy, null);
+  assert.equal(result.realtime.voiceExecutionLocked, null);
+  assert.equal(result.realtime.voiceExecutionPersistent, null);
+  assert.doesNotMatch(JSON.stringify(result), /SENSITIVE|diagnostic|path|identity|availableBytes/u);
 });
 
 test('health collection rejects non-2xx, malformed, and oversized bodies without leakage', async () => {
@@ -554,6 +593,50 @@ test('missing Realtime capacity remains unknown rather than passing by default',
   assert.equal(result.realtime.healthy, true);
   assert.equal(result.realtime.stateHealthy, true);
   assert.equal(result.realtime.capacityHealthy, null);
+});
+
+test('malformed, oversized, and noncanonical capacity reports remain unknown', async () => {
+  const sensitive = 'SENSITIVE_INVALID_CAPACITY_REPORT';
+  const cases = [
+    () => new Response(`{malformed-${sensitive}`, { status: 200 }),
+    () => new Response(JSON.stringify({
+      status: 'healthy',
+      state: { ok: true, capacity: { ok: true, diagnostic: `${sensitive}${'x'.repeat(MAX_HEALTH_BYTES)}` } },
+    }), { status: 200 }),
+    () => new Response(JSON.stringify({
+      status: 'healthy', state: { ok: true, capacity: { ok: false, diagnostic: sensitive } },
+    }), { status: 200 }),
+    () => new Response(JSON.stringify({
+      status: 'unhealthy', state: { ok: false, capacity: { ok: true, diagnostic: sensitive } },
+    }), { status: 503 }),
+    () => new Response(JSON.stringify({
+      status: 'unhealthy', state: { ok: false, capacity: { ok: false, diagnostic: sensitive } },
+    }), { status: 500 }),
+    () => new Response(JSON.stringify({
+      status: 'unhealthy', state: { ok: false, capacity: { ok: 'false', diagnostic: sensitive } },
+    }), { status: 503 }),
+    () => new Response(JSON.stringify({
+      status: 'ok', state: { ok: true, capacity: { ok: true } },
+    }), { status: 201 }),
+    () => new Response(JSON.stringify({
+      ready: true, state: { ok: true, capacity: { ok: true } },
+    }), { status: 200 }),
+    () => new Response(JSON.stringify({
+      status: 'healthy', state: { ok: true, capacity: { ok: true, diagnostic: sensitive } },
+    }), { status: 200 }),
+    () => new Response(JSON.stringify({
+      status: 'unhealthy', state: { ok: false, capacity: { ok: false, diagnostic: sensitive } },
+    }), { status: 503 }),
+  ];
+
+  for (const responseFactory of cases) {
+    const fetchImpl = async (url) => url.endsWith('/api/realtime-health')
+      ? responseFactory()
+      : new Response(JSON.stringify({ status: 'healthy' }), { status: 200 });
+    const result = await readLoopbackHealth({ fetchImpl, now: () => NOW });
+    assert.equal(result.realtime.capacityHealthy, null);
+    assert.doesNotMatch(JSON.stringify(result), /SENSITIVE|diagnostic/u);
+  }
 });
 
 test('nonhealthy Realtime responses cannot assert panic-lock proof', async () => {

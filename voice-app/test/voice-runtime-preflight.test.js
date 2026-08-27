@@ -8,6 +8,7 @@ const test = require('node:test');
 const {
   VOICE_RUNTIME_PATHS,
   VoiceStateCapacityGuard,
+  projectStateCapacityHealth,
   validateVoiceRuntimePreflight,
 } = require('../lib/voice-runtime-preflight');
 const { SECRET_PATHS } = require('../lib/runtime-secrets');
@@ -166,6 +167,23 @@ test('runtime capacity guard reports bounded JSON-safe health and fails closed a
     ok: false,
     code: 'VOICE_STATE_CAPACITY_EXHAUSTED',
   });
+});
+
+test('public capacity health projection exposes one exact fail-closed boolean', () => {
+  assert.deepEqual(projectStateCapacityHealth({
+    ok: true,
+    code: null,
+    capacityBytes: 4 * 1024 * 1024 * 1024,
+    availableBytes: 2 * 1024 * 1024 * 1024,
+    path: 'SENSITIVE_CAPACITY_PATH',
+  }), { ok: true });
+  assert.deepEqual(projectStateCapacityHealth({
+    ok: false,
+    code: 'VOICE_STATE_CAPACITY_EXHAUSTED',
+    reason: 'SENSITIVE_CAPACITY_DIAGNOSTIC',
+  }), { ok: false });
+  assert.deepEqual(projectStateCapacityHealth({ ok: 'true' }), { ok: false });
+  assert.deepEqual(projectStateCapacityHealth(null), { ok: false });
 });
 
 test('preflight rejects root, owner UID/GID 1000, and unsafe runtime paths', () => {

@@ -54,7 +54,7 @@ function buildScorecard(evidence, health) {
       evidenceAvailable ? 'available' : 'unavailable'),
     item('voice_health', 'Voice endpoint reachable and healthy', voiceStatus,
       voiceStatus === 'pass' ? 'healthy' : (voiceStatus === 'unknown' ? 'unknown' : 'not healthy')),
-    item('realtime_health', 'Realtime state and capacity healthy', realtimeStatus,
+    item('realtime_health', 'Realtime state and durable-state capacity healthy', realtimeStatus,
       realtimeStatus === 'pass'
         ? 'healthy' : (realtimeStatus === 'unknown' ? 'unknown' : 'not healthy')),
     item('controller_reachable',

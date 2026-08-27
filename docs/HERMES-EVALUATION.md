@@ -95,13 +95,16 @@ green output.
 ## Known current Hermes limitation
 
 The legacy voice runtime currently running on Hermes predates the hardened
-`state.capacity.ok` health field. The collector therefore emits
+`state.capacity.ok` durable-state admission field. The collector therefore emits
 `capacityHealthy: null`. The dashboard displays this as **Unknown ·
 unsupported**, not unhealthy: missing proof does not show that capacity is
 exhausted.
 
 The distinction does not weaken the gate. Machine eligibility is intentionally
-blocked until a hardened runtime explicitly reports healthy capacity telemetry.
+blocked until a hardened runtime explicitly reports healthy durable-state
+admission capacity. This signal proves that the runtime's exact state filesystem
+still satisfies its admission reserve; it does not measure CPU or memory
+headroom and does not prove that Hermes can sustain daily use.
 The bounded Hermes trial may continue accumulating session, turn, and usage
 aggregates in the meantime. Latency, barge-in, usefulness, and privacy remain
 manual observations recorded outside the lane. Starting this evaluation lane
@@ -158,7 +161,7 @@ The machine gates evaluate only rows inside the current evidence window:
 | Persistent voice panic | explicitly locked and persistent |
 | Evidence store | offline aggregate query succeeds |
 | Voice health | endpoint explicitly healthy |
-| Realtime health | endpoint, configuration, state, and capacity all explicitly true |
+| Realtime health | endpoint, configuration, state, and durable-state admission capacity all explicitly true |
 | Controller connectivity | fixed loopback endpoint responded; readiness remains intentionally fenced by panic |
 | Sessions | at least 5 terminal current-window sessions and no open/unknown sessions |
 | Days with sessions | activity on at least 3 current-window days |
@@ -189,7 +192,10 @@ surface:
 Passing those prerequisites authorizes, at most, a separately executed and
 time-boxed node trial. It does not authorize daily use or production.
 
-The dashboard displays the manual rubric but does not store answers. A refresh
+The dashboard displays the manual rubric but does not store answers. Record
+owner-only observations with
+[`docs/HERMES-EVALUATION-RUBRIC.md`](HERMES-EVALUATION-RUBRIC.md), which forbids
+caller identifiers, transcripts, prompts, responses, and raw audio. A refresh
 failure hides the old dashboard and marks the safety state unknown. The local
 `expiresAt` deadline independently hides it if refresh is delayed, hung, or
 suspended.

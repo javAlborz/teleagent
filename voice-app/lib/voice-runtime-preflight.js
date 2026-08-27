@@ -156,6 +156,10 @@ class VoiceStateCapacityGuard {
   }
 }
 
+function projectStateCapacityHealth(value) {
+  return Object.freeze({ ok: value?.ok === true });
+}
+
 function readSecureFile(fsModule, filename, label, {
   gid,
   minBytes = 1,
@@ -326,6 +330,7 @@ module.exports = {
   VOICE_RUNTIME_PATHS,
   VoiceStateCapacityGuard,
   VoiceRuntimePreflightError,
+  projectStateCapacityHealth,
   verifyBoundedStateFilesystem,
   validateVoiceRuntimePreflight,
   MAX_STATE_CAPACITY_BYTES,

@@ -180,7 +180,7 @@ function render(payload) {
     label.textContent = check.label;
     const observed = document.createElement('strong');
     observed.textContent = isLegacyCapacityBlock
-      ? 'blocked · legacy capacity telemetry unsupported'
+      ? 'blocked · legacy durable-state capacity telemetry unsupported'
       : String(check.observed);
     row.append(label, observed);
     return row;

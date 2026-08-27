@@ -63,6 +63,31 @@ function countOrNull(value) {
   return Math.min(value.length, 1000);
 }
 
+function exactCapacityProjection(body, expected) {
+  const capacity = body?.state?.capacity;
+  return capacity !== null && typeof capacity === 'object' && !Array.isArray(capacity) &&
+    Object.keys(capacity).length === 1 && Object.hasOwn(capacity, 'ok') &&
+    capacity.ok === expected;
+}
+
+function selectCapacityHealth(realtimeResult, realtimeAccepted) {
+  const body = realtimeResult?.body;
+  if (realtimeAccepted && exactCapacityProjection(body, true)) return true;
+  if (realtimeResult?.response?.status === 503 && body?.status === 'unhealthy' &&
+      exactCapacityProjection(body, false)) {
+    return false;
+  }
+  return null;
+}
+
+function canonicalRealtimeHealthy(realtimeResult) {
+  return Boolean(
+    realtimeResult?.response?.status === 200 &&
+    realtimeResult.body?.status === 'healthy' &&
+    realtimeResult.body?.state?.ok === true,
+  );
+}
+
 async function readLoopbackHealth({ fetchImpl = fetch, now = () => new Date() } = {}) {
   const [voiceResult, realtimeResult, controllerResult] = await Promise.all([
     fetchHealth(HEALTH_ENDPOINTS.voiceApp, fetchImpl),
@@ -73,11 +98,9 @@ async function readLoopbackHealth({ fetchImpl = fetch, now = () => new Date() } 
   const voiceBody = voiceResult?.body || {};
   const realtimeBody = realtimeResult?.body || {};
   const controllerBody = controllerResult?.body || {};
-  const realtimeAccepted = Boolean(
-    realtimeResult && healthyStatus(realtimeResult.response, realtimeBody),
-  );
+  const realtimeAccepted = canonicalRealtimeHealthy(realtimeResult);
   const realtimeDetails = realtimeAccepted ? realtimeBody : {};
-  const capacity = realtimeDetails.state?.capacity;
+  const capacityHealthy = selectCapacityHealth(realtimeResult, realtimeAccepted);
   const sampledAt = typeof now === 'function' ? now() : now;
   const sampledTime = sampledAt instanceof Date ? new Date(sampledAt.getTime()) : new Date(sampledAt);
   if (!Number.isFinite(sampledTime.getTime())) throw new Error('invalid sample time');
@@ -93,7 +116,7 @@ async function readLoopbackHealth({ fetchImpl = fetch, now = () => new Date() } 
       healthy: realtimeAccepted,
       configured: booleanOrNull(realtimeDetails.configured),
       stateHealthy: booleanOrNull(realtimeDetails.state?.ok),
-      capacityHealthy: booleanOrNull(capacity?.ok),
+      capacityHealthy,
       voiceExecutionLocked: booleanOrNull(realtimeDetails.voiceExecution?.locked),
       voiceExecutionPersistent: booleanOrNull(realtimeDetails.voiceExecution?.persistent),
     },

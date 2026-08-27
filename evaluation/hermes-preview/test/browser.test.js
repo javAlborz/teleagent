@@ -74,7 +74,7 @@ function payload({ capacityHealthy = true, expiresAt = '2026-08-27T12:01:15.000Z
       investmentAuthorized: false,
       checks: [{
         key: 'realtime_health',
-        label: 'Realtime state and capacity healthy',
+        label: 'Realtime state and durable-state capacity healthy',
         status: capacityUnknown ? 'unknown' : (capacityBlocks ? 'fail' : 'pass'),
         observed: capacityUnknown ? 'unknown' : (capacityBlocks ? 'not healthy' : 'healthy'),
       }],
@@ -187,7 +187,7 @@ test('render distinguishes fixed trial epoch, rolling window, and legacy capacit
   assert.equal(harness.elements.get('#health-capacity').textContent, 'Unknown · unsupported');
   assert.equal(harness.elements.get('#checks').children[0].className, 'unknown');
   assert.match(harness.elements.get('#checks').children[0].children[1].textContent,
-    /legacy capacity telemetry unsupported/u);
+    /legacy durable-state capacity telemetry unsupported/u);
   assert.equal(harness.elements.get('#metric-jobs').textContent, '2 / 3');
   assert.equal(harness.elements.get('#health-controller').textContent,
     'Responded · readiness fenced');
