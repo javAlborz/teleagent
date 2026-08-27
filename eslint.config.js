@@ -53,6 +53,7 @@ module.exports = [
       'claude-api-server/**/*.js',
       'privileged-action-broker/**/*.js',
       'lib/**/*.js',
+      'evaluation/hermes-preview/**/*.js',
     ],
     languageOptions: {
       ecmaVersion: 2022,
@@ -76,10 +77,13 @@ module.exports = [
         fetch: 'readonly',  // Deployed Node 24 global fetch
         FormData: 'readonly',
         Blob: 'readonly',
+        Response: 'readonly',
         AbortSignal: 'readonly',
         AbortController: 'readonly',
         structuredClone: 'readonly',
-        URL: 'readonly'
+        URL: 'readonly',
+        URLSearchParams: 'readonly',
+        Intl: 'readonly'
       }
     },
     rules: {
@@ -102,6 +106,22 @@ module.exports = [
       'quotes': 'off',  // Mixed quote styles in existing code
       'indent': 'off',  // Existing code uses various indentation
       'comma-dangle': 'off'  // Existing code uses trailing commas
+    }
+  },
+  // The evaluation dashboard's dependency-free browser bundle is a classic
+  // script, while the rest of the evaluation tree is CommonJS.
+  {
+    files: ['evaluation/hermes-preview/static/**/*.js'],
+    languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: 'script',
+      globals: {
+        window: 'readonly',
+        document: 'readonly',
+        fetch: 'readonly',
+        URLSearchParams: 'readonly',
+        Intl: 'readonly',
+      }
     }
   }
 ];

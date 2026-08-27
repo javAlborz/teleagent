@@ -195,8 +195,10 @@ metadata and fixed error classifications.
 Drachtio and FreeSWITCH consume protected generated configuration files, not
 secret command-line flags. Their control listeners and the voice client's
 credential-bearing connections are pinned to exact loopback addresses and
-ports. Static/generated media is private runtime data and is served only through
-exact no-follow paths.
+ports. The `drachtio-fsmrf` reverse ESL callback is also explicitly bound and
+advertised on loopback; its dependency default may otherwise select the first
+non-loopback host interface. Static/generated media is private runtime data and
+is served only through exact no-follow paths.
 
 The tracked host-network nftables table is a transitional sender/source fence,
 not the target receiver boundary: `meta skuid` identifies an emitting socket but

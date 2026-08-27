@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Hermes Evaluation — Flight Recorder</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <main class="shell">
+    <header class="masthead">
+      <div>
+        <p class="eyebrow">Teleagent · Hermes evaluation</p>
+        <h1>Flight recorder</h1>
+        <p class="lede">Aggregate evidence for deciding whether the phone agent is eligible for a separately approved, time-boxed dedicated-node trial.</p>
+      </div>
+      <div class="timestamp">
+        <span>Snapshot composed</span>
+        <time id="sample-time">Awaiting authenticated sample</time>
+        <span>Snapshot validity</span>
+        <span id="snapshot-validity" class="validity pending">Awaiting authenticated sample</span>
+        <span>Trial began · fixed epoch</span>
+        <time id="cohort-time">Awaiting authenticated sample</time>
+        <span>Current evidence window began · max 14 days</span>
+        <time id="window-time">Awaiting authenticated sample</time>
+      </div>
+    </header>
+
+    <section class="boundary" aria-labelledby="boundary-title">
+      <div class="lock-mark" aria-hidden="true"><span></span></div>
+      <div>
+        <p class="eyebrow">Execution boundary</p>
+        <h2 id="boundary-title">Read-only evidence · panic preserved only when proven</h2>
+        <p id="boundary-detail">This surface cannot place calls, dispatch work, unlock execution, or target root or agent sessions.</p>
+      </div>
+      <span id="boundary-badge" class="badge pending">Not sampled</span>
+    </section>
+
+    <section id="auth-panel" class="notice" aria-live="polite">
+      <p class="eyebrow">Launch access</p>
+      <h2 id="auth-title">Checking the fragment launch token…</h2>
+      <p id="auth-detail">The token is removed from the address bar and held only in this page’s memory.</p>
+    </section>
+
+    <div id="dashboard" class="dashboard" hidden>
+      <section id="capacity-limit" class="limitation" aria-labelledby="capacity-limit-title" hidden>
+        <p class="eyebrow">Current Hermes limitation</p>
+        <h2 id="capacity-limit-title">Capacity telemetry is unsupported by the legacy runtime.</h2>
+        <p><strong>Unknown does not mean exhausted.</strong> The current Hermes voice runtime does not emit the hardened capacity proof, so machine eligibility is intentionally blocked until that telemetry exists. Session, turn, and usage evidence can still accumulate; record call quality separately.</p>
+      </section>
+
+      <section class="decision" aria-labelledby="decision-title">
+        <div class="decision-copy">
+          <p class="eyebrow">Machine eligibility signal</p>
+          <h2 id="decision-title">Gathering bounded evidence</h2>
+          <p id="investment-state">No purchase or production is authorized here. Before a time-boxed node trial, every machine gate must pass, the manual rubric must be recorded separately, and the budget must be approved.</p>
+        </div>
+        <div class="score" aria-label="Machine checks passed">
+          <strong id="score-value">—</strong>
+          <span id="score-total">— pass · — unknown · — fail</span>
+        </div>
+      </section>
+
+      <section class="metric-field" aria-label="Aggregate evidence from the current window of at most 14 days">
+        <article class="metric primary">
+          <span>Sessions</span><strong id="metric-sessions">—</strong><small>current evidence window</small>
+        </article>
+        <article class="metric">
+          <span>Active days</span><strong id="metric-days">—</strong><small>days with sessions</small>
+        </article>
+        <article class="metric">
+          <span>User turns</span><strong id="metric-turns">—</strong><small>transcripts counted, never shown</small>
+        </article>
+        <article class="metric">
+          <span>Session completion</span><strong id="metric-reliability">—</strong><small>terminal sessions</small>
+        </article>
+        <article class="metric">
+          <span>Agent jobs</span><strong id="metric-jobs">—</strong><small>completed / total · descriptive, not scored</small>
+        </article>
+        <article class="metric">
+          <span>Realtime tokens</span><strong id="metric-tokens">—</strong><small>usage only · not billing</small>
+        </article>
+      </section>
+
+      <div class="two-column">
+        <section class="panel" aria-labelledby="checks-title">
+          <div class="panel-heading">
+            <div><p class="eyebrow">Machine-observed</p><h2 id="checks-title">Trial gates</h2></div>
+            <button id="refresh" type="button">Refresh evidence</button>
+          </div>
+          <ol id="checks" class="check-list"></ol>
+        </section>
+
+        <section class="panel" aria-labelledby="health-title">
+          <div class="panel-heading">
+            <div><p class="eyebrow">Loopback only</p><h2 id="health-title">Service pulse</h2></div>
+          </div>
+          <dl class="health-list">
+            <div><dt>Voice endpoint</dt><dd id="health-voice">—</dd></div>
+            <div><dt>Realtime core</dt><dd id="health-realtime">—</dd></div>
+            <div><dt>Capacity proof</dt><dd id="health-capacity">—</dd></div>
+            <div><dt>Controller endpoint</dt><dd id="health-controller">—</dd></div>
+            <div><dt>Persistent panic</dt><dd id="health-panic">—</dd></div>
+          </dl>
+        </section>
+      </div>
+
+      <section class="manual" aria-labelledby="manual-title">
+        <div>
+          <p class="eyebrow">Human judgment remains</p>
+          <h2 id="manual-title">Manual review and budget approval are required.</h2>
+          <p>The operator must assess lived call quality and record the rubric somewhere outside this GET-only surface. Machine eligibility alone does not authorize buying a host.</p>
+        </div>
+        <ul id="manual-checks"></ul>
+      </section>
+
+      <footer>
+        <p><strong>What this proves:</strong> current-window aggregate activity, usage accounting, selected loopback health, and the observed persistent voice panic state.</p>
+        <p><strong>What it does not prove:</strong> purchase value, production readiness, unrestricted execution safety, caller identity, transcript quality, provider cost, or permission to mutate anything.</p>
+      </footer>
+    </div>
+  </main>
+</body>
+</html>

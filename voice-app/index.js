@@ -45,7 +45,9 @@ var loadRealtimeEndpointConfig = realtimeClientConfig.loadRealtimeEndpointConfig
 var queueRuntimeCallback = require("./lib/conversation-loop").queueRuntimeCallback;
 var refreshRuntimeTranscriptionVocabulary = require("./lib/realtime-conversation").refreshRuntimeTranscriptionVocabulary;
 var loadSipTrunkSecurityConfig = require("./lib/sip-trunk-auth").loadSipTrunkSecurityConfig;
-var loadMediaControlEndpoints = require("./lib/media-control-endpoints").loadMediaControlEndpoints;
+var mediaControlEndpoints = require("./lib/media-control-endpoints");
+var buildFreeswitchConnectionOptions = mediaControlEndpoints.buildFreeswitchConnectionOptions;
+var loadMediaControlEndpoints = mediaControlEndpoints.loadMediaControlEndpoints;
 var loadLegacySpeechConfig = require("./lib/legacy-speech-config").loadLegacySpeechConfig;
 var VoiceStateCapacityGuard = require("./lib/voice-runtime-preflight").VoiceStateCapacityGuard;
 var runtimeSecretsModule = require("./lib/runtime-secrets");
@@ -230,11 +232,10 @@ var mrf = new Mrf(srf);
 
 // Define FreeSWITCH connection function
 function connectToFreeswitch() {
-  return mrf.connect({
-    address: config.freeswitch.host,
-    port: config.freeswitch.port,
-    secret: config.freeswitch.secret
-  });
+  return mrf.connect(buildFreeswitchConnectionOptions(
+    config.freeswitch,
+    config.freeswitch.secret
+  ));
 }
 
 // Connect with exponential backoff retry
