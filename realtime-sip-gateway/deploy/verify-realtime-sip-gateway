@@ -28,10 +28,32 @@ const INSTALLED_UNIT = '/etc/systemd/system/teleagent-realtime-sip-gateway.servi
 const INSTALLED_INSTALLER = '/usr/local/libexec/teleagent-realtime-sip-gateway-install';
 const INSTALLED_MANIFEST = `${CONFIG_ROOT}/install.manifest`;
 const SYSTEMCTL = '/usr/bin/systemctl';
+const IMMUTABLE_RELEASE_ROOT = /^\/opt\/teleagent\/releases\/sha256-[a-f0-9]{64}$/u;
+const IMMUTABLE_PREFLIGHT_RELATIVE =
+  'realtime-sip-gateway/deploy/verify-realtime-sip-gateway';
+const HANDOFF_LOCK = '/run/teleagent-staging-handoff.lock';
+const LIFECYCLE_LOCK_ENV = 'TELEAGENT_HANDOFF_LIFECYCLE_LOCK_FD';
 const RELEASE_START_GATE = 'ExecStartPre=+/usr/bin/env -i HOME=/var/empty ' +
   'PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 ' +
   '/usr/local/libexec/verify-teleagent-release-closure --check-start-gate';
-const REVIEWED_SERVICE_SHA256 = 'ea37b1db1ef7ad278bf9bc5cafce20f8866690ec57c04fe5ddf249156bd043ed';
+const ACTIVATION_CHECK_COMMAND =
+  'ExecStartPre=+/usr/bin/python3 -I /usr/local/libexec/verify-teleagent-release-closure ' +
+  '--preflight-component realtime-sip-gateway ' +
+  '${CREDENTIALS_DIRECTORY}/teleagent-release-gate';
+const RELEASE_START_COMMAND = 'ExecStart=/usr/bin/python3 -I ' +
+  '/usr/local/libexec/verify-teleagent-release-closure ' +
+  '--start-component realtime-sip-gateway ${CREDENTIALS_DIRECTORY}/teleagent-release-gate';
+const REVIEWED_CREDENTIAL_DIRECTIVES = Object.freeze([
+  'LoadCredential=OPENAI_API_KEY:/etc/teleagent/credentials/openai-api-key',
+  'LoadCredential=OPENAI_WEBHOOK_SECRET:/etc/teleagent/credentials/openai-webhook-secret',
+  'LoadCredential=SIP_PBX_AUTH_SECRET:/etc/teleagent/credentials/sip-pbx-auth-secret',
+  'LoadCredential=SIP_STATE_INITIALIZED:' +
+    '/etc/teleagent/realtime-sip-gateway/STATE_INITIALIZED',
+  'LoadCredential=teleagent-release-gate:/run/teleagent-release-gate/verified.json',
+]);
+const EXECUTION_DIRECTIVE = /^Exec(?:Condition|StartPre|Start|StartPost|Reload|Stop|StopPost)=/u;
+const CREDENTIAL_DIRECTIVE = /^(?:LoadCredential|LoadCredentialEncrypted|SetCredential|SetCredentialEncrypted|ImportCredential|ImportCredentialEx)=/u;
+const REVIEWED_SERVICE_SHA256 = '78d6b9408714a1c565d1667b927cabf299a59fc955c6a16fa92b60ec92a91177';
 const GIB = 1024n * 1024n * 1024n;
 const MIB = 1024n * 1024n;
 const DURABLE_FILESYSTEMS = new Set([
@@ -75,6 +97,52 @@ function refuse(message) {
   throw new Error(`Realtime SIP gateway verification refused: ${message}`);
 }
 
+export function requireImmutableActivationPreflight({
+  environment = process.env,
+  filesystem = fs,
+  executable = process.execPath,
+  invokedScript = process.argv[1],
+  execArguments = process.execArgv,
+  uid = process.geteuid(),
+} = {}) {
+  const releaseRoot = environment.TELEAGENT_RELEASE_ROOT;
+  const descriptorValue = environment[LIFECYCLE_LOCK_ENV];
+  if (uid !== 0 || !IMMUTABLE_RELEASE_ROOT.test(releaseRoot || '') ||
+      !/^(?:[3-9]|[1-9][0-9]+)$/u.test(descriptorValue || '') ||
+      !Array.isArray(execArguments) || execArguments.length !== 0) {
+    refuse('the SIP activation preflight requires one gated immutable release and retained lock');
+  }
+  const descriptor = Number.parseInt(descriptorValue, 10);
+  if (!Number.isSafeInteger(descriptor) || descriptor > 1_000_000) {
+    refuse('the SIP activation preflight lock descriptor is invalid');
+  }
+  const expectedNode = `${releaseRoot}/runtime/node/bin/node`;
+  const expectedScript = `${releaseRoot}/${IMMUTABLE_PREFLIGHT_RELATIVE}`;
+  let resolvedExecutable;
+  let resolvedScript;
+  let descriptorMetadata;
+  let pathMetadata;
+  try {
+    resolvedExecutable = filesystem.realpathSync(executable);
+    resolvedScript = filesystem.realpathSync(invokedScript || '');
+    descriptorMetadata = filesystem.fstatSync(descriptor);
+    pathMetadata = filesystem.lstatSync(HANDOFF_LOCK);
+  } catch {
+    refuse('the SIP activation preflight executable or retained lock is unavailable');
+  }
+  if (resolvedExecutable !== expectedNode || resolvedScript !== expectedScript) {
+    refuse('the SIP activation preflight escaped the immutable release');
+  }
+  if (!descriptorMetadata.isDirectory() || !pathMetadata.isDirectory() ||
+      descriptorMetadata.dev !== pathMetadata.dev || descriptorMetadata.ino !== pathMetadata.ino ||
+      pathMetadata.uid !== 0 || pathMetadata.gid !== 0 ||
+      (pathMetadata.mode & 0o7777) !== 0o755) {
+    refuse('the SIP activation preflight lock identity is unsafe');
+  }
+  delete environment[LIFECYCLE_LOCK_ENV];
+  return descriptor;
+}
+
 function meaningfulLines(source) {
   return String(source).split('\n').map((line) => line.trim())
     .filter((line) => line && !line.startsWith('#'));
@@ -83,6 +151,26 @@ function meaningfulLines(source) {
 function exactlyOnce(source, expression, label) {
   const matches = String(source).match(expression) ?? [];
   if (matches.length !== 1) refuse(`${label} must occur exactly once`);
+}
+
+function serviceDirectiveLines(source, expression, label) {
+  const result = [];
+  let section = null;
+  for (const line of String(source).split('\n')) {
+    const header = /^[^\S\r\n]*(\[[^\][\r\n]+\])[^\S\r\n]*$/u.exec(line);
+    if (header) {
+      section = header[1];
+      continue;
+    }
+    if (!expression.test(line)) continue;
+    if (section !== '[Service]') refuse(`${label} escaped the Service section`);
+    result.push(line);
+  }
+  return result;
+}
+
+function sameLineMultiset(actual, expected) {
+  return JSON.stringify([...actual].sort()) === JSON.stringify([...expected].sort());
 }
 
 export function validateSysusersSource(source) {
@@ -134,8 +222,19 @@ export function validateRuntimeConfigurationSource(source) {
 
 export function validateServiceSource(source) {
   if (/^\[Install\]\s*$/mu.test(source)
-      || /^Environment=.*(?:TOKEN|PASSWORD|SECRET|API_KEY|PRIVATE_KEY)=/imu.test(source)) {
+      || /^Environment=.*(?:TOKEN|PASSWORD|SECRET|API_KEY|PRIVATE_KEY)=/imu.test(source)
+      || /^ConditionFileIsExecutable=/mu.test(source)) {
     refuse('the unit became enableable or embeds a credential');
+  }
+  if (/[\u0000\r]/u.test(source)) {
+    refuse('the unit contains a forbidden control byte');
+  }
+  if (/\\[^\S\r\n]*$/mu.test(source)) {
+    refuse('the unit contains an unsupported line continuation');
+  }
+  if (/^(?:[^\S\r\n]+(?:Exec(?:Condition|StartPre|Start|StartPost|Reload|Stop|StopPost)|(?:LoadCredential|LoadCredentialEncrypted|SetCredential|SetCredentialEncrypted|ImportCredential|ImportCredentialEx))[^\S\r\n]*=|(?:Exec(?:Condition|StartPre|Start|StartPost|Reload|Stop|StopPost)|(?:LoadCredential|LoadCredentialEncrypted|SetCredential|SetCredentialEncrypted|ImportCredential|ImportCredentialEx))[^\S\r\n]+=)/mu
+    .test(source)) {
+    refuse('the unit contains noncanonical lifecycle or credential assignment whitespace');
   }
   for (const [expression, label] of [
     [/^ConditionPathExists=\/etc\/teleagent\/realtime-sip-gateway\/ENABLE$/gmu,
@@ -160,20 +259,39 @@ export function validateServiceSource(source) {
       'fixed state marker credential'],
     [/^LoadCredential=SIP_STATE_INITIALIZED:\/etc\/teleagent\/realtime-sip-gateway\/STATE_INITIALIZED$/gmu,
       'state marker credential'],
+    [/^LoadCredential=teleagent-release-gate:\/run\/teleagent-release-gate\/verified\.json$/gmu,
+      'release-gate credential'],
     [new RegExp(`^UnsetEnvironment=${UNSET_ENVIRONMENT.replaceAll('/', '\\/')}$`, 'gmu'),
       'final injection-variable removal'],
     [/^ExecStartPre=\+\/usr\/bin\/env -i HOME=\/var\/empty PATH=\/usr\/sbin:\/usr\/bin:\/sbin:\/bin LANG=C\.UTF-8 LC_ALL=C\.UTF-8 \/usr\/local\/libexec\/verify-teleagent-release-closure --check-start-gate$/gmu,
       'trusted release start gate'],
-    [/^ExecStartPre=\+\/usr\/local\/libexec\/verify-realtime-sip-gateway --activation-check$/gmu,
-      'activation-time installed verifier'],
+    [/^ExecStartPre=\+\/usr\/bin\/python3 -I \/usr\/local\/libexec\/verify-teleagent-release-closure --preflight-component realtime-sip-gateway \$\{CREDENTIALS_DIRECTORY\}\/teleagent-release-gate$/gmu,
+      'immutable activation preflight'],
+    [/^ExecStart=\/usr\/bin\/python3 -I \/usr\/local\/libexec\/verify-teleagent-release-closure --start-component realtime-sip-gateway \$\{CREDENTIALS_DIRECTORY\}\/teleagent-release-gate$/gmu,
+      'immutable release launcher'],
   ]) exactlyOnce(source, expression, label);
   const startCommands = String(source).split('\n')
     .filter((line) => /^ExecStart(?:Pre)?=/u.test(line));
+  const executionCommands = serviceDirectiveLines(
+    source, EXECUTION_DIRECTIVE, 'an execution command',
+  );
+  const credentialDirectives = serviceDirectiveLines(
+    source, CREDENTIAL_DIRECTIVE, 'a credential directive',
+  );
+  const expectedExecutionCommands = [
+    RELEASE_START_GATE,
+    ACTIVATION_CHECK_COMMAND,
+    RELEASE_START_COMMAND,
+  ];
   const releaseGateReferences = String(source).match(
     /\/usr\/local\/libexec\/verify-teleagent-release-closure/gu,
   ) ?? [];
-  if (/^ExecCondition=/mu.test(source) || /^ExecReload=/mu.test(source) ||
-      startCommands[0] !== RELEASE_START_GATE || releaseGateReferences.length !== 1) {
+  if (!sameLineMultiset(executionCommands, expectedExecutionCommands) ||
+      !sameLineMultiset(credentialDirectives, REVIEWED_CREDENTIAL_DIRECTIVES) ||
+      /^ExecCondition=/mu.test(source) || /^ExecReload=/mu.test(source) ||
+      /^ExecStartPost=/mu.test(source) || /^ExecStop(?:Post)?=/mu.test(source) ||
+      startCommands[0] !== RELEASE_START_GATE || releaseGateReferences.length !== 3 ||
+      executionCommands.some((line) => line.includes('/opt/teleagent/current'))) {
     refuse('the trusted release start gate is weakened, duplicated, or out of order');
   }
   for (const inaccessible of [
@@ -975,10 +1093,18 @@ function main() {
   const installedModes = [
     '--initialize-empty-state', '--installed-check', '--activation-check',
   ];
-  if (process.argv.length !== 3 || !['--source-check', ...installedModes].includes(mode)) {
-    refuse('usage: verify-realtime-sip-gateway --source-check|--initialize-empty-state|--installed-check|--activation-check');
+  const immutableActivationMode = '--immutable-activation-check';
+  if (process.argv.length !== 3 ||
+      !['--source-check', immutableActivationMode, ...installedModes].includes(mode)) {
+    refuse('usage: verify-realtime-sip-gateway --source-check|--initialize-empty-state|--installed-check|--activation-check|--immutable-activation-check');
   }
   const invoked = fs.realpathSync(process.argv[1]);
+  if (mode === immutableActivationMode) {
+    requireImmutableActivationPreflight();
+    activationCheck();
+    process.stdout.write('SIP_GATEWAY_ACTIVATION_OK\n');
+    return;
+  }
   if (installedModes.includes(mode)) {
     if (invoked !== INSTALLED_VERIFIER) refuse('use the fixed installed verifier');
     inspectExactPath(INSTALLED_VERIFIER, {

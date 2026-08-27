@@ -11,6 +11,17 @@ const INSTALLED_VERIFIER = '/usr/local/libexec/verify-voice-stack-identity';
 const RELEASE_START_GATE = 'ExecStartPre=+/usr/bin/env -i HOME=/var/empty ' +
   'PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 ' +
   '/usr/local/libexec/verify-teleagent-release-closure --check-start-gate';
+const RELEASE_START_COMMAND = 'ExecStart=/usr/bin/python3 -I ' +
+  '/usr/local/libexec/verify-teleagent-release-closure --start-component voice-stack-start ' +
+  '${CREDENTIALS_DIRECTORY}/teleagent-release-gate';
+const RELEASE_STOP_COMMAND = 'ExecStop=/usr/bin/python3 -I ' +
+  '/usr/local/libexec/verify-teleagent-release-closure --stop-voice-stack';
+const RELEASE_CLEANUP_COMMAND = 'ExecStopPost=/usr/bin/python3 -I ' +
+  '/usr/local/libexec/verify-teleagent-release-closure --cleanup-voice-stack';
+const RELEASE_GATE_CREDENTIAL = 'LoadCredential=teleagent-release-gate:' +
+  '/run/teleagent-release-gate/verified.json';
+const EXECUTION_DIRECTIVE = /^Exec(?:Condition|StartPre|Start|StartPost|Reload|Stop|StopPost)=/u;
+const CREDENTIAL_DIRECTIVE = /^(?:LoadCredential|LoadCredentialEncrypted|SetCredential|SetCredentialEncrypted|ImportCredential|ImportCredentialEx)=/u;
 const IDENTITY_SPECS = Object.freeze([
   Object.freeze({ key: 'voice', name: 'teleagent-voice', home: '/var/lib/teleagent-voice' }),
   Object.freeze({ key: 'drachtio', name: 'teleagent-drachtio', home: '/nonexistent' }),
@@ -52,6 +63,26 @@ function meaningfulLines(source) {
 function exactlyOnce(source, expression, label) {
   const matches = String(source).match(expression) || [];
   if (matches.length !== 1) refuse(`${label} must occur exactly once`);
+}
+
+function serviceDirectiveLines(source, expression, label) {
+  const result = [];
+  let section = null;
+  for (const line of String(source).split('\n')) {
+    const header = /^[^\S\r\n]*(\[[^\][\r\n]+\])[^\S\r\n]*$/u.exec(line);
+    if (header) {
+      section = header[1];
+      continue;
+    }
+    if (!expression.test(line)) continue;
+    if (section !== '[Service]') refuse(`${label} escaped the Service section`);
+    result.push(line);
+  }
+  return result;
+}
+
+function sameLineMultiset(actual, expected) {
+  return JSON.stringify([...actual].sort()) === JSON.stringify([...expected].sort());
 }
 
 function inspectSourceAsset(filename, { uid = 0, gid = 0, mode }, {
@@ -227,28 +258,59 @@ function sourceCheck(sourceRoot = SOURCE_ROOT, { sourceUid = 0, sourceGid = 0 } 
       /^Environment=.*(?:TOKEN|PASSWORD|SECRET|API_KEY|PRIVATE_KEY)=/imu.test(service)) {
     refuse('the voice unit became enableable or embeds a credential');
   }
+  if (/[\u0000\r]/u.test(service)) {
+    refuse('the voice unit contains a forbidden control byte');
+  }
+  if (/\\[^\S\r\n]*$/mu.test(service)) {
+    refuse('the voice unit contains an unsupported line continuation');
+  }
+  if (/^(?:[^\S\r\n]+(?:Exec(?:Condition|StartPre|Start|StartPost|Reload|Stop|StopPost)|(?:LoadCredential|LoadCredentialEncrypted|SetCredential|SetCredentialEncrypted|ImportCredential|ImportCredentialEx))[^\S\r\n]*=|(?:Exec(?:Condition|StartPre|Start|StartPost|Reload|Stop|StopPost)|(?:LoadCredential|LoadCredentialEncrypted|SetCredential|SetCredentialEncrypted|ImportCredential|ImportCredentialEx))[^\S\r\n]+=)/mu
+    .test(service)) {
+    refuse('the voice unit contains noncanonical lifecycle or credential assignment whitespace');
+  }
   const startCommands = service.split('\n').filter((line) => /^ExecStart(?:Pre)?=/u.test(line));
+  const executionCommands = serviceDirectiveLines(
+    service, EXECUTION_DIRECTIVE, 'an execution command',
+  );
+  const credentialDirectives = serviceDirectiveLines(
+    service, CREDENTIAL_DIRECTIVE, 'a credential directive',
+  );
+  const expectedExecutionCommands = [
+    RELEASE_START_GATE,
+    RELEASE_START_COMMAND,
+    RELEASE_STOP_COMMAND,
+    RELEASE_CLEANUP_COMMAND,
+  ];
   const releaseGateReferences = service.match(
     /\/usr\/local\/libexec\/verify-teleagent-release-closure/gu,
   ) ?? [];
-  if (/^ExecCondition=/mu.test(service) || /^ExecReload=/mu.test(service) ||
+  if (!sameLineMultiset(executionCommands, expectedExecutionCommands) ||
+      !sameLineMultiset(credentialDirectives, [RELEASE_GATE_CREDENTIAL]) ||
+      /^ExecCondition=/mu.test(service) || /^ExecReload=/mu.test(service) ||
       startCommands[0] !== RELEASE_START_GATE ||
       startCommands.filter((line) => line === RELEASE_START_GATE).length !== 1 ||
-      releaseGateReferences.length !== 1) {
+      releaseGateReferences.length !== 4 ||
+      /^ExecStartPost=/mu.test(service) ||
+      executionCommands.filter((line) => line.startsWith('ExecStop=')).length !== 1 ||
+      executionCommands.filter((line) => line.startsWith('ExecStopPost=')).length !== 1 ||
+      executionCommands.some((line) => line.includes('/opt/teleagent/current'))) {
     refuse('the trusted release start gate is absent, weakened, duplicated, or out of order');
   }
+  if (/^ExecStartPre=\/usr\/local\/libexec\/verify-voice-stack-identity/mu.test(service)) {
+    refuse('the voice start still resolves identity through mutable current');
+  }
   exactlyOnce(service,
-    /^ExecStartPre=\/usr\/local\/libexec\/verify-voice-stack-identity --installed-check$/gmu,
-    'the installed identity gate');
+    /^ExecStart=\/usr\/bin\/python3 -I \/usr\/local\/libexec\/verify-teleagent-release-closure --start-component voice-stack-start \$\{CREDENTIALS_DIRECTORY\}\/teleagent-release-gate$/gmu,
+    'the immutable start command');
   exactlyOnce(service,
-    /^ExecStart=\/usr\/local\/libexec\/teleagent-voice-stack-launch start$/gmu,
-    'the fixed start command');
+    /^ExecStop=\/usr\/bin\/python3 -I \/usr\/local\/libexec\/verify-teleagent-release-closure --stop-voice-stack$/gmu,
+    'the immutable stop command');
   exactlyOnce(service,
-    /^ExecStop=\/usr\/local\/libexec\/teleagent-voice-stack-launch stop$/gmu,
-    'the fixed stop command');
+    /^ExecStopPost=\/usr\/bin\/python3 -I \/usr\/local\/libexec\/verify-teleagent-release-closure --cleanup-voice-stack$/gmu,
+    'the serialized host-owned emergency cleanup command');
   exactlyOnce(service,
-    /^ExecStopPost=\/usr\/local\/libexec\/teleagent-voice-stack-install --emergency-cleanup$/gmu,
-    'the host-owned emergency cleanup command');
+    /^LoadCredential=teleagent-release-gate:\/run\/teleagent-release-gate\/verified\.json$/gmu,
+    'the release-gate credential');
   exactlyOnce(service, /^User=root$/gmu, 'the root orchestrator user');
   exactlyOnce(service, /^Group=root$/gmu, 'the root orchestrator group');
   exactlyOnce(service, /^Requires=teleagent-voice-containers\.slice$/gmu,

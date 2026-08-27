@@ -24,6 +24,13 @@ const PROVIDER_PLANE_PARENT = path.dirname(PROVIDER_PLANE_ROOT);
 const MIN_PROVIDER_PLANE_CAPACITY_BYTES = 1n * 1024n * 1024n * 1024n;
 const MAX_PROVIDER_PLANE_CAPACITY_BYTES = 4n * 1024n * 1024n * 1024n;
 const MIN_PROVIDER_PLANE_FREE_BYTES = 512n * 1024n * 1024n;
+const DURABLE_LOCAL_FILESYSTEMS = new Set([
+  0xef53n, // ext2/3/4
+  0x58465342n, // XFS
+  0x9123683en, // Btrfs
+  0xf2f52010n, // F2FS
+  0x2fc12fc1n, // ZFS
+]);
 const PROVIDERS = Object.freeze({
   claude: Object.freeze({
     supervisorUser: 'teleagent-claude-supervisor',
@@ -122,6 +129,15 @@ function validateProviderPlaneStorageBoundary({
   const blockSize = BigInt(storage.bsize);
   const blocks = BigInt(storage.blocks);
   const availableBlocks = BigInt(storage.bavail);
+  let filesystemType;
+  try {
+    filesystemType = BigInt.asUintN(32, BigInt(storage.type));
+  } catch {
+    throw new Error('Provider plane filesystem type is invalid.');
+  }
+  if (!DURABLE_LOCAL_FILESYSTEMS.has(filesystemType)) {
+    throw new Error('Provider plane requires a reviewed durable local filesystem.');
+  }
   if (blockSize <= 0n || blocks <= 0n || availableBlocks < 0n || availableBlocks > blocks) {
     throw new Error('Provider plane filesystem accounting is invalid.');
   }

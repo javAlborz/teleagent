@@ -99,8 +99,8 @@ EXPECTED_PROMOTION_BLOCKERS = (
     "independent-pbx-attested-request-bound-approval-authority-is-not-implemented",
     "receiver-safe-sip-media-network-boundary-and-asterisk-rtp-attestation-"
     "are-not-implemented",
-    "universal-current-boot-release-gate-enforcement-at-"
-    "credential-bearing-service-restart-is-not-proven",
+    "universal-current-boot-release-gate-enforcement-at-credential-bearing-"
+    "service-restart-is-not-proven",
     "dedicated-staging-proof-including-non-root-media-containers-is-missing",
 )
 
@@ -120,6 +120,146 @@ EXPECTED_START_GATED_UNITS = (
     "deploy/worker-session/teleagent-worker-session.service",
     "realtime-sip-gateway/deploy/teleagent-realtime-sip-gateway.service",
 )
+
+RELEASE_GATE_CREDENTIAL = (
+    "LoadCredential=teleagent-release-gate:"
+    "/run/teleagent-release-gate/verified.json"
+)
+
+EXPECTED_START_COMPONENTS = {
+    "deploy/controller/teleagent-agent-controller.service": "agent-controller",
+    "deploy/privileged-action/teleagent-privileged-action.service": "privileged-action",
+    "deploy/voice-stack/teleagent-voice-stack.service": "voice-stack-start",
+    "deploy/worker-session/teleagent-provider-egress@.service": "provider-egress-%i",
+    "deploy/worker-session/teleagent-provider-libexec-install.service":
+        "provider-libexec-install",
+    "deploy/worker-session/teleagent-provider-supervisor@.service":
+        "provider-supervisor-%i",
+    "deploy/worker-session/teleagent-worker-session.service": "worker-session",
+    "realtime-sip-gateway/deploy/teleagent-realtime-sip-gateway.service":
+        "realtime-sip-gateway",
+}
+
+
+def release_start_command(component: str) -> str:
+    return (
+        "ExecStart=/usr/bin/python3 -I "
+        "/usr/local/libexec/verify-teleagent-release-closure "
+        f"--start-component {component} "
+        "${CREDENTIALS_DIRECTORY}/teleagent-release-gate"
+    )
+
+
+def release_preflight_command(component: str) -> str:
+    return (
+        "ExecStartPre=+/usr/bin/python3 -I "
+        "/usr/local/libexec/verify-teleagent-release-closure "
+        f"--preflight-component {component} "
+        "${CREDENTIALS_DIRECTORY}/teleagent-release-gate"
+    )
+
+
+EXPECTED_EXECUTION_DIRECTIVES = {
+    "deploy/controller/teleagent-agent-controller.service": (
+        RELEASE_START_GATE,
+        release_start_command("agent-controller"),
+    ),
+    "deploy/privileged-action/teleagent-privileged-action.service": (
+        RELEASE_START_GATE,
+        release_start_command("privileged-action"),
+    ),
+    "deploy/voice-stack/teleagent-voice-stack.service": (
+        RELEASE_START_GATE,
+        release_start_command("voice-stack-start"),
+        "ExecStop=/usr/bin/python3 -I "
+        "/usr/local/libexec/verify-teleagent-release-closure --stop-voice-stack",
+        "ExecStopPost=/usr/bin/python3 -I "
+        "/usr/local/libexec/verify-teleagent-release-closure --cleanup-voice-stack",
+    ),
+    "deploy/worker-session/teleagent-provider-egress@.service": (
+        RELEASE_START_GATE,
+        release_preflight_command("provider-egress-%i"),
+        release_start_command("provider-egress-%i"),
+    ),
+    "deploy/worker-session/teleagent-provider-libexec-install.service": (
+        RELEASE_START_GATE,
+        release_start_command("provider-libexec-install"),
+    ),
+    "deploy/worker-session/teleagent-provider-supervisor@.service": (
+        RELEASE_START_GATE,
+        release_preflight_command("provider-supervisor-%i"),
+        release_start_command("provider-supervisor-%i"),
+    ),
+    "deploy/worker-session/teleagent-worker-session.service": (
+        RELEASE_START_GATE,
+        release_preflight_command("worker-session"),
+        release_start_command("worker-session"),
+    ),
+    "realtime-sip-gateway/deploy/teleagent-realtime-sip-gateway.service": (
+        RELEASE_START_GATE,
+        release_preflight_command("realtime-sip-gateway"),
+        release_start_command("realtime-sip-gateway"),
+    ),
+}
+
+EXPECTED_CREDENTIAL_DIRECTIVES = {
+    "deploy/controller/teleagent-agent-controller.service": (
+        RELEASE_GATE_CREDENTIAL,
+    ),
+    "deploy/privileged-action/teleagent-privileged-action.service": (
+        "LoadCredential=approval-public-key:"
+        "/etc/teleagent/privileged-action/approval-public.pem",
+        "LoadCredential=replay-fingerprint-key:"
+        "/etc/teleagent/privileged-action/replay-fingerprint.key",
+        RELEASE_GATE_CREDENTIAL,
+    ),
+    "deploy/voice-stack/teleagent-voice-stack.service": (
+        RELEASE_GATE_CREDENTIAL,
+    ),
+    "deploy/worker-session/teleagent-provider-egress@.service": (
+        "LoadCredential=provider-api-key:"
+        "/etc/teleagent/provider-egress-secrets/%i.api-key",
+        RELEASE_GATE_CREDENTIAL,
+    ),
+    "deploy/worker-session/teleagent-provider-libexec-install.service": (
+        RELEASE_GATE_CREDENTIAL,
+    ),
+    "deploy/worker-session/teleagent-provider-supervisor@.service": (
+        RELEASE_GATE_CREDENTIAL,
+    ),
+    "deploy/worker-session/teleagent-worker-session.service": (
+        RELEASE_GATE_CREDENTIAL,
+    ),
+    "realtime-sip-gateway/deploy/teleagent-realtime-sip-gateway.service": (
+        "LoadCredential=OPENAI_API_KEY:/etc/teleagent/credentials/openai-api-key",
+        "LoadCredential=OPENAI_WEBHOOK_SECRET:"
+        "/etc/teleagent/credentials/openai-webhook-secret",
+        "LoadCredential=SIP_PBX_AUTH_SECRET:"
+        "/etc/teleagent/credentials/sip-pbx-auth-secret",
+        "LoadCredential=SIP_STATE_INITIALIZED:"
+        "/etc/teleagent/realtime-sip-gateway/STATE_INITIALIZED",
+        RELEASE_GATE_CREDENTIAL,
+    ),
+}
+
+EXECUTION_DIRECTIVE_RE = re.compile(
+    r"^Exec(?:Condition|StartPre|Start|StartPost|Reload|Stop|StopPost)="
+)
+CREDENTIAL_DIRECTIVE_RE = re.compile(
+    r"^(?:LoadCredential|LoadCredentialEncrypted|SetCredential|"
+    r"SetCredentialEncrypted|ImportCredential|ImportCredentialEx)="
+)
+SENSITIVE_ASSIGNMENT_RE = re.compile(
+    r"^(?:[^\S\r\n]+(?:"
+    r"Exec(?:Condition|StartPre|Start|StartPost|Reload|Stop|StopPost)|"
+    r"(?:LoadCredential|LoadCredentialEncrypted|SetCredential|"
+    r"SetCredentialEncrypted|ImportCredential|ImportCredentialEx))[^\S\r\n]*="
+    r"|(?:Exec(?:Condition|StartPre|Start|StartPost|Reload|Stop|StopPost)|"
+    r"(?:LoadCredential|LoadCredentialEncrypted|SetCredential|"
+    r"SetCredentialEncrypted|ImportCredential|ImportCredentialEx))[^\S\r\n]+=)",
+    re.MULTILINE,
+)
+UNIT_SECTION_RE = re.compile(r"[^\S\r\n]*(\[[^\][\r\n]+\])[^\S\r\n]*")
 
 
 def sha256(payload: bytes) -> str:
@@ -329,29 +469,77 @@ class CiReleaseTests(unittest.TestCase):
         for relative in BOUND_SOURCE_PATHS:
             if not relative.endswith(".service"):
                 continue
-            source = (REPOSITORY_ROOT / relative).read_text("utf-8")
-            execution_lines = tuple(
-                line for line in source.splitlines()
-                if line.startswith(("ExecCondition=", "ExecStartPre=", "ExecStart="))
+            raw_source = (REPOSITORY_ROOT / relative).read_bytes()
+            self.assertNotIn(b"\x00", raw_source, relative)
+            self.assertNotIn(b"\r", raw_source, relative)
+            source = raw_source.decode("utf-8")
+            self.assertIsNone(
+                re.search(r"\\[^\S\r\n]*$", source, re.MULTILINE), relative
             )
-            directly_executes_current = any(
-                "/opt/teleagent/current/" in line for line in execution_lines
-            )
-            launches_current_consumer = any(
-                command in execution_lines
-                for command in (
-                    "ExecStart=/usr/local/libexec/teleagent-provider-libexec-install",
-                    "ExecStart=/usr/local/libexec/teleagent-voice-stack-launch start",
-                )
-            )
-            if directly_executes_current or launches_current_consumer:
+            self.assertIsNone(SENSITIVE_ASSIGNMENT_RE.search(source), relative)
+            execution_lines: list[str] = []
+            credential_lines: list[str] = []
+            section: str | None = None
+            for line in source.split("\n"):
+                header = UNIT_SECTION_RE.fullmatch(line)
+                if header:
+                    section = header.group(1)
+                    continue
+                if EXECUTION_DIRECTIVE_RE.match(line):
+                    self.assertEqual(section, "[Service]", relative)
+                    execution_lines.append(line)
+                if CREDENTIAL_DIRECTIVE_RE.match(line):
+                    self.assertEqual(section, "[Service]", relative)
+                    credential_lines.append(line)
+            execution_lines_tuple = tuple(execution_lines)
+            if RELEASE_START_GATE in execution_lines or "--start-component" in source:
                 candidates.append(relative)
                 self.assertEqual(execution_lines.count(RELEASE_START_GATE), 1, relative)
                 self.assertEqual(execution_lines[0], RELEASE_START_GATE, relative)
+                self.assertEqual(credential_lines.count(RELEASE_GATE_CREDENTIAL), 1, relative)
+                component = EXPECTED_START_COMPONENTS[relative]
+                self.assertIn(
+                    "ExecStart=/usr/bin/python3 -I "
+                    "/usr/local/libexec/verify-teleagent-release-closure "
+                    f"--start-component {component} "
+                    "${CREDENTIALS_DIRECTORY}/teleagent-release-gate",
+                    execution_lines_tuple,
+                    relative,
+                )
+                self.assertEqual(
+                    sum("--start-component" in line for line in execution_lines),
+                    1,
+                    relative,
+                )
+                self.assertEqual(
+                    tuple(sorted(execution_lines)),
+                    tuple(sorted(EXPECTED_EXECUTION_DIRECTIVES[relative])),
+                    relative,
+                )
+                self.assertEqual(
+                    tuple(sorted(credential_lines)),
+                    tuple(sorted(EXPECTED_CREDENTIAL_DIRECTIVES[relative])),
+                    relative,
+                )
+                if relative == "deploy/voice-stack/teleagent-voice-stack.service":
+                    self.assertIn(
+                        "ExecStop=/usr/bin/python3 -I "
+                        "/usr/local/libexec/verify-teleagent-release-closure "
+                        "--stop-voice-stack",
+                        source.split("\n"),
+                    )
+                else:
+                    self.assertFalse(
+                        any(
+                            line.startswith(("ExecStartPost=", "ExecStop=", "ExecStopPost="))
+                            for line in execution_lines
+                        ),
+                        relative,
+                    )
                 self.assertNotIn("ExecReload=", source, relative)
-                for line in source.splitlines():
-                    if line.startswith("ExecStopPost="):
-                        self.assertNotIn("/opt/teleagent/current/", line, relative)
+                for line in execution_lines:
+                    self.assertNotIn("/opt/teleagent/current", line, relative)
+                    if line.startswith(("ExecStartPost=", "ExecStop=", "ExecStopPost=")):
                         self.assertNotIn("teleagent-node", line, relative)
                         self.assertNotIn("teleagent-voice-stack-launch", line, relative)
                 self.assertFalse(

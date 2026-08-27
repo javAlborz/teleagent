@@ -2,6 +2,7 @@
 
 const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
+const { createHash } = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
@@ -17,6 +18,27 @@ const EXECUTABLES = new Set([
 function writeExecutable(filename, source) {
   fs.writeFileSync(filename, source, { mode: 0o700 });
   fs.chmodSync(filename, 0o700);
+}
+
+function rebindManifestAsset(controllerDeploy, relative) {
+  const releaseRoot = path.resolve(controllerDeploy, '..', '..');
+  const digest = createHash('sha256')
+    .update(fs.readFileSync(path.join(releaseRoot, relative)))
+    .digest('hex');
+  const manifest = path.join(controllerDeploy, 'control-plane-install.manifest');
+  const lines = fs.readFileSync(manifest, 'utf8').trimEnd().split('\n');
+  let replacements = 0;
+  const rebound = lines.map((line) => {
+    const fields = line.split(' ');
+    if (fields[2] !== relative) return line;
+    replacements += 1;
+    fields[0] = digest;
+    return fields.join(' ');
+  });
+  assert.equal(replacements, 1);
+  fs.chmodSync(manifest, 0o644);
+  fs.writeFileSync(manifest, `${rebound.join('\n')}\n`);
+  fs.chmodSync(manifest, 0o444);
 }
 
 function makeFixture(t) {
@@ -296,6 +318,12 @@ test('control-plane installer intentionally initializes fresh state unlocked and
   assert.equal(result.status, 75);
   assert.match(result.stderr, /unit is active, failed, or transitional/);
 
+  for (const mode of ['--source-check', '--install-disabled']) {
+    result = fixture.run(fixture.installedInstaller, mode);
+    assert.equal(result.status, 77);
+    assert.match(result.stderr, /installed entrypoint is check-only/);
+  }
+
   for (const [variable, unit, expected] of [
     ['FAKE_FRAGMENT_UNIT', 'teleagent-agent-controller.service', /unreviewed fragment/],
     ['FAKE_FRAGMENT_UNIT', 'teleagent-provider-supervisor@claude.socket', /unreviewed fragment/],
@@ -312,7 +340,7 @@ test('control-plane installer intentionally initializes fresh state unlocked and
   }
 
   fs.unlinkSync(stateFile);
-  result = fixture.run(fixture.installedInstaller, '--install-disabled');
+  result = fixture.run(fixture.sourceInstaller, '--install-disabled');
   assert.equal(result.status, 77);
   assert.match(result.stderr, /explicit controller lock state is absent/);
   assert.equal(fs.existsSync(stateFile), false);
@@ -347,11 +375,60 @@ test('control-plane installer intentionally initializes fresh state unlocked and
     remotePanicConfirmedAt: null,
   })}\n`, { mode: 0o600 });
   fs.unlinkSync(privilegedDatabase);
-  result = fixture.run(fixture.installedInstaller, '--install-disabled');
+  result = fixture.run(fixture.sourceInstaller, '--install-disabled');
   assert.equal(result.status, 77);
   assert.match(result.stderr, /initialized durable database is absent/);
   assert.equal(fs.existsSync(privilegedDatabase), false);
   assert.equal(fs.existsSync(privilegedMarker), true);
+});
+
+test('control-plane source check rejects unreviewed execution and credential directives', (t) => {
+  for (const injection of [
+    'ExecStartPre=/usr/bin/false',
+    'ExecStart=/usr/bin/false',
+    'LoadCredential=unreviewed:/tmp/unreviewed',
+    'LoadCredential=teleagent-release-gate:/run/teleagent-release-gate/verified.json',
+    'LoadCredentialEncrypted=unreviewed:/tmp/unreviewed',
+    'ImportCredential=unreviewed',
+    'ImportCredentialEx=unreviewed',
+    'SetCredential=unreviewed:not-secret',
+    'SetCredentialEncrypted=unreviewed:not-encrypted',
+    'ExecStartPost =/opt/teleagent/current/unreviewed-post',
+    '\tExecStop=/opt/teleagent/current/unreviewed-stop',
+    'LoadCredential =unreviewed:/tmp/unreviewed',
+    'LoadCredentialEncrypted =unreviewed:/tmp/unreviewed',
+    '\tImportCredentialEx =unreviewed',
+    'ExecStartPost\\\n =/opt/teleagent/current/unreviewed-continuation',
+    'ExecStartPost\\\r\n =/opt/teleagent/current/unreviewed-crlf-continuation',
+    'ExecStartPost=\0/opt/teleagent/current/unreviewed-control',
+  ]) {
+    const fixture = makeFixture(t);
+    const service = path.join(
+      fixture.controllerDeploy,
+      'teleagent-agent-controller.service',
+    );
+    fs.chmodSync(service, 0o644);
+    fs.appendFileSync(service, `${injection}\n`);
+    fs.chmodSync(service, 0o444);
+    rebindManifestAsset(
+      fixture.controllerDeploy,
+      'deploy/controller/teleagent-agent-controller.service',
+    );
+    const result = fixture.run(fixture.sourceInstaller, '--source-check');
+    assert.equal(result.status, 77);
+    assert.match(result.stderr,
+      /execution command closure|credential directive closure|release-gate credential|noncanonical lifecycle or credential assignment whitespace|unsupported line continuation|forbidden control byte/);
+  }
+});
+
+test('control-plane production mutation requires a canonical immutable release entrypoint', () => {
+  const result = spawnSync(
+    path.join(CONTROLLER_DEPLOY, 'teleagent-control-plane-install'),
+    ['--install-disabled'],
+    { encoding: 'utf8', env: { LC_ALL: 'C' }, timeout: 10_000 },
+  );
+  assert.equal(result.status, 77);
+  assert.match(result.stderr, /requires an immutable release root/);
 });
 
 test('control-plane installer rolls back all owned bytes after a post-copy failure', (t) => {

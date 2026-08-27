@@ -4,7 +4,10 @@
 of the separately authenticated host release gate. It does not authenticate a
 release itself and never creates the gate. The homelab verifier must create
 `/run/teleagent-release-gate/verified.json` for the current boot immediately
-before invoking this handoff and must verify the release again afterward.
+before invoking this handoff and must verify the release again afterward. The
+gate is nonsecret host-owned integrity metadata: its root-owned directory is
+mode `0755` and its single-link file is mode `0444`. Systemd separately projects
+that file into a private mode-`0400` per-service credential.
 
 The handoff has three exact modes:
 

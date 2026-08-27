@@ -246,10 +246,13 @@ exact disabled authority state before recording activation intent or projecting
 credentials.
 
 The Ed25519 capability, replay, exact-plan, and typed broker libraries remain
-unit-tested future substrate. They must not be production-enabled until an
-independent PBX attester plays the controller-canonical prompt, supplies durable
-request-bound handset DTMF evidence, and a controller-owned authority validates
-that evidence without trusting voice to assert consent. The future executor
+unit-tested future substrate. Dormant `telereq1` controller-arm,
+`teleattest1` PBX-evidence, and `telecap2` controller-capability contracts now
+make the intended three-key protocol executable in fixtures, but no production
+entrypoint imports or activates them. They must not be production-enabled until
+an independent PBX attester plays the controller-canonical prompt, supplies
+durable request-bound handset DTMF evidence, and a controller-owned authority
+validates that evidence without trusting voice to assert consent. The future executor
 persists both the admitting key ID and the verifier-derived SHA-256 SPKI
 fingerprint, then rechecks both immediately before the first external effect so
 same-ID key replacement revokes queued work.

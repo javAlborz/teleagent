@@ -54,8 +54,8 @@ PROMOTION_BLOCKERS = (
     "independent-pbx-attested-request-bound-approval-authority-is-not-implemented",
     "receiver-safe-sip-media-network-boundary-and-asterisk-rtp-attestation-"
     "are-not-implemented",
-    "universal-current-boot-release-gate-enforcement-at-"
-    "credential-bearing-service-restart-is-not-proven",
+    "universal-current-boot-release-gate-enforcement-at-credential-bearing-"
+    "service-restart-is-not-proven",
     "dedicated-staging-proof-including-non-root-media-containers-is-missing",
 )
 

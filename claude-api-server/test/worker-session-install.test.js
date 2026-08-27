@@ -12,6 +12,10 @@ const INSTALLER = path.join(DEPLOY, 'teleagent-worker-session-install');
 const RELEASE_START_GATE = 'ExecStartPre=+/usr/bin/env -i HOME=/var/empty ' +
   'PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 ' +
   '/usr/local/libexec/verify-teleagent-release-closure --check-start-gate';
+const WORKER_PREFLIGHT = 'ExecStartPre=+/usr/bin/python3 -I ' +
+  '/usr/local/libexec/verify-teleagent-release-closure ' +
+  '--preflight-component worker-session ' +
+  '${CREDENTIALS_DIRECTORY}/teleagent-release-gate';
 
 const EXECUTABLE_SOURCES = new Set([
   'teleagent-codex-cli-wrapper',
@@ -56,6 +60,11 @@ function makeFixture(t) {
     path.join(apiServer, 'provider-egress-shim.js')
   );
   fs.chmodSync(path.join(apiServer, 'provider-egress-shim.js'), 0o755);
+  fs.copyFileSync(
+    path.join(ROOT, 'claude-api-server', 'provider-supervisor-client.js'),
+    path.join(apiServer, 'provider-supervisor-client.js')
+  );
+  fs.chmodSync(path.join(apiServer, 'provider-supervisor-client.js'), 0o444);
   for (const entry of fs.readdirSync(deploy, { withFileTypes: true })) {
     if (!entry.isFile()) continue;
     const mode = EXECUTABLE_SOURCES.has(entry.name) ? 0o555 : 0o444;
@@ -232,15 +241,23 @@ test('worker-session installer source is dormant and the activation verifier is 
     'teleagent-provider-egress@.service',
     'teleagent-provider-libexec-install.service',
   ]) {
-    const executionLines = fs.readFileSync(path.join(DEPLOY, unit), 'utf8')
+    const source = fs.readFileSync(path.join(DEPLOY, unit), 'utf8');
+    const executionLines = source
       .split('\n').filter((line) => /^Exec(?:Condition|StartPre|Start)=/.test(line));
     assert.equal(executionLines.filter((line) => line === RELEASE_START_GATE).length, 1);
     assert.equal(executionLines[0], RELEASE_START_GATE);
-    assert.doesNotMatch(fs.readFileSync(path.join(DEPLOY, unit), 'utf8'),
-      /^\s*ExecCondition\s*=/m);
-    assert.doesNotMatch(fs.readFileSync(path.join(DEPLOY, unit), 'utf8'),
-      /^\s*ExecReload\s*=/m);
+    assert.equal(source.match(/^LoadCredential=teleagent-release-gate:/gm)?.length, 1);
+    assert.equal(executionLines.filter((line) => line.includes('--start-component')).length, 1);
+    assert.ok(executionLines.every((line) => !line.includes('/opt/teleagent/current')));
+    assert.doesNotMatch(source,
+      /^(?:[^\S\r\n]+(?:Exec(?:Condition|StartPre|Start|StartPost|Reload|Stop|StopPost)|(?:LoadCredential|LoadCredentialEncrypted|SetCredential|SetCredentialEncrypted|ImportCredential|ImportCredentialEx))[^\S\r\n]*=|(?:Exec(?:Condition|StartPre|Start|StartPost|Reload|Stop|StopPost)|(?:LoadCredential|LoadCredentialEncrypted|SetCredential|SetCredentialEncrypted|ImportCredential|ImportCredentialEx))[^\S\r\n]+=)/m);
+    assert.doesNotMatch(source, /^\s*ExecCondition\s*=/m);
+    assert.doesNotMatch(source, /^\s*ExecReload\s*=/m);
   }
+  assert.doesNotMatch(
+    fs.readFileSync(path.join(DEPLOY, 'teleagent-provider-supervisor-client'), 'utf8'),
+    /\/opt\/teleagent\/current/
+  );
   assert.doesNotMatch(installer, /"\$systemctl_bin"\s+(?:start|enable|restart)\b/);
   assert.doesNotMatch(installer, /provider-egress-(?:claude|codex)\.policy\.example/);
   assert.doesNotMatch(installer, /provider-egress-secrets\/(?:claude|codex)\.api-key/);
@@ -249,6 +266,16 @@ test('worker-session installer source is dormant and the activation verifier is 
   const syntax = spawnSync('/bin/sh', ['-n', path.join(DEPLOY,
     'verify-worker-session-boundary')], { encoding: 'utf8' });
   assert.equal(syntax.status, 0, syntax.stderr);
+});
+
+test('worker-session production mutation requires a canonical immutable release entrypoint', () => {
+  const result = spawnSync(INSTALLER, ['--install-disabled'], {
+    encoding: 'utf8',
+    env: { LC_ALL: 'C' },
+    timeout: 10_000,
+  });
+  assert.equal(result.status, 77);
+  assert.match(result.stderr, /requires an immutable release root/);
 });
 
 test('worker-session installer performs an offline transactional disabled install', (t) => {
@@ -288,6 +315,12 @@ test('worker-session installer performs an offline transactional disabled instal
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout, 'WORKER_SESSION_INSTALLED_DISABLED_OK\n');
 
+  for (const mode of ['--source-check', '--install-disabled']) {
+    result = fixture.run(fixture.installedInstaller, mode);
+    assert.equal(result.status, 77);
+    assert.match(result.stderr, /installed entrypoint is check-only/);
+  }
+
   const sudoers = path.join(
     fixture.fixture, 'etc', 'sudoers.d', 'teleagent-provider-supervisors'
   );
@@ -295,8 +328,18 @@ test('worker-session installer performs an offline transactional disabled instal
     fixture.fixture, 'usr', 'local', 'libexec',
     'teleagent-provider-egress-credential-check'
   );
+  const installedSupervisorClient = path.join(
+    fixture.fixture, 'usr', 'local', 'libexec',
+    'teleagent-provider-supervisor-client.js'
+  );
   assert.equal(fs.statSync(sudoers).mode & 0o777, 0o440);
   assert.equal(fs.statSync(credentialCheck).mode & 0o777, 0o755);
+  assert.equal(fs.statSync(installedSupervisorClient).mode & 0o777, 0o444);
+  assert.equal(
+    fs.readFileSync(installedSupervisorClient, 'utf8'),
+    fs.readFileSync(path.join(fixture.release, 'claude-api-server',
+      'provider-supervisor-client.js'), 'utf8')
+  );
   assert.equal(
     fs.readFileSync(credentialCheck, 'utf8'),
     fs.readFileSync(path.join(fixture.deploy,
@@ -450,12 +493,13 @@ test('worker-session installer performs an offline transactional disabled instal
   const brokerUnit = path.join(fixture.deploy, 'teleagent-worker-session.service');
   const brokerUnitSource = fs.readFileSync(brokerUnit, 'utf8');
   fs.writeFileSync(brokerUnit, brokerUnitSource.replace(
-    '--action attest-workspace-storage',
-    '--action assert-global-unlocked'
+    WORKER_PREFLIGHT,
+    'ExecStartPre=+/usr/local/libexec/teleagent-provider-boundary ' +
+      '--action attest-workspace-storage'
   ));
   result = fixture.run(fixture.sourceInstaller, '--source-check');
   assert.equal(result.status, 77);
-  assert.match(result.stderr, /worker broker lost its workspace storage activation gate/);
+  assert.match(result.stderr, /worker broker lost its immutable storage preflight/);
   fs.writeFileSync(brokerUnit, brokerUnitSource);
 
   fs.writeFileSync(brokerUnit, brokerUnitSource.replace(
@@ -479,6 +523,33 @@ test('worker-session installer performs an offline transactional disabled instal
   result = fixture.run(fixture.sourceInstaller, '--source-check');
   assert.equal(result.status, 77);
   assert.match(result.stderr, /contains an ungated reload command/);
+  fs.writeFileSync(brokerUnit, brokerUnitSource);
+
+  for (const injection of [
+    'ExecStartPre=/usr/bin/false',
+    'ExecStart=/usr/bin/false',
+    'LoadCredential=unreviewed:/tmp/unreviewed',
+    'LoadCredential=teleagent-release-gate:/run/teleagent-release-gate/verified.json',
+    'LoadCredentialEncrypted=unreviewed:/tmp/unreviewed',
+    'ImportCredential=unreviewed',
+    'ImportCredentialEx=unreviewed',
+    'SetCredential=unreviewed:not-secret',
+    'SetCredentialEncrypted=unreviewed:not-encrypted',
+    'ExecStartPost =/opt/teleagent/current/unreviewed-post',
+    '\tExecStop=/opt/teleagent/current/unreviewed-stop',
+    'LoadCredential =unreviewed:/tmp/unreviewed',
+    'SetCredentialEncrypted =unreviewed:not-encrypted',
+    '\tImportCredentialEx =unreviewed',
+    'ExecStartPost\\\n =/opt/teleagent/current/unreviewed-continuation',
+    'ExecStartPost\\\r\n =/opt/teleagent/current/unreviewed-crlf-continuation',
+    'ExecStartPost=\0/opt/teleagent/current/unreviewed-control',
+  ]) {
+    fs.writeFileSync(brokerUnit, `${brokerUnitSource}${injection}\n`);
+    result = fixture.run(fixture.sourceInstaller, '--source-check');
+    assert.equal(result.status, 77);
+    assert.match(result.stderr,
+      /execution command closure|credential directive closure|gate credential|noncanonical lifecycle or credential assignment whitespace|unsupported line continuation|forbidden control byte/);
+  }
   fs.writeFileSync(brokerUnit, brokerUnitSource);
 
   const driftedRuntime = path.join(

@@ -100,25 +100,35 @@ npm run test:coverage
 The tests use injected SDK, WebSocket, filesystem, identity, and systemd fakes and make no OpenAI
 API calls or host service changes.
 
-The source-owned component installer has three exact modes:
+On a dedicated host, the operator-facing installation surface is the fixed
+infrastructure-owned handoff:
 
 ```bash
-/opt/teleagent/current/realtime-sip-gateway/deploy/teleagent-realtime-sip-gateway-install --source-check
-# SIP_GATEWAY_SOURCE_OK
-/opt/teleagent/current/realtime-sip-gateway/deploy/teleagent-realtime-sip-gateway-install --install-disabled
-# SIP_GATEWAY_INSTALLED_DISABLED
-/usr/local/libexec/teleagent-realtime-sip-gateway-install --check
-# SIP_GATEWAY_INSTALLED_DISABLED_OK
+sudo /usr/bin/env -i HOME=/var/empty PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+  /usr/local/libexec/teleagent-staging-handoff --source-check
+# TELEAGENT_STAGING_SOURCE_OK
+sudo /usr/bin/env -i HOME=/var/empty PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+  /usr/local/libexec/teleagent-staging-handoff --install-disabled
+# TELEAGENT_STAGING_INSTALLED_DISABLED_OK
+sudo /usr/bin/env -i HOME=/var/empty PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+  /usr/local/libexec/teleagent-staging-handoff --check
+# TELEAGENT_STAGING_INSTALLED_DISABLED_OK
 ```
+
+The handoff invokes the source-owned component modes only through the canonical
+`/opt/teleagent/releases/sha256-*` root authenticated by the external approval.
+The installed component-installer copy accepts only `--check`; it refuses
+`--source-check` and `--install-disabled`. Never invoke an installer through
+`/opt/teleagent/current`.
 
 `--install-disabled` requires the exact durable mount to have been provisioned already. It installs
 the root-owned static unit, sysusers/tmpfiles policy, verifier, manifest, and installer, but never
 creates `ENABLE`, configuration, or credentials and never enables, starts, or restarts the unit.
-All three modes reject source/installed drift; install and check also reject an active,
+All component modes reject source/installed drift; install and check also reject an active,
 transitional, enableable, or unverifiable unit.
 Source check executes the source verifier with only the authenticated immutable
 `<release-root>/runtime/node/bin/node`; it never selects an owner's Node, `PATH` entry, or caller
-override. Installed modes require `/usr/local/libexec/teleagent-node`.
+override. The installed check requires `/usr/local/libexec/teleagent-node`.
 
 On a fresh objectively empty mount, disabled installation creates the zero-length main and lifetime
 lock database files with no-replace opens, service ownership, mode `0600`, and file/directory fsync,
@@ -158,7 +168,11 @@ The first systemd start command is the external host-owned
 environment before the gateway's activation verifier. It cheaply binds the
 start to current-boot approval, the selected release/manifest identity, and
 installed runtime metadata; it never performs the serialized handoff's full
-release scan or binary content hashing.
+release scan or binary content hashing. The next root-only fixed-verifier
+profile reauthenticates the projected gate and live selection, retains the
+shared handoff lock in both parent and child, and runs the immutable activation
+verifier through the selected release's bundled Node. The ordinary gateway
+start independently repeats gate and lock validation.
 
 The release authentication closure must bind `package.json`, `package-lock.json`, every runtime
 import (`src/app.js`, `call-gateway.js`, `call-registry.js`, `config.js`, `gateway-singleton.js`,

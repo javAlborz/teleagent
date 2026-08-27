@@ -7,8 +7,8 @@ unset ENV BASH_ENV CDPATH LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT GCONV_PATH \
   NODE_OPTIONS NODE_PATH PYTHONPATH PERL5LIB RUBYOPT
 umask 077
 
-app_root=/opt/teleagent/current
-manifest="$app_root/deploy/worker-session/provider-libexec.manifest"
+app_root=
+manifest=
 target_root=/usr/local/libexec
 installed_manifest=/etc/teleagent/provider-runtime/provider-libexec.manifest
 systemctl_bin=/usr/bin/systemctl
@@ -48,6 +48,18 @@ else
     [ -z "${TELEAGENT_PROVIDER_LIBEXEC_TEST_SYSTEMCTL:-}" ] ||
     fail 'test overrides require the isolated test lane'
   [ "$#" -eq 0 ] || fail 'unexpected arguments'
+  app_root=${TELEAGENT_RELEASE_ROOT:-}
+  case "$app_root" in
+    /opt/teleagent/releases/sha256-[0-9a-f][0-9a-f]*) ;;
+    *) fail 'the immutable release root is unavailable' ;;
+  esac
+  [ "${#app_root}" -eq 95 ] || fail 'the immutable release root is malformed'
+  case "${app_root#/opt/teleagent/releases/sha256-}" in
+    *[!0-9a-f]*) fail 'the immutable release root is malformed' ;;
+  esac
+  self=$(/usr/bin/readlink -f -- "$0") || fail 'the executing source path is unavailable'
+  [ "$self" = "$app_root/deploy/worker-session/teleagent-provider-libexec-install" ] ||
+    fail 'the provider installer is outside the gated immutable release'
 fi
 
 unit_property() {
@@ -111,6 +123,8 @@ if [ "${TELEAGENT_PROVIDER_LIBEXEC_TEST_ONLY:-}" = 1 ]; then
   printf 'PROVIDER_LIBEXEC_QUIESCENT_OK\n'
   exit 0
 fi
+
+manifest="$app_root/deploy/worker-session/provider-libexec.manifest"
 
 if [ "$(/usr/bin/id -u)" -ne 0 ]; then
   echo "provider libexec installation requires root" >&2

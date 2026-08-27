@@ -8,6 +8,7 @@ unset ENV BASH_ENV CDPATH LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT GCONV_PATH \
 umask 077
 
 name=teleagent-worker-session-install
+requested_action=${1:-}
 sentinel=/etc/teleagent/worker-session/ENABLE
 systemctl_bin=/usr/bin/systemctl
 sysusers_bin=/usr/bin/systemd-sysusers
@@ -140,6 +141,12 @@ capture_systemctl() {
 self=$(/usr/bin/readlink -f -- "$0")
 installed_entrypoint=$(host_path /usr/local/libexec/teleagent-worker-session-install)
 if [ "$self" = "$installed_entrypoint" ]; then
+  case "$requested_action" in
+    --check) ;;
+    --source-check|--install-disabled)
+      fail 'the installed entrypoint is check-only; source and mutating modes require an immutable release entrypoint'
+      ;;
+  esac
   source_root=$(/usr/bin/readlink -f -- \
     "$(host_path /opt/teleagent/current/deploy/worker-session)")
 else
@@ -150,6 +157,14 @@ fi
 app_root=$(/usr/bin/readlink -f -- "$source_root/../..")
 [ "$source_root" = "$app_root/deploy/worker-session" ] ||
   fail 'the worker-session source bundle is outside a release root'
+
+require_immutable_mutation_entrypoint() {
+  [ -n "$root_prefix" ] && return
+  [ "$0" = "$self" ] ||
+    fail 'disabled installation requires the literal canonical immutable release entrypoint'
+  [[ "$app_root" =~ ^/opt/teleagent/releases/sha256-[a-f0-9]{64}$ ]] ||
+    fail 'disabled installation requires an immutable release root'
+}
 
 declare -a sources=()
 declare -a targets=()
@@ -202,6 +217,8 @@ load_assets() {
     /etc/teleagent/provider-runtime/provider-libexec.manifest 0444 0444
   add_asset deploy/worker-session/teleagent-provider-supervisor-client \
     /usr/local/libexec/teleagent-provider-supervisor-client 0755 0755
+  add_asset claude-api-server/provider-supervisor-client.js \
+    /usr/local/libexec/teleagent-provider-supervisor-client.js 0644 0444
   add_asset deploy/worker-session/teleagent-session-pane-entry \
     /usr/local/libexec/teleagent-session-pane-entry 0755 0755
   add_asset deploy/worker-session/teleagent-worker-session-create \
@@ -353,19 +370,21 @@ source_check() {
       fail 'a dormant worker-session unit became enableable'
   done
   [ "$(/usr/bin/grep -Fxc \
-    'ExecStartPre=+/usr/local/libexec/teleagent-provider-boundary --action attest-workspace-storage' \
+    'ExecStartPre=+/usr/bin/python3 -I /usr/local/libexec/verify-teleagent-release-closure --preflight-component worker-session ${CREDENTIALS_DIRECTORY}/teleagent-release-gate' \
     "$source_root/teleagent-worker-session.service" || true)" -eq 1 ] ||
-    fail 'the worker broker lost its workspace storage activation gate'
+    fail 'the worker broker lost its immutable storage preflight'
   [ "$(/usr/bin/grep -Fxc \
-    'ExecStartPre=+/usr/local/libexec/teleagent-provider-boundary --action attest-provider-plane-storage' \
-    "$source_root/teleagent-worker-session.service" || true)" -eq 1 ] ||
-    fail 'the worker broker lost its provider plane storage activation gate'
-  [ "$(/usr/bin/grep -Fxc \
-    'ExecStartPre=+/usr/local/libexec/teleagent-provider-boundary --action assert-supervisor-start-admitted' \
+    'ExecStartPre=+/usr/bin/python3 -I /usr/local/libexec/verify-teleagent-release-closure --preflight-component provider-supervisor-%i ${CREDENTIALS_DIRECTORY}/teleagent-release-gate' \
     "$source_root/teleagent-provider-supervisor@.service" || true)" -eq 1 ] ||
-    fail 'the provider supervisor lost its workspace storage activation gate'
+    fail 'the provider supervisor lost its immutable admission preflight'
   local release_gate gate_count gate_line first_exec_line condition_count reload_count
+  local release_credential expected_start start_count credential_count component
+  local execution_pattern credential_pattern actual_execution expected_execution
+  local actual_credentials expected_credentials service_execution service_credentials
   release_gate='ExecStartPre=+/usr/bin/env -i HOME=/var/empty PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 /usr/local/libexec/verify-teleagent-release-closure --check-start-gate'
+  release_credential='LoadCredential=teleagent-release-gate:/run/teleagent-release-gate/verified.json'
+  execution_pattern='^Exec(Condition|StartPre|Start|StartPost|Reload|Stop|StopPost)='
+  credential_pattern='^(LoadCredential|LoadCredentialEncrypted|SetCredential|SetCredentialEncrypted|ImportCredential|ImportCredentialEx)='
   for unit in \
     teleagent-worker-session.service \
     teleagent-provider-supervisor@.service \
@@ -374,6 +393,19 @@ source_check() {
     filename="$source_root/$unit"
     gate_count=$(/usr/bin/grep -Fxc "$release_gate" "$filename" || true)
     [ "$gate_count" -eq 1 ] || fail 'a release-consuming unit lost its exact start gate'
+    case "$unit" in
+      teleagent-worker-session.service) component=worker-session ;;
+      teleagent-provider-supervisor@.service) component='provider-supervisor-%i' ;;
+      teleagent-provider-egress@.service) component='provider-egress-%i' ;;
+      teleagent-provider-libexec-install.service) component=provider-libexec-install ;;
+    esac
+    expected_start="ExecStart=/usr/bin/python3 -I /usr/local/libexec/verify-teleagent-release-closure --start-component $component \${CREDENTIALS_DIRECTORY}/teleagent-release-gate"
+    start_count=$(/usr/bin/grep -Fxc "$expected_start" "$filename" || true)
+    [ "$start_count" -eq 1 ] || fail 'a release-consuming unit lost its immutable launcher'
+    credential_count=$(/usr/bin/grep -Fxc "$release_credential" "$filename" || true)
+    [ "$credential_count" -eq 1 ] || fail 'a release-consuming unit lost its gate credential'
+    ! /usr/bin/grep -E '^Exec(Condition|StartPre|StartPost|Start|StopPost|Stop|Reload)=.*\/opt\/teleagent\/current' "$filename" |
+      /usr/bin/grep -q . || fail 'a release-consuming unit still executes mutable current'
     gate_line=$(/usr/bin/awk -v gate="$release_gate" '$0 == gate { print NR }' "$filename")
     first_exec_line=$(/usr/bin/awk \
       '/^[[:space:]]*Exec(Condition|StartPre|Start)[[:space:]]*=/ { print NR; exit }' \
@@ -388,6 +420,70 @@ source_check() {
       '^[[:space:]]*ExecReload[[:space:]]*=' "$filename" || true)
     [ "$reload_count" -eq 0 ] ||
       fail 'a release-consuming unit contains an ungated reload command'
+    /usr/bin/cmp -s -- "$filename" <(LC_ALL=C /usr/bin/tr -d '\000\r' < "$filename") ||
+      fail 'a release-consuming unit contains a forbidden control byte'
+    ! /usr/bin/grep -Eq '\\[[:space:]]*$' "$filename" ||
+      fail 'a release-consuming unit contains an unsupported line continuation'
+    ! /usr/bin/grep -Eq \
+      '(^[[:space:]]+(Exec(Condition|StartPre|Start|StartPost|Reload|Stop|StopPost)|(LoadCredential|LoadCredentialEncrypted|SetCredential|SetCredentialEncrypted|ImportCredential|ImportCredentialEx))[[:space:]]*=|^(Exec(Condition|StartPre|Start|StartPost|Reload|Stop|StopPost)|(LoadCredential|LoadCredentialEncrypted|SetCredential|SetCredentialEncrypted|ImportCredential|ImportCredentialEx))[[:space:]]+=)' \
+      "$filename" ||
+      fail 'a release-consuming unit contains noncanonical lifecycle or credential assignment whitespace'
+    ! /usr/bin/grep -Eq '^ExecStartPost=|^ExecStop=|^ExecStopPost=' "$filename" ||
+      fail 'a release-consuming unit contains an unsupported lifecycle command'
+    case "$unit" in
+      teleagent-worker-session.service)
+        expected_execution="$release_gate
+ExecStartPre=+/usr/bin/python3 -I /usr/local/libexec/verify-teleagent-release-closure --preflight-component worker-session \${CREDENTIALS_DIRECTORY}/teleagent-release-gate
+$expected_start"
+        expected_credentials=$release_credential
+        ;;
+      teleagent-provider-supervisor@.service)
+        expected_execution="$release_gate
+ExecStartPre=+/usr/bin/python3 -I /usr/local/libexec/verify-teleagent-release-closure --preflight-component provider-supervisor-%i \${CREDENTIALS_DIRECTORY}/teleagent-release-gate
+$expected_start"
+        expected_credentials=$release_credential
+        ;;
+      teleagent-provider-egress@.service)
+        expected_execution="$release_gate
+ExecStartPre=+/usr/bin/python3 -I /usr/local/libexec/verify-teleagent-release-closure --preflight-component provider-egress-%i \${CREDENTIALS_DIRECTORY}/teleagent-release-gate
+$expected_start"
+        expected_credentials="LoadCredential=provider-api-key:/etc/teleagent/provider-egress-secrets/%i.api-key
+$release_credential"
+        ;;
+      teleagent-provider-libexec-install.service)
+        expected_execution="$release_gate
+$expected_start"
+        expected_credentials=$release_credential
+        ;;
+    esac
+    actual_execution=$(/usr/bin/grep -E "$execution_pattern" "$filename" || true)
+    [ "$(printf '%s\n' "$actual_execution" | LC_ALL=C /usr/bin/sort)" = \
+      "$(printf '%s\n' "$expected_execution" | LC_ALL=C /usr/bin/sort)" ] ||
+      fail 'a release-consuming unit execution command closure drifted'
+    service_execution=$(/usr/bin/awk -v pattern="$execution_pattern" '
+      /^[[:space:]]*\[[^][]+\][[:space:]]*$/ {
+        section = $0
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", section)
+        next
+      }
+      section == "[Service]" && $0 ~ pattern { print }
+    ' "$filename")
+    [ "$service_execution" = "$actual_execution" ] ||
+      fail 'a release-consuming unit execution command escaped the Service section'
+    actual_credentials=$(/usr/bin/grep -E "$credential_pattern" "$filename" || true)
+    [ "$(printf '%s\n' "$actual_credentials" | LC_ALL=C /usr/bin/sort)" = \
+      "$(printf '%s\n' "$expected_credentials" | LC_ALL=C /usr/bin/sort)" ] ||
+      fail 'a release-consuming unit credential directive closure drifted'
+    service_credentials=$(/usr/bin/awk -v pattern="$credential_pattern" '
+      /^[[:space:]]*\[[^][]+\][[:space:]]*$/ {
+        section = $0
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", section)
+        next
+      }
+      section == "[Service]" && $0 ~ pattern { print }
+    ' "$filename")
+    [ "$service_credentials" = "$actual_credentials" ] ||
+      fail 'a release-consuming unit credential directive escaped the Service section'
   done
   ! /usr/bin/grep -Fq '/etc/teleagent/worker-session/ENABLE' \
     "$source_root/teleagent-worker-session.tmpfiles" ||
@@ -700,7 +796,7 @@ check_installed() {
   assert_component_storage
 }
 
-case "${1:-}" in
+case "$requested_action" in
   --source-check)
     [ "$#" -eq 1 ] || fail 'unexpected arguments'
     source_check
@@ -708,6 +804,7 @@ case "${1:-}" in
     ;;
   --install-disabled)
     [ "$#" -eq 1 ] || fail 'unexpected arguments'
+    require_immutable_mutation_entrypoint
     install_disabled
     printf 'WORKER_SESSION_INSTALLED_DISABLED\n'
     ;;

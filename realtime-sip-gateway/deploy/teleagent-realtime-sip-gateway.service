@@ -13,15 +13,13 @@ ConditionPathExists=/etc/teleagent/credentials/openai-api-key
 ConditionPathExists=/etc/teleagent/credentials/openai-webhook-secret
 ConditionPathExists=/etc/teleagent/credentials/sip-pbx-auth-secret
 ConditionPathIsMountPoint=/var/lib/teleagent-sip-gateway
-ConditionPathExists=/opt/teleagent/current/realtime-sip-gateway/src/index.js
-ConditionFileIsExecutable=/usr/local/libexec/teleagent-node
 
 [Service]
 Type=simple
 User=teleagent-sip-gateway
 Group=teleagent-sip-gateway
 SupplementaryGroups=
-WorkingDirectory=/opt/teleagent/current/realtime-sip-gateway
+WorkingDirectory=/
 Environment=NODE_ENV=production
 Environment=HOME=/var/lib/teleagent-sip-gateway
 Environment=TELEAGENT_SIP_STATE_BOUNDARY=required
@@ -32,10 +30,11 @@ LoadCredential=OPENAI_API_KEY:/etc/teleagent/credentials/openai-api-key
 LoadCredential=OPENAI_WEBHOOK_SECRET:/etc/teleagent/credentials/openai-webhook-secret
 LoadCredential=SIP_PBX_AUTH_SECRET:/etc/teleagent/credentials/sip-pbx-auth-secret
 LoadCredential=SIP_STATE_INITIALIZED:/etc/teleagent/realtime-sip-gateway/STATE_INITIALIZED
+LoadCredential=teleagent-release-gate:/run/teleagent-release-gate/verified.json
 UnsetEnvironment=ENV BASH_ENV CDPATH LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT GCONV_PATH NODE_OPTIONS NODE_PATH NODE_EXTRA_CA_CERTS NODE_TLS_REJECT_UNAUTHORIZED NODE_USE_ENV_PROXY PYTHONPATH PERL5LIB RUBYOPT SSLKEYLOGFILE SSL_CERT_FILE SSL_CERT_DIR HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy OPENAI_API_KEY OPENAI_WEBHOOK_SECRET SIP_PBX_AUTH_SECRET OPENAI_API_KEY_FILE OPENAI_WEBHOOK_SECRET_FILE SIP_PBX_AUTH_SECRET_FILE
 ExecStartPre=+/usr/bin/env -i HOME=/var/empty PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 /usr/local/libexec/verify-teleagent-release-closure --check-start-gate
-ExecStartPre=+/usr/local/libexec/verify-realtime-sip-gateway --activation-check
-ExecStart=/usr/local/libexec/teleagent-node /opt/teleagent/current/realtime-sip-gateway/src/index.js
+ExecStartPre=+/usr/bin/python3 -I /usr/local/libexec/verify-teleagent-release-closure --preflight-component realtime-sip-gateway ${CREDENTIALS_DIRECTORY}/teleagent-release-gate
+ExecStart=/usr/bin/python3 -I /usr/local/libexec/verify-teleagent-release-closure --start-component realtime-sip-gateway ${CREDENTIALS_DIRECTORY}/teleagent-release-gate
 Restart=on-failure
 RestartPreventExitStatus=77 78
 RestartSec=5s
@@ -72,7 +71,7 @@ ProtectKernelTunables=true
 ProtectProc=invisible
 ProtectSystem=strict
 ProcSubset=pid
-ReadOnlyPaths=/opt/teleagent/current/realtime-sip-gateway
+ReadOnlyPaths=/opt/teleagent/releases /usr/local/libexec
 ReadWritePaths=/var/lib/teleagent-sip-gateway
 InaccessiblePaths=/var/lib/teleagent-provider-plane
 InaccessiblePaths=/var/lib/teleagent-worker-state

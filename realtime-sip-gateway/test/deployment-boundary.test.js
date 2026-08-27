@@ -17,6 +17,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   inspectInstalledStorage,
+  requireImmutableActivationPreflight,
   validateActivationGate,
   validateIdentityRecords,
   validateInstalledManifestAssets,
@@ -34,6 +35,69 @@ const GIB = 1024n * 1024n * 1024n;
 const RELEASE_START_GATE = 'ExecStartPre=+/usr/bin/env -i HOME=/var/empty ' +
   'PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 ' +
   '/usr/local/libexec/verify-teleagent-release-closure --check-start-gate';
+const RELEASE_PREFLIGHT = 'ExecStartPre=+/usr/bin/python3 -I ' +
+  '/usr/local/libexec/verify-teleagent-release-closure ' +
+  '--preflight-component realtime-sip-gateway ' +
+  '${CREDENTIALS_DIRECTORY}/teleagent-release-gate';
+
+function immutablePreflightFixture() {
+  const releaseRoot = `/opt/teleagent/releases/sha256-${'a'.repeat(64)}`;
+  const environment = {
+    TELEAGENT_RELEASE_ROOT: releaseRoot,
+    TELEAGENT_HANDOFF_LIFECYCLE_LOCK_FD: '17',
+  };
+  const lock = {
+    dev: 7,
+    ino: 11,
+    uid: 0,
+    gid: 0,
+    mode: 0o40755,
+    isDirectory: () => true,
+  };
+  const filesystem = {
+    realpathSync: (filename) => filename,
+    fstatSync: () => ({ ...lock }),
+    lstatSync: () => ({ ...lock }),
+  };
+  return {
+    environment,
+    filesystem,
+    executable: `${releaseRoot}/runtime/node/bin/node`,
+    invokedScript: `${releaseRoot}/realtime-sip-gateway/deploy/verify-realtime-sip-gateway`,
+  };
+}
+
+test('immutable activation preflight requires bundled Node and the retained exact lock', () => {
+  const valid = immutablePreflightFixture();
+  assert.equal(requireImmutableActivationPreflight({
+    ...valid,
+    execArguments: [],
+    uid: 0,
+  }), 17);
+  assert.equal(valid.environment.TELEAGENT_HANDOFF_LIFECYCLE_LOCK_FD, undefined);
+
+  for (const mutate of [
+    (fixture) => { fixture.executable = '/usr/local/libexec/teleagent-node'; },
+    (fixture) => { fixture.invokedScript = '/usr/local/libexec/verify-realtime-sip-gateway'; },
+    (fixture) => { fixture.environment.TELEAGENT_HANDOFF_LIFECYCLE_LOCK_FD = '2'; },
+    (fixture) => { fixture.uid = 1000; },
+    (fixture) => {
+      fixture.filesystem = {
+        ...fixture.filesystem,
+        fstatSync: () => ({
+          dev: 7, ino: 12, uid: 0, gid: 0, mode: 0o40755, isDirectory: () => true,
+        }),
+      };
+    },
+  ]) {
+    const fixture = { ...immutablePreflightFixture(), execArguments: [], uid: 0 };
+    mutate(fixture);
+    assert.throws(
+      () => requireImmutableActivationPreflight(fixture),
+      /immutable release|retained lock|escaped|lock identity/u,
+    );
+  }
+});
 
 function source(name) {
   return readFileSync(path.join(deployRoot, name), 'utf8');
@@ -87,17 +151,52 @@ test('source policy is static, sentinel-gated, bounded, and creates no activatio
   assert.equal(service.split('\n').filter((line) => line === RELEASE_START_GATE).length, 1);
   assert.equal(service.split('\n').filter((line) => /^ExecStart(?:Pre)?=/u.test(line))[0],
     RELEASE_START_GATE);
+  assert.ok(service.includes(
+    `${RELEASE_PREFLIGHT}\n`
+  ));
+  assert.ok(service.includes(
+    'ExecStart=/usr/bin/python3 -I /usr/local/libexec/verify-teleagent-release-closure ' +
+    '--start-component realtime-sip-gateway ' +
+    '${CREDENTIALS_DIRECTORY}/teleagent-release-gate\n'
+  ));
+  assert.ok(service.includes(
+    'LoadCredential=teleagent-release-gate:' +
+    '/run/teleagent-release-gate/verified.json\n'
+  ));
+  assert.doesNotMatch(service, /^ExecStart=.*\/opt\/teleagent\/current/m);
   for (const weakened of [
     service.replace('--check-start-gate', '--check-runtime'),
     service.replace('/usr/bin/env -i', '/usr/bin/env'),
     service.replace(`${RELEASE_START_GATE}\n`, `${RELEASE_START_GATE}\n${RELEASE_START_GATE}\n`),
     service.replace(
-      `${RELEASE_START_GATE}\nExecStartPre=+/usr/local/libexec/verify-realtime-sip-gateway --activation-check`,
-      `ExecStartPre=+/usr/local/libexec/verify-realtime-sip-gateway --activation-check\n${RELEASE_START_GATE}`,
+      `${RELEASE_START_GATE}\n${RELEASE_PREFLIGHT}`,
+      `${RELEASE_PREFLIGHT}\n${RELEASE_START_GATE}`,
     ),
+    service.replace(RELEASE_PREFLIGHT,
+      'ExecStartPre=+/usr/local/libexec/verify-realtime-sip-gateway --activation-check'),
+    `${service}ExecStartPre=/usr/bin/false\n`,
+    `${service}ExecStart=/usr/bin/false\n`,
+    `${service}LoadCredential=unreviewed:/tmp/unreviewed\n`,
+    `${service}LoadCredential=teleagent-release-gate:/run/teleagent-release-gate/verified.json\n`,
+    `${service}LoadCredentialEncrypted=unreviewed:/tmp/unreviewed\n`,
+    `${service}ImportCredential=unreviewed\n`,
+    `${service}ImportCredentialEx=unreviewed\n`,
+    `${service}SetCredential=unreviewed:not-secret\n`,
+    `${service}SetCredentialEncrypted=unreviewed:not-encrypted\n`,
     `${service}ExecCondition=/bin/true\n`,
     `${service}ExecReload=/usr/local/libexec/reload-from-release\n`,
-  ]) assert.throws(() => validateServiceSource(weakened), /release start gate|reviewed/u);
+    `${service}ExecStartPost =/opt/teleagent/current/unreviewed-post\n`,
+    `${service}\tExecStop=/opt/teleagent/current/unreviewed-stop\n`,
+    `${service}LoadCredential =unreviewed:/tmp/unreviewed\n`,
+    `${service}LoadCredentialEncrypted =unreviewed:/tmp/unreviewed\n`,
+    `${service}\tImportCredentialEx =unreviewed\n`,
+    `${service}ExecStartPost\\\n =/opt/teleagent/current/unreviewed-continuation\n`,
+    `${service}ExecStartPost\\\r\n =/opt/teleagent/current/unreviewed-crlf-continuation\n`,
+    `${service}ExecStartPost=\0/opt/teleagent/current/unreviewed-control\n`,
+  ]) assert.throws(
+    () => validateServiceSource(weakened),
+    /release start gate|immutable activation preflight|credential|reviewed|noncanonical|line continuation|control byte/u,
+  );
   assert.equal(validateSysusersSource(source('teleagent-realtime-sip-gateway.sysusers')), true);
   assert.equal(validateTmpfilesSource(source('teleagent-realtime-sip-gateway.tmpfiles')), true);
 
@@ -139,7 +238,7 @@ test('source policy is static, sentinel-gated, bounded, and creates no activatio
       () => validateServiceSource(
         `${source('teleagent-realtime-sip-gateway.service')}\n${unsafeDirective}\n`,
       ),
-      /reviewed|exactly once|credential/u,
+      /release start gate|reviewed|exactly once|credential/u,
     );
   }
   assert.throws(
@@ -260,7 +359,7 @@ test('installed manifest pins every root-executed policy asset including install
     readAsset: (record) => readFileSync(path.join(packageRoot, record.relative)),
   }), true);
   assert.throws(() => validateInstalledManifestAssets(
-    manifest.replace(/^[a-f0-9]/u, '0'),
+    manifest.replace(/^[a-f0-9]/u, (value) => value === '0' ? '1' : '0'),
     { readAsset: (record) => readFileSync(path.join(packageRoot, record.relative)) },
   ), /digest verification/u);
 });
@@ -348,6 +447,8 @@ test('systemd accepts the static hardened unit in an offline fixture', {
   ]) makeDirectory(directoryName);
   writeFileSync(path.join(root, 'usr/bin/env'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
   chmodSync(path.join(root, 'usr/bin/env'), 0o755);
+  writeFileSync(path.join(root, 'usr/bin/python3'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  chmodSync(path.join(root, 'usr/bin/python3'), 0o755);
   copyFileSync(
     path.join(deployRoot, 'teleagent-realtime-sip-gateway.service'),
     path.join(root, 'etc/systemd/system/teleagent-realtime-sip-gateway.service'),
@@ -365,7 +466,7 @@ test('systemd accepts the static hardened unit in an offline fixture', {
     );
   }
   for (const executableName of [
-    'verify-realtime-sip-gateway', 'teleagent-node',
+    'verify-realtime-sip-gateway', 'verify-teleagent-release-closure', 'teleagent-node',
   ]) {
     const filename = path.join(root, 'usr/local/libexec', executableName);
     writeFileSync(filename, '#!/bin/sh\nexit 0\n', { mode: 0o755 });

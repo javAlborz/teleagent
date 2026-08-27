@@ -12,7 +12,7 @@ User=teleagent-session-broker
 Group=teleagent-session-broker
 SupplementaryGroups=teleagent-agent-workspace teleagent-provider-launch
 UMask=0077
-WorkingDirectory=/opt/teleagent/current
+WorkingDirectory=/
 Environment=HOME=/var/lib/teleagent-worker-state/session-broker
 Environment=PATH=/opt/teleagent/agent-tools:/usr/local/bin:/usr/bin:/bin
 Environment=LANG=C.UTF-8
@@ -24,10 +24,10 @@ Environment=WORKER_SESSION_SINGLETON_DB_PATH=/var/lib/teleagent-worker-state/ses
 Environment=WORKER_SESSION_PROVIDER_VIEW=/var/lib/teleagent-worker-state/session-broker/provider-view
 Environment=WORKER_SESSION_WORKSPACE_ROOT=/srv/teleagent-agent-workspaces
 Environment=WORKER_SESSION_INSPECTION_ROOTS=/srv/teleagent-agent-workspaces/phone
+LoadCredential=teleagent-release-gate:/run/teleagent-release-gate/verified.json
 ExecStartPre=+/usr/bin/env -i HOME=/var/empty PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 /usr/local/libexec/verify-teleagent-release-closure --check-start-gate
-ExecStartPre=+/usr/local/libexec/teleagent-provider-boundary --action attest-workspace-storage
-ExecStartPre=+/usr/local/libexec/teleagent-provider-boundary --action attest-provider-plane-storage
-ExecStart=/opt/teleagent/node/bin/node /opt/teleagent/current/claude-api-server/worker-session-broker-service.js
+ExecStartPre=+/usr/bin/python3 -I /usr/local/libexec/verify-teleagent-release-closure --preflight-component worker-session ${CREDENTIALS_DIRECTORY}/teleagent-release-gate
+ExecStart=/usr/bin/python3 -I /usr/local/libexec/verify-teleagent-release-closure --start-component worker-session ${CREDENTIALS_DIRECTORY}/teleagent-release-gate
 Restart=on-failure
 RestartSec=2s
 KillMode=control-group

@@ -346,11 +346,11 @@ verify_gate_and_release() {
   assert_directory_safe "$(host_path /run)"
   gate_directory=$(host_path "$gate_dir")
   gate=$(host_path "$gate_file")
-  assert_directory_safe "$gate_directory" 700
+  assert_directory_safe "$gate_directory" 755
   [ -f "$gate" ] && [ ! -L "$gate" ] || fail 'the boot-bound release gate is absent or unsafe'
   [ "$(/usr/bin/readlink -f -- "$gate")" = "$gate" ] || fail 'the release gate resolves through a link'
   [ "$(/usr/bin/stat -c '%u:%g:%a:%h' -- "$gate")" = \
-    "${expected_uid}:${expected_gid}:400:1" ] || fail 'the release gate metadata is unsafe'
+    "${expected_uid}:${expected_gid}:444:1" ] || fail 'the release gate metadata is unsafe'
   gate_before=$(/usr/bin/stat -c '%d:%i:%s:%u:%g:%a:%h:%Y:%Z' -- "$gate")
   [ "$(/usr/bin/stat -c '%s' -- "$gate")" -le 1024 ] || fail 'the release gate is oversized'
   [ "$(/usr/bin/wc -l < "$gate")" -eq 1 ] || fail 'the release gate is not canonical one-line JSON'

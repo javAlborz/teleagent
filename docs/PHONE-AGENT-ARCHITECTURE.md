@@ -74,13 +74,18 @@ The production Realtime client is pinned to the reviewed OpenAI WebSocket
 origin, path, model, transcription model, and voice set. Configuration cannot
 redirect the provider credential or call stream to another origin.
 
-In the future design, handset confirmation becomes useful only after an
-independently isolated PBX attester—not voice and not a FreeSWITCH event source
-voice can inject into—plays the controller-canonical summary and durably
-attests later handset-side DTMF for the exact call leg and request. A
-controller-owned authority validates that evidence and internally dispatches
-one call-bound capability for one canonical action plan. Voice never receives
-the signer or capability.
+Handset confirmation becomes useful only after an independently isolated PBX
+attester—not voice and not a FreeSWITCH event source voice can inject into—plays
+the controller-canonical summary and durably attests later handset-side DTMF
+for the exact call leg and request. Dormant fixture modules now specify three
+non-interchangeable Ed25519 artifacts: controller arm `telereq1`, PBX evidence
+`teleattest1`, and controller execution capability `telecap2`. They enforce
+exact prompt/request/plan/call-leg bindings, temporal ordering, distinct key
+roles, and atomic replay consumption. They are not imported by a production
+entrypoint and provide no activation authority. A real controller-owned
+authority must validate that evidence and internally dispatch one call-bound
+capability for one canonical action plan. Voice never receives a signer or
+capability. See `PBX-APPROVAL-ATTESTATION-CONTRACT.md`.
 
 ### Controller and durable executor
 
@@ -200,7 +205,14 @@ vacated port. Production activation remains blocked until infrastructure puts
 each media service, including Asterisk, in its reviewed per-service network
 namespace, enforces explicit ingress links, and attests that Asterisk's exact
 effective RTP allocation is disjoint from FreeSWITCH `30000-30100`. The current
-application bundle deliberately does not create that topology. The release
+application bundle deliberately does not create that topology. The dormant
+`lib/sip-media-boundary-contract.js` fixture validates the prospective four
+namespace/veth/UID/address topology, exact directional flow tuples, disjoint
+listeners, initiator-only TCP admission with conntrack-established return
+traffic, and a boot/configuration/topology-bound Ed25519 Asterisk observation.
+Validation requires both a host-owned expected topology digest and synchronous
+replay consumption. It performs no networking action and is not activation
+evidence. The release
 reason
 `receiver-safe-sip-media-network-boundary-and-asterisk-rtp-attestation-are-not-implemented`
 must remain present until staging proves the installed infrastructure boundary.
@@ -229,8 +241,32 @@ external host-owned release verifier is the first start command, before the
 application identity check or launcher. Its empty-environment
 `--check-start-gate` cheaply revalidates current-boot approval, selected
 release/manifest identity, and installed runtime metadata without rescanning
-or content-hashing the release; the serialized disabled host handoff retains
-the full `--check-runtime` pass. The standalone installer also requires the
+or content-hashing the release. Systemd snapshots the nonsecret, host-owned
+start gate into a private mode-`0400` service credential with `LoadCredential`;
+while holding a shared lock on the stable handoff inode,
+the fixed host launcher then revalidates the snapshot plus the live approval,
+global boot gate, current selector, immutable release device/inode, component,
+service identity, and scrubbed environment before executing the exact
+release-root launcher and Node runtime. The descriptor is close-on-exec, and the
+serialized disabled host handoff holds the exclusive side of the same lock
+while validating and installing the already selected approved release. The
+root-only worker/provider/Realtime admission checks use closed profiles in the
+same host verifier. Each profile authenticates the snapshot and live release,
+retains the shared lock in both verifier and child, and runs only an immutable
+helper via that release's bundled Node before the ordinary workload start
+revalidates independently. Provider-egress preflight also passes only the
+selected systemd credential snapshot to its helper, which requires an exact
+match with the selected live source and distinct live provider sources. No
+supported credential writer exists; a future rotation writer must take the
+exclusive handoff lock. No supported tool can change
+`/opt/teleagent/current`. A future reviewed
+selector transaction must take that exclusive lock and prove the whole bounded
+unit set, including voice A, inactive before publishing B; A-to-B replacement
+while A is active is unsupported. Because systemd does not expose this
+credential to `ExecStop`, stop and offline recovery instead use exact
+credential-free operations in the fixed host verifier and revalidate the live
+approved current release. The handoff also retains the full `--check-runtime`
+pass. The standalone installer requires the
 loaded service and container slice to use their exact `/etc/systemd/system`
 fragments, with no drop-ins or pending daemon reload. The
 no-network credential preflight is separately capped at 0.5 CPU, 256 MiB, and
@@ -313,7 +349,10 @@ immutable root; a moving or chained release selector cannot mix source trees.
 
 The unconditional `ExecStopPost` uses the host-owned shell installer rather
 than the release Node runtime, so a failed release start gate cannot invoke
-release-derived cleanup code. It removes only containers bearing the exact
+release-derived cleanup code. The fixed verifier waits for the exclusive
+lifecycle lock and passes the same descriptor into that installer, preserving
+serialization across the separate stop/post-stop commands and parent-only
+verifier failure. It removes only containers bearing the exact
 `com.docker.compose.project=teleagent-voice` label and proves none remain before
 removing projected credentials. This cleanup does not clear controller panic or
 convert an unknown panic outcome into success, and it never edits durable
@@ -326,9 +365,11 @@ stack; successful container cleanup cannot prove that controller-visible work
 never began.
 
 Recovery is explicit and two-stage. With the voice containers absent, a root
-operator invokes the fixed launcher with `recover`; it re-proves zero exact
-project containers and requests the controller's coordinated panic across the
-executor, provider, and privileged planes. Only a positive persisted/quiesced
+operator invokes the fixed host verifier's `--recover-voice-stack` operation;
+it refuses unless the live selector already names the approved immutable
+current release, re-proves zero exact project containers, and requests the
+controller's coordinated panic
+across the executor, provider, and privileged planes. Only a positive persisted/quiesced
 response records the activation recovered. The controller remains panic-locked
 until the separate authenticated operator unlock verifies its own durable task,
 privileged broker, provider cgroup, and worker-session recovery gates. Startup

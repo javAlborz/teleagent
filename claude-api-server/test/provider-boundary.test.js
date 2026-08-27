@@ -256,6 +256,7 @@ test('provider plane storage is a bounded dedicated mount with private superviso
           : (overrides.homeDev?.[filename] ?? 2n),
     }),
     statfs: () => ({
+      type: overrides.filesystemType ?? 0xef53n,
       bsize: 4096n,
       blocks: (overrides.capacity ?? (2n * 1024n * 1024n * 1024n)) / 4096n,
       bavail: (overrides.free ?? (768n * 1024n * 1024n)) / 4096n,
@@ -277,6 +278,23 @@ test('provider plane storage is a bounded dedicated mount with private superviso
     () => inspect({ free: 511n * 1024n * 1024n }),
     /reserve is exhausted/
   );
+  assert.throws(
+    () => inspect({ filesystemType: 0x01021994n }),
+    /durable local filesystem/
+  );
+  assert.throws(
+    () => inspect({ filesystemType: 0x6969n }),
+    /durable local filesystem/
+  );
+  for (const filesystemType of [
+    0xef53n,
+    0x58465342n,
+    BigInt.asIntN(32, 0x9123683en),
+    BigInt.asIntN(32, 0xf2f52010n),
+    0x2fc12fc1n,
+  ]) {
+    assert.doesNotThrow(() => inspect({ filesystemType }));
+  }
   assert.equal(inspect({
     free: 511n * 1024n * 1024n,
     requireReserve: false,
@@ -297,7 +315,9 @@ test('provider plane storage is a bounded dedicated mount with private superviso
 
   const workspace = { device: 2n };
   const providerPlane = { device: 3n };
+  const anchors = [];
   assert.deepEqual(boundary.validateProviderStorageIsolation({
+    validateWorkspace: (directory) => anchors.push(directory),
     validateWorkspaceStorage: (directory) => {
       assert.equal(directory, '/srv/teleagent-agent-workspaces');
       return workspace;
@@ -307,10 +327,100 @@ test('provider plane storage is a bounded dedicated mount with private superviso
       return providerPlane;
     },
   }), { workspace, providerPlane });
+  assert.deepEqual(anchors, ['/srv/teleagent-agent-workspaces/phone']);
   assert.throws(() => boundary.validateProviderStorageIsolation({
+    validateWorkspace: () => {},
     validateWorkspaceStorage: () => ({ device: 7n }),
     validateProviderPlaneStorage: () => ({ device: 7n }),
   }), /require distinct filesystems/);
+  assert.throws(() => boundary.validateProviderStorageIsolation({
+    validateWorkspace: () => { throw new Error('replaceable workspace anchor'); },
+    validateWorkspaceStorage: () => assert.fail('storage must follow anchor validation'),
+    validateProviderPlaneStorage: () => assert.fail('provider storage must follow anchor validation'),
+  }), /replaceable workspace anchor/);
+  assert.equal(boundary.attestWorkerStorageBoundary({
+    validateStorage: () => ({ workspace, providerPlane }),
+  }), 'PROVIDER_WORKER_STORAGE_OK');
+});
+
+test('root provider preflights require bundled Node and the retained exact lock', () => {
+  const releaseRoot = `/opt/teleagent/releases/sha256-${'b'.repeat(64)}`;
+  const fixture = () => {
+    const environment = {
+      TELEAGENT_RELEASE_ROOT: releaseRoot,
+      TELEAGENT_HANDOFF_LIFECYCLE_LOCK_FD: '19',
+    };
+    const lock = {
+      dev: 8,
+      ino: 13,
+      uid: 0,
+      gid: 0,
+      mode: 0o40755,
+      isDirectory: () => true,
+    };
+    return {
+      environment,
+      filesystem: {
+        realpathSync: (filename) => filename,
+        fstatSync: () => ({ ...lock }),
+        lstatSync: () => ({ ...lock }),
+      },
+      executable: `${releaseRoot}/runtime/node/bin/node`,
+      invokedScript: `${releaseRoot}/deploy/worker-session/teleagent-provider-boundary`,
+      execArguments: [],
+      uid: 0,
+    };
+  };
+  const valid = fixture();
+  assert.equal(boundary.requireImmutablePreflight(valid), 19);
+  assert.equal(valid.environment.TELEAGENT_HANDOFF_LIFECYCLE_LOCK_FD, undefined);
+
+  for (const mutate of [
+    (input) => { input.executable = '/usr/local/libexec/teleagent-node'; },
+    (input) => { input.invokedScript = '/usr/local/libexec/teleagent-provider-boundary'; },
+    (input) => { input.environment.TELEAGENT_HANDOFF_LIFECYCLE_LOCK_FD = '1'; },
+    (input) => { input.uid = 1000; },
+    (input) => {
+      input.filesystem = {
+        ...input.filesystem,
+        lstatSync: () => ({
+          dev: 8, ino: 14, uid: 0, gid: 0, mode: 0o40755, isDirectory: () => true,
+        }),
+      };
+    },
+  ]) {
+    const input = fixture();
+    mutate(input);
+    assert.throws(
+      () => boundary.requireImmutablePreflight(input),
+      /immutable release|retained lock|escaped|lock identity/u,
+    );
+  }
+});
+
+test('worker storage main route requires immutable preflight before attestation', async () => {
+  const calls = [];
+  await assert.rejects(
+    boundary.main([], { FIXTURE: 'value' }, {
+      parseInput: () => ({
+        action: 'attest-worker-storage',
+        provider: null,
+        launchId: null,
+        spec: null,
+      }),
+      requirePreflight: ({ environment }) => {
+        assert.deepEqual(environment, { FIXTURE: 'value' });
+        calls.push('preflight');
+        throw new Error('stop-before-storage');
+      },
+      attestWorkerStorage: () => {
+        calls.push('storage');
+        return 'PROVIDER_WORKER_STORAGE_OK';
+      },
+    }),
+    /stop-before-storage/u,
+  );
+  assert.deepEqual(calls, ['preflight']);
 });
 
 test('workspace mounts use one non-replaceable root anchor and one global launch lock', () => {
@@ -646,6 +756,11 @@ test('global panic actions admit only the isolated session broker and keep super
     '--action', 'attest-provider-plane-storage',
   ], { SUDO_USER: 'root-installer-caller' }, { uid: 0 }), {
     action: 'attest-provider-plane-storage', provider: null, launchId: null, spec: null,
+  });
+  assert.deepEqual(boundary.parseControl([
+    '--action', 'attest-worker-storage',
+  ], {}, { uid: 0 }), {
+    action: 'attest-worker-storage', provider: null, launchId: null, spec: null,
   });
   assert.throws(
     () => boundary.parseControl([

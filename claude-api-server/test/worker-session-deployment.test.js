@@ -70,9 +70,9 @@ test('session broker, RPC socket, state DB, and tmux socket exclude provider ide
   assert.match(service, /^CPUQuota=50%$/m);
   assert.match(service, /^IOAccounting=yes$/m);
   assert.match(service,
-    /^ExecStartPre=\+\/usr\/local\/libexec\/teleagent-provider-boundary --action attest-workspace-storage$/m);
-  assert.match(service,
-    /^ExecStartPre=\+\/usr\/local\/libexec\/teleagent-provider-boundary --action attest-provider-plane-storage$/m);
+    /^ExecStartPre=\+\/usr\/bin\/python3 -I \/usr\/local\/libexec\/verify-teleagent-release-closure --preflight-component worker-session \$\{CREDENTIALS_DIRECTORY\}\/teleagent-release-gate$/m);
+  assert.doesNotMatch(service,
+    /^ExecStartPre=.*\/usr\/local\/libexec\/teleagent-provider-boundary/m);
   assert.match(service, /^ReadOnlyPaths=.*\/var\/lib\/teleagent-provider-plane/m);
   assert.doesNotMatch(service, /^ReadWritePaths=.*\/var\/lib\/teleagent-provider-plane/m);
   assert.match(voiceService, /^InaccessiblePaths=.*\/var\/lib\/teleagent-worker-state$/m);
@@ -88,9 +88,19 @@ test('session broker, RPC socket, state DB, and tmux socket exclude provider ide
   assert.match(providerService, /^ReadOnlyPaths=.*teleagent-agent-workspaces$/m);
   assert.doesNotMatch(providerService, /^ReadWritePaths=.*teleagent-%i-worker/m);
   assert.doesNotMatch(providerService, /^ReadWritePaths=.*teleagent-agent-workspaces/m);
-  assert.match(providerService, /^ExecStartPre=.*teleagent-provider-boundary --action recover/m);
+  assert.doesNotMatch(providerService,
+    /^ExecStartPre=.*teleagent-provider-boundary --action recover/m);
+  assert.match(fs.readFileSync(
+    path.join(__dirname, '..', 'provider-supervisor-service.js'),
+    'utf8',
+  ),
+    /const recovery = await boundaryControl\.recover\(config\.provider\);/);
   assert.match(providerService,
-    /^ExecStartPre=\+\/usr\/local\/libexec\/teleagent-provider-boundary --action assert-supervisor-start-admitted$/m);
+    /^ExecStartPre=\+\/usr\/bin\/python3 -I \/usr\/local\/libexec\/verify-teleagent-release-closure --preflight-component provider-supervisor-%i \$\{CREDENTIALS_DIRECTORY\}\/teleagent-release-gate$/m);
+  assert.match(egressService,
+    /^ExecStartPre=\+\/usr\/bin\/python3 -I \/usr\/local\/libexec\/verify-teleagent-release-closure --preflight-component provider-egress-%i \$\{CREDENTIALS_DIRECTORY\}\/teleagent-release-gate$/m);
+  assert.doesNotMatch(egressService,
+    /^ExecStartPre=.*teleagent-provider-egress-credential-check/m);
   assert.match(providerService,
     /^Environment=HOME=\/var\/lib\/teleagent-provider-plane\/%i-supervisor$/m);
   assert.match(providerService,
@@ -192,7 +202,10 @@ test('session broker, RPC socket, state DB, and tmux socket exclude provider ide
     /^source_profile=\/usr\/local\/libexec\/teleagent-provider-model\.apparmor$/m);
   assert.match(apparmorInstall, /root:root:444/);
   assert.match(libexecUnit,
-    /^ExecStart=\/usr\/local\/libexec\/teleagent-provider-libexec-install$/m);
+    /^LoadCredential=teleagent-release-gate:\/run\/teleagent-release-gate\/verified\.json$/m);
+  assert.match(libexecUnit,
+    /^ExecStart=\/usr\/bin\/python3 -I \/usr\/local\/libexec\/verify-teleagent-release-closure --start-component provider-libexec-install \$\{CREDENTIALS_DIRECTORY\}\/teleagent-release-gate$/m);
+  assert.doesNotMatch(libexecUnit, /^ExecStart=.*\/opt\/teleagent\/current/m);
   assert.match(providerBoundary, /InaccessiblePaths=.*teleagent-privileged-action/);
   assert.match(providerBoundary, /InaccessiblePaths=.*teleagent-voice/);
   assert.match(providerBoundary, /LoadCredential=provider-launch-capability/);
@@ -272,10 +285,13 @@ test('session broker, RPC socket, state DB, and tmux socket exclude provider ide
     /^d \/var\/lib\/teleagent-worker-state\/codex-egress 0700 teleagent-codex-egress teleagent-codex-egress -$/m);
   assert.match(credentialCheck, /validateProviderCredential/);
   assert.match(credentialCheck, /providerCredentialsEqual/);
-  assert.match(credentialCheck, /credentials\.claude, credentials\.codex/);
+  assert.match(credentialCheck, /providerCredentialsEqual\(claude, codex\)/);
+  assert.match(credentialCheck,
+    /validateCredentialSnapshot\(provider, projectedCredential, credentials\)/);
   assert.doesNotMatch(credentialCheck, /\/opt\/teleagent\/current|require\([^)]*provider-secret/);
   assert.match(credentialCheck, /directoryMetadata\.gid !== 0/);
-  assert.match(credentialCheck, /metadata\.gid !== 0 \|\| metadata\.nlink !== 1/);
+  assert.match(credentialCheck, /before\.gid !== 0 \|\| before\.nlink !== 1/);
+  assert.match(credentialCheck, /O_NOFOLLOW/);
   assert.doesNotMatch(credentialCheck, /process\.(?:stdout|stderr).*credentials\[/);
 });
 

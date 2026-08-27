@@ -24,6 +24,7 @@ const {
   parseVoiceEnvironmentFile,
   parseExactProjectContainerIds,
   requestJson,
+  requireLifecycleLock,
   renderTemplateContents,
   resolveVoiceIdentities,
   requireControllerReady,
@@ -208,7 +209,10 @@ test('root launcher consumes only the fixed installed identity authority result'
   ].join('\n');
   const runCommand = (filename, args) => {
     assert.equal(filename, '/usr/local/libexec/verify-voice-stack-identity');
-    assert.deepEqual(args, ['--installed-identities']);
+    assert.deepEqual(args, [
+      '--installed-identities', '--source-root',
+      '/opt/teleagent/current/deploy/voice-stack',
+    ]);
     return { status: 0, stdout: exact };
   };
   assert.deepEqual(resolveVoiceIdentities({ runCommand }), RUNTIME_IDENTITIES);
@@ -236,6 +240,74 @@ test('stack shutdown refuses persisted-but-unquiesced panic and forced exits', (
   assert.equal(assertVoiceExit('exited 0'), true);
   for (const state of ['exited 1', 'exited 137', 'running 0', '']) {
     assert.throws(() => assertVoiceExit(state), /clean, quiescent shutdown/);
+  }
+});
+
+test('stop and recovery retain only the exact host handoff lock descriptor', () => {
+  const lockMetadata = directoryMetadata({ dev: 701, ino: 902 });
+  const filesystem = {
+    fstatSync(descriptor) {
+      assert.equal(descriptor, 17);
+      return lockMetadata;
+    },
+    lstatSync(filename) {
+      assert.equal(filename, '/run/teleagent-staging-handoff.lock');
+      return lockMetadata;
+    },
+  };
+
+  for (const operation of ['stop', 'recover']) {
+    const environment = { TELEAGENT_HANDOFF_LIFECYCLE_LOCK_FD: '17' };
+    assert.equal(requireLifecycleLock(operation, { environment, filesystem }), 17);
+    assert.equal(environment.TELEAGENT_HANDOFF_LIFECYCLE_LOCK_FD, undefined);
+  }
+
+  for (const operation of ['start', 'cleanup']) {
+    assert.equal(requireLifecycleLock(operation, { environment: {}, filesystem }), null);
+    assert.throws(() => requireLifecycleLock(operation, {
+      environment: { TELEAGENT_HANDOFF_LIFECYCLE_LOCK_FD: '17' },
+      filesystem,
+    }), /supplied to an unsupported operation/);
+  }
+});
+
+test('voice lifecycle lock validation rejects missing, forged, and unsafe descriptors', () => {
+  const safe = directoryMetadata({ dev: 701, ino: 902 });
+  const environment = (value) => value === undefined ? {} : {
+    TELEAGENT_HANDOFF_LIFECYCLE_LOCK_FD: value,
+  };
+  const filesystem = (descriptorMetadata = safe, pathMetadata = safe) => ({
+    fstatSync: () => descriptorMetadata,
+    lstatSync: () => pathMetadata,
+  });
+
+  for (const value of [undefined, '', '2', '03', '17x', '-3']) {
+    assert.throws(() => requireLifecycleLock('stop', {
+      environment: environment(value),
+      filesystem: filesystem(),
+    }), /did not retain the voice lifecycle lock/);
+  }
+  assert.throws(() => requireLifecycleLock('stop', {
+    environment: environment('1000001'),
+    filesystem: filesystem(),
+  }), /descriptor is invalid/);
+  assert.throws(() => requireLifecycleLock('stop', {
+    environment: environment('17'),
+    filesystem: { fstatSync: () => { throw new Error('closed'); } },
+  }), /lock is unavailable/);
+
+  for (const [descriptorMetadata, pathMetadata] of [
+    [{ ...safe, isDirectory: () => false }, safe],
+    [safe, { ...safe, isDirectory: () => false }],
+    [safe, directoryMetadata({ dev: 701, ino: 903 })],
+    [safe, directoryMetadata({ dev: 701, ino: 902, uid: 1 })],
+    [safe, directoryMetadata({ dev: 701, ino: 902, gid: 1 })],
+    [safe, directoryMetadata({ dev: 701, ino: 902, mode: 0o775 })],
+  ]) {
+    assert.throws(() => requireLifecycleLock('recover', {
+      environment: environment('17'),
+      filesystem: filesystem(descriptorMetadata, pathMetadata),
+    }), /lock identity is unsafe/);
   }
 });
 
@@ -874,12 +946,16 @@ test('dormant systemd gate binds the private voice identity and every prerequisi
   assert.match(unit, /^Requires=teleagent-worker-session\.service teleagent-provider-model-apparmor\.service$/m);
   assert.match(unit, /^Requires=teleagent-voice-containers\.slice$/m);
   assert.match(unit, /^After=teleagent-voice-containers\.slice$/m);
+  assert.doesNotMatch(unit,
+    /^ExecStartPre=\/usr\/local\/libexec\/verify-voice-stack-identity/m);
   assert.match(unit,
-    /^ExecStartPre=\/usr\/local\/libexec\/verify-voice-stack-identity --installed-check$/m);
-  assert.match(unit, /^ExecStart=\/usr\/local\/libexec\/teleagent-voice-stack-launch start$/m);
-  assert.match(unit, /^ExecStop=\/usr\/local\/libexec\/teleagent-voice-stack-launch stop$/m);
+    /^ExecStart=\/usr\/bin\/python3 -I \/usr\/local\/libexec\/verify-teleagent-release-closure --start-component voice-stack-start \$\{CREDENTIALS_DIRECTORY\}\/teleagent-release-gate$/m);
   assert.match(unit,
-    /^ExecStopPost=\/usr\/local\/libexec\/teleagent-voice-stack-install --emergency-cleanup$/m);
+    /^ExecStop=\/usr\/bin\/python3 -I \/usr\/local\/libexec\/verify-teleagent-release-closure --stop-voice-stack$/m);
+  assert.match(unit,
+    /^LoadCredential=teleagent-release-gate:\/run\/teleagent-release-gate\/verified\.json$/m);
+  assert.match(unit,
+    /^ExecStopPost=\/usr\/bin\/python3 -I \/usr\/local\/libexec\/verify-teleagent-release-closure --cleanup-voice-stack$/m);
   assert.match(unit, /^NoNewPrivileges=yes$/m);
   assert.match(unit, /^CPUQuota=100%$/m);
   assert.match(unit, /^MemoryHigh=384M$/m);

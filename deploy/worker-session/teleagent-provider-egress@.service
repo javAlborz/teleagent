@@ -44,9 +44,10 @@ Environment=PROVIDER_EGRESS_CONTROL_SOCKET_PATH=/run/teleagent-provider-egress-c
 Environment=PROVIDER_EGRESS_DB_PATH=/var/lib/teleagent-worker-state/%i-egress/budget.sqlite
 Environment=PROVIDER_EGRESS_POLICY_PATH=/etc/teleagent/provider-egress/%i.json
 LoadCredential=provider-api-key:/etc/teleagent/provider-egress-secrets/%i.api-key
+LoadCredential=teleagent-release-gate:/run/teleagent-release-gate/verified.json
 ExecStartPre=+/usr/bin/env -i HOME=/var/empty PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 /usr/local/libexec/verify-teleagent-release-closure --check-start-gate
-ExecStartPre=+/usr/local/libexec/teleagent-provider-egress-credential-check %i
-ExecStart=/opt/teleagent/node/bin/node /opt/teleagent/current/claude-api-server/provider-egress-broker.js
+ExecStartPre=+/usr/bin/python3 -I /usr/local/libexec/verify-teleagent-release-closure --preflight-component provider-egress-%i ${CREDENTIALS_DIRECTORY}/teleagent-release-gate
+ExecStart=/usr/bin/python3 -I /usr/local/libexec/verify-teleagent-release-closure --start-component provider-egress-%i ${CREDENTIALS_DIRECTORY}/teleagent-release-gate
 Restart=on-failure
 RestartSec=2s
 KillMode=control-group
@@ -67,7 +68,7 @@ PrivateDevices=yes
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=yes
-ReadOnlyPaths=/opt/teleagent/current /etc/teleagent/provider-egress
+ReadOnlyPaths=/opt/teleagent/releases /usr/local/libexec /etc/teleagent/provider-egress
 BindReadOnlyPaths=/run/systemd/resolve/resolv.conf:/etc/resolv.conf
 ReadWritePaths=/var/lib/teleagent-worker-state/%i-egress
 InaccessiblePaths=/var/lib/teleagent-control /var/lib/teleagent-worker-state/session-broker -/var/lib/teleagent-claude-worker -/var/lib/teleagent-codex-worker /srv/teleagent-agent-workspaces /run/teleagent-worker-session /run/teleagent-provider-launch /run/teleagent-privileged-action /opt/teleagent/current/voice-app/audio /opt/teleagent/current/voice-app/static

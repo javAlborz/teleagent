@@ -10,6 +10,11 @@ const DEPLOY = path.join(ROOT, 'deploy', 'controller');
 const RELEASE_START_GATE = 'ExecStartPre=+/usr/bin/env -i HOME=/var/empty ' +
   'PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 ' +
   '/usr/local/libexec/verify-teleagent-release-closure --check-start-gate';
+const RELEASE_START = 'ExecStart=/usr/bin/python3 -I ' +
+  '/usr/local/libexec/verify-teleagent-release-closure --start-component ' +
+  'agent-controller ${CREDENTIALS_DIRECTORY}/teleagent-release-gate';
+const RELEASE_GATE_CREDENTIAL = 'LoadCredential=teleagent-release-gate:' +
+  '/run/teleagent-release-gate/verified.json';
 const RETIRED_PHONE_AUTHORITY_ENVIRONMENT =
   'UnsetEnvironment=VOICE_APPROVAL_KEY_ID VOICE_APPROVAL_PUBLIC_KEY_FILE ' +
   'PRIVILEGED_ACTION_API_TOKEN PRIVILEGED_ACTION_PROXY_ENABLED ' +
@@ -43,12 +48,13 @@ test('controller unit is dormant, exact-path, resource-capped, and isolated', ()
   assert.match(service,
     /^Environment=VOICE_EXECUTION_LOCK_FILE=\/var\/lib\/teleagent-control\/voice-execution\.lock\.json$/m);
   assert.equal(service.split('\n').filter((line) => line === RELEASE_START_GATE).length, 1);
-  assert.equal((service.match(/verify-teleagent-release-closure/gu) ?? []).length, 1);
+  assert.equal((service.match(/verify-teleagent-release-closure/gu) ?? []).length, 2);
   assert.equal(service.split('\n').filter((line) => /^ExecStart(?:Pre)?=/u.test(line))[0],
     RELEASE_START_GATE);
   assert.doesNotMatch(service, /^ExecCondition=|^ExecReload=/m);
-  assert.match(service,
-    /^ExecStart=\/opt\/teleagent\/node\/bin\/node \/opt\/teleagent\/current\/claude-api-server\/server\.js$/m);
+  assert.ok(service.split('\n').includes(RELEASE_START));
+  assert.ok(service.split('\n').includes(RELEASE_GATE_CREDENTIAL));
+  assert.doesNotMatch(service, /^WorkingDirectory=\/opt\/teleagent\/current$/m);
   assert.match(service, /^Requires=.*teleagent-worker-session\.service/m);
   assert.match(service, /^Requires=.*teleagent-provider-supervisor@claude\.socket/m);
   assert.match(service, /^Requires=.*teleagent-provider-supervisor@codex\.socket/m);

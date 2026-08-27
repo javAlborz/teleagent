@@ -62,9 +62,13 @@ dedicated-staging-proof-including-non-root-media-containers-is-missing
 
 The old `host-executed-bound-source-integration-is-pending` blocker is closed:
 the source-side manifest now carries the complete production host closure.
-That does not remove any blocker above. In particular, the target still needs
-one universal boot-bound gate before every credential-bearing service start or
-restart. Caller confirmation must also be attested outside the voice process
+That does not remove any blocker above. The source and isolated host-program
+fixtures now make each credential-bearing unit recheck the boot-bound gate and
+enter one immutable release through the fixed host launcher described below.
+They do not close the universal restart blocker: the exact start/stop lifecycle,
+credential availability, selector serialization, and recovery behavior remain
+unproven under the dedicated staging host's real systemd. Caller confirmation
+must still be attested outside the voice process
 that proposes work; moving a signing key behind an endpoint that trusts the
 same process is not sufficient. Dedicated staging still must prove the full
 dormant/install/activation behavior including the non-root media containers.
@@ -219,11 +223,15 @@ package-local production tree, and complete native-addon set is independently
 cross-checked against the full inventory. Node resolution uses normal sibling
 `node_modules` lookup; mutable/system `NODE_PATH` is forbidden.
 
-Both Node interpreter destinations are explicit because root launchers and
-verifiers currently use `/usr/local/libexec/teleagent-node`, while broker,
-supervisor, and egress services use `/opt/teleagent/node/bin/node`. The same
-release-contained Node file must provision both targets, and the authoritative
-installed check must compare both installed copies to `nodeSha256` before any
+The fixed host launcher executes only the bundled interpreter at
+`<release-root>/runtime/node/bin/node` for Node components. The two installed
+copies, `/usr/local/libexec/teleagent-node` and `/opt/teleagent/node/bin/node`,
+remain explicitly provisioned support artifacts for installed verifiers and
+wrappers; no release-consuming workload resolves either one at start. The
+continuously active SIP local-peer fence is the documented infrastructure
+exception: its installed identity verifier uses the libexec Node copy while
+the aggregate handoff remains serialized. The
+authoritative installed check compares both copies to `nodeSha256` before any
 release code runs.
 
 ## Production host source closure
@@ -259,16 +267,72 @@ sets, requires exact equality with the reviewed tuple, proves all 131 paths are
 real regular files, derives every host JavaScript file's nearest package scope,
 and pins the complete realtime-SIP import list.
 
-The same regression derives the eight systemd services that directly execute
-the selected release or an installed launcher that consumes it. Each must make
-the host-owned `verify-teleagent-release-closure --check-start-gate` command its
-first execution directive, exactly once. That start gate checks the current
-boot, approval, canonical manifest, selected release identity, and installed
-runtime metadata without scanning or hashing the complete release. Full tree
-and runtime hashing remains serialized in the dedicated staging handoff;
-putting it in every service preflight would multiply large reads during boot.
-The release remains non-promotable until the cheap start gate and the complete
-handoff are proven under real systemd on a dedicated staging host.
+The same regression derives the eight systemd services that consume release
+code. Each makes the root-privileged host-owned
+`verify-teleagent-release-closure --check-start-gate` command its first
+execution directive, exactly once. Each also declares
+`LoadCredential=teleagent-release-gate:/run/teleagent-release-gate/verified.json`
+and uses the ordinary, sandboxed `ExecStart` identity to call the fixed host
+verifier with `--start-component <profile>` and that systemd credential path.
+
+The start gate checks the current boot, approval, canonical manifest, selected
+release identity, and installed runtime metadata without scanning or hashing
+the complete release. Systemd snapshots the nonsecret, host-owned global gate
+into the unit's private mode-`0400` credential directory. The fixed launcher
+takes a shared lock on the
+root-owned, non-writable handoff-lock inode; revalidates both that snapshot and
+the live external approval, current selector, and global boot gate; then checks
+the component allowlist, service UID/GID, and scrubbed environment. The
+exclusive handoff uses the same inode while validating and installing the
+already selected approved release, so it cannot cross the validation-to-exec
+window. Supported tools cannot change `/opt/teleagent/current`; a future
+reviewed selector transaction must take the exclusive lock and prove the
+complete bounded runtime-unit set quiescent before publishing another release.
+The descriptor is close-on-exec. The launcher `execve`s the exact entrypoint and
+bundled Node interpreter below `/opt/teleagent/releases/sha256-<manifest-digest>`;
+it never executes through `/opt/teleagent/current`.
+
+Worker storage, provider-supervisor admission, provider credential, and
+Realtime SIP activation checks require root-only host state. Their units do
+not execute installed Node helpers directly. Instead, one exact
+`--preflight-component` operation in the fixed host verifier authenticates the
+projected gate plus live selection, takes the shared handoff lock, and invokes
+only the allowlisted helper and arguments from that immutable release through
+its bundled Node. Provider-egress preflight additionally opens the selected
+`provider-api-key` beside the authenticated systemd gate snapshot and passes
+only that descriptor to the immutable credential helper. The helper requires
+the projected key to match its selected live source while the two live
+provider sources remain distinct. No supported credential writer exists; any
+future rotation writer must take the exclusive handoff lock. The child
+inherits the relevant descriptors, so parent-only verifier death cannot let it
+overlap a handoff or host-program update. Each
+ordinary sandboxed `ExecStart` then independently repeats the gate and lock
+validation before launching the workload.
+
+Systemd does not make this unit's `LoadCredential` mount available to
+`ExecStop` on the target host generation. Voice stop therefore calls one exact
+credential-free operation in the fixed host verifier. That operation takes the
+exclusive lifecycle side of the handoff lock and passes its inheritable
+descriptor to the immutable voice wrapper for the complete stop operation. It
+revalidates the live approved global gate/current and runs only the fixed stop
+profile from that immutable release. Fixed recovery uses the same exclusive
+retained-lock path. The unconditional emergency cleanup is instead routed
+through the fixed host verifier. Cleanup waits for the exclusive lock so the
+separate `ExecStop`/`ExecStopPost` scheduling edge cannot turn contention into
+a skipped cleanup, then passes that exact descriptor to the fixed host-owned
+cleanup program. Both verifier and child retain it, so parent-only verifier
+death cannot orphan a mutating cleanup outside serialization. These paths
+cannot overlap a handoff, host-program upgrade, start, or another lifecycle
+mutation. This is not an activation-bound A-after-B mechanism. A-to-B
+replacement while A is active is
+unsupported, and no supported tool changes selection. Any future selector
+transaction must hold the exclusive lock and prove voice A and every other
+bounded runtime unit inactive before publishing B.
+
+Full tree and runtime hashing remains serialized in the dedicated staging
+handoff; putting it in every service preflight would multiply large reads
+during boot. The release remains non-promotable until this cheap start path and
+the complete handoff are proven under real systemd on a dedicated staging host.
 
 The provider section cross-checks `provider-cli.manifest.json` against the
 actual bundled Claude binary, Codex wrapper, and Codex vendor binary. IDs,
@@ -302,7 +366,8 @@ pulling the already-approved artifact.
 
 The homelab repository installs exactly one fixed file at
 `/etc/teleagent/release-approval.json`. It is canonical one-line JSON,
-`root:root`, mode `0400`, link count 1, with root-owned non-writable ancestry:
+`root:root`, mode `0444`, link count 1, with root-owned non-writable ancestry.
+It is nonsecret integrity metadata; write authority remains root-only:
 
 ```json
 {"version":1,"application":"teleagent","environment":"dedicated-staging","releaseId":"sha256-<manifest-sha256>","manifestSha256":"sha256:<manifest-sha256>","bundleSha256":"sha256:<deterministic-tar-sha256>","sourceRevision":"<revision>","sourceTree":"<tree>","voiceImageConfigDigest":"sha256:<config-digest>","voiceImageRegistryReference":null,"voiceImageRegistryDigest":null,"providerCliManifestSha256":"sha256:<provider-manifest-digest>"}
@@ -401,7 +466,9 @@ anything in the release:
 7. Cross-check the Node, native-addon, provider, image, SBOM, host-launch,
    bind-mount, and canary-module bindings.
 8. Require `/opt/teleagent/current` to point literally at the approved release.
-9. Write a root-only, boot-bound gate under `/run/teleagent-release-gate/`.
+9. Write the nonsecret, root-owned boot-bound gate as a mode-`0444` file under
+   its mode-`0755` `/run/teleagent-release-gate/` directory. Systemd later
+   snapshots it into private mode-`0400` per-service credentials.
 10. Only then may it import/inspect the pinned image, run unprivileged
     networkless native smoke tests, invoke a root installer, or install provider
     binaries from their bound release paths.
@@ -411,10 +478,11 @@ sentinel, enable/start a unit, expose a route, or run a provider canary. A
 failure exits `77`, emits no success token, leaves `current` unchanged, and
 does not advance to a later phase.
 
-The host must repeat closure/current/image verification before credential-
-bearing service activation. Installed copies of both Node interpreter targets,
-provider binaries, fixed libexec helpers, systemd units, and image metadata
-must still match the approved release.
+Before credential-bearing service activation, the host must retain the complete
+handoff evidence and pass the boot-bound precheck, systemd gate snapshot, and
+immutable component launcher above. Installed copies of both Node interpreter
+targets, provider binaries, fixed libexec helpers, systemd units, and image
+metadata must still match the approved release.
 
 ## Source-side checks
 

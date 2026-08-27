@@ -135,9 +135,17 @@ protocol, not a production activation path:
    the durable work item. Raw capabilities and reusable credentials are never
    persisted.
 
-New calls invalidate an old approval arm and replay the exact prompt before
-re-arming. Early, clipped, cleared, backpressured, lost, mismatched, or timed-out
-audio never authorizes execution.
+Dormant `telereq1`, `teleattest1`, and `telecap2` fixture contracts plus the
+attester state machine make this three-key protocol testable. They are not
+imported by production, have no Asterisk adapter or service wiring, and do not
+close the PBX promotion blocker. See
+`docs/PBX-APPROVAL-ATTESTATION-CONTRACT.md`.
+
+Any future call-start integration must durably invalidate an old approval arm
+before it starts a new call, then replay the exact prompt before re-arming. The
+current dormant store does not implement controller-driven supersession, so
+this remains part of the PBX adapter promotion blocker. Early, clipped, cleared,
+backpressured, lost, mismatched, or timed-out audio never authorizes execution.
 
 Dial `9` is the independent emergency path. A STOPPED response is truthful only
 after every configured execution plane has durably accepted the panic and is

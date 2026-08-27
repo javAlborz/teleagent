@@ -109,8 +109,10 @@ their independent recovery-plane resource caps.
 
 Provider supervisor panic and recovery state is isolated separately from both
 the host root and worker/egress state. Before disabled installation, provision
-`/var/lib/teleagent-provider-plane` as an exact dedicated filesystem mount
-between 1 GiB and 4 GiB, owned by `root:root` at mode 0751. Tmpfiles creates
+`/var/lib/teleagent-provider-plane` as an exact dedicated durable local
+ext-family, XFS, Btrfs, F2FS, or ZFS mount between 1 GiB and 4 GiB, owned by
+`root:root` at mode 0751. Only those reviewed filesystem types are admitted;
+every other type, including tmpfs and NFS, is refused. Tmpfiles creates
 private mode-0700 `claude-supervisor` and `codex-supervisor` homes on that same
 device, and the matching sysusers records use those homes. Installation,
 checking, supervisor startup, worker-broker startup, and every new provider
@@ -143,12 +145,15 @@ matching bounded egress service.
 
 The tracked units, sockets, slices, sysusers, tmpfiles, sudoers, digest-pinned
 libexec policy, empty runtime configuration, and verification scripts under
-`deploy/worker-session/` are dormant. The release-local installer has only
-three public modes:
+`deploy/worker-session/` are dormant. A checkout may run the read-only source
+check. Production mutation is reachable only through the fixed host handoff,
+which invokes `--install-disabled` from the authenticated canonical
+`/opt/teleagent/releases/sha256-*` root. The installed component copy is
+check-only:
 
 ```sh
 deploy/worker-session/teleagent-worker-session-install --source-check
-deploy/worker-session/teleagent-worker-session-install --install-disabled
+/usr/local/libexec/teleagent-staging-handoff --install-disabled
 /usr/local/libexec/teleagent-worker-session-install --check
 ```
 
@@ -172,15 +177,33 @@ offline release tree proves host mount state. Canonical release staging
 normalizes executable sources to mode 0555 and data sources to 0444; the source
 checker also accepts the non-writable-parent development variants 0755/0644.
 Every worker, provider-supervisor, provider-egress, and libexec-install unit
-that directly consumes `/opt/teleagent/current` runs the fixed host-owned release
-verifier with `--check-start-gate` as its first execution directive under an
-empty environment. This cheap boot-time gate validates the boot gate, current
-release, approval, manifest, and installed runtime metadata without scanning or
-hashing the full release, then emits `TELEAGENT_RELEASE_START_GATE_OK`; each
-unit contains it exactly once as the first `ExecStartPre`/`ExecStart` directive
-and contains no `ExecCondition` or `ExecReload`. The full
-`--check-runtime` scan remains serialized at release handoff rather than being
-amplified across service prestarts.
+runs the fixed host-owned release verifier with `--check-start-gate` as its
+first execution directive under an empty environment. This cheap boot-time gate
+validates the boot gate, current release, approval, manifest, and installed
+runtime metadata without scanning or hashing the full release, then emits
+`TELEAGENT_RELEASE_START_GATE_OK`. Each unit contains it exactly once as the
+first `ExecStartPre`/`ExecStart` directive, contains no `ExecCondition` or
+`ExecReload`, and snapshots the nonsecret, host-owned global gate into a
+private mode-`0400` service credential with `LoadCredential`. Its
+worker, provider-supervisor, and provider-egress units then call one closed
+root-only `--preflight-component` profile. The fixed verifier reauthenticates
+the snapshot and live release while retaining the shared handoff lock, and
+runs only the mapped immutable storage/admission or credential helper through
+the release's bundled Node. For provider egress, the verifier also securely
+opens the selected `provider-api-key` from the same private systemd credential
+directory and passes that descriptor only to the credential profile. The
+helper proves that snapshot still equals the selected live source and that the
+two live provider sources remain distinct. The helper inherits the relevant
+descriptors for its whole read-only check, including parent-only verifier
+failure. No supported credential writer exists; any future rotation writer
+must take the exclusive handoff lock. The
+ordinary sandboxed `ExecStart` then asks the fixed verifier to launch one named
+component from that snapshot. The launcher verifies the exact immutable release
+root and service identity, scrubs loader/runtime injection variables, and
+`execve`s only the entrypoint and Node interpreter inside that root; no worker
+start executes via `/opt/teleagent/current`. The full `--check-runtime` scan
+remains serialized at release handoff rather than being amplified across
+service prestarts.
 The root provider-CLI installer and checker treat the pinned Claude binary,
 Codex wrapper, and Codex vendor binary as opaque bytes: they verify exact
 owner, mode, link count, size, path, and digest but never execute them, including

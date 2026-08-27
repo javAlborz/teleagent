@@ -44,15 +44,23 @@ requires the worker service, AppArmor loader, and both provider socket units to
 be exactly loaded, static, inactive, and dead.
 
 With all three sentinels absent (`worker-session`, `controller`, and
-`privileged-action`), provision and mount both filesystems, then run:
+`privileged-action`), provision and mount both filesystems, then run the fixed
+infrastructure-owned handoff:
 
 ```sh
-sudo /opt/teleagent/current/deploy/controller/teleagent-control-plane-install \
-  --source-check
-sudo /opt/teleagent/current/deploy/controller/teleagent-control-plane-install \
-  --install-disabled
-sudo /usr/local/libexec/verify-teleagent-control-plane --installed-check
+sudo /usr/bin/env -i HOME=/var/empty PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+  /usr/local/libexec/teleagent-staging-handoff --source-check
+sudo /usr/bin/env -i HOME=/var/empty PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+  /usr/local/libexec/teleagent-staging-handoff --install-disabled
+sudo /usr/bin/env -i HOME=/var/empty PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+  /usr/local/libexec/teleagent-staging-handoff --check
 ```
+
+The handoff authenticates one external approval and invokes the component
+installer only through that release's canonical
+`/opt/teleagent/releases/sha256-*` path. The installed component-installer copy
+is check-only; it refuses both `--source-check` and `--install-disabled`.
+Never use `/opt/teleagent/current` as an installer entrypoint.
 
 The digest-pinned installer transactionally installs only the two units,
 tmpfiles/sysusers declarations, manifest, installer, and verifier. It proves
@@ -103,9 +111,16 @@ At every controller or broker start, the first start command is the external,
 host-owned `verify-teleagent-release-closure --check-start-gate` under an empty
 environment. This cheap gate rechecks current-boot release approval, selector,
 manifest identity, and installed runtime metadata; it deliberately does not
-rescan or content-hash the full release. The serialized disabled host handoff
-retains the full `--check-runtime` verification. A failed start gate prevents
-the application-owned preflight and Node entrypoint from running.
+rescan or content-hash the full release. Systemd also snapshots the nonsecret,
+host-owned global gate into a private mode-`0400` service credential with
+`LoadCredential`. The ordinary sandboxed service identity passes that
+snapshot to the fixed host verifier's `--start-component` launcher, which
+revalidates the boot, immutable release device/inode, exact component, UID/GID,
+and scrubbed environment before `execve` of the exact release entrypoint. No
+application start resolves `/opt/teleagent/current`. The serialized disabled
+host handoff retains the full `--check-runtime` verification. A failed precheck
+or launcher check prevents the application-owned preflight and Node entrypoint
+from running.
 
 After the installed verifier is green:
 

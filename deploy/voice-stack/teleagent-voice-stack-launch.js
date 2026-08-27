@@ -7,7 +7,11 @@ const http = require('node:http');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
-const APP_ROOT = '/opt/teleagent/current';
+const IMMUTABLE_RELEASE_ROOT = /^\/opt\/teleagent\/releases\/sha256-[a-f0-9]{64}$/u;
+// Unit starts receive this from the infrastructure-owned release launcher.
+// The fallback keeps this file importable for source-only tests; main() never
+// permits it for a live start, stop, cleanup, or recovery operation.
+const APP_ROOT = process.env.TELEAGENT_RELEASE_ROOT || '/opt/teleagent/current';
 const COMPOSE_FILE = `${APP_ROOT}/docker-compose.yml`;
 const ENV_FILE = '/etc/teleagent-voice/voice-app.env';
 const VOICE_IMAGE_MANIFEST = '/etc/teleagent-voice/voice-image.manifest.json';
@@ -16,7 +20,7 @@ const RUNTIME_ROOT = '/run/teleagent-voice-stack';
 const RUNTIME_SECRET_ROOT = `${RUNTIME_ROOT}/voice-secrets`;
 const ACTIVATION_ROOT = '/var/lib/teleagent-voice-stack';
 const ACTIVATION_STATE = `${ACTIVATION_ROOT}/activation-state.json`;
-const WRAPPER = '/usr/local/libexec/teleagent-voice-stack-launch';
+const WRAPPER = `${APP_ROOT}/deploy/voice-stack/teleagent-voice-stack-launch.js`;
 const DOCKER = '/usr/bin/docker';
 const IDENTITY_VERIFIER = '/usr/local/libexec/verify-voice-stack-identity';
 const SYSTEMCTL = '/usr/bin/systemctl';
@@ -25,6 +29,8 @@ const PROVIDER_CLI_CHECK = '/usr/local/libexec/teleagent-provider-cli-check';
 const SOURCE_PROVIDER_MANIFEST = `${APP_ROOT}/deploy/worker-session/provider-libexec.manifest`;
 const INSTALLED_PROVIDER_MANIFEST = '/etc/teleagent/provider-runtime/provider-libexec.manifest';
 const APPARMOR_PROFILES = '/sys/kernel/security/apparmor/profiles';
+const HANDOFF_LOCK = '/run/teleagent-staging-handoff.lock';
+const LIFECYCLE_LOCK_ENV = 'TELEAGENT_HANDOFF_LIFECYCLE_LOCK_FD';
 const PROJECT = 'teleagent-voice';
 const PROJECT_LABEL = `com.docker.compose.project=${PROJECT}`;
 const IMAGE_REVISION_LABEL = 'org.opencontainers.image.revision';
@@ -304,7 +310,9 @@ function verifyVoiceImage(manifest, {
 }
 
 function resolveVoiceIdentities({ runCommand = run } = {}) {
-  const result = runCommand(IDENTITY_VERIFIER, ['--installed-identities'], {
+  const result = runCommand(IDENTITY_VERIFIER, [
+    '--installed-identities', '--source-root', `${APP_ROOT}/deploy/voice-stack`,
+  ], {
     capture: true,
     allowFailure: true,
     environment: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C', LC_ALL: 'C' },
@@ -1513,6 +1521,39 @@ async function recover() {
   await runOfflineRecovery(readActivationState());
 }
 
+function requireLifecycleLock(operation, {
+  environment = process.env,
+  filesystem = fs,
+} = {}) {
+  const value = environment[LIFECYCLE_LOCK_ENV];
+  if (!['stop', 'recover'].includes(operation)) {
+    if (value !== undefined) refuse('the voice lifecycle lock was supplied to an unsupported operation');
+    return null;
+  }
+  if (!/^(?:[3-9]|[1-9][0-9]+)$/u.test(value || '')) {
+    refuse('the fixed host verifier did not retain the voice lifecycle lock');
+  }
+  const descriptor = Number.parseInt(value, 10);
+  if (!Number.isSafeInteger(descriptor) || descriptor > 1_000_000) {
+    refuse('the voice lifecycle lock descriptor is invalid');
+  }
+  let descriptorMetadata;
+  let pathMetadata;
+  try {
+    descriptorMetadata = filesystem.fstatSync(descriptor);
+    pathMetadata = filesystem.lstatSync(HANDOFF_LOCK);
+  } catch {
+    refuse('the voice lifecycle lock is unavailable');
+  }
+  if (!descriptorMetadata.isDirectory() || !pathMetadata.isDirectory() ||
+      descriptorMetadata.dev !== pathMetadata.dev || descriptorMetadata.ino !== pathMetadata.ino ||
+      pathMetadata.uid !== 0 || pathMetadata.gid !== 0 || (pathMetadata.mode & 0o7777) !== 0o755) {
+    refuse('the voice lifecycle lock identity is unsafe');
+  }
+  delete environment[LIFECYCLE_LOCK_ENV];
+  return descriptor;
+}
+
 function assertPanicQuiesced(panic) {
   if (panic?.status !== 200 || panic.body?.success !== true) {
     refuse('voice panic was persisted but full quiescence was not confirmed');
@@ -1528,14 +1569,18 @@ function assertVoiceExit(inspection) {
 }
 
 async function main() {
-  if (process.geteuid() !== 0 || fs.realpathSync(process.execPath) !== '/usr/local/libexec/teleagent-node' ||
+  const operation = process.argv[2];
+  if (process.geteuid() !== 0 || !IMMUTABLE_RELEASE_ROOT.test(APP_ROOT) ||
+      process.env.TELEAGENT_RELEASE_ROOT !== APP_ROOT ||
+      fs.realpathSync(process.execPath) !== `${APP_ROOT}/runtime/node/bin/node` ||
       fs.realpathSync(process.argv[1] || '') !== WRAPPER || process.execArgv.length !== 0 ||
-      process.argv.length !== 3 || !['start', 'stop', 'cleanup', 'recover'].includes(process.argv[2])) {
-    refuse('the voice-stack wrapper must run as root through its fixed entrypoint');
+      process.argv.length !== 3 || !['start', 'stop', 'cleanup', 'recover'].includes(operation)) {
+    refuse('the voice-stack wrapper must run as root through one gated immutable release');
   }
-  if (process.argv[2] === 'start') await start();
-  else if (process.argv[2] === 'stop') await stop();
-  else if (process.argv[2] === 'recover') await recover();
+  requireLifecycleLock(operation);
+  if (operation === 'start') await start();
+  else if (operation === 'stop') await stop();
+  else if (operation === 'recover') await recover();
   else cleanup();
 }
 
@@ -1556,6 +1601,7 @@ module.exports = {
   parseVoiceContainerBoundary,
   resolveVoiceIdentities,
   requestJson,
+  requireLifecycleLock,
   renderTemplate,
   renderTemplateContents,
   requireControllerReady,

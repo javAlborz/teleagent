@@ -302,9 +302,9 @@ function createFixture({ entrypointBarrier = false, fenceInstallOutput = '' } = 
     `"currentTarget":"/opt/teleagent/releases/${releaseId}",` +
     `"releaseDevice":${releaseMetadata.dev},"releaseInode":${releaseMetadata.ino},` +
     `"bootId":"${BOOT_ID}"}\n`;
-  mkdir(path.join(root, 'run/teleagent-release-gate'), 0o700);
-  writeFile(gatePath, gate, 0o400);
-  fs.chmodSync(path.join(root, 'run/teleagent-release-gate'), 0o700);
+  mkdir(path.join(root, 'run/teleagent-release-gate'), 0o755);
+  writeFile(gatePath, gate, 0o444);
+  fs.chmodSync(path.join(root, 'run/teleagent-release-gate'), 0o755);
 
   const environment = {
     ...process.env,
@@ -423,7 +423,7 @@ function createFixture({ entrypointBarrier = false, fenceInstallOutput = '' } = 
       fs.symlinkSync(`releases/${promotedId}`, currentSelector);
       fs.chmodSync(gatePath, 0o600);
       fs.writeFileSync(gatePath, promotedGate);
-      fs.chmodSync(gatePath, 0o400);
+      fs.chmodSync(gatePath, 0o444);
       return { promotedId, promotedRoot };
     },
     lines() {
@@ -661,6 +661,24 @@ test('missing gate and shared workload devices refuse before installation', () =
       .some((line) => line.includes('--install-disabled')), false);
   } finally {
     providerCollision.cleanup();
+  }
+});
+
+test('global gate metadata matches the host-owned public-read contract exactly', () => {
+  for (const [relative, mode, message] of [
+    ['run/teleagent-release-gate', 0o700, /trusted directory has the wrong mode/u],
+    ['run/teleagent-release-gate/verified.json', 0o400, /release gate metadata is unsafe/u],
+  ]) {
+    const fixture = createFixture();
+    try {
+      fs.chmodSync(path.join(fixture.root, relative), mode);
+      const result = fixture.run('--source-check');
+      assertRefusal(result);
+      assert.match(result.stderr, message);
+      assert.deepEqual(fixture.lines(), []);
+    } finally {
+      fixture.cleanup();
+    }
   }
 });
 

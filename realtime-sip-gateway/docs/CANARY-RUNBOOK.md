@@ -9,13 +9,14 @@ Before adding public ingress:
 
 1. Create a dedicated `teleagent-sip-gateway` system identity with no login shell, sudo, Docker,
    SSH-agent, or agent-worker group membership.
-2. Install the authenticated release at `/opt/teleagent/current`; the component path is
-   `/opt/teleagent/current/realtime-sip-gateway`, owned by root and not writable by the service
-   user.
-3. Provision a reviewed root-owned Node 24+ binary at
-   `/usr/local/libexec/teleagent-node`. The candidate is the existing Node 24.13.0 runtime copied
-   as an ordinary root-owned, non-group/world-writable file after recording its version and
-   checksum. Do not execute the owner's NVM path at runtime: it is intentionally inaccessible
+2. Stage the authenticated release at its canonical immutable
+   `/opt/teleagent/releases/sha256-*` root and bind `/opt/teleagent/current` to that exact root only
+   through the future reviewed selector transaction. The service never executes through
+   `/opt/teleagent/current`.
+3. Provision and attest the release-bundled Node 24+ interpreter at
+   `<release-root>/runtime/node/bin/node`. The fixed host launcher executes only that immutable
+   interpreter. Installed runtime copies are verification/support artifacts, not application
+   service entrypoints. Do not execute the owner's NVM path: it is intentionally inaccessible
    under `ProtectHome=true`.
 4. Provision an exact dedicated durable local filesystem at
    `/var/lib/teleagent-sip-gateway`. It must be 1-4 GiB, use ext4/XFS/Btrfs/F2FS/ZFS, have a
@@ -33,17 +34,25 @@ Before adding public ingress:
 6. Confirm Codex/Claude worker identities cannot read those credential sources, the systemd
    credential directory, the SQLite state database, or the controller process environment.
 
-Run the component installer only after the external release-v2 authentication gate and exact mount
-provisioning:
+After exact mount provisioning, run only the fixed infrastructure-owned handoff;
+it authenticates the external release-v2 approval before any component mutation:
 
 ```bash
-/opt/teleagent/current/realtime-sip-gateway/deploy/teleagent-realtime-sip-gateway-install --source-check
-# exact stdout: SIP_GATEWAY_SOURCE_OK
-/opt/teleagent/current/realtime-sip-gateway/deploy/teleagent-realtime-sip-gateway-install --install-disabled
-# exact stdout: SIP_GATEWAY_INSTALLED_DISABLED
-/usr/local/libexec/teleagent-realtime-sip-gateway-install --check
-# exact stdout: SIP_GATEWAY_INSTALLED_DISABLED_OK
+sudo /usr/bin/env -i HOME=/var/empty PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+  /usr/local/libexec/teleagent-staging-handoff --source-check
+# exact stdout: TELEAGENT_STAGING_SOURCE_OK
+sudo /usr/bin/env -i HOME=/var/empty PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+  /usr/local/libexec/teleagent-staging-handoff --install-disabled
+# exact stdout: TELEAGENT_STAGING_INSTALLED_DISABLED_OK
+sudo /usr/bin/env -i HOME=/var/empty PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+  /usr/local/libexec/teleagent-staging-handoff --check
+# exact stdout: TELEAGENT_STAGING_INSTALLED_DISABLED_OK
 ```
+
+The handoff invokes the component installer only through the authenticated
+canonical `/opt/teleagent/releases/sha256-*` root. The installed component copy
+is check-only and refuses `--source-check` and `--install-disabled`; never use
+`/opt/teleagent/current` as an installer entrypoint.
 
 The installer is independently idempotent and transactionally publishes its six policy assets. It installs
 only a static, inactive `teleagent-realtime-sip-gateway.service`, identity/directory policy,
@@ -52,7 +61,7 @@ manifest, verifier, and itself. It never creates configuration, credentials, or
 Any active/transitional unit, systemd query failure, identity collision, metadata drift, ordinary
 root-backed state directory, out-of-range filesystem, or exhausted reserve fails closed.
 Its pre-runtime source check uses only the authenticated `<release-root>/runtime/node/bin/node`;
-installed modes use only `/usr/local/libexec/teleagent-node`. Release orchestration separately
+the installed check uses only `/usr/local/libexec/teleagent-node`. Release orchestration separately
 requires exact `SIP_GATEWAY_SOURCE_OK` and `SIP_GATEWAY_IDENTITY_SOURCE_OK` attestations.
 
 Fresh disabled installation accepts only an objectively empty exact mount (an empty root-owned
@@ -95,7 +104,10 @@ environment file; load them through the service credential directory.
 Activation is a separate operator-controlled step after `--check`: provision the root-owned
 mode-`0600` non-secret `config.env`, the three root-owned mode-`0400` single-link credential source
 files, and finally a root-owned mode-`0600` regular single-link `ENABLE` sentinel. Only then may the
-static unit be started explicitly. Its `--activation-check` preflight verifies those metadata,
+static unit be started explicitly. Its fixed-host `--preflight-component`
+profile runs the immutable `--immutable-activation-check` helper through the
+approved release's bundled Node while both parent and child retain the shared
+handoff lock. That preflight verifies those metadata,
 identity, state marker/files, mount bounds, and reserve without reading credential contents. Remove
 the sentinel to make a later start fail closed; the installer never creates or removes it.
 Preflight also proves the loaded systemd fragment is the exact static installed unit, with no

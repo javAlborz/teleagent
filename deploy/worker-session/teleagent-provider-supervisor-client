@@ -2,7 +2,7 @@
 set -eu
 
 runtime=/usr/local/libexec/teleagent-node
-client=/opt/teleagent/current/claude-api-server/provider-supervisor-client.js
+client=/usr/local/libexec/teleagent-provider-supervisor-client.js
 for target in "$runtime" "$client"; do
   owner_mode=$(/usr/bin/stat -Lc '%u:%a' "$target")
   case "$owner_mode" in

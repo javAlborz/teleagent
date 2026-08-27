@@ -12,6 +12,7 @@ import {
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
@@ -131,6 +132,19 @@ function run(installer, environment, mode) {
   });
 }
 
+function rebindServiceManifest(deploy) {
+  const service = path.join(deploy, 'teleagent-realtime-sip-gateway.service');
+  const digest = createHash('sha256').update(readFileSync(service)).digest('hex');
+  const manifest = path.join(deploy, 'realtime-sip-gateway-install.manifest');
+  const source = readFileSync(manifest, 'utf8');
+  const rebound = source.replace(
+    /^[a-f0-9]{64}(?= deploy\/teleagent-realtime-sip-gateway\.service )/mu,
+    digest,
+  );
+  assert.notEqual(rebound, source);
+  writeFileSync(manifest, rebound);
+}
+
 function assertSuccess(result, token) {
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout, `${token}\n`);
@@ -149,6 +163,11 @@ test('offline installer source-checks, installs, and checks one static inactive 
     'usr/local/libexec/teleagent-realtime-sip-gateway-install',
   );
   assertSuccess(run(installed, context.environment, '--check'), 'SIP_GATEWAY_INSTALLED_DISABLED_OK');
+  for (const mode of ['--source-check', '--install-disabled']) {
+    const refused = run(installed, context.environment, mode);
+    assert.equal(refused.status, 77);
+    assert.match(refused.stderr, /installed entrypoint is check-only/u);
+  }
 
   assert.equal(existsSync(path.join(
     context.root,
@@ -183,6 +202,37 @@ test('source-check accepts immutable release normalization and rejects manifest 
   assert.match(result.stderr, /manifest digest does not match/u);
 });
 
+test('source-check rejects unreviewed execution and credential directives after digest verification', (t) => {
+  for (const injection of [
+    'ExecStartPre=/usr/bin/false',
+    'ExecStart=/usr/bin/false',
+    'LoadCredential=unreviewed:/tmp/unreviewed',
+    'LoadCredential=teleagent-release-gate:/run/teleagent-release-gate/verified.json',
+    'LoadCredentialEncrypted=unreviewed:/tmp/unreviewed',
+    'ImportCredential=unreviewed',
+    'ImportCredentialEx=unreviewed',
+    'SetCredential=unreviewed:not-secret',
+    'SetCredentialEncrypted=unreviewed:not-encrypted',
+    'ExecStartPost =/opt/teleagent/current/unreviewed-post',
+    '\tExecStop=/opt/teleagent/current/unreviewed-stop',
+    'LoadCredential =unreviewed:/tmp/unreviewed',
+    'SetCredentialEncrypted =unreviewed:not-encrypted',
+    '\tImportCredentialEx =unreviewed',
+    'ExecStartPost\\\n =/opt/teleagent/current/unreviewed-continuation',
+    'ExecStartPost\\\r\n =/opt/teleagent/current/unreviewed-crlf-continuation',
+    'ExecStartPost=\0/opt/teleagent/current/unreviewed-control',
+  ]) {
+    const context = fixture(t);
+    const service = path.join(context.deploy, 'teleagent-realtime-sip-gateway.service');
+    writeFileSync(service, `${readFileSync(service, 'utf8')}${injection}\n`);
+    rebindServiceManifest(context.deploy);
+    const result = run(context.installer, context.environment, '--source-check');
+    assert.equal(result.status, 77);
+    assert.match(result.stderr,
+      /start command closure|execution command closure|credential directive closure|resource or storage contract|noncanonical lifecycle or credential assignment whitespace|unsupported line continuation|forbidden control byte/u);
+  }
+});
+
 test('source-check cannot select a caller-provided runtime override', () => {
   const result = spawnSync(
     path.join(sourceDeploy, 'teleagent-realtime-sip-gateway-install'),
@@ -195,6 +245,16 @@ test('source-check cannot select a caller-provided runtime override', () => {
   );
   assert.equal(result.status, 77);
   assert.match(result.stderr, /overrides require the isolated test lane/u);
+});
+
+test('production mutation requires a canonical immutable release entrypoint', () => {
+  const result = spawnSync(
+    path.join(sourceDeploy, 'teleagent-realtime-sip-gateway-install'),
+    ['--install-disabled'],
+    { encoding: 'utf8', env: { LC_ALL: 'C' }, timeout: 10_000 },
+  );
+  assert.equal(result.status, 77);
+  assert.match(result.stderr, /requires an immutable release root/u);
 });
 
 test('source-check requires one exact release-Node verifier attestation', (t) => {

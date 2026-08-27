@@ -68,6 +68,7 @@ function providerPlaneStorage(overrides = {}) {
           : (overrides.homeDev ?? 2n),
     }),
     statfs: () => ({
+      type: overrides.filesystemType ?? 0xef53n,
       bsize: 4096n,
       blocks: (overrides.capacity ?? (2n * 1024n * 1024n * 1024n)) / 4096n,
       bavail: (overrides.free ?? (768n * 1024n * 1024n)) / 4096n,
@@ -93,6 +94,23 @@ test('provider supervisor state requires its exact bounded dedicated mount and r
     () => providerPlaneStorage({ free: 511n * 1024n * 1024n }),
     /reserve is exhausted/
   );
+  assert.throws(
+    () => providerPlaneStorage({ filesystemType: 0x01021994n }),
+    /durable local filesystem/
+  );
+  assert.throws(
+    () => providerPlaneStorage({ filesystemType: 0x6969n }),
+    /durable local filesystem/
+  );
+  for (const filesystemType of [
+    0xef53n,
+    0x58465342n,
+    BigInt.asIntN(32, 0x9123683en),
+    BigInt.asIntN(32, 0xf2f52010n),
+    0x2fc12fc1n,
+  ]) {
+    assert.doesNotThrow(() => providerPlaneStorage({ filesystemType }));
+  }
 
   let recoveryCalled = false;
   await assert.rejects(startProviderSupervisor({

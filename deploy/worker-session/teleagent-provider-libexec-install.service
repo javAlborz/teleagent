@@ -5,8 +5,9 @@ ConditionPathExists=/etc/teleagent/worker-session/ENABLE
 
 [Service]
 Type=oneshot
+LoadCredential=teleagent-release-gate:/run/teleagent-release-gate/verified.json
 ExecStartPre=+/usr/bin/env -i HOME=/var/empty PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 /usr/local/libexec/verify-teleagent-release-closure --check-start-gate
-ExecStart=/usr/local/libexec/teleagent-provider-libexec-install
+ExecStart=/usr/bin/python3 -I /usr/local/libexec/verify-teleagent-release-closure --start-component provider-libexec-install ${CREDENTIALS_DIRECTORY}/teleagent-release-gate
 RemainAfterExit=yes
 UMask=0077
 LimitCORE=0
@@ -15,7 +16,7 @@ PrivateDevices=yes
 PrivateTmp=yes
 ProtectSystem=full
 ProtectHome=yes
-ReadOnlyPaths=/opt/teleagent/current
+ReadOnlyPaths=/opt/teleagent/releases /usr/local/libexec
 ReadWritePaths=/usr/local/libexec /etc/teleagent/provider-runtime
 RestrictAddressFamilies=AF_UNIX
 SystemCallArchitectures=native

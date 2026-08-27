@@ -60,6 +60,19 @@ and restart testing. The release blockers
 and `dedicated-staging-proof-including-non-root-media-containers-is-missing`
 remain open.
 
+The dormant `lib/sip-media-boundary-contract.js` module makes the prospective
+receiver contract testable without changing the host. It accepts only the
+canonical four-service namespace/UID/veth/address topology, fixed listener and
+directional-flow tuples, initiator-only TCP rules whose reverse packets require
+conntrack-established state, and a disjoint Asterisk RTP range. Its Asterisk
+observation must be Ed25519-signed and bound to both a host-owned expected
+topology digest and the supplied exact topology, expected boot ID, expected
+effective-configuration digest, namespace identity, link/address tuple, time
+window, and one-time nonce. The validator requires a synchronous atomic replay
+consumer. The module is unimported by production,
+does not create namespaces, veth links, routes, firewall policy, or Asterisk
+configuration, and does not close either blocker.
+
 An operator may use `--install` only while `teleagent-voice-stack.service` is
 stopped. The source descriptor binds the current helper/unit digests and one
 reviewed legacy pair. A descriptor-less target is adopted only when both bytes

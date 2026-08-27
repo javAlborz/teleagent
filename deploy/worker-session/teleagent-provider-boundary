@@ -86,12 +86,68 @@ const MAX_WORKSPACE_FILESYSTEM_BYTES = 64n * 1024n * 1024n * 1024n;
 const MIN_PROVIDER_PLANE_CAPACITY_BYTES = 1n * 1024n * 1024n * 1024n;
 const MAX_PROVIDER_PLANE_CAPACITY_BYTES = 4n * 1024n * 1024n * 1024n;
 const MIN_PROVIDER_PLANE_FREE_BYTES = 512n * 1024n * 1024n;
+const DURABLE_LOCAL_FILESYSTEMS = new Set([
+  0xef53n, // ext2/3/4
+  0x58465342n, // XFS
+  0x9123683en, // Btrfs
+  0xf2f52010n, // F2FS
+  0x2fc12fc1n, // ZFS
+]);
 const WORKSPACE_STORAGE_ATTESTATION = 'PROVIDER_WORKSPACE_STORAGE_OK';
 const PROVIDER_PLANE_STORAGE_ATTESTATION = 'PROVIDER_PLANE_STORAGE_OK';
+const WORKER_STORAGE_ATTESTATION = 'PROVIDER_WORKER_STORAGE_OK';
+const IMMUTABLE_RELEASE_ROOT = /^\/opt\/teleagent\/releases\/sha256-[a-f0-9]{64}$/;
+const IMMUTABLE_PREFLIGHT_RELATIVE = 'deploy/worker-session/teleagent-provider-boundary';
+const HANDOFF_LOCK = '/run/teleagent-staging-handoff.lock';
+const LIFECYCLE_LOCK_ENV = 'TELEAGENT_HANDOFF_LIFECYCLE_LOCK_FD';
 
 function fail(message, code = 77) {
   const error = Object.assign(new Error(message), { exitCode: code });
   throw error;
+}
+
+function requireImmutablePreflight({
+  environment = process.env,
+  filesystem = fs,
+  executable = process.execPath,
+  invokedScript = process.argv[1],
+  execArguments = process.execArgv,
+  uid = process.geteuid(),
+} = {}) {
+  const releaseRoot = environment.TELEAGENT_RELEASE_ROOT;
+  const descriptorValue = environment[LIFECYCLE_LOCK_ENV];
+  if (uid !== 0 || !IMMUTABLE_RELEASE_ROOT.test(releaseRoot || '') ||
+      !/^(?:[3-9]|[1-9][0-9]+)$/.test(descriptorValue || '') ||
+      !Array.isArray(execArguments) || execArguments.length !== 0) {
+    fail('the provider preflight requires one gated immutable release and retained lock');
+  }
+  const descriptor = Number.parseInt(descriptorValue, 10);
+  if (!Number.isSafeInteger(descriptor) || descriptor > 1_000_000) {
+    fail('the provider preflight lock descriptor is invalid');
+  }
+  const expectedNode = `${releaseRoot}/runtime/node/bin/node`;
+  const expectedScript = `${releaseRoot}/${IMMUTABLE_PREFLIGHT_RELATIVE}`;
+  let descriptorMetadata;
+  let pathMetadata;
+  try {
+    if (filesystem.realpathSync(executable) !== expectedNode ||
+        filesystem.realpathSync(invokedScript || '') !== expectedScript) {
+      fail('the provider preflight executable escaped the immutable release');
+    }
+    descriptorMetadata = filesystem.fstatSync(descriptor);
+    pathMetadata = filesystem.lstatSync(HANDOFF_LOCK);
+  } catch (error) {
+    if (error?.exitCode === 77) throw error;
+    fail('the provider preflight executable or retained lock is unavailable');
+  }
+  if (!descriptorMetadata.isDirectory() || !pathMetadata.isDirectory() ||
+      descriptorMetadata.dev !== pathMetadata.dev || descriptorMetadata.ino !== pathMetadata.ino ||
+      pathMetadata.uid !== 0 || pathMetadata.gid !== 0 ||
+      (pathMetadata.mode & 0o7777) !== 0o755) {
+    fail('the provider preflight lock identity is unsafe');
+  }
+  delete environment[LIFECYCLE_LOCK_ENV];
+  return descriptor;
 }
 
 function take(options, name, required = true) {
@@ -513,6 +569,15 @@ function validateProviderPlaneStorageBoundary({
   const blockSize = BigInt(storage.bsize);
   const blocks = BigInt(storage.blocks);
   const availableBlocks = BigInt(storage.bavail);
+  let filesystemType;
+  try {
+    filesystemType = BigInt.asUintN(32, BigInt(storage.type));
+  } catch {
+    fail('provider plane filesystem type is invalid');
+  }
+  if (!DURABLE_LOCAL_FILESYSTEMS.has(filesystemType)) {
+    fail('provider plane requires a reviewed durable local filesystem');
+  }
   if (blockSize <= 0n || blocks <= 0n || availableBlocks < 0n || availableBlocks > blocks) {
     fail('provider plane filesystem accounting is invalid');
   }
@@ -541,9 +606,11 @@ function validateProviderPlaneStorageBoundary({
 }
 
 function validateProviderStorageIsolation({
+  validateWorkspace = validateWorkspaceAnchor,
   validateWorkspaceStorage = validateWorkspaceStorageBoundary,
   validateProviderPlaneStorage = validateProviderPlaneStorageBoundary,
 } = {}) {
+  validateWorkspace(FIXED_WORKSPACE);
   const workspace = validateWorkspaceStorage(WORKSPACE_ROOT);
   const providerPlane = validateProviderPlaneStorage({ requireReserve: true });
   const normalizeDevice = (value) => {
@@ -555,6 +622,13 @@ function validateProviderStorageIsolation({
     fail('provider workspace and provider plane require distinct filesystems');
   }
   return Object.freeze({ workspace, providerPlane });
+}
+
+function attestWorkerStorageBoundary({
+  validateStorage = validateProviderStorageIsolation,
+} = {}) {
+  validateStorage();
+  return WORKER_STORAGE_ATTESTATION;
 }
 
 function attestProviderPlaneStorageBoundary({
@@ -583,7 +657,7 @@ function parseControl(argv, environment = process.env, { uid = process.getuid() 
   const globalAction = [
     'panic-all', 'recover-root-panic', 'assert-global-unlocked',
     'assert-supervisor-start-admitted', 'attest-workspace-storage',
-    'attest-provider-plane-storage',
+    'attest-provider-plane-storage', 'attest-worker-storage',
   ].includes(action);
   const provider = take(options, '--provider', !globalAction);
   const launchId = take(options, '--launch-id', action === 'launch' || action === 'terminate' || action === 'status');
@@ -1767,8 +1841,18 @@ async function main(argv = process.argv.slice(2), environment = process.env, {
   randomCapability = () => crypto.randomBytes(32).toString('hex'),
   spawnImpl = spawn,
   checkProviderCli = requirePinnedProviderCli,
+  requirePreflight = requireImmutablePreflight,
+  parseInput = parseControl,
+  attestWorkerStorage = attestWorkerStorageBoundary,
 } = {}) {
-  const input = parseControl(argv, environment);
+  const input = parseInput(argv, environment);
+  if (['assert-supervisor-start-admitted', 'attest-worker-storage'].includes(input.action)) {
+    requirePreflight({ environment });
+  }
+  if (input.action === 'attest-worker-storage') {
+    process.stdout.write(`${attestWorkerStorage()}\n`);
+    return 0;
+  }
   if (input.action === 'attest-workspace-storage') {
     process.stdout.write(`${attestWorkspaceStorageBoundary()}\n`);
     return 0;
@@ -1921,6 +2005,7 @@ module.exports = {
   PROVIDER_MODELS,
   PROVIDERS,
   attestProviderPlaneStorageBoundary,
+  attestWorkerStorageBoundary,
   attestWorkspaceStorageBoundary,
   assertSupervisorStartAdmitted,
   assertGlobalProviderLaunchUnlocked,
@@ -1950,6 +2035,7 @@ module.exports = {
   processStartTime,
   purgeProviderReadinessArtifacts,
   providerControl,
+  requireImmutablePreflight,
   requirePinnedProviderCli,
   probeProviderSupervisor,
   readStableBoundedFile,

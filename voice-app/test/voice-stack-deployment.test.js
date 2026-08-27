@@ -24,6 +24,9 @@ const VOICE_INSTALLER = path.join(DEPLOY, 'teleagent-voice-stack-install');
 const RELEASE_START_GATE = 'ExecStartPre=+/usr/bin/env -i HOME=/var/empty ' +
   'PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 ' +
   '/usr/local/libexec/verify-teleagent-release-closure --check-start-gate';
+const RELEASE_START = 'ExecStart=/usr/bin/python3 -I ' +
+  '/usr/local/libexec/verify-teleagent-release-closure --start-component ' +
+  'voice-stack-start ${CREDENTIALS_DIRECTORY}/teleagent-release-gate';
 
 function voiceInstallerFixture(t) {
   const directory = fs.mkdtempSync('/tmp/teleagent-voice-install-test-');
@@ -210,17 +213,67 @@ test('voice deployment source is dormant and contains only the reviewed identity
   const unit = fs.readFileSync(path.join(DEPLOY, 'teleagent-voice-stack.service'), 'utf8');
   const compose = fs.readFileSync(path.join(ROOT, 'docker-compose.yml'), 'utf8');
   assert.equal(unit.split('\n').filter((line) => line === RELEASE_START_GATE).length, 1);
-  assert.equal((unit.match(/verify-teleagent-release-closure/gu) ?? []).length, 1);
+  assert.equal((unit.match(/verify-teleagent-release-closure/gu) ?? []).length, 4);
   assert.equal(unit.split('\n').filter((line) => /^ExecStart(?:Pre)?=/u.test(line))[0],
     RELEASE_START_GATE);
+  assert.ok(unit.split('\n').includes(RELEASE_START));
+  assert.ok(unit.split('\n').includes(
+    'LoadCredential=teleagent-release-gate:/run/teleagent-release-gate/verified.json'
+  ));
+  assert.doesNotMatch(unit, /^ExecStart=.*\/opt\/teleagent\/current/m);
   assert.doesNotMatch(unit, /^ExecCondition=|^ExecReload=/m);
+  assert.doesNotMatch(unit,
+    /^ExecStartPre=\/usr\/local\/libexec\/verify-voice-stack-identity/m);
   assert.match(unit,
-    /^ExecStartPre=\/usr\/local\/libexec\/verify-voice-stack-identity --installed-check$/m);
-  assert.match(unit,
-    /^ExecStopPost=\/usr\/local\/libexec\/teleagent-voice-stack-install --emergency-cleanup$/m);
+    /^ExecStopPost=\/usr\/bin\/python3 -I \/usr\/local\/libexec\/verify-teleagent-release-closure --cleanup-voice-stack$/m);
   assert.doesNotMatch(unit, /^\[Install\]$/m);
   assert.doesNotMatch(unit, /^Environment=.*(?:TOKEN|PASSWORD|SECRET|API_KEY|PRIVATE_KEY)=/mi);
   assert.doesNotMatch(compose, /^\s+group_add\s*:/m);
+});
+
+test('voice source check rejects unreviewed execution and credential directives', (t) => {
+  for (const injection of [
+    'ExecStartPre=/usr/bin/false',
+    'ExecStart=/usr/bin/false',
+    'LoadCredential=unreviewed:/tmp/unreviewed',
+    'LoadCredential=teleagent-release-gate:/run/teleagent-release-gate/verified.json',
+    'LoadCredentialEncrypted=unreviewed:/tmp/unreviewed',
+    'ImportCredential=unreviewed',
+    'ImportCredentialEx=unreviewed',
+    'SetCredential=unreviewed:not-secret',
+    'SetCredentialEncrypted=unreviewed:not-encrypted',
+    'ExecStartPost =/opt/teleagent/current/unreviewed-post',
+    '\tExecStop=/opt/teleagent/current/unreviewed-stop',
+    'LoadCredential =unreviewed:/tmp/unreviewed',
+    'SetCredentialEncrypted =unreviewed:not-encrypted',
+    '\tImportCredentialEx =unreviewed',
+    'ExecStartPost\\\n =/opt/teleagent/current/unreviewed-continuation',
+    'ExecStartPost\\\r\n =/opt/teleagent/current/unreviewed-crlf-continuation',
+    'ExecStartPost=\0/opt/teleagent/current/unreviewed-control',
+  ]) {
+    const releaseRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'voice-lifecycle-source-'));
+    t.after(() => fs.rmSync(releaseRoot, { recursive: true, force: true }));
+    const sourceRoot = path.join(releaseRoot, 'deploy', 'voice-stack');
+    fs.mkdirSync(sourceRoot, { recursive: true, mode: 0o755 });
+    for (const [sourceName, , mode] of REVIEWED_ASSETS) {
+      const target = path.join(sourceRoot, sourceName);
+      fs.copyFileSync(path.join(DEPLOY, sourceName), target);
+      fs.chmodSync(target, mode);
+    }
+    fs.copyFileSync(
+      path.join(ROOT, 'docker-compose.yml'),
+      path.join(releaseRoot, 'docker-compose.yml'),
+    );
+    const service = path.join(sourceRoot, 'teleagent-voice-stack.service');
+    fs.appendFileSync(service, `${injection}\n`);
+    assert.throws(
+      () => sourceCheck(sourceRoot, {
+        sourceUid: process.getuid(),
+        sourceGid: process.getgid(),
+      }),
+      /trusted release start gate|credential directive|execution command|noncanonical lifecycle or credential assignment whitespace|unsupported line continuation|forbidden control byte/,
+    );
+  }
 });
 
 test('voice source assets accept only installed or immutable read-only modes', (t) => {
