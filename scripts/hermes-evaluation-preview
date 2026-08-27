@@ -21,7 +21,7 @@ readonly systemd_run_bin='/usr/bin/systemd-run'
 readonly openssl_bin='/usr/bin/openssl'
 readonly timeout_bin='/usr/bin/timeout'
 readonly sync_bin='/usr/bin/sync'
-readonly script_path="$(readlink -f -- "$0")"
+readonly script_path="$(readlink -f -- "${BASH_SOURCE[0]}")"
 readonly repository_root="$(cd -- "$(dirname -- "$script_path")/.." && pwd -P)"
 readonly evaluation_directory="$repository_root/evaluation/hermes-preview"
 readonly server_path="$evaluation_directory/server.js"
@@ -36,6 +36,7 @@ readonly public_snapshot_directory="$private_directory/public"
 readonly snapshot_file="$public_snapshot_directory/summary.json"
 readonly token_file="$private_directory/launch-token"
 readonly ready_file="$private_directory/ready"
+readonly cleanup_pending_file="$private_directory/cleanup-pending"
 readonly lock_file="$runtime_root/teleagent-hermes-evaluation-preview.lock"
 readonly persistent_state_directory='/home/alborz/.local/state/teleagent-hermes-evaluation-preview'
 readonly trial_epoch_file="$persistent_state_directory/trial-epoch"
@@ -107,6 +108,10 @@ preview_command() {
     sudo -n "$preview_helper" "$@"
 }
 
+systemctl_user() {
+  "$systemctl_bin" --user "$@"
+}
+
 route_target() {
   local preview_status
   preview_status="$(preview_command status 2>/dev/null)" || {
@@ -133,11 +138,104 @@ route_class() {
 }
 
 remove_exact_route() {
-  if preview_command evaluation-down-if >/dev/null; then
+  preview_command evaluation-down-if >/dev/null 2>&1 || true
+  if [ "$(route_class)" = 'absent' ]; then
     return 0
   fi
-  printf 'hermes-evaluation-preview: fixed evaluation route was not removed; conflict or helper failure\n' >&2
+  printf 'hermes-evaluation-preview: fixed evaluation route absence was not verified\n' >&2
   return 2
+}
+
+path_absent() {
+  [ ! -e "$1" ] && [ ! -L "$1" ]
+}
+
+secure_cleanup_pending_present() {
+  [ -f "$cleanup_pending_file" ] && [ ! -L "$cleanup_pending_file" ] &&
+    [ "$(stat -c '%u:%a:%s:%h' -- "$cleanup_pending_file")" = "$user_id:600:7:1" ] &&
+    [ "$(<"$cleanup_pending_file")" = 'pending' ]
+}
+
+cleanup_pending_present() {
+  [ -e "$cleanup_pending_file" ] || [ -L "$cleanup_pending_file" ]
+}
+
+mark_cleanup_pending() {
+  if cleanup_pending_present; then
+    secure_cleanup_pending_present && return 0
+    rm -f -- "$cleanup_pending_file" 2>/dev/null || return 1
+  fi
+  ( set -o noclobber; umask 077; printf 'pending' >"$cleanup_pending_file" ) 2>/dev/null ||
+    return 1
+  secure_cleanup_pending_present
+}
+
+clear_cleanup_pending() {
+  rm -f -- "$cleanup_pending_file" 2>/dev/null || true
+  path_absent "$cleanup_pending_file"
+}
+
+unit_inactive() {
+  local active_state
+  active_state="$(systemctl_user show "$1" --property=ActiveState --value 2>/dev/null)" || return 1
+  [ "$active_state" = 'inactive' ] || [ "$active_state" = 'failed' ]
+}
+
+stop_main_unit() {
+  systemctl_user stop "$unit_name" >/dev/null 2>&1 || true
+  unit_inactive "$unit_name"
+}
+
+unlink_facade_socket() {
+  rm -f -- "$facade_socket" 2>/dev/null || true
+  path_absent "$facade_socket"
+}
+
+erase_runtime_files() {
+  rm -f -- "$ready_file" "$token_file" "$snapshot_file" 2>/dev/null || true
+  path_absent "$ready_file" && path_absent "$token_file" && path_absent "$snapshot_file"
+}
+
+teardown_preview_state() {
+  local marker_status=0 route_status=0 main_status=0 socket_status=0 files_status=0
+  mark_cleanup_pending || marker_status=$?
+  remove_exact_route || route_status=$?
+  stop_main_unit || main_status=$?
+  unlink_facade_socket || socket_status=$?
+  erase_runtime_files || files_status=$?
+
+  if [ "$marker_status" -ne 0 ] || [ "$route_status" -ne 0 ] || [ "$main_status" -ne 0 ] ||
+      [ "$socket_status" -ne 0 ] || [ "$files_status" -ne 0 ]; then
+    printf 'hermes-evaluation-preview: teardown postconditions are incomplete; cleanup must retry\n' >&2
+    return 1
+  fi
+  if ! clear_cleanup_pending; then
+    printf 'hermes-evaluation-preview: teardown completed but its retry marker could not be cleared\n' >&2
+    return 1
+  fi
+}
+
+watchdog_teardown() {
+  teardown_preview_state
+}
+
+acquire_cleanup_lock() {
+  exec 9>"$lock_file"
+  flock --exclusive --wait 10 9
+}
+
+facade_healthy() {
+  [ -S "$facade_socket" ] && "$curl_bin" --fail --silent --max-time 1 \
+    --unix-socket "$facade_socket" http://localhost/ >/dev/null
+}
+
+wait_watch_interval() {
+  sleep 1
+}
+
+stop_cleanup_guards() {
+  systemctl_user stop "$expiry_timer" "$expiry_service" "$watchdog_unit" >/dev/null 2>&1 || true
+  unit_inactive "$expiry_timer" && unit_inactive "$expiry_service" && unit_inactive "$watchdog_unit"
 }
 
 secure_token_present() {
@@ -278,8 +376,9 @@ run_facade() {
 }
 
 print_url() {
+  ! cleanup_pending_present || fail 'evaluation cleanup is pending; launch access is revoked'
   secure_token_present || fail 'no active secure launch token; start the preview first'
-  "$systemctl_bin" --user is-active --quiet "$unit_name" || fail 'evaluation preview is not active'
+  systemctl_user is-active --quiet "$unit_name" || fail 'evaluation preview is not active'
   [ "$(route_class)" = 'exact' ] || fail 'exact evaluation route is not active'
   local base_url
   base_url="$(preview_command url "$https_port")" || fail 'preview URL is unavailable'
@@ -296,7 +395,7 @@ run_service() {
   local child_pid='' refresh_pid=''
   cleanup() {
     trap - EXIT HUP INT TERM
-    rm -f -- "$ready_file"
+    rm -f -- "$ready_file" "$token_file" "$snapshot_file"
     if [ -n "$refresh_pid" ] && kill -0 "$refresh_pid" 2>/dev/null; then
       kill -TERM "$refresh_pid" 2>/dev/null || true
       wait "$refresh_pid" 2>/dev/null || true
@@ -306,7 +405,6 @@ run_service() {
       wait "$child_pid" 2>/dev/null || true
     fi
     if [ -S "$facade_socket" ]; then rm -f -- "$facade_socket"; fi
-    rm -f -- "$token_file" "$snapshot_file"
   }
   trap cleanup EXIT HUP INT TERM
 
@@ -348,70 +446,82 @@ run_service() {
 
 watch_preview() {
   require_lifecycle_commands
-  local health_failures=0 route_status=0
-  while "$systemctl_bin" --user is-active --quiet "$unit_name"; do
-    if [ -S "$facade_socket" ] && "$curl_bin" --fail --silent --max-time 1 \
-        --unix-socket "$facade_socket" http://localhost/ >/dev/null; then
+  local health_failures=0
+  while systemctl_user is-active --quiet "$unit_name"; do
+    if cleanup_pending_present; then
+      acquire_cleanup_lock || return 1
+      if watchdog_teardown; then return 0; fi
+      return 1
+    elif facade_healthy; then
       health_failures=0
     else
       health_failures=$((health_failures + 1))
     fi
     if [ "$health_failures" -ge 3 ]; then
-      exec 9>"$lock_file"
-      flock --exclusive --wait 10 9 || return 1
-      remove_exact_route || route_status=$?
-      "$systemctl_bin" --user stop "$unit_name" >/dev/null 2>&1 || true
-      rm -f -- "$ready_file" "$token_file" "$snapshot_file"
-      if [ "$route_status" -ne 0 ]; then return 1; fi
-      return 0
+      acquire_cleanup_lock || return 1
+      if watchdog_teardown; then return 0; fi
+      return 1
     fi
-    sleep 1
+    wait_watch_interval
   done
-  exec 9>"$lock_file"
-  flock --exclusive --wait 10 9 || return 1
-  if ! "$systemctl_bin" --user is-active --quiet "$unit_name"; then
-    remove_exact_route || route_status=$?
-    rm -f -- "$ready_file" "$token_file" "$snapshot_file"
-    if [ "$route_status" -ne 0 ]; then return 1; fi
+  acquire_cleanup_lock || return 1
+  watchdog_teardown
+}
+
+abort_unpublished_start() {
+  local reason="$1" guards_armed="${2:-0}"
+  if teardown_preview_state; then
+    if [ "$guards_armed" -eq 1 ] && ! stop_cleanup_guards; then
+      fail "$reason; runtime access is removed, but cleanup-guard shutdown is unresolved"
+    fi
+    fail "$reason"
   fi
+  fail "$reason; teardown is incomplete and any active watchdog was retained for retry"
+}
+
+abort_published_start() {
+  local reason="$1"
+  if teardown_preview_state; then
+    stop_cleanup_guards ||
+      fail "$reason; published runtime is removed, but cleanup-guard shutdown is unresolved"
+    fail "$reason"
+  fi
+  fail "$reason; teardown is incomplete and cleanup guards were retained for retry"
 }
 
 start_preview() {
-  if "$systemctl_bin" --user is-active --quiet "$unit_name"; then
-    fail 'evaluation preview is already active'
-  fi
+  unit_inactive "$unit_name" || fail 'evaluation preview is active or its state is unavailable'
 
   ensure_trial_epoch
-  "$systemctl_bin" --user stop "$expiry_timer" "$expiry_service" "$watchdog_unit" >/dev/null 2>&1 || true
-  "$systemctl_bin" --user reset-failed "$unit_name" "$expiry_service" "$watchdog_unit" >/dev/null 2>&1 || true
-  remove_exact_route || fail 'reserved preview route is not safely available'
-  rm -f -- "$ready_file" "$token_file" "$snapshot_file"
+  teardown_preview_state || fail 'reserved preview route or runtime state is not safely available'
+  stop_cleanup_guards || fail 'prior cleanup guards could not be stopped and verified inactive'
+  systemctl_user reset-failed "$unit_name" "$expiry_service" "$watchdog_unit" >/dev/null 2>&1 || true
   write_new_token
 
-  "$systemd_run_bin" --user \
-    --unit="$unit_name" --collect --service-type=exec \
-    --description='Teleagent isolated read-only Hermes evaluation' \
-    --working-directory="$evaluation_directory" \
-    --property=RuntimeMaxSec=2h --property=TimeoutStopSec=10s \
-    --property=KillMode=control-group --property=Restart=no \
-    --property=CPUAccounting=yes --property=CPUQuota=100% \
-    --property=MemoryAccounting=yes --property=MemoryMax=1536M --property=MemorySwapMax=128M \
-    --property=TasksAccounting=yes --property=TasksMax=192 --property=LimitNOFILE=256 \
-    --property=Nice=10 --property=IOSchedulingClass=idle \
-    --property=NoNewPrivileges=yes --property=RestrictSUIDSGID=yes --property=LockPersonality=yes \
-    --property="RestrictAddressFamilies=AF_UNIX AF_INET AF_NETLINK" --property=UMask=0077 \
-    -- "$script_path" _run >/dev/null
+  if ! "$systemd_run_bin" --user \
+      --unit="$unit_name" --collect --service-type=exec \
+      --description='Teleagent isolated read-only Hermes evaluation' \
+      --working-directory="$evaluation_directory" \
+      --property=RuntimeMaxSec=2h --property=TimeoutStopSec=10s \
+      --property=KillMode=control-group --property=Restart=no \
+      --property=CPUAccounting=yes --property=CPUQuota=100% \
+      --property=MemoryAccounting=yes --property=MemoryMax=1536M --property=MemorySwapMax=128M \
+      --property=TasksAccounting=yes --property=TasksMax=192 --property=LimitNOFILE=256 \
+      --property=Nice=10 --property=IOSchedulingClass=idle \
+      --property=NoNewPrivileges=yes --property=RestrictSUIDSGID=yes --property=LockPersonality=yes \
+      --property="RestrictAddressFamilies=AF_UNIX AF_INET AF_NETLINK" --property=UMask=0077 \
+      -- "$script_path" _run >/dev/null; then
+    abort_unpublished_start 'evaluation preview service could not be started'
+  fi
 
   local attempt
   for attempt in $(seq 1 40); do
     [ -f "$ready_file" ] && break
-    "$systemctl_bin" --user is-active --quiet "$unit_name" || break
+    systemctl_user is-active --quiet "$unit_name" || break
     sleep 0.25
   done
   if [ ! -f "$ready_file" ]; then
-    "$systemctl_bin" --user stop "$unit_name" >/dev/null 2>&1 || true
-    rm -f -- "$ready_file" "$token_file" "$snapshot_file"
-    fail 'evaluation preview did not become ready'
+    abort_unpublished_start 'evaluation preview did not become ready'
   fi
 
   if ! "$systemd_run_bin" --user \
@@ -420,9 +530,7 @@ start_preview() {
       --property=RuntimeMaxSec=2h10m --property=TimeoutStopSec=5s \
       --property=KillMode=control-group --property=Restart=on-failure --property=RestartSec=2s \
       -- "$script_path" _watch >/dev/null; then
-    "$systemctl_bin" --user stop "$unit_name" >/dev/null 2>&1 || true
-    rm -f -- "$ready_file" "$token_file" "$snapshot_file"
-    fail 'evaluation route watchdog could not be started'
+    abort_unpublished_start 'evaluation route watchdog could not be started' 1
   fi
 
   if ! "$systemd_run_bin" --user \
@@ -431,36 +539,13 @@ start_preview() {
       --property=RuntimeMaxSec=2m --property=TimeoutStopSec=15s \
       --property=KillMode=control-group --property=Restart=no \
       -- "$script_path" _expire >/dev/null; then
-    "$systemctl_bin" --user stop "$watchdog_unit" "$unit_name" >/dev/null 2>&1 || true
-    rm -f -- "$ready_file" "$token_file" "$snapshot_file"
-    fail 'automatic preview expiry could not be scheduled'
+    abort_unpublished_start 'automatic preview expiry could not be scheduled' 1
   fi
 
-  if ! "$systemctl_bin" --user is-active --quiet "$watchdog_unit" ||
-      ! "$systemctl_bin" --user is-active --quiet "$expiry_timer"; then
-    "$systemctl_bin" --user stop "$expiry_timer" "$expiry_service" \
-      "$watchdog_unit" "$unit_name" >/dev/null 2>&1 || true
-    rm -f -- "$ready_file" "$token_file" "$snapshot_file"
-    fail 'evaluation cleanup guards are not active'
+  if ! systemctl_user is-active --quiet "$watchdog_unit" ||
+      ! systemctl_user is-active --quiet "$expiry_timer"; then
+    abort_unpublished_start 'evaluation cleanup guards are not active' 1
   fi
-
-  abort_published_start() {
-    local reason="$1" route_status=0
-    remove_exact_route || route_status=$?
-    if [ "$route_status" -eq 0 ]; then
-      "$systemctl_bin" --user stop "$expiry_timer" "$expiry_service" \
-        "$watchdog_unit" "$unit_name" >/dev/null 2>&1 || true
-    else
-      # Stop the useful backend and erase its bearer, but retain both cleanup
-      # guards so a temporarily unavailable Tailscale control plane is retried.
-      "$systemctl_bin" --user stop "$unit_name" >/dev/null 2>&1 || true
-    fi
-    rm -f -- "$ready_file" "$token_file" "$snapshot_file"
-    if [ "$route_status" -ne 0 ]; then
-      fail "$reason; backend stopped, but cleanup guards retained for route retry"
-    fi
-    fail "$reason"
-  }
 
   if ! preview_command evaluation-up >/dev/null || [ "$(route_class)" != 'exact' ]; then
     abort_published_start 'fixed Unix-socket preview route could not be established'
@@ -474,37 +559,27 @@ start_preview() {
 }
 
 stop_preview() {
-  local route_status=0
-  remove_exact_route || route_status=$?
-  if [ "$route_status" -eq 0 ]; then
-    "$systemctl_bin" --user stop "$expiry_timer" "$expiry_service" \
-      "$watchdog_unit" "$unit_name" >/dev/null 2>&1 || true
-  else
-    "$systemctl_bin" --user stop "$expiry_timer" "$expiry_service" \
-      "$unit_name" >/dev/null 2>&1 || true
+  if ! teardown_preview_state; then
+    printf 'hermes-evaluation-preview: stop is incomplete; cleanup guards were retained for retry\n' >&2
+    return 1
   fi
-  rm -f -- "$ready_file" "$token_file" "$snapshot_file"
-  if [ "$route_status" -ne 0 ]; then
-    printf 'hermes-evaluation-preview: backend stopped and secrets removed, but the route may remain\n' >&2
-    return "$route_status"
-  fi
-  printf 'Hermes evaluation preview stopped; launch token and cached snapshot removed.\n'
+  stop_cleanup_guards || {
+    printf 'hermes-evaluation-preview: runtime stopped, but cleanup guards were not verified inactive\n' >&2
+    return 1
+  }
+  printf 'Hermes evaluation preview stopped; route, socket, process, token, and cache are absent.\n'
 }
 
 expire_preview() {
-  local route_status=0
-  remove_exact_route || route_status=$?
-  if [ "$route_status" -eq 0 ]; then
-    "$systemctl_bin" --user stop "$watchdog_unit" "$unit_name" >/dev/null 2>&1 || true
-  else
-    "$systemctl_bin" --user stop "$unit_name" >/dev/null 2>&1 || true
+  if ! teardown_preview_state; then
+    return 1
   fi
-  rm -f -- "$ready_file" "$token_file" "$snapshot_file"
-  if [ "$route_status" -ne 0 ]; then return "$route_status"; fi
+  systemctl_user stop "$watchdog_unit" >/dev/null 2>&1 || true
+  unit_inactive "$watchdog_unit"
 }
 
 show_status() {
-  if "$systemctl_bin" --user is-active --quiet "$unit_name"; then
+  if systemctl_user is-active --quiet "$unit_name"; then
     printf 'service: active\n'
   else
     printf 'service: inactive\n'
@@ -519,6 +594,11 @@ show_status() {
     printf 'launch token: present (value hidden)\n'
   else
     printf 'launch token: absent or unsafe\n'
+  fi
+  if cleanup_pending_present; then
+    printf 'cleanup state: pending\n'
+  else
+    printf 'cleanup state: clear\n'
   fi
   if secure_trial_epoch_present; then
     printf 'trial epoch: %s\n' "$(<"$trial_epoch_file")"
@@ -561,4 +641,6 @@ main() {
   esac
 }
 
-main "$@"
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  main "$@"
+fi

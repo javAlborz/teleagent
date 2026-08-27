@@ -125,18 +125,23 @@ scripts/hermes-evaluation-preview stop
 `start` collects the first snapshot and proves the Unix facade healthy before
 arming both the route watchdog and bounded two-hour expiry timer. It verifies
 both guards active before invoking the helper's fixed `evaluation-up`. A failure
-before publication leaves no new route. After publication, failure stops the
-backend and removes the bearer token; the exact route is removed when possible,
-while the watchdog and expiry path remain available to retry. If removal is
-temporarily unavailable, the stale route targets a dead socket inside the
-operator's private runtime directory.
+before publication leaves no new route. After publication, every failure path
+first creates a private `cleanup-pending` marker and attempts the same verified
+teardown: remove and recheck the exact route, stop and recheck the main unit,
+unlink and recheck the fixed socket, and remove the token, readiness marker, and
+cached snapshot. The wrapper clears `cleanup-pending` and reports success only
+when every postcondition holds. Otherwise it returns an error without claiming
+the backend stopped and retains the watchdog and expiry path for retry.
 
 The watchdog polls the Unix facade and reacts after three consecutive failures.
-It removes the fixed route before stopping the facade when possible; helper
-failure makes the watchdog fail and restart so cleanup is retried. Normal stop
-and expiry also invoke fixed `evaluation-down-if` while the facade is still
-alive, then stop units and remove the token and cached snapshot. The trial epoch
-persists.
+It uses that same route, process, socket, and file teardown. Any unresolved
+postcondition makes the watchdog fail and restart, and unlinking the socket
+causes subsequent health probes to fail even if a main-unit stop request did not
+take effect. A restarted watchdog checks `cleanup-pending` before accepting a
+healthy facade, so simultaneous route, process, socket, and file-cleanup failure
+cannot return it to monitoring mode. Normal stop and expiry use the same state
+machine; cleanup guards are stopped only after teardown succeeds. The trial
+epoch persists.
 
 The outer transient service has a hard two-hour lifetime, one-CPU quota,
 1536-MB memory limit, 128-MB swap limit, 192-task limit, and 256-file-descriptor

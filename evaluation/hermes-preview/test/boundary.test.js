@@ -110,6 +110,7 @@ test('operator wrapper fixes provenance, namespaces, cached refresh, and route c
   assert.match(wrapper, /export PATH='\/usr\/bin:\/bin'/u);
   assert.match(wrapper, /readonly https_port=8491/u);
   assert.match(wrapper, /facade_socket="\$socket_directory\/facade\.sock"/u);
+  assert.match(wrapper, /cleanup_pending_file="\$private_directory\/cleanup-pending"/u);
   assert.match(wrapper, /trial_epoch_file="\$persistent_state_directory\/trial-epoch"/u);
   assert.match(wrapper, /set -o noclobber/u);
   assert.match(wrapper, /600:24:1/u);
@@ -136,22 +137,35 @@ test('operator wrapper fixes provenance, namespaces, cached refresh, and route c
   const startBody = wrapper.slice(wrapper.indexOf('start_preview() {'), wrapper.indexOf('stop_preview() {'));
   assert.ok(startBody.indexOf('watchdog_unit') < startBody.indexOf('preview_command evaluation-up'));
   assert.ok(startBody.indexOf('expiry_unit_base') < startBody.indexOf('preview_command evaluation-up'));
-  assert.match(startBody, /abort_published_start\(\)/u);
+  assert.ok(startBody.indexOf('teardown_preview_state') < startBody.indexOf('stop_cleanup_guards'));
+  assert.match(startBody, /abort_published_start 'fixed Unix-socket preview route/u);
   assert.doesNotMatch(startBody, /remove_exact_route \|\| true/u);
   assert.match(startBody,
     /if ! launch_url="\$\(print_url\)"; then\s+abort_published_start/u);
-  const abortBody = startBody.slice(
-    startBody.indexOf('abort_published_start() {'),
-    startBody.indexOf("if ! preview_command evaluation-up"),
+  const teardownBody = wrapper.slice(
+    wrapper.indexOf('teardown_preview_state() {'),
+    wrapper.indexOf('watchdog_teardown() {'),
   );
-  const retryBranch = abortBody.slice(
-    abortBody.indexOf('else'),
-    abortBody.indexOf('rm -f --'),
+  assert.ok(teardownBody.indexOf('mark_cleanup_pending') < teardownBody.indexOf('remove_exact_route'));
+  assert.ok(teardownBody.indexOf('remove_exact_route') < teardownBody.indexOf('stop_main_unit'));
+  assert.ok(teardownBody.indexOf('stop_main_unit') < teardownBody.indexOf('unlink_facade_socket'));
+  assert.ok(teardownBody.indexOf('unlink_facade_socket') < teardownBody.indexOf('erase_runtime_files'));
+  assert.match(teardownBody, /route_status.*main_status.*socket_status.*files_status/su);
+  assert.match(teardownBody, /clear_cleanup_pending/u);
+  const abortBody = wrapper.slice(
+    wrapper.indexOf('abort_published_start() {'),
+    wrapper.indexOf('start_preview() {'),
   );
-  assert.match(retryBranch, /stop "\$unit_name"/u);
-  assert.doesNotMatch(retryBranch, /watchdog_unit|expiry_timer|expiry_service/u);
+  assert.match(abortBody, /if teardown_preview_state; then/u);
+  assert.match(abortBody, /cleanup guards were retained for retry/u);
   const stopBody = wrapper.slice(wrapper.indexOf('stop_preview() {'), wrapper.indexOf('expire_preview() {'));
-  assert.ok(stopBody.indexOf('remove_exact_route') < stopBody.indexOf('stop "$expiry_timer"'));
+  assert.ok(stopBody.indexOf('teardown_preview_state') < stopBody.indexOf('stop_cleanup_guards'));
+  const expiryBody = wrapper.slice(wrapper.indexOf('expire_preview() {'), wrapper.indexOf('show_status() {'));
+  assert.match(expiryBody, /if ! teardown_preview_state; then\s+return 1/u);
+  const watchBody = wrapper.slice(wrapper.indexOf('watch_preview() {'), wrapper.indexOf('abort_unpublished_start() {'));
+  assert.match(watchBody, /watchdog_teardown/u);
+  assert.ok(watchBody.indexOf('cleanup_pending_present') < watchBody.indexOf('facade_healthy'));
+  assert.match(wrapper, /if \[ "\$\{BASH_SOURCE\[0\]\}" = "\$0" \]; then\s+main "\$@"/u);
 
   const serviceBody = wrapper.slice(wrapper.indexOf('run_service() {'), wrapper.indexOf('watch_preview() {'));
   assert.doesNotMatch(serviceBody, /sudo|preview_helper/u);
