@@ -12,30 +12,51 @@
 const { v4: uuidv4 } = require('uuid');
 const logger = require('./logger');
 const ttsService = require('./tts-service');
+const { verifyOutboundRoutingConfig } = require('./outbound-routing-config');
 
-function buildSipUri({ to, dialUri, sipTrunkHost, sipTrunkTransport }) {
-  if (dialUri) {
-    return dialUri;
+function createOutboundAbortError(reason = 'Outbound call canceled') {
+  const error = new Error(String(reason || 'Outbound call canceled'));
+  error.name = 'AbortError';
+  error.code = 'OUTBOUND_CALL_CANCELED';
+  return error;
+}
+
+async function cleanupOutboundResources(dialog, endpoint, callId) {
+  const failures = [];
+  if (dialog && !dialog.destroyed) {
+    try {
+      await dialog.destroy();
+      logger.info('Dialog destroyed', { callId });
+    } catch (error) {
+      failures.push(error);
+      logger.warn('Failed to destroy dialog', { callId, error: error.message });
+    }
   }
+  if (endpoint) {
+    try {
+      await endpoint.destroy();
+      logger.info('Endpoint destroyed', { callId });
+    } catch (error) {
+      failures.push(error);
+      logger.warn('Failed to destroy endpoint', { callId, error: error.message });
+    }
+  }
+  return { success: failures.length === 0, failures };
+}
 
-  const isExternal = to.startsWith('+');
-  const phoneNumber = isExternal ? '9' + to.replace(/^\+1?/, '') : to;
-  const trimmedHost = String(sipTrunkHost || '').trim();
-  const normalizedHost = trimmedHost.toLowerCase();
-  const normalizedTransport = String(sipTrunkTransport || '').trim().toLowerCase();
-  const inferredTransport = normalizedTransport || (
-    normalizedHost === '127.0.0.1' ||
-    normalizedHost.startsWith('127.0.0.1:') ||
-    normalizedHost === 'localhost' ||
-    normalizedHost.startsWith('localhost:')
-      ? 'udp'
-      : ''
-  );
-  const hostWithTransport = /;transport=/i.test(trimmedHost)
-    ? trimmedHost
-    : `${trimmedHost}${inferredTransport ? `;transport=${inferredTransport}` : ''}`;
+function verifiedRoutingConfig(value) {
+  // Re-normalize at the side-effect boundary. A caller cannot smuggle an
+  // alternate buildSipUri implementation, add URI parameters, or substitute a
+  // different authentication target after startup.
+  try {
+    return verifyOutboundRoutingConfig(value);
+  } catch {
+    throw new Error('A validated outbound SIP routing configuration is required');
+  }
+}
 
-  return `sip:${phoneNumber}@${hostWithTransport}`;
+function buildSipUri({ to, routingConfig }) {
+  return verifiedRoutingConfig(routingConfig).buildSipUri(to);
 }
 
 /**
@@ -53,17 +74,44 @@ function buildSipUri({ to, dialUri, sipTrunkHost, sipTrunkTransport }) {
 async function initiateOutboundCall(srf, mediaServer, options) {
   const {
     to,
-    dialUri,
-    message,
     callerId,
     timeoutSeconds = 30,
-    deviceConfig = null
+    deviceConfig = null,
+    routingConfig,
+    callId: reservedCallId = null,
+    signal = null
   } = options;
 
-  const callId = uuidv4();
+  const callId = reservedCallId || uuidv4();
   const startTime = Date.now();
+  let endpoint = null;
+  let dialog = null;
+  let sipAttemptStarted = false;
+  let dialogAcquired = false;
+  let cleanupPromise = Promise.resolve({ success: true, failures: [] });
+  const cleanupFailures = [];
+  const cleanup = () => {
+    const dialogToClean = dialog;
+    const endpointToClean = endpoint;
+    dialog = null;
+    endpoint = null;
+    cleanupPromise = cleanupPromise.then(async () => {
+      const result = await cleanupOutboundResources(dialogToClean, endpointToClean, callId);
+      cleanupFailures.push(...result.failures);
+      return { success: cleanupFailures.length === 0, failures: cleanupFailures };
+    });
+    return cleanupPromise;
+  };
+  const throwIfAborted = async () => {
+    if (!signal?.aborted) return;
+    await cleanup();
+    throw createOutboundAbortError(signal.reason);
+  };
+  const abortListener = () => { void cleanup(); };
+  signal?.addEventListener?.('abort', abortListener, { once: true });
 
   try {
+    await throwIfAborted();
     logger.info('Initiating outbound call', {
       callId,
       to,
@@ -73,44 +121,37 @@ async function initiateOutboundCall(srf, mediaServer, options) {
 
     // STEP 1: Create FreeSWITCH endpoint first (Early Offer pattern)
     logger.info('Creating FreeSWITCH endpoint', { callId });
-    const endpoint = await mediaServer.createEndpoint();
+    endpoint = await mediaServer.createEndpoint();
+    await throwIfAborted();
 
     // Get local SDP from FreeSWITCH
     const localSdp = endpoint.local.sdp;
 
-    // Format SIP URI for 3CX
-    // Remove '+' from E.164 format for SIP URI
-    // Internal extensions: dial as-is. External (E.164 with +): add 9 prefix for PSTN
-    const sipTrunkHost = process.env.SIP_TRUNK_HOST || '10.70.7.50';
-    const sipTrunkTransport = process.env.SIP_TRUNK_TRANSPORT || '';
-    const externalIp = process.env.EXTERNAL_IP || '10.70.7.81';
+    // The destination authority is startup-validated and server-owned. API
+    // callers and inbound Contact headers never influence this route.
+    const route = verifiedRoutingConfig(routingConfig);
     const defaultCallerId = callerId || process.env.DEFAULT_CALLER_ID || '+15551234567';
-
-    // SIP Authentication for 3CX extension registration
-    const sipAuthUsername = process.env.SIP_AUTH_USERNAME;
-    const sipAuthPassword = process.env.SIP_AUTH_PASSWORD;
 
     const sipUri = buildSipUri({
       to,
-      dialUri,
-      sipTrunkHost,
-      sipTrunkTransport
+      routingConfig: route,
     });
 
     logger.info('Dialing SIP URI', {
       callId,
-      sipUri,
+      sipTarget: sipUri.replace(/^sip:[^@]+@/i, 'sip:<redacted>@'),
       from: defaultCallerId,
-      hasAuth: !!(sipAuthUsername && sipAuthPassword)
+      hasAuth: true
     });
 
     // STEP 2: Create UAC (outbound call) with Early Offer
     // Use device extension and display name if available, otherwise fall back to callerId
     const fromExtension = deviceConfig ? deviceConfig.extension : defaultCallerId.replace('+', '');
     const displayName = deviceConfig ? deviceConfig.name : null;
+    const fromUri = route.buildFromUri(fromExtension);
     const fromHeader = displayName
-      ? '"' + displayName + '" <sip:' + fromExtension + '@' + sipTrunkHost + '>'
-      : '<sip:' + fromExtension + '@' + sipTrunkHost + '>';
+      ? '"' + displayName.replaceAll(/["\\\r\n]/g, '') + '" <' + fromUri + '>'
+      : '<' + fromUri + '>';
 
     const uacOptions = {
       localSdp: localSdp,
@@ -121,28 +162,17 @@ async function initiateOutboundCall(srf, mediaServer, options) {
       }
     };
 
-    // Add SIP authentication - prefer device credentials, fall back to env vars
-    const authUsername = deviceConfig ? deviceConfig.authId : sipAuthUsername;
-    const authPassword = deviceConfig ? deviceConfig.password : sipAuthPassword;
-
-    if (authUsername && authPassword) {
-      uacOptions.auth = {
-        username: authUsername,
-        password: authPassword
-      };
-      logger.info('SIP authentication enabled', {
-        callId,
-        username: authUsername,
-        device: deviceConfig ? deviceConfig.name : 'default'
-      });
-    }
+    // The callback credential is a dedicated, app-owned trunk capability. It
+    // is never selected from caller/device data and is attached only after the
+    // exact PBX authority and transport have been revalidated above.
+    uacOptions.auth = route.getCallbackAuth();
+    logger.info('SIP trunk authentication enabled', { callId });
 
     let isRinging = false;
-    let callAnswered = false;
-
     // Create the outbound call (returns dialog directly, not { uas, uac })
-    const uac = await srf.createUAC(sipUri, uacOptions, {
-      cbRequest: function(err, req) {
+    sipAttemptStarted = true;
+    dialog = await srf.createUAC(sipUri, uacOptions, {
+      cbRequest: function(err, _req) {
         // Called when INVITE is sent
         if (err) {
           logger.error('INVITE send failed', { callId, error: err.message });
@@ -164,9 +194,10 @@ async function initiateOutboundCall(srf, mediaServer, options) {
         }
       }
     });
+    dialogAcquired = true;
+    await throwIfAborted();
 
     // STEP 3: Call was answered! Connect endpoint with remote SDP
-    callAnswered = true;
     const latency = Date.now() - startTime;
 
     logger.info('Call answered', {
@@ -177,26 +208,14 @@ async function initiateOutboundCall(srf, mediaServer, options) {
     });
 
     // Modify endpoint with remote SDP to complete media connection
-    await endpoint.modify(uac.remote.sdp);
+    await endpoint.modify(dialog.remote.sdp);
+    await throwIfAborted();
 
     logger.info('Media connection established', { callId });
 
-    // Setup call cleanup on remote hangup
-    uac.on('destroy', function() {
-      logger.info('Remote party hung up', { callId });
-      if (endpoint) {
-        endpoint.destroy().catch(function(err) {
-          logger.warn('Failed to destroy endpoint on hangup', {
-            callId,
-            error: err.message
-          });
-        });
-      }
-    });
-
     return {
       callId,
-      dialog: uac,
+      dialog,
       endpoint,
       isRinging,
       latency
@@ -212,23 +231,36 @@ async function initiateOutboundCall(srf, mediaServer, options) {
       latency
     });
 
+    const cleanupResult = await cleanup();
+
+    if (signal?.aborted || error?.name === 'AbortError' || error?.code === 'OUTBOUND_CALL_CANCELED') {
+      const abortError = createOutboundAbortError(signal?.reason || error.message);
+      const knownRejectedInvite = [401, 404, 407, 408, 480, 486, 503].includes(error?.status);
+      abortError.cleanupSucceeded = cleanupResult.success &&
+        (!sipAttemptStarted || dialogAcquired || knownRejectedInvite);
+      throw abortError;
+    }
+
     // Handle specific SIP error codes
     if (error.status) {
       const status = error.status;
       if (status === 486) {
-        throw new Error('busy');
+        error = new Error('busy');
       } else if (status === 480 || status === 408) {
-        throw new Error('no_answer');
+        error = new Error('no_answer');
       } else if (status === 404) {
-        throw new Error('not_found');
+        error = new Error('not_found');
       } else if (status === 503) {
-        throw new Error('service_unavailable');
+        error = new Error('service_unavailable');
       } else if (status === 401 || status === 407) {
-        throw new Error('auth_failed');
+        error = new Error('auth_failed');
       }
     }
 
+    error.cleanupSucceeded = cleanupResult.success;
     throw error;
+  } finally {
+    signal?.removeEventListener?.('abort', abortListener);
   }
 }
 
@@ -284,36 +316,13 @@ async function playMessage(endpoint, message, options) {
  */
 async function hangupCall(dialog, endpoint, callId) {
   logger.info('Hanging up outbound call', { callId: callId });
-
-  try {
-    // Destroy SIP dialog
-    if (dialog && !dialog.destroyed) {
-      await dialog.destroy();
-      logger.info('Dialog destroyed', { callId: callId });
-    }
-  } catch (error) {
-    logger.warn('Failed to destroy dialog', {
-      callId: callId,
-      error: error.message
-    });
-  }
-
-  try {
-    // Destroy FreeSWITCH endpoint
-    if (endpoint) {
-      await endpoint.destroy();
-      logger.info('Endpoint destroyed', { callId: callId });
-    }
-  } catch (error) {
-    logger.warn('Failed to destroy endpoint', {
-      callId: callId,
-      error: error.message
-    });
-  }
+  return cleanupOutboundResources(dialog, endpoint, callId);
 }
 
 module.exports = {
   buildSipUri,
+  cleanupOutboundResources,
+  createOutboundAbortError,
   initiateOutboundCall: initiateOutboundCall,
   playMessage: playMessage,
   hangupCall: hangupCall

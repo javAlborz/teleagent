@@ -10,10 +10,12 @@
     "lint:fix": "cd .. && eslint claude-api-server/ --fix"
   },
   "dependencies": {
-    "express": "^4.22.2"
+    "better-sqlite3": "12.11.1",
+    "express": "^4.22.2",
+    "node-pty": "1.1.0"
   },
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=24.0.0"
   },
   "author": "NetworkChuck",
   "license": "MIT"

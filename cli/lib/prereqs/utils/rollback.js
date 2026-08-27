@@ -194,7 +194,7 @@ export async function rollback(savedState) {
     console.log(chalk.gray('  Ubuntu/Debian: sudo apt-get remove nodejs npm'));
     console.log(chalk.gray('  Fedora/RHEL: sudo dnf remove nodejs npm'));
     console.log(chalk.gray('  Arch: sudo pacman -R nodejs npm'));
-    console.log(chalk.gray('  macOS: brew uninstall node@20\n'));
+    console.log(chalk.gray('  macOS: brew uninstall node@24\n'));
   }
 
   // Docker rollback

@@ -2,7 +2,12 @@ import chalk from 'chalk';
 import ora from 'ora';
 import fs from 'fs';
 import path from 'path';
-import { loadConfig, configExists, getInstallationType } from '../config.js';
+import {
+  loadConfigWithVoiceRuntimeIdentityPreflight,
+  peekConfig,
+  configExists,
+  getInstallationType,
+} from '../config.js';
 import { checkDocker, writeDockerConfig, startContainers } from '../docker.js';
 import { startServer, isServerRunning } from '../process-manager.js';
 import { sleep } from '../utils.js';
@@ -12,6 +17,41 @@ import {
   buildAgentServerEnvironment,
   checkConfiguredAgentProviders
 } from '../agents.js';
+
+export function assertPersonaOnlyDeviceConfiguration(devices) {
+  for (const device of devices || []) {
+    if (!device || typeof device !== 'object') continue;
+    for (const key of ['authId', 'authPassword', 'password']) {
+      if (Object.hasOwn(device, key)) {
+        throw new Error('Device configuration must contain persona/routing metadata only; remove legacy SIP authentication fields.');
+      }
+    }
+  }
+  return true;
+}
+
+export async function writeDeviceConfiguration(config) {
+  assertPersonaOnlyDeviceConfiguration(config.devices);
+  const devicesPath = path.join(config.paths.voiceApp, 'config', 'devices.json');
+  const devicesConfig = {};
+  for (const device of config.devices || []) {
+    devicesConfig[device.extension] = device;
+  }
+
+  const temporaryPath = `${devicesPath}.tmp-${process.pid}-${Date.now()}`;
+  try {
+    await fs.promises.writeFile(
+      temporaryPath,
+      JSON.stringify(devicesConfig, null, 2),
+      { mode: 0o600, flag: 'wx' }
+    );
+    await fs.promises.rename(temporaryPath, devicesPath);
+    await fs.promises.chmod(devicesPath, 0o600);
+  } catch (error) {
+    await fs.promises.unlink(temporaryPath).catch(() => {});
+    throw error;
+  }
+}
 
 async function ensureAgentProvidersReady(config) {
   const results = await checkConfiguredAgentProviders(config);
@@ -53,9 +93,13 @@ export async function startCommand() {
     process.exit(1);
   }
 
-  // Load config and get installation type
-  const config = await loadConfig();
-  const installationType = getInstallationType(config);
+  // The first config read is deliberately non-mutating. Resolve all three
+  // voice/media accounts before loadConfig migrations or prerequisite repair
+  // can write state. API-only installations remain exempt.
+  const configSnapshot = await peekConfig();
+  const installationType = getInstallationType(configSnapshot);
+  const { config, voiceRuntimeIdentities } =
+    await loadConfigWithVoiceRuntimeIdentityPreflight({ snapshot: configSnapshot });
   const isPiMode = config.deployment?.mode === 'pi-split';
 
   console.log(chalk.gray(`Installation type: ${installationType}\n`));
@@ -77,11 +121,11 @@ export async function startCommand() {
       await startApiServer(config);
       break;
     case 'voice-server':
-      await startVoiceServer(config, isPiMode);
+      await startVoiceServer(config, isPiMode, voiceRuntimeIdentities);
       break;
     case 'both':
     default:
-      await startBoth(config, isPiMode);
+      await startBoth(config, isPiMode, voiceRuntimeIdentities);
       break;
   }
 }
@@ -109,7 +153,7 @@ async function startApiServer(config) {
   if (!fs.existsSync(nodeModulesPath)) {
     console.log(chalk.red('✗ Dependencies not installed in claude-api-server'));
     console.log(chalk.yellow('\nRun the following to install dependencies:'));
-    console.log(chalk.cyan(`  cd ${config.paths.claudeApiServer} && npm install\n`));
+    console.log(chalk.cyan(`  cd ${config.paths.claudeApiServer} && npm ci --omit=dev\n`));
     process.exit(1);
   }
 
@@ -145,7 +189,7 @@ async function startApiServer(config) {
  * @param {boolean} isPiMode - Is Pi split-mode
  * @returns {Promise<void>}
  */
-async function startVoiceServer(config, isPiMode) {
+async function startVoiceServer(config, isPiMode, voiceRuntimeIdentities) {
   // Verify voice-app path exists
   if (!fs.existsSync(config.paths.voiceApp)) {
     console.log(chalk.red(`✗ Voice app not found at: ${config.paths.voiceApp}`));
@@ -180,15 +224,7 @@ async function startVoiceServer(config, isPiMode) {
   // Generate Docker config
   spinner.start('Generating Docker configuration...');
   try {
-    await writeDockerConfig(config);
-
-    // Also write devices.json to voice-app/config
-    const devicesPath = path.join(config.paths.voiceApp, 'config', 'devices.json');
-    const devicesConfig = {};
-    for (const device of config.devices) {
-      devicesConfig[device.extension] = device;
-    }
-    await fs.promises.writeFile(devicesPath, JSON.stringify(devicesConfig, null, 2), { mode: 0o644 });
+    await writeDockerConfig(config, voiceRuntimeIdentities);
 
     spinner.succeed('Docker configuration generated');
   } catch (error) {
@@ -244,7 +280,7 @@ async function startVoiceServer(config, isPiMode) {
  * @param {boolean} isPiMode - Is Pi split-mode
  * @returns {Promise<void>}
  */
-async function startBoth(config, isPiMode) {
+async function startBoth(config, isPiMode, voiceRuntimeIdentities) {
   // Verify voice-app path exists
   if (!fs.existsSync(config.paths.voiceApp)) {
     console.log(chalk.red(`✗ Voice app not found at: ${config.paths.voiceApp}`));
@@ -265,7 +301,7 @@ async function startBoth(config, isPiMode) {
     if (!fs.existsSync(nodeModulesPath)) {
       console.log(chalk.red('✗ Dependencies not installed in claude-api-server'));
       console.log(chalk.yellow('\nRun the following to install dependencies:'));
-      console.log(chalk.cyan(`  cd ${config.paths.claudeApiServer} && npm install\n`));
+      console.log(chalk.cyan(`  cd ${config.paths.claudeApiServer} && npm ci --omit=dev\n`));
       process.exit(1);
     }
   }
@@ -302,15 +338,7 @@ async function startBoth(config, isPiMode) {
   // Generate Docker config
   spinner.start('Generating Docker configuration...');
   try {
-    await writeDockerConfig(config);
-
-    // Also write devices.json to voice-app/config
-    const devicesPath = path.join(config.paths.voiceApp, 'config', 'devices.json');
-    const devicesConfig = {};
-    for (const device of config.devices) {
-      devicesConfig[device.extension] = device;
-    }
-    await fs.promises.writeFile(devicesPath, JSON.stringify(devicesConfig, null, 2), { mode: 0o644 });
+    await writeDockerConfig(config, voiceRuntimeIdentities);
 
     spinner.succeed('Docker configuration generated');
   } catch (error) {

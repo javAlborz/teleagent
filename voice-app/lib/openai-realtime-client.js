@@ -3,16 +3,21 @@
 const { EventEmitter } = require('node:events');
 const { URL } = require('node:url');
 const WebSocket = require('ws');
+const { getRuntimeSecret } = require('./runtime-secrets');
 
 const DEFAULT_BASE_URL = 'wss://api.openai.com/v1/realtime';
 const DEFAULT_MODEL = 'gpt-realtime-2.1-mini';
 const DEFAULT_VOICE = 'marin';
+const DEFAULT_TRANSCRIPTION_MODEL = 'gpt-live-transcribe';
+const REVIEWED_REALTIME_VOICES = Object.freeze([DEFAULT_VOICE]);
 const PCM_SAMPLE_RATE = 24000;
 const NON_TOOL_RESPONSE_PURPOSES = new Set([
   'approval_prompt',
   'farewell',
   'job_status',
+  'routed_speech',
   'system_notice',
+  'tool_result',
 ]);
 
 function responseMaySelectTool(purpose) {
@@ -21,8 +26,73 @@ function responseMaySelectTool(purpose) {
   return !NON_TOOL_RESPONSE_PURPOSES.has(value);
 }
 
-function getRealtimeApiKey(environment = process.env) {
-  return String(environment.OPENAI_REALTIME_API_KEY || '').trim();
+function getRealtimeApiKey(suppliedSettings) {
+  const key = suppliedSettings && typeof suppliedSettings.OPENAI_REALTIME_API_KEY === 'string'
+    ? suppliedSettings.OPENAI_REALTIME_API_KEY
+    : (getRuntimeSecret('openaiRealtimeApiKey', { required: false }) || '');
+  const byteLength = Buffer.byteLength(key, 'utf8');
+  if (
+    byteLength < 32 ||
+    byteLength > 4096 ||
+    !/^[\x21-\x7e]+$/u.test(key) ||
+    /(?:replace|change)[-_ ]?with|placeholder|example|changeme|your[-_ ]?(?:api[-_ ]?key|key|token)/iu.test(key)
+  ) {
+    return '';
+  }
+  return key;
+}
+
+class RealtimeEndpointConfigError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'RealtimeEndpointConfigError';
+    this.code = 'REALTIME_ENDPOINT_CONFIG_INVALID';
+  }
+}
+
+function exactConfiguredValue(settings, name, expected) {
+  const supplied = settings?.[name];
+  if (supplied === undefined || supplied === null || supplied === '') return expected;
+  if (typeof supplied !== 'string' || supplied !== expected) {
+    throw new RealtimeEndpointConfigError(
+      `${name} must be the reviewed production value ${expected}`
+    );
+  }
+  return expected;
+}
+
+/**
+ * Credential-bearing Realtime traffic has one reviewed production
+ * destination and model contract. This deliberately rejects equivalent URL
+ * spellings (redirectors, alternate ports, userinfo, query strings, and
+ * fragments) instead of normalizing them.
+ */
+function loadRealtimeEndpointConfig(settings = process.env) {
+  const baseUrl = exactConfiguredValue(
+    settings,
+    'OPENAI_REALTIME_BASE_URL',
+    DEFAULT_BASE_URL
+  );
+  const model = exactConfiguredValue(settings, 'OPENAI_REALTIME_MODEL', DEFAULT_MODEL);
+  const transcriptionModel = exactConfiguredValue(
+    settings,
+    'OPENAI_REALTIME_TRANSCRIPTION_MODEL',
+    DEFAULT_TRANSCRIPTION_MODEL
+  );
+  const voice = exactConfiguredValue(settings, 'OPENAI_REALTIME_VOICE', DEFAULT_VOICE);
+  if (!REVIEWED_REALTIME_VOICES.includes(voice)) {
+    throw new RealtimeEndpointConfigError('OPENAI_REALTIME_VOICE is not reviewed for production');
+  }
+  return Object.freeze({ baseUrl, model, transcriptionModel, voice });
+}
+
+function validateRealtimeEndpointOptions({ baseUrl, model, transcriptionModel, voice }) {
+  return loadRealtimeEndpointConfig({
+    OPENAI_REALTIME_BASE_URL: baseUrl,
+    OPENAI_REALTIME_MODEL: model,
+    OPENAI_REALTIME_TRANSCRIPTION_MODEL: transcriptionModel,
+    OPENAI_REALTIME_VOICE: voice,
+  });
 }
 
 function buildRealtimeTools(profiles) {
@@ -51,36 +121,11 @@ function buildRealtimeTools(profiles) {
     {
       type: 'function',
       name: 'send_agent_message',
-      description: 'Silently route a message to a Teleagent-managed Claude Code or Codex profile session as the first output item. Never use this for an existing tmux pane, named tmux window, or the current Codex/Claude thread; use send_agent_session_message for those.',
+      description: 'Silently route one read-only request to a Teleagent-managed Claude Code or Codex profile session as the first output item. Production phone jobs cannot mutate files, deploy, administer systems, or message an existing tmux/provider conversation.',
       parameters: {
         type: 'object',
         properties: taskProperties,
         required: ['request'],
-        additionalProperties: false,
-      },
-    },
-    {
-      type: 'function',
-      name: 'send_agent_session_message',
-      description: 'Send one exact message to the Codex or Claude provider session already attached to an exact tmux target. This always requires pound approval and reports success only after provider history verifies both delivery and the final response.',
-      parameters: {
-        type: 'object',
-        properties: {
-          target: {
-            type: 'string',
-            description: 'Use the stable_target returned by tmux/history tools whenever available; otherwise use an exact named target such as main:phone.',
-          },
-          message: {
-            type: 'string',
-            maxLength: 4000,
-            description: 'The exact instruction or question to deliver to that existing provider conversation.',
-          },
-          notify_when_complete: {
-            type: 'string',
-            enum: ['in_call', 'callback', 'resume'],
-          },
-        },
-        required: ['target', 'message'],
         additionalProperties: false,
       },
     },
@@ -147,7 +192,7 @@ function buildRealtimeTools(profiles) {
     {
       type: 'function',
       name: 'get_voice_history',
-      description: 'Read exact Teleagent phone-call transcript events from local SQLite. This is voice-call history only, never Codex or Claude provider-session history.',
+      description: 'Read exact Teleagent phone-call transcript events from local SQLite, excluding the current request and suppressed noise/backchannels. Read exact_text verbatim. This is voice-call history only, never Codex or Claude provider-session history.',
       parameters: {
         type: 'object',
         properties: {
@@ -252,7 +297,7 @@ function buildRealtimeTools(profiles) {
     {
       type: 'function',
       name: 'list_tmux_sessions',
-      description: 'List a compact hierarchy: tmux sessions contain windows, and windows contain panes. Claude/Codex descendants are mapped to the owning pane. Optionally restrict to one exact session.',
+      description: 'Quickly list a compact hierarchy: tmux sessions contain windows, and windows contain panes. Claude/Codex descendants are mapped to the owning pane, but current provider activity is intentionally omitted. Optionally restrict to one exact session.',
       parameters: {
         type: 'object',
         properties: { session: { type: 'string', description: 'Optional exact tmux session name, such as main.' } },
@@ -315,6 +360,19 @@ function buildRealtimeTools(profiles) {
     },
     {
       type: 'function',
+      name: 'get_agent_activity',
+      description: 'Return the current provider task state and recent-output signal for one exact tmux-attached Codex or Claude conversation. Use this for “working now,” “generating,” or “outputting tokens”; never infer activity from process presence or the latest message.',
+      parameters: {
+        type: 'object',
+        properties: {
+          target: { type: 'string', description: 'Exact tmux target, preferably a stable_target such as %59.' },
+        },
+        required: ['target'],
+        additionalProperties: false,
+      },
+    },
+    {
+      type: 'function',
       name: 'continue_agent_session_history',
       description: 'Read the next numbered provider-history chunk after inspect_agent_session_history. Use when the caller says next, continue, or asks for the rest.',
       parameters: { type: 'object', properties: {}, additionalProperties: false },
@@ -352,6 +410,52 @@ function buildRealtimeTools(profiles) {
   ];
 }
 
+function buildRealtimeRouterTool(profiles) {
+  const actions = ['respond', ...buildRealtimeTools(profiles).map((tool) => tool.name)];
+  return {
+    type: 'function',
+    name: 'route_turn',
+    description: [
+      'Silently classify exactly one caller turn before any speech.',
+      'Use respond for an ordinary conversational answer.',
+      'Otherwise select exactly one bounded application action by name and put its JSON arguments in arguments_json.',
+      'Inspection actions read authoritative state; send_agent_message starts read-only managed Claude/Codex work; end_call ends the phone call.',
+      'Never narrate, approve, cancel, or claim an action inside this routing response.',
+    ].join(' '),
+    parameters: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: actions,
+          description: 'The single deterministic application action for this caller turn.',
+        },
+        arguments_json: {
+          type: 'string',
+          maxLength: 8000,
+          description: 'For an application action, a JSON object matching that action. Use {} when it takes no arguments.',
+        },
+        response_instruction: {
+          type: 'string',
+          maxLength: 1200,
+          description: 'For respond only, a concise instruction for the subsequent speech-only response. Do not put final spoken prose here.',
+        },
+      },
+      required: ['action'],
+      additionalProperties: false,
+    },
+  };
+}
+
+function parseRoutedArguments(value) {
+  if (value === undefined || value === null || value === '') return {};
+  if (typeof value === 'object' && !Array.isArray(value)) return value;
+  if (typeof value !== 'string') {
+    return { _parse_error: 'arguments_json must be a JSON object string' };
+  }
+  return parseArguments(value);
+}
+
 function parseArguments(value) {
   if (!value) return {};
   try {
@@ -368,7 +472,7 @@ class OpenAIRealtimeClient extends EventEmitter {
     model = DEFAULT_MODEL,
     voice = DEFAULT_VOICE,
     baseUrl = DEFAULT_BASE_URL,
-    transcriptionModel = 'gpt-live-transcribe',
+    transcriptionModel = DEFAULT_TRANSCRIPTION_MODEL,
     transcriptionPrompt = 'A private operator call about Teleagent on the phone through Linphone, Hermes, a homelab, repositories, the main tmux session, windows, panes, Claude Code, Codex, Kubernetes, and infrastructure.',
     transcriptionKeywords = [
       'Hermes', 'Teleagent', 'homelab', 'tmux', 'Claude Code', 'Codex',
@@ -377,6 +481,7 @@ class OpenAIRealtimeClient extends EventEmitter {
     ],
     transcriptionLanguages = ['en'],
     transcriptionDelay = 'medium',
+    noiseReductionType = 'near_field',
     instructions,
     profiles = [],
     safetyIdentifier = null,
@@ -384,25 +489,36 @@ class OpenAIRealtimeClient extends EventEmitter {
     project = null,
     connectTimeoutMs = 15000,
     maxSpokenWords = 45,
-    hardMaxSpokenWords = null,
+    hardMaxSpokenWords = 240,
     contextTokenLimit = 16000,
     contextRetentionRatio = 0.8,
     toolHandler = null,
+    responseValidator = null,
     WebSocketImpl = WebSocket,
   } = {}) {
     super();
     if (!apiKey) throw new Error('An OpenAI Realtime API key is required');
     if (!instructions) throw new Error('Realtime conductor instructions are required');
 
+    const endpointConfig = validateRealtimeEndpointOptions({
+      baseUrl,
+      model,
+      transcriptionModel,
+      voice,
+    });
+
     this.apiKey = apiKey;
-    this.model = model;
-    this.voice = voice;
-    this.baseUrl = baseUrl;
-    this.transcriptionModel = transcriptionModel;
+    this.model = endpointConfig.model;
+    this.voice = endpointConfig.voice;
+    this.baseUrl = endpointConfig.baseUrl;
+    this.transcriptionModel = endpointConfig.transcriptionModel;
     this.transcriptionPrompt = transcriptionPrompt;
     this.transcriptionKeywords = transcriptionKeywords;
     this.transcriptionLanguages = transcriptionLanguages;
     this.transcriptionDelay = transcriptionDelay;
+    this.noiseReductionType = ['near_field', 'far_field'].includes(noiseReductionType)
+      ? noiseReductionType
+      : null;
     this.instructions = instructions;
     this.profiles = profiles;
     this.safetyIdentifier = safetyIdentifier;
@@ -410,16 +526,14 @@ class OpenAIRealtimeClient extends EventEmitter {
     this.project = project;
     this.connectTimeoutMs = connectTimeoutMs;
     this.maxSpokenWords = Math.max(10, Number.parseInt(maxSpokenWords, 10) || 45);
-    this.hardMaxSpokenWords = Math.max(
-      this.maxSpokenWords + 1,
-      Number.parseInt(hardMaxSpokenWords, 10) || this.maxSpokenWords * 2
-    );
+    this.hardMaxSpokenWords = Math.max(120, Number.parseInt(hardMaxSpokenWords, 10) || 240);
     this.contextTokenLimit = Math.max(4096, Number.parseInt(contextTokenLimit, 10) || 16000);
     const retentionRatio = Number.parseFloat(contextRetentionRatio);
     this.contextRetentionRatio = Number.isFinite(retentionRatio)
       ? Math.max(0.5, Math.min(retentionRatio, 1))
       : 0.8;
     this.toolHandler = toolHandler;
+    this.responseValidator = responseValidator;
     this.WebSocketImpl = WebSocketImpl;
 
     this.ws = null;
@@ -441,6 +555,8 @@ class OpenAIRealtimeClient extends EventEmitter {
     this.bufferedResponseAudio = new Map();
     this.bufferedAssistantTranscripts = new Map();
     this.activeResponseId = null;
+    this.activeNotice = null;
+    this.nextNotice = null;
     this.eventSequence = 0;
   }
 
@@ -493,15 +609,34 @@ class OpenAIRealtimeClient extends EventEmitter {
     const status = String(response.status || 'completed');
     const wasLimited = this.limitedResponseIds.has(responseId);
     const wasSuppressed = this.suppressedResponseIds.has(responseId);
-    const shouldDiscard = calls.length > 0 || wasSuppressed || (
+    const transcript = (this.bufferedAssistantTranscripts.get(responseId) || [])
+      .map((entry) => entry.transcript)
+      .join('\n')
+      .trim();
+    let validation = { allowed: true };
+    if (calls.length === 0 && transcript && typeof this.responseValidator === 'function') {
+      const result = this.responseValidator({
+        response,
+        responseId,
+        purpose: this.activeResponsePurpose,
+        transcript,
+      });
+      validation = result === false
+        ? { allowed: false, reason: 'response_validation_failed' }
+        : { allowed: true, ...(result || {}) };
+    }
+    const rejected = validation.allowed === false;
+    const shouldDiscard = calls.length > 0 || wasSuppressed || rejected || (
       ['cancelled', 'failed', 'incomplete'].includes(status) && !wasLimited
     );
 
     if (shouldDiscard) {
       this._discardBufferedResponse(
         responseId,
-        calls.length > 0 ? 'tool_selection' : (wasSuppressed ? 'caller_interrupt' : status),
-        { toolCalls: calls.length }
+        calls.length > 0
+          ? 'tool_selection'
+          : (wasSuppressed ? 'caller_interrupt' : (rejected ? validation.reason : status)),
+        { markSuppressed: rejected, toolCalls: calls.length }
       );
     } else {
       for (const output of this.bufferedResponseAudio.get(responseId) || []) {
@@ -516,6 +651,19 @@ class OpenAIRealtimeClient extends EventEmitter {
 
     this.limitedResponseIds.delete(responseId);
     this.suppressedResponseIds.delete(responseId);
+    if (rejected) {
+      this.emit('response.output_rejected', {
+        responseId,
+        purpose: this.activeResponsePurpose,
+        reason: validation.reason || 'response_validation_failed',
+        transcript,
+      });
+    }
+    return {
+      rejected,
+      retryInstructions: validation.retryInstructions || null,
+      retryPurpose: validation.retryPurpose || 'validation_retry',
+    };
   }
 
   _nextEventId(prefix = 'teleagent') {
@@ -610,6 +758,9 @@ class OpenAIRealtimeClient extends EventEmitter {
   _sendSessionUpdate() {
     const input = {
       format: { type: 'audio/pcm', rate: PCM_SAMPLE_RATE },
+      noise_reduction: this.noiseReductionType
+        ? { type: this.noiseReductionType }
+        : null,
       turn_detection: {
         type: 'semantic_vad',
         eagerness: 'low',
@@ -649,8 +800,12 @@ class OpenAIRealtimeClient extends EventEmitter {
             voice: this.voice,
           },
         },
-        tools: buildRealtimeTools(this.profiles),
-        tool_choice: 'auto',
+        // The live session exposes one routing gateway. Every caller turn is
+        // first classified silently, and any spoken response is then created
+        // with tool selection disabled. This prevents tool preambles from
+        // reaching the phone and keeps application state authoritative.
+        tools: [buildRealtimeRouterTool(this.profiles)],
+        tool_choice: 'none',
       },
     });
   }
@@ -678,7 +833,7 @@ class OpenAIRealtimeClient extends EventEmitter {
     return true;
   }
 
-  requestResponse(response = undefined, { purpose = 'general' } = {}) {
+  requestResponse(response = undefined, { purpose = 'general', notice = null } = {}) {
     if (this.responseActive) return false;
     const event = {
       event_id: this._nextEventId('response'),
@@ -687,8 +842,24 @@ class OpenAIRealtimeClient extends EventEmitter {
     if (response) event.response = response;
     this.responseActive = true;
     this.nextResponsePurpose = purpose;
+    this.nextNotice = notice;
     this.sendEvent(event);
     return true;
+  }
+
+  requestRoutedResponse({ purpose = 'user_turn' } = {}) {
+    return this.requestResponse({
+      conversation: 'none',
+      metadata: { teleagent_stage: 'route_turn' },
+      output_modalities: ['text'],
+      tools: [buildRealtimeRouterTool(this.profiles)],
+      tool_choice: { type: 'function', name: 'route_turn' },
+      instructions: [
+        'Route the latest completed caller turn now.',
+        'Call route_turn exactly once and emit no message, narration, or audio.',
+        'Use respond only when no application action is needed.',
+      ].join(' '),
+    }, { purpose });
   }
 
   queueUserResponse({ purpose = 'user_turn' } = {}) {
@@ -697,11 +868,22 @@ class OpenAIRealtimeClient extends EventEmitter {
       return false;
     }
     this.pendingUserResponse = false;
-    return this.requestResponse(undefined, { purpose });
+    return this.requestRoutedResponse({ purpose });
   }
 
   discardPendingUserResponse() {
     this.pendingUserResponse = false;
+  }
+
+  deleteConversationItem(itemId) {
+    const normalized = String(itemId || '').trim();
+    if (!normalized || !this.connected) return false;
+    this.sendEvent({
+      event_id: this._nextEventId('delete'),
+      type: 'conversation.item.delete',
+      item_id: normalized,
+    });
+    return true;
   }
 
   sendSystemNotice(content, {
@@ -727,10 +909,15 @@ class OpenAIRealtimeClient extends EventEmitter {
     }
 
     if (speak) {
-      this.requestResponse({
+      const record = { content: notice, speak, key, priority };
+      const started = this.requestResponse({
         tool_choice: 'none',
         instructions: `One-time voice instruction. Follow it for this response only, then discard it: ${notice}`,
-      }, { purpose: key ? `notice:${key}` : 'system_notice' });
+      }, { purpose: key ? `notice:${key}` : 'system_notice', notice: record });
+      if (!started) {
+        this.pendingNotices.push(record);
+        return false;
+      }
     }
     return true;
   }
@@ -762,6 +949,9 @@ class OpenAIRealtimeClient extends EventEmitter {
     this.bufferedAssistantTranscripts.clear();
     this.limitedResponseIds.clear();
     this.suppressedResponseIds.clear();
+    this.pendingNotices = [];
+    this.activeNotice = null;
+    this.nextNotice = null;
     if (!this.ws) return;
     const openState = this.WebSocketImpl.OPEN ?? WebSocket.OPEN;
     const connectingState = this.WebSocketImpl.CONNECTING ?? WebSocket.CONNECTING;
@@ -808,7 +998,11 @@ class OpenAIRealtimeClient extends EventEmitter {
         this.activeResponsePurpose = this.nextResponsePurpose || this.activeResponsePurpose || 'server';
         this.nextResponsePurpose = null;
         this.activeResponseId = event.response?.id || null;
-        this.emit('response.created', event.response || {});
+        this.activeNotice = this.nextNotice;
+        this.nextNotice = null;
+        this.emit('response.created', event.response || {}, {
+          purpose: this.activeResponsePurpose,
+        });
         break;
 
       case 'response.output_audio.delta':
@@ -825,15 +1019,22 @@ class OpenAIRealtimeClient extends EventEmitter {
         }
         break;
 
+      case 'response.output_audio.done':
+        // This is the authoritative upstream boundary: all audio deltas for
+        // the exact response item have been emitted by Realtime. Handset
+        // authorization still waits for a separate downstream playout mark.
+        this.emit('audio.done', event);
+        break;
+
       case 'response.output_audio_transcript.delta': {
         const key = event.item_id || event.response_id || 'current';
         const transcript = `${this.outputTranscripts.get(key) || ''}${event.delta || ''}`;
         this.outputTranscripts.set(key, transcript);
         const wordCount = transcript.trim().split(/\s+/).filter(Boolean).length;
-        const endsSentence = /[.!?](?:["')\]]+)?\s*$/.test(transcript);
-        const mode = wordCount > this.hardMaxSpokenWords && endsSentence
-          ? 'hard_sentence_boundary'
-          : (wordCount > this.hardMaxSpokenWords * 2 ? 'absolute_hard_limit' : null);
+        const cutoffRecovery = String(this.activeResponsePurpose || '').startsWith('notice:cutoff:');
+        const mode = !cutoffRecovery && wordCount > this.hardMaxSpokenWords
+          ? 'absolute_hard_limit'
+          : null;
         if (mode && !this.clippedResponses.has(key) && this.cancelResponse()) {
           this.clippedResponses.add(key);
           this.limitedResponseIds.add(this._responseKey(event));
@@ -865,22 +1066,45 @@ class OpenAIRealtimeClient extends EventEmitter {
       }
 
       case 'response.done':
-        this._finalizeBufferedResponse(event.response || {});
-        this.responseActive = false;
-        this.cancelPending = false;
-        if (event.response?.usage) {
-          this.emit('usage', {
-            kind: 'response',
-            eventKey: `response:${event.response.id || event.event_id || this._nextEventId('usage')}`,
-            model: this.model,
-            usage: event.response.usage,
-          });
-        }
         {
+          const finalization = this._finalizeBufferedResponse(event.response || {});
+          const completedNotice = this.activeNotice;
           const completedPurpose = this.activeResponsePurpose;
+          const completedStatus = String(event.response?.status || 'completed');
+          this.responseActive = false;
+          this.cancelPending = false;
+          if (event.response?.usage) {
+            this.emit('usage', {
+              kind: 'response',
+              eventKey: `response:${event.response.id || event.event_id || this._nextEventId('usage')}`,
+              model: this.model,
+              usage: event.response.usage,
+            });
+          }
           this.activeResponsePurpose = null;
           this.activeResponseId = null;
-          await this._handleResponseDone(event.response || {}, completedPurpose);
+          this.activeNotice = null;
+          if (finalization.rejected && finalization.retryInstructions) {
+            this.requestResponse({
+              instructions: finalization.retryInstructions,
+              tool_choice: 'auto',
+            }, { purpose: finalization.retryPurpose });
+          } else {
+            await this._handleResponseDone(event.response || {}, completedPurpose);
+          }
+          if (completedNotice) {
+            if (completedStatus === 'completed' && !finalization.rejected) {
+              this.emit('notice.delivered', completedNotice);
+            } else {
+              this._queueNotice(completedNotice);
+              this.emit('notice.delivery_failed', {
+                ...completedNotice,
+                status: completedStatus,
+                reason: finalization.rejected ? 'response_rejected' : completedStatus,
+              });
+              this._flushNotice();
+            }
+          }
         }
         break;
 
@@ -912,12 +1136,16 @@ class OpenAIRealtimeClient extends EventEmitter {
   async _handleResponseDone(response, purpose = null) {
     const calls = (response.output || []).filter((item) => item?.type === 'function_call');
     if (calls.length > 0) {
-      const outputs = [];
+      const handledCalls = [];
       for (const call of calls) {
-        const output = await this._handleToolCall(call);
-        if (output) outputs.push(output);
+        const handled = await this._handleToolCall(call, {
+          sendOutput: call.name !== 'route_turn',
+        });
+        if (handled) handledCalls.push(handled);
       }
-      const behaviors = outputs.map((output) => output.response_behavior).filter(Boolean);
+      const outputs = handledCalls.map((entry) => entry.output);
+      const routed = handledCalls.some((entry) => entry.routed);
+      const behaviors = outputs.map((output) => output?.response_behavior).filter(Boolean);
       if (behaviors.includes('earcon_then_quiet') && outputs.every((output) => (
         output.response_behavior === 'earcon_then_quiet'
       ))) {
@@ -925,10 +1153,27 @@ class OpenAIRealtimeClient extends EventEmitter {
         this._flushNotice();
         if (!this.responseActive && !this.userSpeaking && this.pendingUserResponse) {
           this.pendingUserResponse = false;
-          this.requestResponse(undefined, { purpose: 'queued_user_turn' });
+          this.requestRoutedResponse({ purpose: 'queued_user_turn' });
         }
         return;
       }
+
+      const directSpeech = outputs.find((output) => output?.response_behavior === 'direct_speech');
+      if (directSpeech) {
+        const instruction = String(directSpeech.speech_instruction || '').trim().slice(0, 1200) ||
+          'Answer the latest completed caller turn directly and concisely.';
+        this.requestResponse({
+          output_modalities: ['audio'],
+          tool_choice: 'none',
+          instructions: [
+            'Speech stage after deterministic routing. Do not call a tool.',
+            instruction,
+            'Answer the latest completed caller turn and then stop.',
+          ].join(' '),
+        }, { purpose: 'routed_speech' });
+        return;
+      }
+
       const reportsPendingJob = outputs.some((output) => (
         ['awaiting_approval', 'queued', 'running'].includes(output?.job?.status) ||
         output?.jobs?.some?.((job) => ['awaiting_approval', 'queued', 'running'].includes(job.status))
@@ -946,7 +1191,19 @@ class OpenAIRealtimeClient extends EventEmitter {
           instructions: `Say exactly the following approval prompt and nothing else: ${JSON.stringify(prompt)}`,
         }, { purpose: nextPurpose });
       } else {
-        this.requestResponse(undefined, { purpose: nextPurpose });
+        const routedToolResult = routed
+          ? JSON.stringify(outputs.length === 1 ? outputs[0] : outputs).slice(0, 12000)
+          : null;
+        this.requestResponse(routedToolResult ? {
+          output_modalities: ['audio'],
+          tool_choice: 'none',
+          instructions: [
+            'The deterministic application action has completed.',
+            'Answer the latest caller request using only the following app-owned result.',
+            `Result JSON: ${routedToolResult}`,
+            'Do not claim anything beyond the result, and do not ask a follow-up question.',
+          ].join(' '),
+        } : undefined, { purpose: routed ? 'tool_result' : nextPurpose });
       }
       return;
     }
@@ -955,19 +1212,47 @@ class OpenAIRealtimeClient extends EventEmitter {
     this._flushNotice();
     if (!this.responseActive && !this.userSpeaking && this.pendingUserResponse) {
       this.pendingUserResponse = false;
-      this.requestResponse(undefined, { purpose: 'queued_user_turn' });
+      this.requestRoutedResponse({ purpose: 'queued_user_turn' });
     }
   }
 
-  async _handleToolCall(call) {
+  async _handleToolCall(call, { sendOutput = true } = {}) {
     const callId = call.call_id || call.id;
     if (!callId || this.handledToolCalls.has(callId)) return null;
     this.handledToolCalls.add(callId);
 
-    const args = parseArguments(call.arguments);
+    let toolName = call.name;
+    let args = parseArguments(call.arguments);
+    let routed = false;
+    let auditCall = call;
     const startedAt = Date.now();
     let output;
-    if (args._parse_error) {
+    if (toolName === 'route_turn' && !args._parse_error) {
+      routed = true;
+      const allowedActions = new Set(['respond', ...buildRealtimeTools(this.profiles).map((tool) => tool.name)]);
+      const action = String(args.action || '').trim();
+      if (!allowedActions.has(action)) {
+        output = {
+          success: false,
+          code: 'INVALID_ROUTE_ACTION',
+          message: 'The requested route action is not available.',
+        };
+      } else if (action === 'respond') {
+        output = {
+          success: true,
+          response_behavior: 'direct_speech',
+          speech_instruction: String(args.response_instruction || '').trim().slice(0, 1200),
+        };
+      } else {
+        toolName = action;
+        args = parseRoutedArguments(args.arguments_json);
+        auditCall = { ...call, name: action, routed_by: 'route_turn' };
+      }
+    }
+
+    if (output) {
+      // The route was handled above without invoking an application action.
+    } else if (args._parse_error) {
       output = {
         success: false,
         code: 'INVALID_TOOL_ARGUMENTS',
@@ -977,44 +1262,75 @@ class OpenAIRealtimeClient extends EventEmitter {
       output = { success: false, code: 'TOOLS_UNAVAILABLE', message: 'Agent tools are unavailable.' };
     } else {
       try {
-        output = await this.toolHandler(call.name, args, { callId, itemId: call.id || null });
+        output = await this.toolHandler(toolName, args, {
+          callId,
+          itemId: call.id || null,
+          routed,
+        });
       } catch (error) {
         output = { success: false, code: 'TOOL_ERROR', message: error.message };
       }
     }
 
-    this.sendEvent({
-      event_id: this._nextEventId('tool'),
-      type: 'conversation.item.create',
-      item: {
-        type: 'function_call_output',
-        call_id: callId,
-        output: JSON.stringify(output ?? null),
-      },
+    if (sendOutput) {
+      this.sendEvent({
+        event_id: this._nextEventId('tool'),
+        type: 'conversation.item.create',
+        item: {
+          type: 'function_call_output',
+          call_id: callId,
+          output: JSON.stringify(output ?? null),
+        },
+      });
+    }
+    this.emit('tool.completed', {
+      call: auditCall,
+      args,
+      output,
+      durationMs: Date.now() - startedAt,
+      routed,
     });
-    this.emit('tool.completed', { call, args, output, durationMs: Date.now() - startedAt });
-    return output;
+    return { output, routed, action: toolName };
   }
 
   _flushNotice() {
     if (this.responseActive || this.userSpeaking || this.pendingNotices.length === 0) return;
-    const pending = this.pendingNotices.splice(0).sort((left, right) => right.priority - left.priority);
-    const content = pending.map((notice) => notice.content).join('\n');
-    this.sendSystemNotice(content, {
-      speak: pending.some((notice) => notice.speak),
+    this.pendingNotices.sort((left, right) => right.priority - left.priority);
+    const notice = this.pendingNotices.shift();
+    const started = this.sendSystemNotice(notice.content, {
+      speak: notice.speak,
       force: true,
+      key: notice.key,
+      priority: notice.priority,
     });
+    if (!started) this._queueNotice(notice);
+  }
+
+  _queueNotice(record) {
+    if (!record?.content) return false;
+    const existingIndex = record.key
+      ? this.pendingNotices.findIndex((entry) => entry.key === record.key)
+      : -1;
+    if (existingIndex >= 0) this.pendingNotices.splice(existingIndex, 1, record);
+    else this.pendingNotices.push(record);
+    return true;
   }
 }
 
 module.exports = {
   DEFAULT_BASE_URL,
   DEFAULT_MODEL,
+  DEFAULT_TRANSCRIPTION_MODEL,
   DEFAULT_VOICE,
   OpenAIRealtimeClient,
   PCM_SAMPLE_RATE,
+  REVIEWED_REALTIME_VOICES,
+  RealtimeEndpointConfigError,
+  buildRealtimeRouterTool,
   buildRealtimeTools,
   getRealtimeApiKey,
+  loadRealtimeEndpointConfig,
   parseArguments,
+  parseRoutedArguments,
   responseMaySelectTool,
 };

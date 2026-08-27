@@ -1,0 +1,2053 @@
+#!/usr/local/libexec/teleagent-node
+'use strict';
+
+const fs = require('node:fs');
+const crypto = require('node:crypto');
+const http = require('node:http');
+const net = require('node:net');
+const path = require('node:path');
+const { spawn, spawnSync } = require('node:child_process');
+
+const SYSTEMD_RUN = '/usr/bin/systemd-run';
+const SYSTEMCTL = '/usr/bin/systemctl';
+const RUNTIME = '/usr/local/libexec/teleagent-provider-boundary-runtime';
+const CLI_CHECK = '/usr/local/libexec/teleagent-provider-cli-check';
+const GETENT = '/usr/bin/getent';
+const WORKSPACE_ROOT = '/srv/teleagent-agent-workspaces';
+const FIXED_WORKSPACE = `${WORKSPACE_ROOT}/phone`;
+const WORKSPACE_GROUP = 'teleagent-agent-workspace';
+const WORKSPACE_PARENT = path.dirname(WORKSPACE_ROOT);
+const CAPABILITY_DIRECTORY = '/run/teleagent-provider-capabilities';
+const GLOBAL_LAUNCH_LOCK = '.global-provider-launch.lock';
+const SYSTEMD_RUNTIME_UNIT_DIRECTORY = '/run/systemd/system';
+const PROVIDER_PLANE_ROOT = '/var/lib/teleagent-provider-plane';
+const PROVIDER_PLANE_PARENT = path.dirname(PROVIDER_PLANE_ROOT);
+const PROVIDER_PLANE_HOMES = Object.freeze({
+  claude: `${PROVIDER_PLANE_ROOT}/claude-supervisor`,
+  codex: `${PROVIDER_PLANE_ROOT}/codex-supervisor`,
+});
+const GLOBAL_PANIC_DIRECTORY = PROVIDER_PLANE_ROOT;
+const GLOBAL_PANIC_FILE = path.join(GLOBAL_PANIC_DIRECTORY, 'panic.lock');
+const GLOBAL_RECOVERY_FILE = path.join(GLOBAL_PANIC_DIRECTORY, 'recovery.lock');
+const LAUNCH_ID = /^launch_[a-f0-9]{32}$/;
+const TASK_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const SAFE_MODEL = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const PROVIDER_ROUTE_KINDS = Object.freeze({
+  claude: Object.freeze(['inference', 'count_tokens']),
+  codex: Object.freeze(['inference']),
+});
+const PROVIDER_MODELS = Object.freeze({
+  // These are the exact wire IDs emitted by the pinned production CLIs. Do
+  // not accept convenience aliases here: the selected model is part of the
+  // launch capability and must survive argv -> registration -> request as an
+  // identical value.
+  claude: Object.freeze([
+    'claude-haiku-4-5-20251001',
+    'claude-sonnet-5',
+    'claude-opus-5',
+  ]),
+  codex: Object.freeze([
+    'gpt-5.6-luna',
+    'gpt-5.6-terra',
+    'gpt-5.6-sol',
+  ]),
+});
+const REASONING_EFFORT_BY_MODEL = Object.freeze({
+  'claude-haiku-4-5-20251001': 'default',
+  'claude-sonnet-5': 'high',
+  'claude-opus-5': 'high',
+  'gpt-5.6-luna': 'low',
+  'gpt-5.6-terra': 'medium',
+  'gpt-5.6-sol': 'high',
+});
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const PROVIDERS = Object.freeze({
+  claude: Object.freeze({
+    supervisor: 'teleagent-claude-supervisor',
+    workerHome: '/nonexistent/teleagent-claude-worker',
+    otherHome: '/nonexistent/teleagent-codex-worker',
+    egressSocket: '/run/teleagent-provider-egress/claude.sock',
+    egressControlSocket: '/run/teleagent-provider-egress-control/claude.sock',
+    supervisorSocket: '/run/teleagent-provider-launch/claude.sock',
+  }),
+  codex: Object.freeze({
+    supervisor: 'teleagent-codex-supervisor',
+    workerHome: '/nonexistent/teleagent-codex-worker',
+    otherHome: '/nonexistent/teleagent-claude-worker',
+    egressSocket: '/run/teleagent-provider-egress/codex.sock',
+    egressControlSocket: '/run/teleagent-provider-egress-control/codex.sock',
+    supervisorSocket: '/run/teleagent-provider-launch/codex.sock',
+  }),
+});
+const FORBIDDEN_WORKSPACE_FILE = /^(?:\.env(?!\.example$)|auth\.json|\.credentials\.json|kubeconfig|id_(?:rsa|ed25519)|credentials?|secrets?|tokens?|passwords?)(?:\..*)?$/i;
+const MAX_WORKSPACE_ENTRIES = 50_000;
+const MIN_WORKSPACE_FREE_BYTES = 2n * 1024n * 1024n * 1024n;
+const MAX_WORKSPACE_FILESYSTEM_BYTES = 64n * 1024n * 1024n * 1024n;
+const MIN_PROVIDER_PLANE_CAPACITY_BYTES = 1n * 1024n * 1024n * 1024n;
+const MAX_PROVIDER_PLANE_CAPACITY_BYTES = 4n * 1024n * 1024n * 1024n;
+const MIN_PROVIDER_PLANE_FREE_BYTES = 512n * 1024n * 1024n;
+const DURABLE_LOCAL_FILESYSTEMS = new Set([
+  0xef53n, // ext2/3/4
+  0x58465342n, // XFS
+  0x9123683en, // Btrfs
+  0xf2f52010n, // F2FS
+  0x2fc12fc1n, // ZFS
+]);
+const WORKSPACE_STORAGE_ATTESTATION = 'PROVIDER_WORKSPACE_STORAGE_OK';
+const PROVIDER_PLANE_STORAGE_ATTESTATION = 'PROVIDER_PLANE_STORAGE_OK';
+const WORKER_STORAGE_ATTESTATION = 'PROVIDER_WORKER_STORAGE_OK';
+const IMMUTABLE_RELEASE_ROOT = /^\/opt\/teleagent\/releases\/sha256-[a-f0-9]{64}$/;
+const IMMUTABLE_PREFLIGHT_RELATIVE = 'deploy/worker-session/teleagent-provider-boundary';
+const HANDOFF_LOCK = '/run/teleagent-staging-handoff.lock';
+const LIFECYCLE_LOCK_ENV = 'TELEAGENT_HANDOFF_LIFECYCLE_LOCK_FD';
+
+function fail(message, code = 77) {
+  const error = Object.assign(new Error(message), { exitCode: code });
+  throw error;
+}
+
+function requireImmutablePreflight({
+  environment = process.env,
+  filesystem = fs,
+  executable = process.execPath,
+  invokedScript = process.argv[1],
+  execArguments = process.execArgv,
+  uid = process.geteuid(),
+} = {}) {
+  const releaseRoot = environment.TELEAGENT_RELEASE_ROOT;
+  const descriptorValue = environment[LIFECYCLE_LOCK_ENV];
+  if (uid !== 0 || !IMMUTABLE_RELEASE_ROOT.test(releaseRoot || '') ||
+      !/^(?:[3-9]|[1-9][0-9]+)$/.test(descriptorValue || '') ||
+      !Array.isArray(execArguments) || execArguments.length !== 0) {
+    fail('the provider preflight requires one gated immutable release and retained lock');
+  }
+  const descriptor = Number.parseInt(descriptorValue, 10);
+  if (!Number.isSafeInteger(descriptor) || descriptor > 1_000_000) {
+    fail('the provider preflight lock descriptor is invalid');
+  }
+  const expectedNode = `${releaseRoot}/runtime/node/bin/node`;
+  const expectedScript = `${releaseRoot}/${IMMUTABLE_PREFLIGHT_RELATIVE}`;
+  let descriptorMetadata;
+  let pathMetadata;
+  try {
+    if (filesystem.realpathSync(executable) !== expectedNode ||
+        filesystem.realpathSync(invokedScript || '') !== expectedScript) {
+      fail('the provider preflight executable escaped the immutable release');
+    }
+    descriptorMetadata = filesystem.fstatSync(descriptor);
+    pathMetadata = filesystem.lstatSync(HANDOFF_LOCK);
+  } catch (error) {
+    if (error?.exitCode === 77) throw error;
+    fail('the provider preflight executable or retained lock is unavailable');
+  }
+  if (!descriptorMetadata.isDirectory() || !pathMetadata.isDirectory() ||
+      descriptorMetadata.dev !== pathMetadata.dev || descriptorMetadata.ino !== pathMetadata.ino ||
+      pathMetadata.uid !== 0 || pathMetadata.gid !== 0 ||
+      (pathMetadata.mode & 0o7777) !== 0o755) {
+    fail('the provider preflight lock identity is unsafe');
+  }
+  delete environment[LIFECYCLE_LOCK_ENV];
+  return descriptor;
+}
+
+function take(options, name, required = true) {
+  const matches = options.flatMap((value, index) => value === name ? [index] : []);
+  if (matches.length === 0 && !required) return null;
+  if (matches.length !== 1 || matches[0] + 1 >= options.length) fail(`${name} is invalid`);
+  const index = matches[0];
+  const value = options[index + 1];
+  options.splice(index, 2);
+  return value;
+}
+
+function syncDirectory(directory) {
+  const descriptor = fs.openSync(directory, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY);
+  try { fs.fsyncSync(descriptor); }
+  finally { fs.closeSync(descriptor); }
+}
+
+function requirePinnedProviderCli(provider, { spawnCheck = spawnSync } = {}) {
+  const result = spawnCheck(CLI_CHECK, ['--provider', provider], {
+    cwd: '/',
+    encoding: 'utf8',
+    timeout: 15000,
+    maxBuffer: 4096,
+    env: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8' },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  if (result.error || result.status !== 0 || result.signal ||
+      result.stdout.trim() !== `PROVIDER_CLI_OK ${provider}`) {
+    fail('the pinned provider CLI failed its launch-time gate', 75);
+  }
+}
+
+function persistGlobalProviderPanic() {
+  validateProviderPlaneStorageBoundary({ requireReserve: false, requireHomes: false });
+  secureRootDirectory(GLOBAL_PANIC_DIRECTORY, 0o022, 0);
+  try {
+    const metadata = fs.lstatSync(GLOBAL_PANIC_FILE);
+    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.uid !== 0 ||
+        (metadata.mode & 0o077) !== 0) fail('global provider panic state is unsafe');
+    return { persisted: true, alreadyLocked: true };
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+  }
+  const descriptor = fs.openSync(
+    GLOBAL_PANIC_FILE,
+    fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL |
+      fs.constants.O_NOFOLLOW,
+    0o600
+  );
+  try {
+    fs.writeFileSync(descriptor, `${JSON.stringify({
+      version: 1,
+      locked: true,
+      reason: 'provider_plane_root_panic',
+      lockedAt: new Date().toISOString(),
+    })}\n`);
+    fs.fsyncSync(descriptor);
+  } finally {
+    fs.closeSync(descriptor);
+  }
+  syncDirectory(GLOBAL_PANIC_DIRECTORY);
+  return { persisted: true, alreadyLocked: false };
+}
+
+function rootStateFileExists(filename, label) {
+  try {
+    const metadata = fs.lstatSync(filename);
+    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.uid !== 0 ||
+        (metadata.mode & 0o077) !== 0) fail(`global provider ${label} state is unsafe`);
+    return true;
+  } catch (error) {
+    if (error?.code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+function globalProviderRecoveryPending() {
+  return rootStateFileExists(GLOBAL_RECOVERY_FILE, 'recovery');
+}
+
+function globalProviderPanicLocked() {
+  // A stranded recovery transaction is itself a lock. This makes every crash
+  // between supervisor restart and the final panic-file unlink fail closed.
+  return rootStateFileExists(GLOBAL_PANIC_FILE, 'panic') || globalProviderRecoveryPending();
+}
+
+function persistGlobalProviderRecovery() {
+  validateProviderPlaneStorageBoundary({ requireReserve: false, requireHomes: false });
+  secureRootDirectory(GLOBAL_PANIC_DIRECTORY, 0o022, 0);
+  if (globalProviderRecoveryPending()) return { persisted: true, alreadyPending: true };
+  const descriptor = fs.openSync(
+    GLOBAL_RECOVERY_FILE,
+    fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL |
+      fs.constants.O_NOFOLLOW,
+    0o600
+  );
+  try {
+    fs.writeFileSync(descriptor, `${JSON.stringify({
+      version: 1,
+      pending: true,
+      reason: 'provider_plane_root_recovery',
+      startedAt: new Date().toISOString(),
+    })}\n`);
+    fs.fsyncSync(descriptor);
+  } finally {
+    fs.closeSync(descriptor);
+  }
+  syncDirectory(GLOBAL_PANIC_DIRECTORY);
+  return { persisted: true, alreadyPending: false };
+}
+
+function clearGlobalProviderRecovery() {
+  if (!globalProviderRecoveryPending()) return { persisted: true, wasPending: false };
+  fs.unlinkSync(GLOBAL_RECOVERY_FILE);
+  syncDirectory(GLOBAL_PANIC_DIRECTORY);
+  return { persisted: true, wasPending: true };
+}
+
+function clearGlobalProviderPanic() {
+  if (!rootStateFileExists(GLOBAL_PANIC_FILE, 'panic')) {
+    return { persisted: true, wasLocked: false };
+  }
+  fs.unlinkSync(GLOBAL_PANIC_FILE);
+  syncDirectory(GLOBAL_PANIC_DIRECTORY);
+  return { persisted: true, wasLocked: true };
+}
+
+function deriveProviderLaunchPolicy(provider, providerArgs) {
+  const modelIndexes = providerArgs.flatMap((value, index) => value === '--model' ? [index] : []);
+  if (modelIndexes.length !== 1 || modelIndexes[0] + 1 >= providerArgs.length) {
+    fail('provider launch requires one exact model');
+  }
+  const model = providerArgs[modelIndexes[0] + 1];
+  if (!SAFE_MODEL.test(model || '')) fail('provider launch model is invalid');
+  if (!PROVIDER_MODELS[provider]?.includes(model)) {
+    fail('provider launch model is not an approved canonical ID');
+  }
+  let reasoningEffort = REASONING_EFFORT_BY_MODEL[model];
+  if (provider === 'claude') {
+    if (providerArgs.includes('--effort')) {
+      fail('Claude launch effort is fixed by the captured model contract');
+    }
+  } else {
+    const effortValues = providerArgs.flatMap((value, index) => {
+      if (!['-c', '--config'].includes(value)) return [];
+      const match = String(providerArgs[index + 1] || '').match(
+        /^model_reasoning_effort="(none|low|medium|high|xhigh|max|ultra)"$/
+      );
+      return match ? [match[1]] : [];
+    });
+    if (effortValues.length !== 1 || effortValues[0] !== reasoningEffort) {
+      fail('Codex launch reasoning effort does not match the canonical model tier');
+    }
+  }
+  return {
+    model,
+    reasoningEffort,
+    routeKinds: PROVIDER_ROUTE_KINDS[provider],
+  };
+}
+
+function readStableBoundedFile(filename, maxBytes = 1024 * 1024) {
+  let descriptor;
+  try {
+    descriptor = fs.openSync(
+      filename,
+      fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0)
+    );
+    const before = fs.fstatSync(descriptor, { bigint: true });
+    if (!before.isFile() || (before.mode & 0o6000n) !== 0n ||
+        before.size < 0n || before.size > BigInt(maxBytes)) {
+      fail('provider workspace configuration exceeds the bounded regular-file contract');
+    }
+    const chunks = [];
+    const buffer = Buffer.allocUnsafe(64 * 1024);
+    let total = 0;
+    for (;;) {
+      const count = fs.readSync(descriptor, buffer, 0, buffer.length, null);
+      if (count === 0) break;
+      total += count;
+      if (total > maxBytes) fail('provider workspace configuration changed while reading');
+      chunks.push(Buffer.from(buffer.subarray(0, count)));
+    }
+    const after = fs.fstatSync(descriptor, { bigint: true });
+    if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size ||
+        before.mode !== after.mode || before.uid !== after.uid || before.gid !== after.gid ||
+        before.nlink !== after.nlink || before.mtimeNs !== after.mtimeNs ||
+        before.ctimeNs !== after.ctimeNs || BigInt(total) !== before.size) {
+      fail('provider workspace configuration changed while reading');
+    }
+    return Buffer.concat(chunks, total).toString('utf8');
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+  }
+}
+
+function validateProviderWorkspace(workspace) {
+  let visited = 0;
+  const pending = [workspace];
+  while (pending.length) {
+    const directory = pending.pop();
+    let entries;
+    try { entries = fs.readdirSync(directory, { withFileTypes: true }); }
+    catch { fail('provider workspace cannot be safely enumerated'); }
+    for (const entry of entries) {
+      if ((visited += 1) > MAX_WORKSPACE_ENTRIES) {
+        fail('provider workspace exceeds the reviewed file bound');
+      }
+      const filename = path.join(directory, entry.name);
+      let metadata;
+      try { metadata = fs.lstatSync(filename); }
+      catch { fail('provider workspace changed during validation'); }
+      if (metadata.isSymbolicLink() || metadata.isSocket() || metadata.isFIFO() ||
+          metadata.isBlockDevice() || metadata.isCharacterDevice() ||
+          (!metadata.isFile() && !metadata.isDirectory()) || (metadata.mode & 0o6000) !== 0) {
+        fail('provider workspace contains a forbidden file type');
+      }
+      if (metadata.isDirectory()) {
+        pending.push(filename);
+        continue;
+      }
+      if (FORBIDDEN_WORKSPACE_FILE.test(entry.name)) {
+        fail('provider workspace contains credential material');
+      }
+      if (path.relative(workspace, filename) === path.join('.git', 'config')) {
+        const gitConfig = readStableBoundedFile(filename);
+        if (/extraheader|credential\s*=|credential[.]helper|https?:\/\/[^\s/@:]+:[^\s/@]+@|(?:token|password|secret)\s*=/i.test(gitConfig)) {
+          fail('provider workspace git configuration contains credentials');
+        }
+      }
+    }
+  }
+  return { safe: true, entries: visited };
+}
+
+function resolveWorkspaceGroupGid({ lookup = spawnSync } = {}) {
+  const result = lookup(GETENT, ['group', WORKSPACE_GROUP], {
+    cwd: '/',
+    encoding: 'utf8',
+    timeout: 5000,
+    maxBuffer: 4096,
+    env: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8' },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const lines = String(result?.stdout || '').trim().split('\n');
+  const fields = lines.length === 1 ? lines[0].split(':') : [];
+  const gid = fields.length === 4 && fields[0] === WORKSPACE_GROUP && /^[0-9]+$/.test(fields[2])
+    ? Number(fields[2])
+    : NaN;
+  if (result?.error || result?.status !== 0 || result?.signal ||
+      !Number.isSafeInteger(gid) || gid <= 0 || gid >= 0xffffffff) {
+    fail('the provider workspace group identity is unavailable or unsafe');
+  }
+  return gid;
+}
+
+function validateWorkspaceAnchor(workspace, {
+  lstat = fs.lstatSync,
+  realpath = fs.realpathSync,
+  expectedUid = 0,
+  expectedGid = null,
+} = {}) {
+  if (workspace !== FIXED_WORKSPACE) {
+    fail('provider launches require the exact root-provisioned workspace anchor');
+  }
+  const ancestor = lstat(WORKSPACE_PARENT);
+  const parent = lstat(WORKSPACE_ROOT);
+  const selected = lstat(FIXED_WORKSPACE);
+  const requiredGid = expectedGid === null ? resolveWorkspaceGroupGid() : expectedGid;
+  if (!ancestor.isDirectory() || ancestor.isSymbolicLink() ||
+      ancestor.uid !== expectedUid || (ancestor.mode & 0o022) !== 0 ||
+      realpath(WORKSPACE_PARENT) !== WORKSPACE_PARENT ||
+      !parent.isDirectory() || parent.isSymbolicLink() || parent.uid !== expectedUid ||
+      parent.gid !== requiredGid || (parent.mode & 0o7777) !== 0o751 ||
+      realpath(WORKSPACE_ROOT) !== WORKSPACE_ROOT || !selected.isDirectory() ||
+      selected.isSymbolicLink() || selected.uid !== expectedUid ||
+      selected.gid !== requiredGid || requiredGid <= 0 ||
+      (selected.mode & 0o7777) !== 0o2770 || realpath(FIXED_WORKSPACE) !== FIXED_WORKSPACE) {
+    fail('the root-provisioned provider workspace anchor is replaceable or unsafe');
+  }
+  return { workspace: FIXED_WORKSPACE, gid: requiredGid };
+}
+
+function validateWorkspaceStorageBoundary(directory = WORKSPACE_ROOT, {
+  stat = (filename) => fs.statSync(filename, { bigint: true }),
+  statfs = (filename) => fs.statfsSync(filename, { bigint: true }),
+} = {}) {
+  if (directory !== WORKSPACE_ROOT) {
+    fail('provider workspaces require the exact dedicated mountpoint');
+  }
+  let parentMetadata;
+  let workspaceMetadata;
+  let storage;
+  try {
+    parentMetadata = stat(WORKSPACE_PARENT);
+    workspaceMetadata = stat(directory);
+    storage = statfs(directory);
+  } catch {
+    fail('provider workspace storage boundary cannot be inspected');
+  }
+  if (parentMetadata.dev === workspaceMetadata.dev) {
+    fail('provider workspaces require an exact dedicated filesystem mountpoint');
+  }
+  const blockSize = BigInt(storage.bsize);
+  const totalBytes = blockSize * BigInt(storage.blocks);
+  const freeBytes = blockSize * BigInt(storage.bavail);
+  if (totalBytes <= MIN_WORKSPACE_FREE_BYTES ||
+      totalBytes > MAX_WORKSPACE_FILESYSTEM_BYTES ||
+      freeBytes < MIN_WORKSPACE_FREE_BYTES) {
+    fail('provider workspace filesystem size or free-space boundary is unsafe');
+  }
+  return { totalBytes, freeBytes, device: workspaceMetadata.dev };
+}
+
+function attestWorkspaceStorageBoundary({
+  validateStorage = validateWorkspaceStorageBoundary,
+} = {}) {
+  validateStorage(WORKSPACE_ROOT);
+  return WORKSPACE_STORAGE_ATTESTATION;
+}
+
+function resolveProviderPlaneIdentities({ lookup = spawnSync } = {}) {
+  const identities = {};
+  for (const provider of Object.keys(PROVIDER_PLANE_HOMES)) {
+    const name = `teleagent-${provider}-supervisor`;
+    const options = {
+      cwd: '/',
+      encoding: 'utf8',
+      timeout: 5000,
+      maxBuffer: 4096,
+      env: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    };
+    const passwdResult = lookup(GETENT, ['passwd', name], options);
+    const groupResult = lookup(GETENT, ['group', name], options);
+    const passwdLines = String(passwdResult?.stdout || '').trim().split('\n');
+    const groupLines = String(groupResult?.stdout || '').trim().split('\n');
+    const passwd = passwdLines.length === 1 ? passwdLines[0].split(':') : [];
+    const group = groupLines.length === 1 ? groupLines[0].split(':') : [];
+    const uid = passwd.length === 7 && passwd[0] === name && /^[0-9]+$/.test(passwd[2])
+      ? Number(passwd[2])
+      : NaN;
+    const primaryGid = passwd.length === 7 && /^[0-9]+$/.test(passwd[3])
+      ? Number(passwd[3])
+      : NaN;
+    const gid = group.length === 4 && group[0] === name && /^[0-9]+$/.test(group[2])
+      ? Number(group[2])
+      : NaN;
+    if (passwdResult?.error || passwdResult?.status !== 0 || passwdResult?.signal ||
+        groupResult?.error || groupResult?.status !== 0 || groupResult?.signal ||
+        !Number.isSafeInteger(uid) || uid <= 0 || uid >= 0xffffffff ||
+        !Number.isSafeInteger(gid) || gid <= 0 || gid >= 0xffffffff ||
+        primaryGid !== gid || passwd[5] !== PROVIDER_PLANE_HOMES[provider] ||
+        !['/usr/sbin/nologin', '/sbin/nologin'].includes(passwd[6])) {
+      fail('a provider supervisor storage identity is unavailable or unsafe');
+    }
+    identities[provider] = Object.freeze({ uid, gid });
+  }
+  return Object.freeze(identities);
+}
+
+function validateProviderPlaneStorageBoundary({
+  requireReserve = true,
+  requireHomes = true,
+  identities = null,
+  lookup = spawnSync,
+  lstat = fs.lstatSync,
+  stat = (filename) => fs.statSync(filename, { bigint: true }),
+  statfs = (filename) => fs.statfsSync(filename, { bigint: true }),
+  realpath = fs.realpathSync,
+} = {}) {
+  const expected = requireHomes
+    ? (identities || resolveProviderPlaneIdentities({ lookup }))
+    : null;
+  let parent;
+  let root;
+  let parentDevice;
+  let rootDevice;
+  let storage;
+  const homes = {};
+  const homeDevices = {};
+  try {
+    parent = lstat(PROVIDER_PLANE_PARENT);
+    root = lstat(PROVIDER_PLANE_ROOT);
+    parentDevice = stat(PROVIDER_PLANE_PARENT);
+    rootDevice = stat(PROVIDER_PLANE_ROOT);
+    storage = statfs(PROVIDER_PLANE_ROOT);
+    if (requireHomes) {
+      for (const [provider, directory] of Object.entries(PROVIDER_PLANE_HOMES)) {
+        homes[provider] = lstat(directory);
+        homeDevices[provider] = stat(directory);
+      }
+    }
+  } catch {
+    fail('provider plane storage boundary cannot be inspected');
+  }
+  if (!parent.isDirectory() || parent.isSymbolicLink() || parent.uid !== 0 ||
+      (parent.mode & 0o022) !== 0 || realpath(PROVIDER_PLANE_PARENT) !== PROVIDER_PLANE_PARENT ||
+      !root.isDirectory() || root.isSymbolicLink() || root.uid !== 0 || root.gid !== 0 ||
+      (root.mode & 0o7777) !== 0o751 || realpath(PROVIDER_PLANE_ROOT) !== PROVIDER_PLANE_ROOT ||
+      rootDevice.dev === parentDevice.dev) {
+    fail('provider plane requires one exact root-owned dedicated mountpoint');
+  }
+  if (requireHomes) {
+    for (const [provider, directory] of Object.entries(PROVIDER_PLANE_HOMES)) {
+      const identity = expected[provider];
+      const metadata = homes[provider];
+      if (!identity || !Number.isSafeInteger(identity.uid) || identity.uid <= 0 ||
+          !Number.isSafeInteger(identity.gid) || identity.gid <= 0 ||
+          !metadata.isDirectory() || metadata.isSymbolicLink() ||
+          metadata.uid !== identity.uid || metadata.gid !== identity.gid ||
+          (metadata.mode & 0o7777) !== 0o700 || realpath(directory) !== directory ||
+          homeDevices[provider].dev !== rootDevice.dev) {
+        fail('a provider supervisor home escaped its private storage boundary');
+      }
+    }
+  }
+  const blockSize = BigInt(storage.bsize);
+  const blocks = BigInt(storage.blocks);
+  const availableBlocks = BigInt(storage.bavail);
+  let filesystemType;
+  try {
+    filesystemType = BigInt.asUintN(32, BigInt(storage.type));
+  } catch {
+    fail('provider plane filesystem type is invalid');
+  }
+  if (!DURABLE_LOCAL_FILESYSTEMS.has(filesystemType)) {
+    fail('provider plane requires a reviewed durable local filesystem');
+  }
+  if (blockSize <= 0n || blocks <= 0n || availableBlocks < 0n || availableBlocks > blocks) {
+    fail('provider plane filesystem accounting is invalid');
+  }
+  const capacityBytes = blockSize * blocks;
+  const freeBytes = blockSize * availableBlocks;
+  if (capacityBytes < MIN_PROVIDER_PLANE_CAPACITY_BYTES ||
+      capacityBytes > MAX_PROVIDER_PLANE_CAPACITY_BYTES) {
+    fail('provider plane filesystem capacity is outside the fixed 1-4 GiB boundary');
+  }
+  const percentageReserve = capacityBytes / 5n;
+  const requiredFreeBytes = percentageReserve > MIN_PROVIDER_PLANE_FREE_BYTES
+    ? percentageReserve
+    : MIN_PROVIDER_PLANE_FREE_BYTES;
+  const admitted = freeBytes >= requiredFreeBytes;
+  if (requireReserve && !admitted) {
+    fail('provider plane filesystem reserve is exhausted');
+  }
+  return Object.freeze({
+    root: PROVIDER_PLANE_ROOT,
+    device: rootDevice.dev,
+    capacityBytes,
+    freeBytes,
+    requiredFreeBytes,
+    admitted,
+  });
+}
+
+function validateProviderStorageIsolation({
+  validateWorkspace = validateWorkspaceAnchor,
+  validateWorkspaceStorage = validateWorkspaceStorageBoundary,
+  validateProviderPlaneStorage = validateProviderPlaneStorageBoundary,
+} = {}) {
+  validateWorkspace(FIXED_WORKSPACE);
+  const workspace = validateWorkspaceStorage(WORKSPACE_ROOT);
+  const providerPlane = validateProviderPlaneStorage({ requireReserve: true });
+  const normalizeDevice = (value) => {
+    if (typeof value === 'bigint' && value > 0n) return value;
+    if (Number.isSafeInteger(value) && value > 0) return BigInt(value);
+    fail('provider storage device identity is invalid');
+  };
+  if (normalizeDevice(workspace?.device) === normalizeDevice(providerPlane?.device)) {
+    fail('provider workspace and provider plane require distinct filesystems');
+  }
+  return Object.freeze({ workspace, providerPlane });
+}
+
+function attestWorkerStorageBoundary({
+  validateStorage = validateProviderStorageIsolation,
+} = {}) {
+  validateStorage();
+  return WORKER_STORAGE_ATTESTATION;
+}
+
+function attestProviderPlaneStorageBoundary({
+  validateStorage = validateProviderPlaneStorageBoundary,
+} = {}) {
+  validateStorage({ requireReserve: true });
+  return PROVIDER_PLANE_STORAGE_ATTESTATION;
+}
+
+function assertSupervisorStartAdmitted({
+  validateStorageIsolation = validateProviderStorageIsolation,
+  panicLocked = globalProviderPanicLocked,
+  recoveryPending = globalProviderRecoveryPending,
+} = {}) {
+  validateStorageIsolation();
+  if (panicLocked() && !recoveryPending()) {
+    fail('provider supervisor start is panic-locked', 75);
+  }
+}
+
+function parseControl(argv, environment = process.env, { uid = process.getuid() } = {}) {
+  const separator = argv.indexOf('--');
+  const options = separator >= 0 ? argv.slice(0, separator) : [...argv];
+  const providerArgs = separator >= 0 ? argv.slice(separator + 1) : [];
+  const action = take(options, '--action');
+  const globalAction = [
+    'panic-all', 'recover-root-panic', 'assert-global-unlocked',
+    'assert-supervisor-start-admitted', 'attest-workspace-storage',
+    'attest-provider-plane-storage', 'attest-worker-storage',
+  ].includes(action);
+  const provider = take(options, '--provider', !globalAction);
+  const launchId = take(options, '--launch-id', action === 'launch' || action === 'terminate' || action === 'status');
+  const mode = take(options, '--mode', action === 'launch');
+  const accessMode = take(options, '--access-mode', action === 'launch');
+  const workspaceInput = take(options, '--workspace', action === 'launch');
+  const taskId = take(options, '--task-id', false);
+  const sessionId = take(options, '--session-id', false);
+  const spec = PROVIDERS[provider];
+  if (globalAction) {
+    const validIdentity = action === 'panic-all'
+      ? environment.SUDO_USER === 'teleagent-session-broker'
+      : action === 'recover-root-panic'
+        ? [undefined, 'teleagent-session-broker'].includes(environment.SUDO_USER)
+        : ['attest-workspace-storage', 'attest-provider-plane-storage'].includes(action)
+          ? true
+          : environment.SUDO_USER === undefined;
+    if (options.length || providerArgs.length || provider !== null || launchId !== null ||
+        mode !== null || accessMode !== null || workspaceInput !== null ||
+        taskId !== null || sessionId !== null || uid !== 0 ||
+        !validIdentity) {
+      fail('global provider boundary identity is invalid');
+    }
+    return { action, provider: null, launchId: null, spec: null };
+  }
+  if (options.length || !spec || !['launch', 'terminate', 'status', 'recover'].includes(action) ||
+      uid !== 0 || environment.SUDO_USER !== spec.supervisor) {
+    fail('boundary controller identity is invalid');
+  }
+  if (action !== 'launch' && (
+    mode || accessMode || workspaceInput || taskId || sessionId || providerArgs.length
+  )) {
+    fail('control action contains launch arguments');
+  }
+  if (launchId && !LAUNCH_ID.test(launchId)) fail('launch ID is invalid');
+  if (action !== 'launch') return { action, provider, launchId, spec };
+  const workspace = path.resolve(String(workspaceInput || ''));
+  if (!['managed', 'interactive'].includes(mode) ||
+      !['read-only', 'mutating'].includes(accessMode) ||
+      mode === 'interactive' ||
+      workspace !== FIXED_WORKSPACE || (taskId && !TASK_ID.test(taskId)) ||
+      providerArgs.length > 256 || providerArgs.some((arg) => arg.length > 8192 || /[\0\r\n]/.test(arg))) {
+    fail('launch arguments are outside the fixed boundary');
+  }
+  if (mode === 'interactive') fail('persistent interactive provider sessions are disabled');
+  if (mode === 'managed' && sessionId) fail('managed launch cannot select a provider session');
+  validateWorkspaceAnchor(workspace);
+  const launchPolicy = deriveProviderLaunchPolicy(provider, providerArgs);
+  return {
+    action, provider, launchId, mode, accessMode,
+    workspace, taskId, sessionId, providerArgs, spec, ...launchPolicy,
+  };
+}
+
+function unitName(provider, launchId) {
+  if (!PROVIDERS[provider] || !LAUNCH_ID.test(launchId || '')) fail('unit identity is invalid');
+  return `teleagent-provider-launch-${provider}-${launchId.slice('launch_'.length)}.service`;
+}
+
+function secureRootDirectory(directory, expectedModeMask = 0o022, expectedUid = 0) {
+  const metadata = fs.lstatSync(directory);
+  if (!metadata.isDirectory() || metadata.isSymbolicLink() || metadata.uid !== expectedUid ||
+      (metadata.mode & expectedModeMask) !== 0 || fs.realpathSync(directory) !== directory) {
+    fail('root boundary directory is unsafe');
+  }
+  return metadata;
+}
+
+function maskPath(unit, directory = SYSTEMD_RUNTIME_UNIT_DIRECTORY) {
+  if (!/^teleagent-provider-launch-(?:claude|codex)-[a-f0-9]{32}\.service$/.test(unit)) {
+    fail('unit mask identity is invalid');
+  }
+  return path.join(directory, unit);
+}
+
+function hasCancellationTombstone(unit, { directory = SYSTEMD_RUNTIME_UNIT_DIRECTORY } = {}) {
+  const filename = maskPath(unit, directory);
+  try {
+    const metadata = fs.lstatSync(filename);
+    return metadata.isSymbolicLink() && fs.readlinkSync(filename) === '/dev/null';
+  } catch (error) {
+    if (error?.code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+function persistCancellationTombstone(unit, {
+  directory = SYSTEMD_RUNTIME_UNIT_DIRECTORY,
+  reload = () => systemctl(['daemon-reload']),
+  uid = 0,
+} = {}) {
+  secureRootDirectory(directory, 0o022, uid);
+  const filename = maskPath(unit, directory);
+  try { fs.symlinkSync('/dev/null', filename); }
+  catch (error) {
+    if (error?.code !== 'EEXIST' || !hasCancellationTombstone(unit, { directory })) {
+      fail('provider unit cancellation tombstone conflicts');
+    }
+  }
+  const directoryFd = fs.openSync(
+    directory,
+    fs.constants.O_RDONLY | fs.constants.O_DIRECTORY
+  );
+  try { fs.fsyncSync(directoryFd); }
+  finally { fs.closeSync(directoryFd); }
+  reload();
+  if (!hasCancellationTombstone(unit, { directory })) {
+    fail('provider unit cancellation tombstone was not persisted');
+  }
+  return true;
+}
+
+function capabilityFilePath(launchId) {
+  if (!LAUNCH_ID.test(launchId || '')) fail('launch capability identity is invalid');
+  return path.join(CAPABILITY_DIRECTORY, `${launchId}.credential`);
+}
+
+function globalLaunchLockPath(directory = CAPABILITY_DIRECTORY) {
+  return path.join(directory, GLOBAL_LAUNCH_LOCK);
+}
+
+function processStartTime(pid, { procRoot = '/proc' } = {}) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) fail('global provider launch lock PID is invalid');
+  let source;
+  try { source = fs.readFileSync(path.join(procRoot, String(pid), 'stat'), 'utf8'); }
+  catch (error) {
+    if (error?.code === 'ENOENT') return null;
+    throw error;
+  }
+  const close = source.lastIndexOf(') ');
+  if (close < 0) fail('global provider launch lock process identity is invalid');
+  const fields = source.slice(close + 2).trim().split(/\s+/);
+  // After the comm field, index 0 is field 3 (state); starttime is field 22.
+  const startTime = fields[19];
+  if (!/^[1-9][0-9]*$/u.test(startTime || '')) {
+    fail('global provider launch lock process start time is invalid');
+  }
+  return startTime;
+}
+
+function normalizeGlobalLaunchLock(source) {
+  if (Buffer.byteLength(source) > 1024 || /\r|\0/u.test(source)) {
+    fail('the global provider launch lock has invalid encoding');
+  }
+  let record;
+  try { record = JSON.parse(source); }
+  catch { fail('the global provider launch lock has invalid content'); }
+  if (!record || Array.isArray(record) ||
+      JSON.stringify(Object.keys(record)) !==
+        JSON.stringify(['version', 'launchId', 'pid', 'startTime']) ||
+      record.version !== 1 || !LAUNCH_ID.test(record.launchId || '') ||
+      !Number.isSafeInteger(record.pid) || record.pid <= 0 ||
+      !/^[1-9][0-9]*$/u.test(record.startTime || '') ||
+      source !== `${JSON.stringify(record)}\n`) {
+    fail('the global provider launch lock has invalid content');
+  }
+  return Object.freeze(record);
+}
+
+function inspectGlobalLaunchLockDescriptor(descriptor, {
+  uid = 0,
+  gid = 0,
+  allowedLinks = [1],
+} = {}) {
+  const before = fs.fstatSync(descriptor);
+  if (!before.isFile() || before.uid !== uid || before.gid !== gid ||
+      (before.mode & 0o777) !== 0o600 || !allowedLinks.includes(before.nlink) ||
+      before.size <= 0 || before.size > 1024) {
+    fail('the global provider launch lock is unsafe');
+  }
+  const content = Buffer.alloc(before.size);
+  let offset = 0;
+  while (offset < content.length) {
+    const count = fs.readSync(descriptor, content, offset, content.length - offset, offset);
+    if (!Number.isSafeInteger(count) || count <= 0) {
+      fail('the global provider launch lock changed while it was inspected');
+    }
+    offset += count;
+  }
+  const after = fs.fstatSync(descriptor);
+  if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size ||
+      before.mode !== after.mode || before.uid !== after.uid || before.gid !== after.gid ||
+      before.nlink !== after.nlink || before.mtimeMs !== after.mtimeMs ||
+      before.ctimeMs !== after.ctimeMs) {
+    fail('the global provider launch lock changed while it was inspected');
+  }
+  return {
+    record: normalizeGlobalLaunchLock(content.toString('utf8')),
+    metadata: before,
+  };
+}
+
+function inspectGlobalLaunchLockState(filename, {
+  directory = CAPABILITY_DIRECTORY,
+  uid = 0,
+  gid = 0,
+} = {}) {
+  if (filename !== globalLaunchLockPath(directory)) {
+    fail('global provider launch lock path is invalid');
+  }
+  const descriptor = fs.openSync(
+    filename,
+    fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW
+  );
+  try {
+    const inspected = inspectGlobalLaunchLockDescriptor(descriptor, {
+      uid, gid, allowedLinks: [1, 2],
+    });
+    if (fs.realpathSync(filename) !== filename) {
+      fail('the global provider launch lock is unsafe');
+    }
+    let companion = null;
+    if (inspected.metadata.nlink === 2) {
+      const candidates = [];
+      for (const entry of fs.readdirSync(directory)) {
+        if (!/^\.global-provider-launch\.lock\.tmp\.[1-9][0-9]*\.[a-f0-9]{32}$/u.test(entry)) {
+          continue;
+        }
+        const candidate = path.join(directory, entry);
+        const metadata = fs.lstatSync(candidate);
+        if (metadata.isFile() && !metadata.isSymbolicLink() &&
+            metadata.dev === inspected.metadata.dev && metadata.ino === inspected.metadata.ino &&
+            metadata.uid === uid && metadata.gid === gid &&
+            (metadata.mode & 0o777) === 0o600 && metadata.nlink === 2 &&
+            fs.realpathSync(candidate) === candidate) {
+          candidates.push(candidate);
+        }
+      }
+      if (candidates.length !== 1) fail('the global provider launch lock is unsafe');
+      companion = candidates[0];
+    }
+    return { ...inspected, companion };
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
+
+function inspectGlobalLaunchLock(filename, options = {}) {
+  return inspectGlobalLaunchLockState(filename, options).record;
+}
+
+function createGlobalLaunchLock(launchId, {
+  directory = CAPABILITY_DIRECTORY,
+  uid = 0,
+  gid = 0,
+  pid = process.pid,
+  readStartTime = processStartTime,
+  writeDescriptor = fs.writeSync,
+  fsyncDescriptor = fs.fsyncSync,
+  inspectLock = inspectGlobalLaunchLock,
+  syncPublishedDirectory = fsyncDirectory,
+  phaseHook = () => {},
+} = {}) {
+  if (!LAUNCH_ID.test(launchId || '')) fail('global provider launch lock identity is invalid');
+  secureRootDirectory(directory, 0o022, uid);
+  const startTime = readStartTime(pid);
+  if (startTime === null) fail('global provider launch lock owner is unavailable');
+  const record = Object.freeze({ version: 1, launchId, pid, startTime });
+  const serialized = Buffer.from(`${JSON.stringify(record)}\n`, 'utf8');
+  const filename = globalLaunchLockPath(directory);
+  const temporary = path.join(
+    directory,
+    `${GLOBAL_LAUNCH_LOCK}.tmp.${pid}.${crypto.randomBytes(16).toString('hex')}`
+  );
+  let descriptor;
+  let createdIdentity = null;
+  let published = false;
+  try {
+    descriptor = fs.openSync(
+      temporary,
+      fs.constants.O_RDWR | fs.constants.O_CREAT | fs.constants.O_EXCL |
+        fs.constants.O_NOFOLLOW,
+      0o600
+    );
+  } catch (error) {
+    throw error;
+  }
+  try {
+    createdIdentity = fs.fstatSync(descriptor);
+    fs.fchownSync(descriptor, uid, gid);
+    fs.fchmodSync(descriptor, 0o600);
+    phaseHook('pre-write');
+    let offset = 0;
+    while (offset < serialized.length) {
+      const written = writeDescriptor(
+        descriptor, serialized, offset, serialized.length - offset, null
+      );
+      if (!Number.isSafeInteger(written) || written <= 0 ||
+          written > serialized.length - offset) {
+        fail('global provider launch lock write was incomplete');
+      }
+      offset += written;
+      if (offset < serialized.length) phaseHook('partial-write');
+    }
+    phaseHook('pre-fsync');
+    fsyncDescriptor(descriptor);
+    const staged = inspectGlobalLaunchLockDescriptor(descriptor, { uid, gid });
+    if (JSON.stringify(staged.record) !== JSON.stringify(record)) {
+      fail('the global provider launch lock is unsafe');
+    }
+    phaseHook('pre-publish');
+    const current = fs.lstatSync(temporary);
+    if (current.dev !== createdIdentity.dev || current.ino !== createdIdentity.ino ||
+        current.nlink !== 1) {
+      fail('the global provider launch lock stage changed before publication');
+    }
+    try { fs.linkSync(temporary, filename); }
+    catch (error) {
+      if (error?.code === 'EEXIST') {
+        fail('another provider launch owns the global workspace lock', 75);
+      }
+      throw error;
+    }
+    published = true;
+    phaseHook('post-publish');
+    const installed = inspectLock(filename, { directory, uid, gid });
+    if (JSON.stringify(installed) !== JSON.stringify(record)) {
+      fail('the global provider launch lock is unsafe');
+    }
+    fs.unlinkSync(temporary);
+    syncPublishedDirectory(directory);
+    const durable = inspectGlobalLaunchLockState(filename, { directory, uid, gid });
+    if (durable.companion !== null ||
+        JSON.stringify(durable.record) !== JSON.stringify(record)) {
+      fail('the global provider launch lock is unsafe');
+    }
+    fs.closeSync(descriptor);
+    descriptor = undefined;
+    return filename;
+  } catch (error) {
+    if (descriptor !== undefined) {
+      try { fs.closeSync(descriptor); } catch { /* exact-inode cleanup below is authoritative */ }
+      descriptor = undefined;
+    }
+    let cleanupError = null;
+    if (createdIdentity !== null) {
+      try {
+        if (published) {
+          const current = fs.lstatSync(filename);
+          if (current.dev !== createdIdentity.dev || current.ino !== createdIdentity.ino) {
+            fail('failed global provider launch lock construction changed path identity');
+          }
+          fs.unlinkSync(filename);
+        }
+        try {
+          const staged = fs.lstatSync(temporary);
+          if (staged.dev !== createdIdentity.dev || staged.ino !== createdIdentity.ino) {
+            fail('failed global provider launch lock construction changed stage identity');
+          }
+          fs.unlinkSync(temporary);
+        } catch (candidate) {
+          if (candidate?.code !== 'ENOENT') throw candidate;
+        }
+        fsyncDirectory(directory);
+      } catch (candidate) {
+        if (candidate?.code !== 'ENOENT') cleanupError = candidate;
+      }
+    }
+    if (cleanupError) {
+      fail('failed global provider launch lock construction could not be cleaned safely');
+    }
+    throw error;
+  }
+}
+
+function removeGlobalLaunchLock(filename, launchId, {
+  directory = CAPABILITY_DIRECTORY,
+  uid = 0,
+  gid = 0,
+  pid = process.pid,
+  readStartTime = processStartTime,
+} = {}) {
+  if (filename !== globalLaunchLockPath(directory) || !LAUNCH_ID.test(launchId || '')) {
+    fail('global provider launch lock removal is invalid');
+  }
+  const record = inspectGlobalLaunchLock(filename, { directory, uid, gid });
+  if (record.launchId !== launchId || record.pid !== pid ||
+      readStartTime(pid) !== record.startTime) {
+    fail('the global provider launch lock changed before release');
+  }
+  fs.unlinkSync(filename);
+  fsyncDirectory(directory);
+}
+
+function clearQuiescentGlobalLaunchTemps({
+  directory = CAPABILITY_DIRECTORY,
+  uid = 0,
+  gid = 0,
+} = {}) {
+  let removed = 0;
+  for (const entry of fs.readdirSync(directory)) {
+    if (!/^\.global-provider-launch\.lock\.tmp\.[1-9][0-9]*\.[a-f0-9]{32}$/u.test(entry)) {
+      continue;
+    }
+    const filename = path.join(directory, entry);
+    const metadata = fs.lstatSync(filename);
+    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.uid !== uid ||
+        metadata.gid !== gid || (metadata.mode & 0o777) !== 0o600 ||
+        metadata.nlink !== 1 || metadata.size > 1024 ||
+        fs.realpathSync(filename) !== filename) {
+      fail('a quiescent global provider launch lock stage is unsafe');
+    }
+    fs.unlinkSync(filename);
+    removed += 1;
+  }
+  return removed;
+}
+
+function clearStaleGlobalLaunchLockAfterQuiescence({
+  quiesced,
+  directory = CAPABILITY_DIRECTORY,
+  uid = 0,
+  gid = 0,
+  readStartTime = processStartTime,
+} = {}) {
+  if (quiesced !== true) fail('global provider launch lock recovery requires quiescence');
+  secureRootDirectory(directory, 0o022, uid);
+  const filename = globalLaunchLockPath(directory);
+  let inspected;
+  try { inspected = inspectGlobalLaunchLockState(filename, { directory, uid, gid }); }
+  catch (error) {
+    if (error?.code === 'ENOENT') {
+      const orphanCount = clearQuiescentGlobalLaunchTemps({ directory, uid, gid });
+      if (orphanCount > 0) fsyncDirectory(directory);
+      return { proved: true, removed: false, orphanCount };
+    }
+    throw error;
+  }
+  const { record, companion } = inspected;
+  if (readStartTime(record.pid) === record.startTime) {
+    fail('global provider launch lock owner remains live after quiescence');
+  }
+  fs.unlinkSync(filename);
+  if (companion !== null) {
+    const metadata = fs.lstatSync(companion);
+    if (metadata.dev !== inspected.metadata.dev || metadata.ino !== inspected.metadata.ino ||
+        metadata.nlink !== 1) {
+      fail('the global provider launch lock companion changed during recovery');
+    }
+    fs.unlinkSync(companion);
+  }
+  const orphanCount = clearQuiescentGlobalLaunchTemps({ directory, uid, gid });
+  fsyncDirectory(directory);
+  return { proved: true, removed: true, launchId: record.launchId, orphanCount };
+}
+
+function assertGlobalProviderLaunchUnlocked({
+  isLocked = globalProviderPanicLocked,
+} = {}) {
+  if (isLocked()) fail('global provider plane is panic-locked', 75);
+  return true;
+}
+
+function readinessFilePath(provider, launchId, directory = CAPABILITY_DIRECTORY) {
+  if (!PROVIDERS[provider]) fail('launch readiness provider is invalid');
+  if (!LAUNCH_ID.test(launchId || '')) fail('launch readiness identity is invalid');
+  return path.join(directory, `${provider}.${launchId}.provider-readiness.jsonl`);
+}
+
+function fsyncDirectory(directory) {
+  const descriptor = fs.openSync(
+    directory,
+    fs.constants.O_RDONLY | fs.constants.O_DIRECTORY
+  );
+  try { fs.fsyncSync(descriptor); }
+  finally { fs.closeSync(descriptor); }
+}
+
+function createReadinessFile(provider, launchId) {
+  secureRootDirectory(CAPABILITY_DIRECTORY);
+  const filename = readinessFilePath(provider, launchId);
+  const planned = `${JSON.stringify({
+    version: 1,
+    type: 'provider_planned',
+    provider,
+    launchId,
+  })}\n`;
+  let fd;
+  try {
+    fd = fs.openSync(
+      filename,
+      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL |
+        fs.constants.O_NOFOLLOW,
+      0o600
+    );
+    fs.writeFileSync(fd, planned, 'utf8');
+    fs.fsyncSync(fd);
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+  fsyncDirectory(CAPABILITY_DIRECTORY);
+  return filename;
+}
+
+function createCapabilityFile(launchId, capability) {
+  secureRootDirectory(CAPABILITY_DIRECTORY);
+  const filename = capabilityFilePath(launchId);
+  let fd;
+  try {
+    fd = fs.openSync(
+      filename,
+      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL |
+        fs.constants.O_NOFOLLOW,
+      0o600
+    );
+    fs.writeFileSync(fd, `${capability}\n`, 'utf8');
+    fs.fsyncSync(fd);
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+  fsyncDirectory(CAPABILITY_DIRECTORY);
+  return filename;
+}
+
+function removeCapabilityFile(filename) {
+  if (!filename || path.dirname(filename) !== CAPABILITY_DIRECTORY) return;
+  try { fs.unlinkSync(filename); }
+  catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+  }
+  fsyncDirectory(CAPABILITY_DIRECTORY);
+}
+
+function removeReadinessFile(filename, directory = CAPABILITY_DIRECTORY) {
+  if (!filename || path.dirname(filename) !== directory ||
+      !filename.endsWith('.provider-readiness.jsonl')) return;
+  try { fs.unlinkSync(filename); }
+  catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+  }
+  fsyncDirectory(directory);
+}
+
+function processStarttime(pid) {
+  if (!Number.isSafeInteger(pid) || pid <= 1) return null;
+  let serialized;
+  try { serialized = fs.readFileSync(`/proc/${pid}/stat`, 'utf8'); }
+  catch { return null; }
+  const close = serialized.lastIndexOf(')');
+  if (close < 0) return null;
+  const fields = serialized.slice(close + 2).trim().split(/\s+/);
+  return /^[0-9]+$/.test(fields[19] || '') ? fields[19] : null;
+}
+
+function processControlGroup(pid) {
+  try {
+    const line = fs.readFileSync(`/proc/${pid}/cgroup`, 'utf8')
+      .split('\n').find((candidate) => candidate.startsWith('0::'));
+    return line ? line.slice(3) : null;
+  } catch { return null; }
+}
+
+function inspectProviderReadiness(provider, launchId, unitStatus, {
+  directory = CAPABILITY_DIRECTORY,
+  uid = 0,
+  starttime = processStarttime,
+  controlGroup = processControlGroup,
+} = {}) {
+  const filename = readinessFilePath(provider, launchId, directory);
+  let metadata;
+  try { metadata = fs.lstatSync(filename); }
+  catch (error) {
+    if (error?.code === 'ENOENT') fail('provider readiness evidence is missing');
+    throw error;
+  }
+  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.uid !== uid ||
+      (metadata.mode & 0o077) !== 0 || metadata.size > 512 ||
+      fs.realpathSync(filename) !== filename) fail('provider readiness evidence is unsafe');
+  let records;
+  try {
+    const serialized = fs.readFileSync(filename, 'utf8');
+    if (!serialized.endsWith('\n')) throw new Error('partial readiness record');
+    records = serialized.trimEnd().split('\n').map((line) => JSON.parse(line));
+  }
+  catch { fail('provider readiness evidence is invalid'); }
+  const planned = records[0];
+  if (planned?.version !== 1 || planned.type !== 'provider_planned' ||
+      planned.provider !== provider || planned.launchId !== launchId ||
+      records.length < 1 || records.length > 3) {
+    fail('provider readiness evidence is invalid');
+  }
+  if (records.length === 1) {
+    return {
+      providerExecutionAttempted: false,
+      providerSpawnedEver: false,
+      providerAlive: false,
+    };
+  }
+  const intent = records[1];
+  if (intent?.version !== 1 || intent.type !== 'provider_start_intent' ||
+      intent.provider !== provider || intent.launchId !== launchId) {
+    fail('provider readiness evidence is invalid');
+  }
+  if (records.length === 2) {
+    return {
+      providerExecutionAttempted: true,
+      providerSpawnedEver: false,
+      providerAlive: false,
+    };
+  }
+  const marker = records[2];
+  const verifiedIdentity = Number.isSafeInteger(marker?.pid) && marker.pid > 1 &&
+    /^[0-9]+$/.test(String(marker.starttime || '')) && marker.identityUnavailable !== true;
+  const unavailableIdentity = marker?.identityUnavailable === true &&
+    marker.pid === undefined && marker.starttime === undefined;
+  if (marker?.version !== 1 || marker.type !== 'provider_spawned' ||
+      marker.provider !== provider || marker.launchId !== launchId ||
+      (!verifiedIdentity && !unavailableIdentity)) {
+    fail('provider readiness evidence is invalid');
+  }
+  const live = verifiedIdentity && unitStatus?.quiesced !== true && Boolean(unitStatus?.controlGroup) &&
+    starttime(marker.pid) === String(marker.starttime) &&
+    controlGroup(marker.pid) === unitStatus.controlGroup;
+  return {
+    providerExecutionAttempted: true,
+    providerSpawnedEver: true,
+    providerAlive: live,
+    providerIdentityVerified: verifiedIdentity,
+    providerPid: verifiedIdentity ? marker.pid : null,
+    providerStarttime: verifiedIdentity ? String(marker.starttime) : null,
+  };
+}
+
+function purgeProviderReadinessArtifacts(provider, {
+  directory = CAPABILITY_DIRECTORY,
+  uid = 0,
+} = {}) {
+  secureRootDirectory(directory, 0o022, uid);
+  const entries = fs.readdirSync(directory, { withFileTypes: true });
+  let removed = 0;
+  for (const entry of entries) {
+    const match = entry.name.match(
+      /^(claude|codex)\.(launch_[a-f0-9]{32})\.provider-readiness\.jsonl$/
+    );
+    if (!match) continue;
+    if (match[1] !== provider) continue;
+    const filename = path.join(directory, entry.name);
+    const metadata = fs.lstatSync(filename);
+    if (!entry.isFile() || metadata.isSymbolicLink() || metadata.uid !== uid ||
+        (metadata.mode & 0o077) !== 0 || metadata.size > 512 ||
+        fs.realpathSync(filename) !== filename) {
+      fail('provider readiness evidence is unsafe');
+    }
+    let records;
+    try {
+      const serialized = fs.readFileSync(filename, 'utf8');
+      if (!serialized.endsWith('\n')) throw new Error('partial readiness record');
+      records = serialized.trimEnd().split('\n').map((line) => JSON.parse(line));
+    }
+    catch { fail('provider readiness evidence is invalid'); }
+    const planned = records[0];
+    const intent = records[1];
+    const spawned = records[2];
+    if (records.length < 1 || records.length > 3 || planned?.version !== 1 ||
+        planned.type !== 'provider_planned' || planned.provider !== match[1] ||
+        planned.launchId !== match[2] || (intent && (
+          intent.version !== 1 || intent.type !== 'provider_start_intent' ||
+          intent.provider !== match[1] || intent.launchId !== match[2]
+        )) || (spawned && (
+          spawned.version !== 1 || spawned.type !== 'provider_spawned' ||
+          spawned.provider !== match[1] || spawned.launchId !== match[2]
+        ))) {
+      fail('provider readiness evidence is invalid');
+    }
+    removeReadinessFile(filename, directory);
+    removed += 1;
+  }
+  return removed;
+}
+
+function providerControl(input, { timeoutMs = 5000, socketPath = null } = {}) {
+  const spec = PROVIDERS[input.provider];
+  if (!spec) return Promise.reject(new Error('provider control identity is invalid'));
+  const action = String(input.action || '');
+  const route = action === 'register'
+    ? '/v1/control/register'
+    : action === 'recover'
+      ? '/v1/control/recover'
+      : action === 'budget'
+        ? '/v1/control/budget'
+        : '/v1/control/revoke';
+  const method = action === 'budget' ? 'GET' : 'POST';
+  const body = method === 'POST' ? Buffer.from(JSON.stringify({
+    version: 1,
+    provider: input.provider,
+    ...(input.launchId ? { launchId: input.launchId } : {}),
+    ...(input.capability ? { capability: input.capability } : {}),
+    ...(input.expiresAtMs ? { expiresAtMs: input.expiresAtMs } : {}),
+    ...(input.maxRequests ? { maxRequests: input.maxRequests } : {}),
+    ...(input.maxReservedTokens ? { maxReservedTokens: input.maxReservedTokens } : {}),
+    ...(action === 'register' ? {
+      model: input.model,
+      reasoningEffort: input.reasoningEffort,
+      routeKinds: input.routeKinds,
+      mode: input.mode,
+    } : {}),
+    ...(input.reason ? { reason: input.reason } : {}),
+  })) : null;
+  return new Promise((resolve, reject) => {
+    const request = http.request({
+      socketPath: socketPath || spec.egressControlSocket,
+      method,
+      path: route,
+      headers: body ? {
+        'content-type': 'application/json',
+        'content-length': body.length,
+      } : {},
+      timeout: timeoutMs,
+    }, (response) => {
+      const chunks = [];
+      let bytes = 0;
+      response.on('data', (chunk) => {
+        bytes += chunk.length;
+        if (bytes > 128 * 1024) request.destroy(new Error('provider control response exceeded bound'));
+        else chunks.push(chunk);
+      });
+      response.once('end', () => {
+        let value;
+        try { value = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
+        catch { return reject(new Error('provider control response is invalid')); }
+        if (response.statusCode < 200 || response.statusCode >= 300 || value?.success !== true) {
+          return reject(new Error('provider control refused the request'));
+        }
+        resolve(value);
+      });
+    });
+    request.once('timeout', () => request.destroy(new Error('provider control timed out')));
+    request.once('error', reject);
+    request.end(body || undefined);
+  });
+}
+
+function buildSystemdRunInvocation(input) {
+  if (input.credentialPath !== capabilityFilePath(input.launchId)) {
+    fail('launch credential path is invalid');
+  }
+  if (input.readinessPath !== readinessFilePath(input.provider, input.launchId)) {
+    fail('launch readiness path is invalid');
+  }
+  const unit = unitName(input.provider, input.launchId);
+  const supervisorUnit = `teleagent-provider-supervisor@${input.provider}.service`;
+  const egressUnit = `teleagent-provider-egress@${input.provider}.service`;
+  const runtimeArgs = [
+    '--provider', input.provider,
+    '--launch-id', input.launchId,
+    '--mode', input.mode,
+    '--access-mode', input.accessMode,
+    '--workspace', input.workspace,
+  ];
+  if (input.taskId) runtimeArgs.push('--task-id', input.taskId);
+  if (input.sessionId) runtimeArgs.push('--session-id', input.sessionId);
+  runtimeArgs.push('--', ...input.providerArgs);
+  const properties = [
+    'Type=exec',
+    'Slice=teleagent-provider-model.slice',
+    `BindsTo=${supervisorUnit} ${egressUnit}`,
+    `After=${supervisorUnit} ${egressUnit}`,
+    'User=root',
+    'Group=root',
+    'UMask=0027',
+    'KillMode=control-group',
+    'TimeoutStopSec=8s',
+    'RuntimeMaxSec=1h',
+    'MemoryHigh=2G',
+    'MemoryMax=3G',
+    'MemorySwapMax=0',
+    'TasksMax=384',
+    'CPUQuota=150%',
+    'CPUWeight=25',
+    'IOAccounting=yes',
+    'IOWeight=25',
+    'LimitNOFILE=4096',
+    'LimitFSIZE=268435456',
+    'LimitCORE=0',
+    'OOMPolicy=kill',
+    'PrivateNetwork=yes',
+    'PrivateIPC=yes',
+    'KeyringMode=private',
+    'PrivateDevices=yes',
+    // A private namespace alone is not a storage bound. This tmpfs contains
+    // the ephemeral HOME and /tmp and cannot consume the host root filesystem.
+    'TemporaryFileSystem=/tmp:rw,nodev,nosuid,noexec,size=512M,mode=1777',
+    // PrivateNetwork does not isolate pathname Unix sockets. Replace the host
+    // runtime tree and re-expose only the one provider-specific egress socket;
+    // systemd mounts this unit's LoadCredential directory separately.
+    'TemporaryFileSystem=/run:ro,nodev,nosuid,noexec',
+    // Hide every sibling workspace, then project only the exact canonical
+    // selected tree back into this launch namespace.
+    `TemporaryFileSystem=${WORKSPACE_ROOT}:ro,nodev,nosuid`,
+    'ProtectSystem=strict',
+    'ProtectHome=yes',
+    'ProtectControlGroups=yes',
+    'ProtectKernelLogs=yes',
+    'ProtectKernelModules=yes',
+    'ProtectKernelTunables=yes',
+    'ProtectClock=yes',
+    'ProtectHostname=yes',
+    'ProtectProc=invisible',
+    'ProcSubset=pid',
+    'RestrictNamespaces=yes',
+    'RestrictSUIDSGID=yes',
+    'LockPersonality=yes',
+    'RestrictRealtime=yes',
+    'RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6',
+    'SystemCallFilter=~io_uring_setup io_uring_enter io_uring_register',
+    'ReadOnlyPaths=/opt/teleagent/agent-tools /opt/teleagent/node /usr/local/libexec /etc/teleagent/provider-runtime',
+    ...(input.accessMode === 'read-only'
+      ? [`BindReadOnlyPaths=${input.workspace}:${input.workspace}`]
+      : [`BindPaths=${input.workspace}:${input.workspace}`]),
+    `BindReadOnlyPaths=${input.spec.egressSocket}:${input.spec.egressSocket}`,
+    `BindPaths=${input.readinessPath}:${input.readinessPath}`,
+    `InaccessiblePaths=/opt/teleagent/current /var/run /var/lib/teleagent-control /var/lib/teleagent-worker-state /var/lib/teleagent-privileged-action -/var/lib/teleagent-claude-worker -/var/lib/teleagent-codex-worker -${input.spec.workerHome} -${input.spec.otherHome} /run/teleagent-worker-session /run/teleagent-provider-launch /run/teleagent-provider-egress-control /run/teleagent-privileged-action /etc/teleagent/provider-egress-secrets -/etc/teleagent/credentials -/etc/teleagent-control -/etc/teleagent/controller -/etc/teleagent/privileged-action -/etc/teleagent-voice -${input.workspace}/.codex -${input.workspace}/.claude`,
+    // SETPCAP is required for setpriv to drop the descendant bounding set;
+    // KILL lets the root wrapper terminate its two different-UID children.
+    // Both descendants assert Cap*=0 and NoNewPrivs=1 before provider start.
+    'CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_SETPCAP CAP_KILL',
+    'NoNewPrivileges=no',
+    `LoadCredential=provider-launch-capability:${input.credentialPath}`,
+  ];
+  return {
+    command: SYSTEMD_RUN,
+    args: [
+      '--quiet', '--wait', '--collect',
+      input.mode === 'interactive' ? '--pty' : '--pipe',
+      '--service-type=exec',
+      `--unit=${unit}`,
+      `--working-directory=${input.workspace}`,
+      ...properties.flatMap((property) => ['--property', property]),
+      '--', RUNTIME, ...runtimeArgs,
+    ],
+    unit,
+  };
+}
+
+function systemctl(args, { allowFailure = false } = {}) {
+  const result = spawnSync(SYSTEMCTL, args, {
+    encoding: 'utf8',
+    timeout: 10000,
+    maxBuffer: 256 * 1024,
+    env: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8' },
+  });
+  if (result.error || (!allowFailure && result.status !== 0)) fail('systemd boundary control failed');
+  return result;
+}
+
+function inspectUnit(unit, { runSystemctl = systemctl } = {}) {
+  const result = runSystemctl([
+    'show', unit, '--no-pager',
+    '--property=LoadState', '--property=ActiveState', '--property=SubState', '--property=ControlGroup',
+  ], { allowFailure: true });
+  if (!result || result.error || result.signal || result.status !== 0 ||
+      typeof result.stdout !== 'string') {
+    fail('provider unit status is unavailable');
+  }
+  const lines = String(result.stdout).trim().split('\n').filter(Boolean);
+  if (lines.some((line) => !/^[A-Za-z]+=[^\r\n]*$/.test(line))) {
+    fail('provider unit status is invalid');
+  }
+  const entries = lines.map((line) => {
+    const index = line.indexOf('=');
+    return [line.slice(0, index), line.slice(index + 1)];
+  });
+  const names = entries.map(([name]) => name);
+  const expected = ['LoadState', 'ActiveState', 'SubState', 'ControlGroup'];
+  if (expected.some((name) => names.filter((candidate) => candidate === name).length !== 1) ||
+      names.some((name) => !expected.includes(name))) {
+    fail('provider unit status is incomplete');
+  }
+  const fields = Object.fromEntries(entries);
+  if (fields.LoadState === 'not-found') {
+    if (fields.ActiveState !== 'inactive' || fields.SubState !== 'dead' || fields.ControlGroup) {
+      fail('provider missing-unit status is inconsistent');
+    }
+    return { exists: false, quiesced: true, activeState: 'not-found', controlGroup: null };
+  }
+  if (!['loaded', 'masked'].includes(fields.LoadState) || !fields.ActiveState || !fields.SubState) {
+    fail('provider unit load state is invalid');
+  }
+  let populated = null;
+  if (fields.ControlGroup) {
+    try {
+      const events = fs.readFileSync(path.join('/sys/fs/cgroup', fields.ControlGroup, 'cgroup.events'), 'utf8');
+      populated = /^populated\s+1$/m.test(events);
+    } catch { populated = true; }
+  }
+  const inactive = ['inactive', 'failed'].includes(fields.ActiveState);
+  return {
+    exists: true,
+    quiesced: inactive && populated !== true,
+    activeState: fields.ActiveState,
+    subState: fields.SubState,
+    controlGroup: fields.ControlGroup || null,
+    populated,
+  };
+}
+
+async function waitQuiesced(unit, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const status = inspectUnit(unit);
+    if (status.quiesced) return status;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return inspectUnit(unit);
+}
+
+async function terminateUnit(provider, launchId, {
+  control = providerControl,
+} = {}) {
+  const unit = unitName(provider, launchId);
+  // The root-owned symlink is a boot-lifetime cancellation tombstone. Unlike
+  // a best-effort `systemctl mask`, creation and fsync are checked before the
+  // boundary reports acceptance, closing launch-before-unit-creation races.
+  persistCancellationTombstone(unit);
+  let capabilityRevoked = false;
+  try {
+    const revoked = await control({ provider, action: 'revoke', launchId, reason: 'canceled' });
+    capabilityRevoked = revoked?.persisted === true && revoked?.quiesced === true;
+  } catch { capabilityRevoked = false; }
+  systemctl(['kill', '--kill-whom=all', '--signal=SIGTERM', unit], { allowFailure: true });
+  let status = await waitQuiesced(unit, 2000);
+  if (!status.quiesced) {
+    systemctl(['kill', '--kill-whom=all', '--signal=SIGKILL', unit], { allowFailure: true });
+    systemctl(['stop', unit], { allowFailure: true });
+    status = await waitQuiesced(unit, 5000);
+  }
+  const readiness = inspectProviderReadiness(provider, launchId, status);
+  if (status.quiesced && capabilityRevoked) {
+    removeReadinessFile(readinessFilePath(provider, launchId));
+  }
+  return {
+    accepted: true,
+    persisted: capabilityRevoked,
+    quiesced: status.quiesced && capabilityRevoked,
+    status,
+    ...readiness,
+  };
+}
+
+async function forceStopSystemdUnit(unit) {
+  systemctl(['kill', '--kill-whom=all', '--signal=SIGTERM', unit], { allowFailure: true });
+  systemctl(['stop', unit], { allowFailure: true });
+  let status = await waitQuiesced(unit, 2000);
+  if (!status.quiesced) {
+    systemctl(['kill', '--kill-whom=all', '--signal=SIGKILL', unit], { allowFailure: true });
+    systemctl(['stop', unit], { allowFailure: true });
+    status = await waitQuiesced(unit, 5000);
+  }
+  return status;
+}
+
+async function recoverProviderEgress(provider, control = providerControl) {
+  try {
+    const recovered = await control({ provider, action: 'recover' });
+    if (recovered?.persisted === true && recovered?.quiesced === true) return recovered;
+  } catch { /* restart the exact credential broker below */ }
+  const unit = `teleagent-provider-egress@${provider}.service`;
+  const stopped = await forceStopSystemdUnit(unit);
+  if (!stopped.quiesced) return { persisted: false, quiesced: false };
+  const started = systemctl(['start', unit], { allowFailure: true });
+  if (started.error || started.signal || started.status !== 0) {
+    return { persisted: false, quiesced: false };
+  }
+  try {
+    const recovered = await control({ provider, action: 'recover' });
+    return {
+      persisted: recovered?.persisted === true,
+      quiesced: recovered?.persisted === true && recovered?.quiesced === true,
+      restarted: true,
+    };
+  } catch {
+    return { persisted: false, quiesced: false, restarted: true };
+  }
+}
+
+function probeProviderSupervisor(provider, {
+  timeoutMs = 3000,
+  connect = (options) => net.createConnection(options),
+} = {}) {
+  const spec = PROVIDERS[provider];
+  if (!spec) return Promise.reject(new Error('provider supervisor probe identity is invalid'));
+  return new Promise((resolve, reject) => {
+    const socket = connect({ path: spec.supervisorSocket });
+    let settled = false;
+    let buffer = Buffer.alloc(0);
+    const finish = (error, payload) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.destroy();
+      if (error) reject(error);
+      else resolve(payload);
+    };
+    const timer = setTimeout(() => finish(new Error('provider supervisor health timed out')), timeoutMs);
+    socket.once('connect', () => {
+      socket.write(`${JSON.stringify({ version: 1, type: 'health' })}\n`);
+    });
+    socket.on('data', (chunk) => {
+      buffer = Buffer.concat([buffer, chunk]);
+      if (buffer.length > 64 * 1024) {
+        return finish(new Error('provider supervisor health response is too large'));
+      }
+      const newline = buffer.indexOf(0x0a);
+      if (newline < 0) return;
+      if (buffer.subarray(newline + 1).some((byte) => ![0x0a, 0x0d, 0x20, 0x09].includes(byte))) {
+        return finish(new Error('provider supervisor health response has trailing data'));
+      }
+      let payload;
+      try { payload = JSON.parse(buffer.subarray(0, newline).toString('utf8')); }
+      catch { return finish(new Error('provider supervisor health response is invalid')); }
+      finish(null, payload);
+    });
+    socket.once('error', (error) => finish(error));
+    socket.once('end', () => {
+      if (!settled) finish(new Error('provider supervisor health response is incomplete'));
+    });
+  });
+}
+
+function isLockedSupervisorHealth(provider, payload) {
+  return payload?.success === true && payload?.provider === provider &&
+    payload?.ready === false && payload?.panicLocked === true &&
+    payload?.boundaryRecovered === true && payload?.active === 0;
+}
+
+async function panicAllProviderPlanes({ control = providerControl } = {}) {
+  const lock = persistGlobalProviderPanic();
+  for (const provider of Object.keys(PROVIDERS)) {
+    systemctl(['stop', `teleagent-provider-supervisor@${provider}.socket`], {
+      allowFailure: true,
+    });
+  }
+  const supervisorResults = {};
+  for (const provider of Object.keys(PROVIDERS)) {
+    supervisorResults[provider] = await forceStopSystemdUnit(
+      `teleagent-provider-supervisor@${provider}.service`
+    );
+  }
+  const supervisorUnits = Object.keys(PROVIDERS).flatMap((provider) => [
+    `teleagent-provider-supervisor@${provider}.socket`,
+    `teleagent-provider-supervisor@${provider}.service`,
+  ]);
+  const masked = systemctl(['mask', '--runtime', ...supervisorUnits], { allowFailure: true });
+  const launchResults = [];
+  for (const provider of Object.keys(PROVIDERS)) {
+    for (const unit of listProviderUnits(provider)) {
+      const match = unit.match(
+        /^teleagent-provider-launch-(?:claude|codex)-([a-f0-9]{32})\.service$/
+      );
+      if (!match) fail('provider panic unit identity is invalid');
+      launchResults.push(await terminateUnit(provider, `launch_${match[1]}`, { control }));
+    }
+  }
+  const egress = {};
+  for (const provider of Object.keys(PROVIDERS)) {
+    egress[provider] = await recoverProviderEgress(provider, control);
+  }
+  const providerPlaneQuiesced = Object.values(supervisorResults).every((status) => status.quiesced) &&
+    launchResults.every((result) => result.quiesced) &&
+    Object.values(egress).every((result) => result.persisted && result.quiesced) &&
+    !masked.error && !masked.signal && masked.status === 0;
+  let launchLockRecovery = { proved: providerPlaneQuiesced, removed: false };
+  if (providerPlaneQuiesced) {
+    try {
+      launchLockRecovery = clearStaleGlobalLaunchLockAfterQuiescence({ quiesced: true });
+    } catch (error) {
+      launchLockRecovery = { proved: false, removed: false, error: error.message };
+    }
+  }
+  const quiesced = providerPlaneQuiesced && launchLockRecovery.proved === true;
+  return {
+    accepted: true,
+    persisted: lock.persisted === true &&
+      Object.values(egress).every((result) => result.persisted),
+    quiesced,
+    alreadyLocked: lock.alreadyLocked === true,
+    supervisorResults,
+    launchCount: launchResults.length,
+    launchLockRecovery,
+    egress,
+  };
+}
+
+async function unlockAllProviderPlanes({
+  control = providerControl,
+  panicAll = () => panicAllProviderPlanes({ control }),
+  runSystemctl = systemctl,
+  forceStop = forceStopSystemdUnit,
+  persistRecovery = persistGlobalProviderRecovery,
+  clearRecovery = clearGlobalProviderRecovery,
+  clearPanic = clearGlobalProviderPanic,
+  probe = probeProviderSupervisor,
+} = {}) {
+  const recovery = await panicAll();
+  if (!recovery.persisted || !recovery.quiesced) {
+    return { success: false, persisted: recovery.persisted, quiesced: false, recovery };
+  }
+  const maskedUnits = Object.keys(PROVIDERS).flatMap((provider) => [
+    `teleagent-provider-supervisor@${provider}.socket`,
+    `teleagent-provider-supervisor@${provider}.service`,
+  ]);
+  const recoveryFence = persistRecovery();
+  if (recoveryFence?.persisted !== true) {
+    return { success: false, persisted: true, quiesced: false, code: 'PROVIDER_RECOVERY_FENCE_FAILED' };
+  }
+  const unmasked = runSystemctl(['unmask', '--runtime', ...maskedUnits], { allowFailure: true });
+  if (unmasked.error || unmasked.signal || unmasked.status !== 0) {
+    return { success: false, persisted: true, quiesced: false, code: 'PROVIDER_UNMASK_FAILED' };
+  }
+  const units = [
+    'teleagent-provider-supervisor@claude.socket',
+    'teleagent-provider-supervisor@codex.socket',
+    'teleagent-provider-supervisor@claude.service',
+    'teleagent-provider-supervisor@codex.service',
+  ];
+  const rollback = async (code) => {
+    for (const provider of Object.keys(PROVIDERS)) {
+      runSystemctl(['stop', `teleagent-provider-supervisor@${provider}.socket`], {
+        allowFailure: true,
+      });
+      await forceStop(`teleagent-provider-supervisor@${provider}.service`);
+    }
+    runSystemctl(['mask', '--runtime', ...maskedUnits], { allowFailure: true });
+    try { clearRecovery(); } catch { /* the global panic file remains authoritative */ }
+    return { success: false, persisted: true, quiesced: false, code };
+  };
+  for (const unit of units) {
+    const started = runSystemctl(['start', unit], { allowFailure: true });
+    if (started.error || started.signal || started.status !== 0) {
+      return rollback('PROVIDER_RESTART_FAILED');
+    }
+  }
+  for (const provider of Object.keys(PROVIDERS)) {
+    let health;
+    try { health = await probe(provider); }
+    catch { return rollback('PROVIDER_RESTART_HEALTH_FAILED'); }
+    if (!isLockedSupervisorHealth(provider, health)) {
+      return rollback('PROVIDER_RESTART_NOT_LOCKED');
+    }
+  }
+  // Remove the recovery marker first while the original panic file still
+  // blocks every launch. Unlinking and fsyncing the panic file is the single,
+  // final commit point after both locked supervisors have answered health.
+  const recoveryCleared = clearRecovery();
+  if (recoveryCleared?.persisted !== true) {
+    return rollback('PROVIDER_RECOVERY_FENCE_CLEAR_FAILED');
+  }
+  const panicCleared = clearPanic();
+  if (panicCleared?.persisted !== true) {
+    return rollback('PROVIDER_PANIC_CLEAR_FAILED');
+  }
+  return { success: true, persisted: true, quiesced: true, recovery };
+}
+
+function listProviderUnits(provider, { runSystemctl = systemctl } = {}) {
+  const prefix = `teleagent-provider-launch-${provider}-`;
+  const result = runSystemctl([
+    'list-units', '--all', '--plain', '--no-legend', `${prefix}*.service`,
+  ], { allowFailure: true });
+  if (!result || result.error || result.signal || result.status !== 0 ||
+      typeof result.stdout !== 'string') {
+    fail('provider unit enumeration is unavailable');
+  }
+  const lines = result.stdout.split('\n').map((line) => line.trim()).filter(Boolean);
+  const units = [];
+  for (const line of lines) {
+    const fields = line.split(/\s+/);
+    const unit = fields[0];
+    if (fields.length < 4 || !new RegExp(
+      `^${prefix}[a-f0-9]{32}\\.service$`
+    ).test(unit)) {
+      fail('provider unit enumeration is invalid');
+    }
+    units.push(unit);
+  }
+  return units;
+}
+
+async function main(argv = process.argv.slice(2), environment = process.env, {
+  control = providerControl,
+  randomCapability = () => crypto.randomBytes(32).toString('hex'),
+  spawnImpl = spawn,
+  checkProviderCli = requirePinnedProviderCli,
+  requirePreflight = requireImmutablePreflight,
+  parseInput = parseControl,
+  attestWorkerStorage = attestWorkerStorageBoundary,
+} = {}) {
+  const input = parseInput(argv, environment);
+  if (['assert-supervisor-start-admitted', 'attest-worker-storage'].includes(input.action)) {
+    requirePreflight({ environment });
+  }
+  if (input.action === 'attest-worker-storage') {
+    process.stdout.write(`${attestWorkerStorage()}\n`);
+    return 0;
+  }
+  if (input.action === 'attest-workspace-storage') {
+    process.stdout.write(`${attestWorkspaceStorageBoundary()}\n`);
+    return 0;
+  }
+  if (input.action === 'attest-provider-plane-storage') {
+    process.stdout.write(`${attestProviderPlaneStorageBoundary()}\n`);
+    return 0;
+  }
+  if (input.action === 'assert-global-unlocked') {
+    if (globalProviderPanicLocked()) fail('global provider plane is panic-locked', 75);
+    return 0;
+  }
+  if (input.action === 'assert-supervisor-start-admitted') {
+    assertSupervisorStartAdmitted();
+    return 0;
+  }
+  if (input.action === 'panic-all') {
+    const result = await panicAllProviderPlanes({ control });
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+    return result.persisted && result.quiesced ? 0 : 75;
+  }
+  if (input.action === 'recover-root-panic') {
+    const result = await unlockAllProviderPlanes({ control });
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+    return result.success && result.quiesced ? 0 : 75;
+  }
+  if (input.action === 'launch') {
+    const unit = unitName(input.provider, input.launchId);
+    if (hasCancellationTombstone(unit)) fail('provider launch was canceled before submit', 75);
+    const capability = randomCapability();
+    if (!/^[a-f0-9]{64}$/.test(capability)) fail('provider launch capability source is invalid');
+    const expiresAtMs = Date.now() + 60 * 60 * 1000;
+    let credentialPath = null;
+    let readinessPath = null;
+    let registered = false;
+    let globalLaunchLock = null;
+    try {
+      globalLaunchLock = createGlobalLaunchLock(input.launchId);
+      validateProviderStorageIsolation();
+      assertGlobalProviderLaunchUnlocked();
+      checkProviderCli(input.provider);
+      validateWorkspaceAnchor(input.workspace);
+      validateProviderWorkspace(input.workspace);
+      assertGlobalProviderLaunchUnlocked();
+      credentialPath = createCapabilityFile(input.launchId, capability);
+      readinessPath = createReadinessFile(input.provider, input.launchId);
+      assertGlobalProviderLaunchUnlocked();
+      const registration = await control({
+        provider: input.provider,
+        action: 'register',
+        launchId: input.launchId,
+        capability,
+        expiresAtMs,
+        model: input.model,
+        reasoningEffort: input.reasoningEffort,
+        routeKinds: input.routeKinds,
+        mode: input.mode,
+      });
+      if (registration?.registered !== true) fail('provider launch capability was not registered');
+      registered = true;
+      if (hasCancellationTombstone(unit)) fail('provider launch was canceled before start', 75);
+      assertGlobalProviderLaunchUnlocked();
+      const invocation = buildSystemdRunInvocation({ ...input, credentialPath, readinessPath });
+      assertGlobalProviderLaunchUnlocked();
+      const child = spawnImpl(invocation.command, invocation.args, {
+        stdio: 'inherit',
+        env: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8' },
+        shell: false,
+      });
+      const result = await new Promise((resolve, reject) => {
+        child.once('error', reject);
+        child.once('exit', (code, signal) => resolve({ code, signal }));
+      });
+      const status = await waitQuiesced(invocation.unit, 5000);
+      if (!status.quiesced) fail('provider unit exited without cgroup quiescence');
+      const revoked = await control({
+        provider: input.provider,
+        action: 'revoke',
+        launchId: input.launchId,
+        reason: 'completed',
+      });
+      if (revoked?.persisted !== true || revoked?.quiesced !== true) {
+        fail('provider launch capability revocation did not reach quiescence');
+      }
+      registered = false;
+      if (result.signal) process.kill(process.pid, result.signal);
+      return Number.isInteger(result.code) ? result.code : 1;
+    } finally {
+      removeCapabilityFile(credentialPath);
+      // Spawn evidence intentionally outlives the transient wrapper. The
+      // supervisor must distinguish a launch that never reached the model
+      // from a model that spawned and exited between readiness polls. Exact
+      // terminate/recover control removes it only after cgroup+egress zero.
+      if (registered) {
+        try {
+          await control({
+            provider: input.provider,
+            action: 'revoke',
+            launchId: input.launchId,
+            reason: 'interrupted',
+          });
+        } catch { /* expiry + supervisor panic remain fail-closed backstops */ }
+      }
+      if (globalLaunchLock) removeGlobalLaunchLock(globalLaunchLock, input.launchId);
+    }
+  }
+  if (input.action === 'status') {
+    const status = inspectUnit(unitName(input.provider, input.launchId));
+    process.stdout.write(`${JSON.stringify({
+      ...status,
+      ...inspectProviderReadiness(input.provider, input.launchId, status),
+    })}\n`);
+    return 0;
+  }
+  if (input.action === 'terminate') {
+    const result = await terminateUnit(input.provider, input.launchId, { control });
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+    return result.quiesced ? 0 : 75;
+  }
+  let capabilityRecovery;
+  try { capabilityRecovery = await control({ provider: input.provider, action: 'recover' }); }
+  catch { capabilityRecovery = null; }
+  const results = [];
+  for (const unit of listProviderUnits(input.provider)) {
+    const match = unit.match(/^teleagent-provider-launch-(?:claude|codex)-([a-f0-9]{32})\.service$/);
+    if (match) results.push(await terminateUnit(input.provider, `launch_${match[1]}`, { control }));
+  }
+  const quiesced = capabilityRecovery?.persisted === true && capabilityRecovery?.quiesced === true &&
+    results.every((result) => result.quiesced);
+  const readinessRemoved = quiesced ? purgeProviderReadinessArtifacts(input.provider) : 0;
+  process.stdout.write(`${JSON.stringify({
+    accepted: true,
+    persisted: capabilityRecovery?.persisted === true &&
+      results.every((result) => result.persisted),
+    quiesced,
+    unitCount: results.length,
+    readinessRemoved,
+  })}\n`);
+  return quiesced ? 0 : 75;
+}
+
+if (require.main === module) {
+  main().then((code) => process.exit(code)).catch((error) => {
+    process.stderr.write(`Provider boundary control failed: ${error.message}\n`);
+    process.exit(error.exitCode || 77);
+  });
+}
+
+module.exports = {
+  PROVIDER_MODELS,
+  PROVIDERS,
+  attestProviderPlaneStorageBoundary,
+  attestWorkerStorageBoundary,
+  attestWorkspaceStorageBoundary,
+  assertSupervisorStartAdmitted,
+  assertGlobalProviderLaunchUnlocked,
+  buildSystemdRunInvocation,
+  capabilityFilePath,
+  createCapabilityFile,
+  createGlobalLaunchLock,
+  createReadinessFile,
+  deriveProviderLaunchPolicy,
+  forceStopSystemdUnit,
+  globalProviderRecoveryPending,
+  globalProviderPanicLocked,
+  validateProviderWorkspace,
+  validateProviderPlaneStorageBoundary,
+  validateProviderStorageIsolation,
+  validateWorkspaceAnchor,
+  validateWorkspaceStorageBoundary,
+  hasCancellationTombstone,
+  inspectUnit,
+  inspectProviderReadiness,
+  listProviderUnits,
+  main,
+  panicAllProviderPlanes,
+  persistGlobalProviderRecovery,
+  persistCancellationTombstone,
+  parseControl,
+  processStartTime,
+  purgeProviderReadinessArtifacts,
+  providerControl,
+  requireImmutablePreflight,
+  requirePinnedProviderCli,
+  probeProviderSupervisor,
+  readStableBoundedFile,
+  removeCapabilityFile,
+  removeGlobalLaunchLock,
+  removeReadinessFile,
+  readinessFilePath,
+  clearGlobalProviderRecovery,
+  clearGlobalProviderPanic,
+  clearStaleGlobalLaunchLockAfterQuiescence,
+  terminateUnit,
+  unitName,
+  unlockAllProviderPlanes,
+  waitQuiesced,
+};

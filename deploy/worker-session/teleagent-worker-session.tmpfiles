@@ -1,0 +1,23 @@
+d /run/teleagent-worker-session 0750 teleagent-session-broker teleagent-control -
+d /run/teleagent-worker-session/pane-status 0700 teleagent-session-broker teleagent-session-broker -
+d /var/lib/teleagent-worker-state 0751 root root -
+d /var/lib/teleagent-worker-state/session-broker 0700 teleagent-session-broker teleagent-session-broker -
+d /var/lib/teleagent-worker-state/claude-egress 0700 teleagent-claude-egress teleagent-claude-egress -
+d /var/lib/teleagent-worker-state/codex-egress 0700 teleagent-codex-egress teleagent-codex-egress -
+d /var/lib/teleagent-provider-plane 0751 root root -
+d /var/lib/teleagent-provider-plane/claude-supervisor 0700 teleagent-claude-supervisor teleagent-claude-supervisor -
+d /var/lib/teleagent-provider-plane/codex-supervisor 0700 teleagent-codex-supervisor teleagent-codex-supervisor -
+# Provider UIDs may traverse but never rename/replace an authorized workspace.
+# Exact children are provisioned by root and carry the shared write group.
+d /srv/teleagent-agent-workspaces 0751 root teleagent-agent-workspace -
+d /srv/teleagent-agent-workspaces/phone 2770 root teleagent-agent-workspace -
+d /etc/teleagent/worker-session 0700 root root -
+d /run/teleagent-provider-launch 0711 root root -
+d /run/teleagent-provider-egress 0711 root root -
+d /run/teleagent-provider-egress-control 0711 root root -
+d /run/teleagent-provider-capabilities 0700 root root -
+d /etc/teleagent/provider-egress 0755 root root -
+d /etc/teleagent/provider-egress-secrets 0700 root root -
+d /etc/teleagent/provider-runtime 0755 root root -
+C /etc/teleagent/provider-runtime/empty-settings.json 0444 root root - /opt/teleagent/current/deploy/worker-session/provider-runtime-empty-settings.json
+C /etc/teleagent/provider-runtime/empty-mcp.json 0444 root root - /opt/teleagent/current/deploy/worker-session/provider-runtime-empty-mcp.json

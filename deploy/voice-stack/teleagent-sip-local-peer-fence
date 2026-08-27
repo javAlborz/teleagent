@@ -1,0 +1,233 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+unset BASH_ENV CDPATH ENV GLOBIGNORE
+umask 0077
+
+nft_bin=/usr/sbin/nft
+flock_bin=/usr/bin/flock
+identity_verifier=/usr/local/libexec/verify-voice-stack-identity
+lock_file=/run/teleagent-sip-local-peer-fence/operation.lock
+table_family=inet
+table_name=teleagent_sip_local_peer_fence
+identity_keys=(voice drachtio freeswitch asterisk)
+
+fail() {
+  printf 'Teleagent SIP local-peer fence: %s\n' "$*" >&2
+  exit 1
+}
+
+# A non-root-only fake dependency lane exercises atomic reconciliation in CI
+# without CAP_NET_ADMIN or any host firewall mutation. Root execution always
+# uses the fixed production nft binary and lock path.
+if [[ "${TELEAGENT_SIP_FENCE_TEST_ONLY:-}" == 1 ]]; then
+  [[ "${EUID}" -ne 0 ]] || fail 'the fake nft lane is forbidden for root'
+  nft_bin=${TELEAGENT_SIP_FENCE_TEST_NFT:-}
+  lock_file=${TELEAGENT_SIP_FENCE_TEST_LOCK:-}
+  [[ "${nft_bin}" == /* && -f "${nft_bin}" && ! -L "${nft_bin}" && -x "${nft_bin}" ]] ||
+    fail 'the fake nft dependency is unsafe'
+  [[ "$(stat -c '%u' "${nft_bin}")" == "${EUID}" ]] || fail 'the fake nft dependency owner is unsafe'
+  ! find "${nft_bin}" -maxdepth 0 -perm /022 | grep -q . ||
+    fail 'the fake nft dependency is writable by another identity'
+  test_root=$(dirname "${lock_file}")
+  [[ "${lock_file}" == /* && "${test_root}" != / && -d "${test_root}" && ! -L "${test_root}" ]] ||
+    fail 'the fake lock path is unsafe'
+  [[ "$(stat -c '%u:%a' "${test_root}")" == "${EUID}:700" ]] ||
+    fail 'the fake lock directory is unsafe'
+  voice_uid=${TELEAGENT_SIP_FENCE_TEST_VOICE_UID:-}
+  voice_gid=${TELEAGENT_SIP_FENCE_TEST_VOICE_GID:-}
+  drachtio_uid=${TELEAGENT_SIP_FENCE_TEST_DRACHTIO_UID:-}
+  drachtio_gid=${TELEAGENT_SIP_FENCE_TEST_DRACHTIO_GID:-}
+  freeswitch_uid=${TELEAGENT_SIP_FENCE_TEST_FREESWITCH_UID:-}
+  freeswitch_gid=${TELEAGENT_SIP_FENCE_TEST_FREESWITCH_GID:-}
+  asterisk_uid=${TELEAGENT_SIP_FENCE_TEST_ASTERISK_UID:-}
+  asterisk_gid=${TELEAGENT_SIP_FENCE_TEST_ASTERISK_GID:-}
+else
+  for override in \
+    TELEAGENT_SIP_FENCE_TEST_ONLY TELEAGENT_SIP_FENCE_TEST_NFT \
+    TELEAGENT_SIP_FENCE_TEST_LOCK TELEAGENT_SIP_FENCE_TEST_VOICE_UID \
+    TELEAGENT_SIP_FENCE_TEST_VOICE_GID TELEAGENT_SIP_FENCE_TEST_DRACHTIO_UID \
+    TELEAGENT_SIP_FENCE_TEST_DRACHTIO_GID TELEAGENT_SIP_FENCE_TEST_FREESWITCH_UID \
+    TELEAGENT_SIP_FENCE_TEST_FREESWITCH_GID TELEAGENT_SIP_FENCE_TEST_ASTERISK_UID \
+    TELEAGENT_SIP_FENCE_TEST_ASTERISK_GID; do
+    [[ -z "${!override:-}" ]] || fail 'test dependency overrides require the non-root fake lane'
+  done
+  ((EUID == 0)) || fail 'live SIP fence operations require root'
+fi
+
+validate_numeric_identity() {
+  local key="$1" uid_name="${1}_uid" gid_name="${1}_gid" uid gid
+  uid=${!uid_name:-}
+  gid=${!gid_name:-}
+  [[ "${uid}" =~ ^[1-9][0-9]{0,9}$ && "${gid}" =~ ^[1-9][0-9]{0,9}$ ]] ||
+    fail "the dedicated teleagent-${key} identity is unavailable"
+  ((uid != 1000 && gid != 1000 && uid <= 2147483647 && gid <= 2147483647)) ||
+    fail "the dedicated teleagent-${key} identity is unsafe"
+}
+
+resolve_production_identities() {
+  local output index key name uid gid extra
+  local -a rows=()
+  local -a expected_keys=(voice drachtio freeswitch asterisk)
+  local -a expected_names=(
+    teleagent-voice teleagent-drachtio teleagent-freeswitch teleagent-asterisk
+  )
+  output=$(
+    /usr/bin/timeout --signal=TERM --kill-after=1s 10s \
+      "${identity_verifier}" --installed-identities
+  ) || fail 'the installed voice identity authority is unavailable'
+  ((${#output} <= 4096)) || fail 'the installed voice identity authority response is oversized'
+  [[ "${output}" != *$'\r'* ]] || fail 'the installed voice identity authority response is malformed'
+  mapfile -t rows <<<"${output}"
+  ((${#rows[@]} == ${#expected_keys[@]})) ||
+    fail 'the installed voice identity authority response is incomplete'
+  for ((index = 0; index < ${#expected_keys[@]}; index += 1)); do
+    IFS=$'\t' read -r key name uid gid extra <<<"${rows[index]}"
+    [[ -z "${extra:-}" && "${key}" == "${expected_keys[index]}" &&
+       "${name}" == "${expected_names[index]}" &&
+       "${rows[index]}" == "${key}"$'\t'"${name}"$'\t'"${uid}"$'\t'"${gid}" ]] ||
+      fail 'the installed voice identity authority response is malformed'
+    printf -v "${key}_uid" '%s' "${uid}"
+    printf -v "${key}_gid" '%s' "${gid}"
+  done
+}
+
+if [[ "${TELEAGENT_SIP_FENCE_TEST_ONLY:-}" != 1 ]]; then
+  # Asterisk remains infrastructure-owned. The installed verifier emits no row
+  # unless all four exact local/NSS identities satisfy one common authority.
+  resolve_production_identities
+fi
+
+for key in "${identity_keys[@]}"; do
+  validate_numeric_identity "${key}"
+done
+for ((left = 0; left < ${#identity_keys[@]}; left += 1)); do
+  for ((right = left + 1; right < ${#identity_keys[@]}; right += 1)); do
+    left_uid_name=${identity_keys[left]}_uid
+    left_gid_name=${identity_keys[left]}_gid
+    right_uid_name=${identity_keys[right]}_uid
+    right_gid_name=${identity_keys[right]}_gid
+    [[ "${!left_uid_name}" != "${!right_uid_name}" &&
+       "${!left_uid_name}" != "${!right_gid_name}" &&
+       "${!left_gid_name}" != "${!right_uid_name}" &&
+       "${!left_gid_name}" != "${!right_gid_name}" ]] ||
+      fail 'the voice and media identities are numerically reused'
+  done
+done
+
+render_ruleset() {
+  cat <<EOF
+add table ${table_family} ${table_name}
+add chain ${table_family} ${table_name} output { type filter hook output priority -200; policy accept; }
+add rule ${table_family} ${table_name} output ip daddr 127.0.0.1 udp dport 5060 meta skuid != ${drachtio_uid} reject with icmp type port-unreachable comment "sip-5060-dst-drachtio"
+add rule ${table_family} ${table_name} output ip saddr 127.0.0.1 udp sport 5060 meta skuid != ${asterisk_uid} reject with icmp type port-unreachable comment "sip-5060-src-asterisk"
+add rule ${table_family} ${table_name} output ip daddr 127.0.0.1 udp dport 5070 meta skuid != ${asterisk_uid} meta skuid != ${freeswitch_uid} reject with icmp type port-unreachable comment "sip-5070-dst-asterisk-or-freeswitch"
+add rule ${table_family} ${table_name} output ip saddr 127.0.0.1 udp sport 5070 meta skuid != ${drachtio_uid} reject with icmp type port-unreachable comment "sip-5070-src-drachtio"
+add rule ${table_family} ${table_name} output ip daddr 127.0.0.1 udp dport 5080 meta skuid != ${drachtio_uid} reject with icmp type port-unreachable comment "sip-5080-dst-drachtio"
+add rule ${table_family} ${table_name} output ip saddr 127.0.0.1 udp sport 5080 meta skuid != ${freeswitch_uid} reject with icmp type port-unreachable comment "sip-5080-src-freeswitch"
+add rule ${table_family} ${table_name} output ip daddr 127.0.0.1 tcp dport 5060 reject with tcp reset comment "sip-5060-tcp-disabled"
+add rule ${table_family} ${table_name} output ip saddr 127.0.0.1 tcp sport 5060 reject with tcp reset comment "sip-5060-tcp-source-disabled"
+add rule ${table_family} ${table_name} output ip daddr 127.0.0.1 tcp dport 5070 reject with tcp reset comment "sip-5070-tcp-disabled"
+add rule ${table_family} ${table_name} output ip saddr 127.0.0.1 tcp sport 5070 reject with tcp reset comment "sip-5070-tcp-source-disabled"
+add rule ${table_family} ${table_name} output ip daddr 127.0.0.1 tcp dport 5080 reject with tcp reset comment "sip-5080-tcp-disabled"
+add rule ${table_family} ${table_name} output ip saddr 127.0.0.1 tcp sport 5080 reject with tcp reset comment "sip-5080-tcp-source-disabled"
+add rule ${table_family} ${table_name} output ip daddr 127.0.0.1 tcp dport 9022 meta skuid != ${voice_uid} reject with tcp reset comment "admin-9022-dst-voice"
+add rule ${table_family} ${table_name} output ip saddr 127.0.0.1 tcp sport 9022 meta skuid != ${drachtio_uid} reject with tcp reset comment "admin-9022-src-drachtio"
+add rule ${table_family} ${table_name} output ip daddr 127.0.0.1 tcp dport 8021 meta skuid != ${voice_uid} reject with tcp reset comment "esl-8021-dst-voice"
+add rule ${table_family} ${table_name} output ip saddr 127.0.0.1 tcp sport 8021 meta skuid != ${freeswitch_uid} reject with tcp reset comment "esl-8021-src-freeswitch"
+add rule ${table_family} ${table_name} output ip daddr 127.0.0.1 tcp dport 3001 meta skuid != ${freeswitch_uid} reject with tcp reset comment "audio-3001-dst-freeswitch"
+add rule ${table_family} ${table_name} output ip saddr 127.0.0.1 tcp sport 3001 meta skuid != ${voice_uid} reject with tcp reset comment "audio-3001-src-voice"
+add rule ${table_family} ${table_name} output ip daddr 127.0.0.1 udp dport 30000-30100 meta skuid != ${asterisk_uid} reject with icmp type port-unreachable comment "rtp-dst-asterisk"
+add rule ${table_family} ${table_name} output ip saddr 127.0.0.1 udp sport 30000-30100 meta skuid != ${freeswitch_uid} reject with icmp type port-unreachable comment "rtp-src-freeswitch"
+EOF
+}
+
+with_lock() {
+  local callback="$1"
+  shift
+  (
+    exec 9>"${lock_file}"
+    "${flock_bin}" --exclusive --timeout 10 9 \
+      || fail 'timed out acquiring the root-owned reconciliation lock'
+    "${callback}" "$@"
+  )
+}
+
+table_exists_locked() {
+  "${nft_bin}" -nnnnn list table "${table_family}" "${table_name}" >/dev/null 2>&1
+}
+
+check_rules_locked() {
+  local actual expected
+  actual="$(
+    "${nft_bin}" -nnnnn list table "${table_family}" "${table_name}" 2>/dev/null \
+      | /usr/bin/sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^$/d'
+  )" || return 1
+  expected="$(cat <<EOF
+table inet teleagent_sip_local_peer_fence {
+chain output {
+type filter hook output priority -200; policy accept;
+ip daddr 127.0.0.1 udp dport 5060 meta skuid != ${drachtio_uid} reject with icmp 3 comment "sip-5060-dst-drachtio"
+ip saddr 127.0.0.1 udp sport 5060 meta skuid != ${asterisk_uid} reject with icmp 3 comment "sip-5060-src-asterisk"
+ip daddr 127.0.0.1 udp dport 5070 meta skuid != ${asterisk_uid} meta skuid != ${freeswitch_uid} reject with icmp 3 comment "sip-5070-dst-asterisk-or-freeswitch"
+ip saddr 127.0.0.1 udp sport 5070 meta skuid != ${drachtio_uid} reject with icmp 3 comment "sip-5070-src-drachtio"
+ip daddr 127.0.0.1 udp dport 5080 meta skuid != ${drachtio_uid} reject with icmp 3 comment "sip-5080-dst-drachtio"
+ip saddr 127.0.0.1 udp sport 5080 meta skuid != ${freeswitch_uid} reject with icmp 3 comment "sip-5080-src-freeswitch"
+ip daddr 127.0.0.1 tcp dport 5060 reject with tcp reset comment "sip-5060-tcp-disabled"
+ip saddr 127.0.0.1 tcp sport 5060 reject with tcp reset comment "sip-5060-tcp-source-disabled"
+ip daddr 127.0.0.1 tcp dport 5070 reject with tcp reset comment "sip-5070-tcp-disabled"
+ip saddr 127.0.0.1 tcp sport 5070 reject with tcp reset comment "sip-5070-tcp-source-disabled"
+ip daddr 127.0.0.1 tcp dport 5080 reject with tcp reset comment "sip-5080-tcp-disabled"
+ip saddr 127.0.0.1 tcp sport 5080 reject with tcp reset comment "sip-5080-tcp-source-disabled"
+ip daddr 127.0.0.1 tcp dport 9022 meta skuid != ${voice_uid} reject with tcp reset comment "admin-9022-dst-voice"
+ip saddr 127.0.0.1 tcp sport 9022 meta skuid != ${drachtio_uid} reject with tcp reset comment "admin-9022-src-drachtio"
+ip daddr 127.0.0.1 tcp dport 8021 meta skuid != ${voice_uid} reject with tcp reset comment "esl-8021-dst-voice"
+ip saddr 127.0.0.1 tcp sport 8021 meta skuid != ${freeswitch_uid} reject with tcp reset comment "esl-8021-src-freeswitch"
+ip daddr 127.0.0.1 tcp dport 3001 meta skuid != ${freeswitch_uid} reject with tcp reset comment "audio-3001-dst-freeswitch"
+ip saddr 127.0.0.1 tcp sport 3001 meta skuid != ${voice_uid} reject with tcp reset comment "audio-3001-src-voice"
+ip daddr 127.0.0.1 udp dport 30000-30100 meta skuid != ${asterisk_uid} reject with icmp 3 comment "rtp-dst-asterisk"
+ip saddr 127.0.0.1 udp sport 30000-30100 meta skuid != ${freeswitch_uid} reject with icmp 3 comment "rtp-src-freeswitch"
+}
+}
+EOF
+  )"
+  [[ "${actual}" == "${expected}" ]]
+}
+
+reconcile_rules_locked() {
+  local ruleset
+  ruleset="$(render_ruleset)"
+  if table_exists_locked; then
+    ruleset="delete table ${table_family} ${table_name}"$'\n'"${ruleset}"
+  fi
+  # One nft input batch is an atomic replace; there is no delete/add gap.
+  printf '%s\n' "${ruleset}" | "${nft_bin}" -f -
+  check_rules_locked || fail 'atomic reconciliation did not produce the exact private table'
+}
+
+remove_rules_locked() {
+  if table_exists_locked; then
+    printf 'delete table %s %s\n' "${table_family}" "${table_name}" | "${nft_bin}" -f -
+  fi
+  ! table_exists_locked || fail 'managed nftables table still exists after removal'
+}
+
+monitor_rules() {
+  # Stop/restart retains the last exact kernel rules. Only the guarded
+  # installer remove path invokes the explicit remove action.
+  trap 'exit 0' TERM INT
+  with_lock reconcile_rules_locked
+  while /usr/bin/sleep 1; do
+    with_lock check_rules_locked || with_lock reconcile_rules_locked
+  done
+}
+
+case "${1:-}" in
+  reconcile) with_lock reconcile_rules_locked ;;
+  check) with_lock check_rules_locked || fail 'the exact managed nftables table is missing or has drifted' ;;
+  remove) with_lock remove_rules_locked ;;
+  monitor) monitor_rules ;;
+  *) fail 'usage: teleagent-sip-local-peer-fence {reconcile|check|remove|monitor}' ;;
+esac

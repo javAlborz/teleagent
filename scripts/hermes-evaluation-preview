@@ -1,0 +1,646 @@
+#!/usr/bin/env bash
+# Operate the fixed Hermes evaluation lane through a Unix-socket Tailnet route.
+# Raw state and live health are visible only to short-lived isolated collectors;
+# the long-running facade serves one sanitized, expiring snapshot.
+set -euo pipefail
+umask 077
+export PATH='/usr/bin:/bin'
+
+readonly https_port=8491
+readonly unit_name='teleagent-hermes-evaluation-preview.service'
+readonly watchdog_unit='teleagent-hermes-evaluation-preview-watch.service'
+readonly expiry_unit_base='teleagent-hermes-evaluation-preview-expiry'
+readonly expiry_service="$expiry_unit_base.service"
+readonly expiry_timer="$expiry_unit_base.timer"
+readonly preview_helper='/usr/local/sbin/hermes-dev-preview'
+readonly node_bin='/home/alborz/.nvm/versions/node/v24.13.0/bin/node'
+readonly bwrap_bin='/usr/bin/bwrap'
+readonly curl_bin='/usr/bin/curl'
+readonly systemctl_bin='/usr/bin/systemctl'
+readonly systemd_run_bin='/usr/bin/systemd-run'
+readonly openssl_bin='/usr/bin/openssl'
+readonly timeout_bin='/usr/bin/timeout'
+readonly sync_bin='/usr/bin/sync'
+readonly script_path="$(readlink -f -- "${BASH_SOURCE[0]}")"
+readonly repository_root="$(cd -- "$(dirname -- "$script_path")/.." && pwd -P)"
+readonly evaluation_directory="$repository_root/evaluation/hermes-preview"
+readonly server_path="$evaluation_directory/server.js"
+readonly live_state_directory='/home/alborz/phone/teleagent/voice-app/state'
+readonly user_id="$(id -u)"
+readonly runtime_root="/run/user/$user_id"
+readonly socket_directory="$runtime_root/teleagent-hermes-evaluation-preview"
+readonly facade_socket="$socket_directory/facade.sock"
+readonly private_directory="$runtime_root/teleagent-hermes-evaluation-private"
+readonly collector_directory="$private_directory/collectors"
+readonly public_snapshot_directory="$private_directory/public"
+readonly snapshot_file="$public_snapshot_directory/summary.json"
+readonly token_file="$private_directory/launch-token"
+readonly ready_file="$private_directory/ready"
+readonly cleanup_pending_file="$private_directory/cleanup-pending"
+readonly lock_file="$runtime_root/teleagent-hermes-evaluation-preview.lock"
+readonly persistent_state_directory='/home/alborz/.local/state/teleagent-hermes-evaluation-preview'
+readonly trial_epoch_file="$persistent_state_directory/trial-epoch"
+readonly snapshot_refresh_seconds=30
+
+fail() {
+  printf 'hermes-evaluation-preview: %s\n' "$*" >&2
+  exit 1
+}
+
+usage() {
+  printf 'usage: scripts/hermes-evaluation-preview <start|stop|status|url>\n' >&2
+}
+
+require_hermes() {
+  [ "$(hostname -s)" = 'hermes' ] || fail 'this wrapper runs only on hermes'
+  [ "$user_id" = '1000' ] || fail 'run as the fixed unprivileged Hermes operator'
+}
+
+secure_directory() {
+  local directory="$1"
+  [ -d "$directory" ] && [ ! -L "$directory" ] &&
+    [ "$(stat -c '%u:%a' -- "$directory")" = "$user_id:700" ]
+}
+
+ensure_private_directory() {
+  local directory="$1"
+  if [ -e "$directory" ] || [ -L "$directory" ]; then
+    secure_directory "$directory" || fail "unsafe evaluation directory: $directory"
+  else
+    install -d -m 0700 -- "$directory"
+    secure_directory "$directory" || fail "could not secure evaluation directory: $directory"
+  fi
+}
+
+require_runtime() {
+  [ -d "$runtime_root" ] && [ ! -L "$runtime_root" ] || fail 'private user runtime is unavailable'
+  [ "$(stat -c '%u' -- "$runtime_root")" = "$user_id" ] ||
+    fail 'private user runtime has the wrong owner'
+  ensure_private_directory "$socket_directory"
+  ensure_private_directory "$private_directory"
+  ensure_private_directory "$collector_directory"
+  ensure_private_directory "$public_snapshot_directory"
+}
+
+require_service_commands() {
+  [ -x "$node_bin" ] || fail 'Node.js is unavailable'
+  [ -x "$bwrap_bin" ] || fail 'bubblewrap is unavailable'
+  [ -x "$curl_bin" ] || fail 'curl is unavailable'
+  [ -x "$sync_bin" ] || fail 'sync is unavailable'
+  [ -r "$server_path" ] || fail 'evaluation server is unavailable'
+}
+
+require_lifecycle_commands() {
+  [ -x "$preview_helper" ] || fail 'reviewed preview helper is unavailable'
+  [ -x "$systemctl_bin" ] || fail 'systemctl is unavailable'
+  [ -x "$timeout_bin" ] || fail 'timeout is unavailable'
+}
+
+require_start_commands() {
+  require_service_commands
+  require_lifecycle_commands
+  [ -x "$systemd_run_bin" ] || fail 'systemd-run is unavailable'
+  [ -x "$openssl_bin" ] || fail 'OpenSSL is unavailable'
+}
+
+preview_command() {
+  "$timeout_bin" --signal=TERM --kill-after=2s 15s \
+    sudo -n "$preview_helper" "$@"
+}
+
+systemctl_user() {
+  "$systemctl_bin" --user "$@"
+}
+
+route_target() {
+  local preview_status
+  preview_status="$(preview_command status 2>/dev/null)" || {
+    printf 'unknown\n'
+    return
+  }
+  awk -v port=":$https_port" '
+    index($0, port) { section = 1; port_seen = 1; next }
+    section && $0 == "" { section = 0 }
+    section && index($0, "proxy ") { sub(/^.*proxy /, ""); print; found = 1; exit }
+    END { if (!found) print port_seen ? "non_proxy_handler" : "absent" }
+  ' <<<"$preview_status"
+}
+
+route_class() {
+  local target
+  target="$(route_target)"
+  case "$target" in
+    "unix:$facade_socket") printf 'exact\n' ;;
+    absent) printf 'absent\n' ;;
+    unknown) printf 'unknown\n' ;;
+    *) printf 'conflict\n' ;;
+  esac
+}
+
+remove_exact_route() {
+  preview_command evaluation-down-if >/dev/null 2>&1 || true
+  if [ "$(route_class)" = 'absent' ]; then
+    return 0
+  fi
+  printf 'hermes-evaluation-preview: fixed evaluation route absence was not verified\n' >&2
+  return 2
+}
+
+path_absent() {
+  [ ! -e "$1" ] && [ ! -L "$1" ]
+}
+
+secure_cleanup_pending_present() {
+  [ -f "$cleanup_pending_file" ] && [ ! -L "$cleanup_pending_file" ] &&
+    [ "$(stat -c '%u:%a:%s:%h' -- "$cleanup_pending_file")" = "$user_id:600:7:1" ] &&
+    [ "$(<"$cleanup_pending_file")" = 'pending' ]
+}
+
+cleanup_pending_present() {
+  [ -e "$cleanup_pending_file" ] || [ -L "$cleanup_pending_file" ]
+}
+
+mark_cleanup_pending() {
+  if cleanup_pending_present; then
+    secure_cleanup_pending_present && return 0
+    rm -f -- "$cleanup_pending_file" 2>/dev/null || return 1
+  fi
+  ( set -o noclobber; umask 077; printf 'pending' >"$cleanup_pending_file" ) 2>/dev/null ||
+    return 1
+  secure_cleanup_pending_present
+}
+
+clear_cleanup_pending() {
+  rm -f -- "$cleanup_pending_file" 2>/dev/null || true
+  path_absent "$cleanup_pending_file"
+}
+
+unit_inactive() {
+  local active_state
+  active_state="$(systemctl_user show "$1" --property=ActiveState --value 2>/dev/null)" || return 1
+  [ "$active_state" = 'inactive' ] || [ "$active_state" = 'failed' ]
+}
+
+stop_main_unit() {
+  systemctl_user stop "$unit_name" >/dev/null 2>&1 || true
+  unit_inactive "$unit_name"
+}
+
+unlink_facade_socket() {
+  rm -f -- "$facade_socket" 2>/dev/null || true
+  path_absent "$facade_socket"
+}
+
+erase_runtime_files() {
+  rm -f -- "$ready_file" "$token_file" "$snapshot_file" 2>/dev/null || true
+  path_absent "$ready_file" && path_absent "$token_file" && path_absent "$snapshot_file"
+}
+
+teardown_preview_state() {
+  local marker_status=0 route_status=0 main_status=0 socket_status=0 files_status=0
+  mark_cleanup_pending || marker_status=$?
+  remove_exact_route || route_status=$?
+  stop_main_unit || main_status=$?
+  unlink_facade_socket || socket_status=$?
+  erase_runtime_files || files_status=$?
+
+  if [ "$marker_status" -ne 0 ] || [ "$route_status" -ne 0 ] || [ "$main_status" -ne 0 ] ||
+      [ "$socket_status" -ne 0 ] || [ "$files_status" -ne 0 ]; then
+    printf 'hermes-evaluation-preview: teardown postconditions are incomplete; cleanup must retry\n' >&2
+    return 1
+  fi
+  if ! clear_cleanup_pending; then
+    printf 'hermes-evaluation-preview: teardown completed but its retry marker could not be cleared\n' >&2
+    return 1
+  fi
+}
+
+watchdog_teardown() {
+  teardown_preview_state
+}
+
+acquire_cleanup_lock() {
+  exec 9>"$lock_file"
+  flock --exclusive --wait 10 9
+}
+
+facade_healthy() {
+  [ -S "$facade_socket" ] && "$curl_bin" --fail --silent --max-time 1 \
+    --unix-socket "$facade_socket" http://localhost/ >/dev/null
+}
+
+wait_watch_interval() {
+  sleep 1
+}
+
+stop_cleanup_guards() {
+  systemctl_user stop "$expiry_timer" "$expiry_service" "$watchdog_unit" >/dev/null 2>&1 || true
+  unit_inactive "$expiry_timer" && unit_inactive "$expiry_service" && unit_inactive "$watchdog_unit"
+}
+
+secure_token_present() {
+  [ -f "$token_file" ] && [ ! -L "$token_file" ] &&
+    [ "$(stat -c '%u:%a:%s:%h' -- "$token_file")" = "$user_id:600:43:1" ] &&
+    grep -Eq '^[A-Za-z0-9_-]{43}$' "$token_file"
+}
+
+write_new_token() {
+  local token
+  token="$($openssl_bin rand -base64 32 | tr '+/' '-_' | tr -d '=\n')"
+  [[ "$token" =~ ^[A-Za-z0-9_-]{43}$ ]] || fail 'token generation failed'
+  ( set -o noclobber; umask 077; printf '%s' "$token" >"$token_file" ) 2>/dev/null ||
+    fail 'launch token already exists'
+  secure_token_present || fail 'launch token is unsafe'
+}
+
+secure_trial_epoch_present() {
+  [ -f "$trial_epoch_file" ] && [ ! -L "$trial_epoch_file" ] &&
+    [ "$(stat -c '%u:%a:%s:%h' -- "$trial_epoch_file")" = "$user_id:600:24:1" ] &&
+    grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.000Z$' \
+      "$trial_epoch_file"
+}
+
+ensure_trial_epoch() {
+  ensure_private_directory "$persistent_state_directory"
+  if [ -e "$trial_epoch_file" ] || [ -L "$trial_epoch_file" ]; then
+    secure_trial_epoch_present || fail 'persistent trial epoch is unsafe'
+    return
+  fi
+  local epoch
+  epoch="$(date -u '+%Y-%m-%dT%H:%M:%S.000Z')"
+  ( set -o noclobber; umask 077; printf '%s' "$epoch" >"$trial_epoch_file" ) 2>/dev/null ||
+    fail 'persistent trial epoch could not be created exactly once'
+  secure_trial_epoch_present || fail 'persistent trial epoch is unsafe'
+}
+
+secure_json_file() {
+  local file="$1"
+  local size
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  [ "$(stat -c '%u:%a:%h' -- "$file")" = "$user_id:600:1" ] || return 1
+  size="$(stat -c '%s' -- "$file")"
+  [ "$size" -ge 2 ] && [ "$size" -le 65536 ]
+}
+
+run_evidence_collector() {
+  local output_file="$1"
+  "$bwrap_bin" \
+    --die-with-parent --new-session \
+    --unshare-pid --unshare-ipc --unshare-uts --unshare-cgroup-try --unshare-net \
+    --cap-drop ALL --clearenv --setenv PATH /usr/bin --setenv NODE_ENV evaluation \
+    --ro-bind /usr /usr --ro-bind /lib /lib --ro-bind /lib64 /lib64 \
+    --ro-bind "$node_bin" /node \
+    --dir /etc --ro-bind /etc/ld.so.cache /etc/ld.so.cache \
+    --dev /dev --proc /proc --tmpfs /tmp --dir /run --dir /app --dir /state \
+    --ro-bind "$trial_epoch_file" /run/teleagent-evaluation-epoch \
+    --ro-bind "$evaluation_directory/aggregate-store.js" /app/aggregate-store.js \
+    --ro-bind "$evaluation_directory/runtime-files.js" /app/runtime-files.js \
+    --ro-bind "$evaluation_directory/collect-evidence.js" /app/collect-evidence.js \
+    --ro-bind "$live_state_directory" /state \
+    --chdir /app /node /app/collect-evidence.js >"$output_file"
+}
+
+run_health_collector() {
+  local output_file="$1"
+  "$bwrap_bin" \
+    --die-with-parent --new-session \
+    --unshare-pid --unshare-ipc --unshare-uts --unshare-cgroup-try \
+    --cap-drop ALL --clearenv --setenv PATH /usr/bin --setenv NODE_ENV evaluation \
+    --ro-bind /usr /usr --ro-bind /lib /lib --ro-bind /lib64 /lib64 \
+    --ro-bind "$node_bin" /node \
+    --dir /etc --ro-bind /etc/ld.so.cache /etc/ld.so.cache \
+    --dev /dev --proc /proc --tmpfs /tmp --dir /app \
+    --ro-bind "$evaluation_directory/health.js" /app/health.js \
+    --ro-bind "$evaluation_directory/collect-health.js" /app/collect-health.js \
+    --chdir /app /node /app/collect-health.js >"$output_file"
+}
+
+run_snapshot_composer() {
+  local evidence_file="$1"
+  local health_file="$2"
+  local output_file="$3"
+  "$bwrap_bin" \
+    --die-with-parent --new-session \
+    --unshare-pid --unshare-ipc --unshare-uts --unshare-cgroup-try --unshare-net \
+    --cap-drop ALL --clearenv --setenv PATH /usr/bin --setenv NODE_ENV evaluation \
+    --ro-bind /usr /usr --ro-bind /lib /lib --ro-bind /lib64 /lib64 \
+    --ro-bind "$node_bin" /node \
+    --dir /etc --ro-bind /etc/ld.so.cache /etc/ld.so.cache \
+    --dev /dev --proc /proc --tmpfs /tmp --dir /app --dir /input \
+    --ro-bind "$evaluation_directory/scorecard.js" /app/scorecard.js \
+    --ro-bind "$evaluation_directory/snapshot-schema.js" /app/snapshot-schema.js \
+    --ro-bind "$evaluation_directory/compose-snapshot.js" /app/compose-snapshot.js \
+    --ro-bind "$evidence_file" /input/evidence.json \
+    --ro-bind "$health_file" /input/health.json \
+    --chdir /app /node /app/compose-snapshot.js >"$output_file"
+}
+
+collect_and_publish_snapshot() {
+  local evidence_temp health_temp snapshot_temp
+  evidence_temp="$(mktemp --tmpdir="$collector_directory" evidence.XXXXXX)"
+  health_temp="$(mktemp --tmpdir="$collector_directory" health.XXXXXX)"
+  snapshot_temp="$(mktemp --tmpdir="$collector_directory" summary.XXXXXX)"
+  chmod 0600 -- "$evidence_temp" "$health_temp" "$snapshot_temp"
+  if ! run_evidence_collector "$evidence_temp" || ! secure_json_file "$evidence_temp" ||
+      ! run_health_collector "$health_temp" || ! secure_json_file "$health_temp" ||
+      ! run_snapshot_composer "$evidence_temp" "$health_temp" "$snapshot_temp" ||
+      ! secure_json_file "$snapshot_temp"; then
+    rm -f -- "$evidence_temp" "$health_temp" "$snapshot_temp"
+    return 1
+  fi
+  "$sync_bin" -f "$snapshot_temp"
+  mv -f -- "$snapshot_temp" "$snapshot_file"
+  "$sync_bin" -d "$public_snapshot_directory"
+  rm -f -- "$evidence_temp" "$health_temp"
+}
+
+run_facade() {
+  "$bwrap_bin" \
+    --die-with-parent --new-session \
+    --unshare-pid --unshare-ipc --unshare-uts --unshare-cgroup-try --unshare-net \
+    --cap-drop ALL --clearenv --setenv PATH /usr/bin --setenv NODE_ENV evaluation \
+    --ro-bind /usr /usr --ro-bind /lib /lib --ro-bind /lib64 /lib64 \
+    --ro-bind "$node_bin" /node \
+    --dir /etc --ro-bind /etc/ld.so.cache /etc/ld.so.cache \
+    --dev /dev --proc /proc --tmpfs /tmp \
+    --dir /run --dir /run/teleagent-evaluation --bind "$socket_directory" /run/teleagent-evaluation \
+    --dir /snapshot --ro-bind "$public_snapshot_directory" /snapshot \
+    --dir /app --dir /app/static \
+    --ro-bind "$token_file" /run/teleagent-evaluation-token \
+    --ro-bind "$evaluation_directory/server.js" /app/server.js \
+    --ro-bind "$evaluation_directory/runtime-files.js" /app/runtime-files.js \
+    --ro-bind "$evaluation_directory/scorecard.js" /app/scorecard.js \
+    --ro-bind "$evaluation_directory/snapshot-schema.js" /app/snapshot-schema.js \
+    --ro-bind "$evaluation_directory/static" /app/static \
+    --chdir /app /node /app/server.js
+}
+
+print_url() {
+  ! cleanup_pending_present || fail 'evaluation cleanup is pending; launch access is revoked'
+  secure_token_present || fail 'no active secure launch token; start the preview first'
+  systemctl_user is-active --quiet "$unit_name" || fail 'evaluation preview is not active'
+  [ "$(route_class)" = 'exact' ] || fail 'exact evaluation route is not active'
+  local base_url
+  base_url="$(preview_command url "$https_port")" || fail 'preview URL is unavailable'
+  printf '%s#token=%s\n' "$base_url" "$(<"$token_file")"
+}
+
+run_service() {
+  require_hermes
+  require_runtime
+  require_service_commands
+  secure_token_present || fail 'the launch token disappeared before service start'
+  secure_trial_epoch_present || fail 'the persistent trial epoch disappeared before service start'
+
+  local child_pid='' refresh_pid=''
+  cleanup() {
+    trap - EXIT HUP INT TERM
+    rm -f -- "$ready_file" "$token_file" "$snapshot_file"
+    if [ -n "$refresh_pid" ] && kill -0 "$refresh_pid" 2>/dev/null; then
+      kill -TERM "$refresh_pid" 2>/dev/null || true
+      wait "$refresh_pid" 2>/dev/null || true
+    fi
+    if [ -n "$child_pid" ] && kill -0 "$child_pid" 2>/dev/null; then
+      kill -TERM "$child_pid" 2>/dev/null || true
+      wait "$child_pid" 2>/dev/null || true
+    fi
+    if [ -S "$facade_socket" ]; then rm -f -- "$facade_socket"; fi
+  }
+  trap cleanup EXIT HUP INT TERM
+
+  if [ -e "$facade_socket" ] || [ -L "$facade_socket" ]; then
+    [ -S "$facade_socket" ] && [ ! -L "$facade_socket" ] || fail 'facade socket path is unsafe'
+    rm -f -- "$facade_socket"
+  fi
+  collect_and_publish_snapshot || fail 'initial sanitized snapshot collection failed'
+
+  run_facade &
+  child_pid=$!
+  local attempt
+  for attempt in $(seq 1 40); do
+    kill -0 "$child_pid" 2>/dev/null || fail 'evaluation facade exited during startup'
+    if [ -S "$facade_socket" ] && "$curl_bin" --fail --silent --show-error --max-time 1 \
+        --unix-socket "$facade_socket" http://localhost/ >/dev/null; then
+      break
+    fi
+    sleep 0.25
+  done
+  [ -S "$facade_socket" ] && "$curl_bin" --fail --silent --show-error --max-time 1 \
+    --unix-socket "$facade_socket" http://localhost/ >/dev/null ||
+    fail 'evaluation facade did not become ready'
+  : >"$ready_file"
+  chmod 0600 -- "$ready_file"
+
+  (
+    while sleep "$snapshot_refresh_seconds"; do
+      if ! collect_and_publish_snapshot; then
+        # Retain the last-good snapshot. The facade rejects it after its fixed
+        # 75-second expiry, so collection failure cannot remain green forever.
+        :
+      fi
+    done
+  ) &
+  refresh_pid=$!
+  wait "$child_pid"
+}
+
+watch_preview() {
+  require_lifecycle_commands
+  local health_failures=0
+  while systemctl_user is-active --quiet "$unit_name"; do
+    if cleanup_pending_present; then
+      acquire_cleanup_lock || return 1
+      if watchdog_teardown; then return 0; fi
+      return 1
+    elif facade_healthy; then
+      health_failures=0
+    else
+      health_failures=$((health_failures + 1))
+    fi
+    if [ "$health_failures" -ge 3 ]; then
+      acquire_cleanup_lock || return 1
+      if watchdog_teardown; then return 0; fi
+      return 1
+    fi
+    wait_watch_interval
+  done
+  acquire_cleanup_lock || return 1
+  watchdog_teardown
+}
+
+abort_unpublished_start() {
+  local reason="$1" guards_armed="${2:-0}"
+  if teardown_preview_state; then
+    if [ "$guards_armed" -eq 1 ] && ! stop_cleanup_guards; then
+      fail "$reason; runtime access is removed, but cleanup-guard shutdown is unresolved"
+    fi
+    fail "$reason"
+  fi
+  fail "$reason; teardown is incomplete and any active watchdog was retained for retry"
+}
+
+abort_published_start() {
+  local reason="$1"
+  if teardown_preview_state; then
+    stop_cleanup_guards ||
+      fail "$reason; published runtime is removed, but cleanup-guard shutdown is unresolved"
+    fail "$reason"
+  fi
+  fail "$reason; teardown is incomplete and cleanup guards were retained for retry"
+}
+
+start_preview() {
+  unit_inactive "$unit_name" || fail 'evaluation preview is active or its state is unavailable'
+
+  ensure_trial_epoch
+  teardown_preview_state || fail 'reserved preview route or runtime state is not safely available'
+  stop_cleanup_guards || fail 'prior cleanup guards could not be stopped and verified inactive'
+  systemctl_user reset-failed "$unit_name" "$expiry_service" "$watchdog_unit" >/dev/null 2>&1 || true
+  write_new_token
+
+  if ! "$systemd_run_bin" --user \
+      --unit="$unit_name" --collect --service-type=exec \
+      --description='Teleagent isolated read-only Hermes evaluation' \
+      --working-directory="$evaluation_directory" \
+      --property=RuntimeMaxSec=2h --property=TimeoutStopSec=10s \
+      --property=KillMode=control-group --property=Restart=no \
+      --property=CPUAccounting=yes --property=CPUQuota=100% \
+      --property=MemoryAccounting=yes --property=MemoryMax=1536M --property=MemorySwapMax=128M \
+      --property=TasksAccounting=yes --property=TasksMax=192 --property=LimitNOFILE=256 \
+      --property=Nice=10 --property=IOSchedulingClass=idle \
+      --property=NoNewPrivileges=yes --property=RestrictSUIDSGID=yes --property=LockPersonality=yes \
+      --property="RestrictAddressFamilies=AF_UNIX AF_INET AF_NETLINK" --property=UMask=0077 \
+      -- "$script_path" _run >/dev/null; then
+    abort_unpublished_start 'evaluation preview service could not be started'
+  fi
+
+  local attempt
+  for attempt in $(seq 1 40); do
+    [ -f "$ready_file" ] && break
+    systemctl_user is-active --quiet "$unit_name" || break
+    sleep 0.25
+  done
+  if [ ! -f "$ready_file" ]; then
+    abort_unpublished_start 'evaluation preview did not become ready'
+  fi
+
+  if ! "$systemd_run_bin" --user \
+      --unit="${watchdog_unit%.service}" --collect --service-type=exec \
+      --description='Remove Teleagent evaluation route when facade exits' \
+      --property=RuntimeMaxSec=2h10m --property=TimeoutStopSec=5s \
+      --property=KillMode=control-group --property=Restart=on-failure --property=RestartSec=2s \
+      -- "$script_path" _watch >/dev/null; then
+    abort_unpublished_start 'evaluation route watchdog could not be started' 1
+  fi
+
+  if ! "$systemd_run_bin" --user \
+      --unit="$expiry_unit_base" --on-active=2h --timer-property=AccuracySec=1s --collect \
+      --description='Expire Teleagent Hermes evaluation route' \
+      --property=RuntimeMaxSec=2m --property=TimeoutStopSec=15s \
+      --property=KillMode=control-group --property=Restart=no \
+      -- "$script_path" _expire >/dev/null; then
+    abort_unpublished_start 'automatic preview expiry could not be scheduled' 1
+  fi
+
+  if ! systemctl_user is-active --quiet "$watchdog_unit" ||
+      ! systemctl_user is-active --quiet "$expiry_timer"; then
+    abort_unpublished_start 'evaluation cleanup guards are not active' 1
+  fi
+
+  if ! preview_command evaluation-up >/dev/null || [ "$(route_class)" != 'exact' ]; then
+    abort_published_start 'fixed Unix-socket preview route could not be established'
+  fi
+
+  local launch_url
+  if ! launch_url="$(print_url)"; then
+    abort_published_start 'fixed preview route was published but its launch URL could not be verified'
+  fi
+  printf '%s\n' "$launch_url"
+}
+
+stop_preview() {
+  if ! teardown_preview_state; then
+    printf 'hermes-evaluation-preview: stop is incomplete; cleanup guards were retained for retry\n' >&2
+    return 1
+  fi
+  stop_cleanup_guards || {
+    printf 'hermes-evaluation-preview: runtime stopped, but cleanup guards were not verified inactive\n' >&2
+    return 1
+  }
+  printf 'Hermes evaluation preview stopped; route, socket, process, token, and cache are absent.\n'
+}
+
+expire_preview() {
+  if ! teardown_preview_state; then
+    return 1
+  fi
+  systemctl_user stop "$watchdog_unit" >/dev/null 2>&1 || true
+  unit_inactive "$watchdog_unit"
+}
+
+show_status() {
+  if systemctl_user is-active --quiet "$unit_name"; then
+    printf 'service: active\n'
+  else
+    printf 'service: inactive\n'
+  fi
+  case "$(route_class)" in
+    exact) printf 'preview route: 8491 -> fixed evaluation Unix socket\n' ;;
+    absent) printf 'preview route: absent\n' ;;
+    conflict) printf 'preview route: conflict (left unchanged)\n' ;;
+    *) printf 'preview route: status unavailable\n' ;;
+  esac
+  if secure_token_present; then
+    printf 'launch token: present (value hidden)\n'
+  else
+    printf 'launch token: absent or unsafe\n'
+  fi
+  if cleanup_pending_present; then
+    printf 'cleanup state: pending\n'
+  else
+    printf 'cleanup state: clear\n'
+  fi
+  if secure_trial_epoch_present; then
+    printf 'trial epoch: %s\n' "$(<"$trial_epoch_file")"
+  else
+    printf 'trial epoch: absent or unsafe\n'
+  fi
+}
+
+main() {
+  require_hermes
+  require_runtime
+  local command="${1:-}"
+  [ -n "$command" ] || { usage; exit 64; }
+  shift || true
+  [ "$#" -eq 0 ] || { usage; exit 64; }
+
+  if [ "$command" = '_run' ]; then
+    run_service
+    return
+  fi
+  if [ "$command" = '_watch' ]; then
+    watch_preview
+    return
+  fi
+
+  case "$command" in
+    start) require_start_commands ;;
+    stop|status|url|_expire) require_lifecycle_commands ;;
+    *) usage; exit 64 ;;
+  esac
+
+  exec 9>"$lock_file"
+  flock --exclusive --wait 10 9 || fail 'another preview operation is still running'
+  case "$command" in
+    start) start_preview ;;
+    stop) stop_preview ;;
+    status) show_status ;;
+    url) print_url ;;
+    _expire) expire_preview ;;
+  esac
+}
+
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  main "$@"
+fi

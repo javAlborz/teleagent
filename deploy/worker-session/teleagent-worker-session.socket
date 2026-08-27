@@ -1,0 +1,16 @@
+[Unit]
+Description=Teleagent worker-owned session broker socket
+ConditionPathExists=/etc/teleagent/worker-session/ENABLE
+
+[Socket]
+ListenStream=/run/teleagent-worker-session/broker.sock
+SocketUser=teleagent-session-broker
+SocketGroup=teleagent-control
+SocketMode=0660
+DirectoryMode=0750
+RemoveOnStop=yes
+FileDescriptorName=worker-session-broker
+Service=teleagent-worker-session.service
+
+# Deliberately no [Install] section. A root operator must create the sentinel
+# and start this dormant socket explicitly after validating worker isolation.

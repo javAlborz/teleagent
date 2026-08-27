@@ -8,8 +8,8 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const logger = require('./logger');
+const { requireLegacySpeechConfig } = require('./legacy-speech-config');
 
-const DEFAULT_TTS_BASE_URL = 'http://127.0.0.1:18000/v1';
 const DEFAULT_VOICE_ID = process.env.TTS_VOICE || 'af_bella';
 const ALLOWED_VOICE_IDS = new Set(
   (process.env.TTS_ALLOWED_VOICES || '')
@@ -17,25 +17,16 @@ const ALLOWED_VOICE_IDS = new Set(
     .map((voice) => voice.trim())
     .filter(Boolean)
 );
-const MODEL_ID = process.env.TTS_MODEL || 'kokoro';
 const RESPONSE_FORMAT = process.env.TTS_RESPONSE_FORMAT || 'mp3';
-const TTS_TIMEOUT_MS = parseInt(process.env.TTS_TIMEOUT_MS || '30000', 10);
+const TTS_TIMEOUT_MS = Math.max(
+  1000,
+  Math.min(Number.parseInt(process.env.TTS_TIMEOUT_MS || '30000', 10) || 30000, 60000)
+);
+const MAX_TTS_TEXT_BYTES = 64 * 1024;
+const MAX_TTS_AUDIO_BYTES = 32 * 1024 * 1024;
 
 // Audio output directory (set via setAudioDir)
 let audioDir = process.env.AUDIO_DIR || path.join(__dirname, '../audio-temp');
-
-function normalizeBaseUrl(rawUrl) {
-  const trimmed = (rawUrl || DEFAULT_TTS_BASE_URL).trim().replace(/\/+$/, '');
-  return trimmed.endsWith('/v1') ? trimmed : `${trimmed}/v1`;
-}
-
-function getTtsBaseUrl() {
-  return normalizeBaseUrl(process.env.TTS_BASE_URL || DEFAULT_TTS_BASE_URL);
-}
-
-function getTtsApiKey() {
-  return process.env.TTS_API_KEY || 'not-needed';
-}
 
 function getAudioExtension() {
   const format = RESPONSE_FORMAT.toLowerCase();
@@ -66,23 +57,8 @@ function normalizeVoiceList(responseData) {
   return [];
 }
 
-function stringifyErrorData(data) {
-  if (!data) return undefined;
-  if (Buffer.isBuffer(data)) return data.toString('utf8');
-  if (typeof data === 'string') return data;
-
-  try {
-    return JSON.stringify(data);
-  } catch {
-    return String(data);
-  }
-}
-
-function formatEmptyAudioError(response) {
-  const backend = response?.headers?.['x-zeus-tts-backend'];
-  return backend
-    ? `TTS endpoint returned empty audio payload (backend=${backend})`
-    : 'TTS endpoint returned empty audio payload';
+function formatEmptyAudioError() {
+  return 'TTS endpoint returned empty audio payload';
 }
 
 /**
@@ -105,10 +81,12 @@ function setAudioDir(dir) {
  * @returns {string} Filename (without path)
  */
 function generateFilename(text) {
-  // Hash text to create unique identifier
-  const hash = crypto.createHash('md5').update(text).digest('hex').substring(0, 8);
+  // Keep call audio unguessable even to a sibling loopback process that knows
+  // the text and approximate generation time.
+  void text;
+  const nonce = crypto.randomBytes(16).toString('hex');
   const timestamp = Date.now();
-  return `tts-${timestamp}-${hash}.${getAudioExtension()}`;
+  return `tts-${timestamp}-${nonce}.${getAudioExtension()}`;
 }
 
 /**
@@ -121,15 +99,18 @@ async function generateSpeech(text, voiceId = DEFAULT_VOICE_ID) {
   const startTime = Date.now();
 
   try {
-    const baseUrl = getTtsBaseUrl();
-    const apiKey = getTtsApiKey();
+    const legacyConfig = requireLegacySpeechConfig();
+    const baseUrl = legacyConfig.ttsBaseUrl;
+    const textBytes = Buffer.byteLength(String(text || ''), 'utf8');
+    if (textBytes === 0 || textBytes > MAX_TTS_TEXT_BYTES) {
+      throw new Error('TTS input must be non-empty and within the local request limit');
+    }
     const selectedVoiceId = resolveVoiceId(voiceId);
 
     logger.info('Generating speech with OpenAI-compatible TTS', {
       textLength: text.length,
       voiceId: selectedVoiceId,
-      model: MODEL_ID,
-      baseUrl
+      model: legacyConfig.ttsModel,
     });
 
     // Call OpenAI-compatible TTS endpoint (for example Kokoro-FastAPI)
@@ -138,18 +119,20 @@ async function generateSpeech(text, voiceId = DEFAULT_VOICE_ID) {
       url: `${baseUrl}/audio/speech`,
       headers: {
         'Accept': 'audio/mpeg',
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`
+        'Content-Type': 'application/json'
       },
       data: {
         input: text,
-        model: MODEL_ID,
+        model: legacyConfig.ttsModel,
         voice: selectedVoiceId,
         response_format: RESPONSE_FORMAT,
         speed: parseFloat(process.env.TTS_SPEED || '1.0')
       },
       responseType: 'arraybuffer',
-      timeout: TTS_TIMEOUT_MS
+      timeout: TTS_TIMEOUT_MS,
+      maxRedirects: 0,
+      maxBodyLength: MAX_TTS_TEXT_BYTES,
+      maxContentLength: MAX_TTS_AUDIO_BYTES,
     });
 
     const audioBuffer = Buffer.isBuffer(response.data)
@@ -162,20 +145,16 @@ async function generateSpeech(text, voiceId = DEFAULT_VOICE_ID) {
         latency: Date.now() - startTime,
         textLength: text.length,
         voiceId: selectedVoiceId,
-        model: MODEL_ID,
-        baseUrl,
-        backend: response.headers?.['x-zeus-tts-backend'],
-        requestedVoice: response.headers?.['x-zeus-tts-requested-voice'],
-        routedVoice: response.headers?.['x-zeus-tts-routed-voice']
+        model: legacyConfig.ttsModel
       });
-      throw new Error(formatEmptyAudioError(response));
+      throw new Error(formatEmptyAudioError());
     }
 
     // Generate filename and save audio
     const filename = generateFilename(text);
     const filepath = path.join(audioDir, filename);
 
-    fs.writeFileSync(filepath, audioBuffer);
+    fs.writeFileSync(filepath, audioBuffer, { flag: 'wx', mode: 0o600 });
 
     const latency = Date.now() - startTime;
 
@@ -197,11 +176,10 @@ async function generateSpeech(text, voiceId = DEFAULT_VOICE_ID) {
     const latency = Date.now() - startTime;
 
     logger.error('Speech generation failed', {
-      error: error.message,
       latency,
       textLength: text?.length,
       responseStatus: error.response?.status,
-      responseData: stringifyErrorData(error.response?.data)
+      errorCode: error.code || 'TTS_REQUEST_FAILED'
     });
 
     // Handle specific errors
@@ -213,7 +191,14 @@ async function generateSpeech(text, voiceId = DEFAULT_VOICE_ID) {
       throw new Error('Invalid request to TTS endpoint');
     }
 
-    throw new Error(`TTS generation failed: ${error.message}`);
+    if (error.message === formatEmptyAudioError() ||
+        error.message?.startsWith('TTS input must be')) {
+      throw error;
+    }
+    if (['LEGACY_SPEECH_DISABLED', 'LEGACY_SPEECH_CONFIG_INVALID'].includes(error.code)) {
+      throw error;
+    }
+    throw new Error('TTS generation failed');
   }
 }
 
@@ -257,12 +242,13 @@ function cleanupOldFiles(maxAgeMs = 60 * 60 * 1000) {
  */
 async function getAvailableVoices() {
   try {
+    const config = requireLegacySpeechConfig();
     const response = await axios({
       method: 'GET',
-      url: `${getTtsBaseUrl()}/audio/voices`,
-      headers: {
-        'Authorization': `Bearer ${getTtsApiKey()}`
-      }
+      url: `${config.ttsBaseUrl}/audio/voices`,
+      timeout: TTS_TIMEOUT_MS,
+      maxRedirects: 0,
+      maxContentLength: 1024 * 1024,
     });
 
     const voices = normalizeVoiceList(response.data);
@@ -278,8 +264,11 @@ async function getAvailableVoices() {
     return [...ALLOWED_VOICE_IDS];
 
   } catch (error) {
-    logger.error('Failed to fetch available voices', { error: error.message });
-    throw error;
+    logger.error('Failed to fetch available voices', {
+      responseStatus: error.response?.status,
+      errorCode: error.code || 'TTS_VOICE_LIST_FAILED',
+    });
+    throw new Error('TTS voice list request failed');
   }
 }
 

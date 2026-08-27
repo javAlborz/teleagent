@@ -71,15 +71,9 @@ async function main() {
     throw new Error('Usage: npm run voice-control -- status|unlock');
   }
 
-  const token = String(
-    process.env.VOICE_CONTROL_TOKEN ||
-    process.env.OUTBOUND_API_TOKEN ||
-    process.env.AGENT_API_TOKEN ||
-    process.env.CLAUDE_API_TOKEN ||
-    ''
-  ).trim();
+  const token = String(process.env.VOICE_CONTROL_TOKEN || '').trim();
   if (command === 'unlock' && !token) {
-    throw new Error('VOICE_CONTROL_TOKEN, OUTBOUND_API_TOKEN, or AGENT_API_TOKEN is required to unlock');
+    throw new Error('VOICE_CONTROL_TOKEN is required to unlock');
   }
 
   const result = command === 'status'

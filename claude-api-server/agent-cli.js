@@ -1,5 +1,7 @@
 'use strict';
 
+const { buildAgentExecutionEnvironment } = require('../lib/agent-execution-environment');
+
 const CODEX_SANDBOXES = new Set([
   'read-only',
   'workspace-write',
@@ -20,19 +22,11 @@ const CODEX_REASONING_EFFORTS = new Set([
   'ultra',
 ]);
 const CODEX_STRIPPED_ENV_KEYS = new Set([
-  'AGENT_API_TOKEN',
-  'CLAUDE_API_TOKEN',
   'CLAUDECODE',
   'CLAUDE_CODE_ENTRYPOINT',
-  'DRACHTIO_SECRET',
-  'FREESWITCH_SECRET',
-  'OUTBOUND_API_TOKEN',
-  'OPENAI_REALTIME_API_KEY',
-  'OPENAI_SAFETY_IDENTIFIER_SALT',
-  'SIP_AUTH_PASSWORD',
-  'STT_API_KEY',
-  'TTS_API_KEY',
 ]);
+const CLAUDE_EMPTY_MCP_CONFIG = '/etc/teleagent/provider-runtime/empty-mcp.json';
+const CLAUDE_EMPTY_SETTINGS = '/etc/teleagent/provider-runtime/empty-settings.json';
 
 function normalizeChoice(value, allowed, fallback) {
   const normalized = String(value || '').trim().toLowerCase();
@@ -62,36 +56,67 @@ function buildCodexArgs({
   if (!model) {
     throw new Error('Codex model is required');
   }
+  if (sessionId) {
+    throw new Error('Persistent Codex provider sessions are disabled');
+  }
   if (!workingDirectory) {
     throw new Error('Codex working directory is required');
   }
 
+  const normalizedSandbox = normalizeCodexSandbox(sandbox);
   const args = [
     '--ask-for-approval', normalizeCodexApprovalPolicy(approvalPolicy),
-    '--sandbox', normalizeCodexSandbox(sandbox),
+    '--sandbox', normalizedSandbox,
     '--model', model,
     '--config', `model_reasoning_effort="${normalizeCodexReasoningEffort(reasoningEffort)}"`,
     '--cd', workingDirectory,
-    'exec',
   ];
 
-  if (sessionId) {
-    args.push('resume');
-  }
+  args.push('exec');
+
+  // Never load worker-home or project rules/config. A prior approved mutation
+  // must not persist a hook/instruction that turns a later read-only launch
+  // into a side effect. Exact launch config comes only from root-owned argv.
+  args.push('--ignore-user-config', '--ignore-rules', '--strict-config');
 
   args.push('--skip-git-repo-check', '--json');
-
-  if (sessionId) {
-    args.push(sessionId);
-  }
 
   // Read the prompt from stdin so spoken requests do not appear in argv.
   args.push('-');
   return args;
 }
 
+function buildClaudeArgs({
+  model,
+  permissionMode,
+  tools = [],
+  allowedTools = [],
+  sessionId = null,
+  newSessionId = null,
+}) {
+  if (!model || !permissionMode) {
+    throw new Error('Claude launch requires an exact model and permission mode');
+  }
+  if (sessionId || newSessionId) {
+    throw new Error('Persistent Claude provider sessions are disabled');
+  }
+  const args = [
+    '-p',
+    '--bare',
+    '--safe-mode',
+    '--strict-mcp-config',
+    '--mcp-config', CLAUDE_EMPTY_MCP_CONFIG,
+    '--settings', CLAUDE_EMPTY_SETTINGS,
+    '--model', String(model),
+    '--permission-mode', String(permissionMode),
+  ];
+  if (tools.length > 0) args.push('--tools', tools.map(String).join(','));
+  if (allowedTools.length > 0) args.push('--allowedTools', allowedTools.map(String).join(','));
+  return args;
+}
+
 function buildCodexEnvironment(baseEnvironment = {}) {
-  const environment = { ...baseEnvironment };
+  const environment = buildAgentExecutionEnvironment(baseEnvironment);
   for (const key of CODEX_STRIPPED_ENV_KEYS) {
     delete environment[key];
   }
@@ -100,14 +125,12 @@ function buildCodexEnvironment(baseEnvironment = {}) {
 
 function parseClaudeStdout(stdout) {
   let response = '';
-  let sessionId = null;
 
   for (const line of String(stdout || '').trim().split('\n')) {
     try {
       const parsed = JSON.parse(line);
       if (parsed.type === 'result' && parsed.result) {
         response = parsed.result;
-        sessionId = parsed.session_id || sessionId;
       }
     } catch {
       // Claude can also emit formatted, non-JSON output.
@@ -118,21 +141,16 @@ function parseClaudeStdout(stdout) {
     response = String(stdout || '').trim();
   }
 
-  return { response, sessionId };
+  return { response, providerContextPersistent: false };
 }
 
 function parseCodexStdout(stdout) {
   let response = '';
-  let sessionId = null;
   let error = null;
 
   for (const line of String(stdout || '').trim().split('\n')) {
     try {
       const parsed = JSON.parse(line);
-
-      if (parsed.type === 'thread.started' && parsed.thread_id) {
-        sessionId = parsed.thread_id;
-      }
 
       if (
         parsed.type === 'item.completed' &&
@@ -150,11 +168,15 @@ function parseCodexStdout(stdout) {
     }
   }
 
-  if (!response && !sessionId) {
+  if (!response && !error) {
     response = String(stdout || '').trim();
   }
 
-  return { response, sessionId, error };
+  return {
+    response,
+    error,
+    providerContextPersistent: false,
+  };
 }
 
 function parseAgentStdout(provider, stdout) {
@@ -164,6 +186,9 @@ function parseAgentStdout(provider, stdout) {
 }
 
 module.exports = {
+  CLAUDE_EMPTY_MCP_CONFIG,
+  CLAUDE_EMPTY_SETTINGS,
+  buildClaudeArgs,
   buildCodexArgs,
   buildCodexEnvironment,
   normalizeCodexApprovalPolicy,

@@ -1,0 +1,75 @@
+[Unit]
+Description=Teleagent isolated workspace and tmux session broker
+Documentation=file:/opt/teleagent/current/docs/WORKER-SESSION-BROKER.md
+Requires=teleagent-worker-session.socket
+After=local-fs.target teleagent-worker-session.socket
+RequiresMountsFor=/var/lib/teleagent-worker-state /var/lib/teleagent-provider-plane
+ConditionPathExists=/etc/teleagent/worker-session/ENABLE
+
+[Service]
+Type=simple
+User=teleagent-session-broker
+Group=teleagent-session-broker
+SupplementaryGroups=teleagent-agent-workspace teleagent-provider-launch
+UMask=0077
+WorkingDirectory=/
+Environment=HOME=/var/lib/teleagent-worker-state/session-broker
+Environment=PATH=/opt/teleagent/agent-tools:/usr/local/bin:/usr/bin:/bin
+Environment=LANG=C.UTF-8
+Environment=LC_ALL=C.UTF-8
+Environment=WORKER_SESSION_BROKER_SOCKET_PATH=/run/teleagent-worker-session/broker.sock
+Environment=WORKER_SESSION_TMUX_SOCKET_PATH=/run/teleagent-worker-session/tmux.sock
+Environment=WORKER_SESSION_DB_PATH=/var/lib/teleagent-worker-state/session-broker/operations.sqlite
+Environment=WORKER_SESSION_SINGLETON_DB_PATH=/var/lib/teleagent-worker-state/session-broker/lifetime-lock.sqlite
+Environment=WORKER_SESSION_PROVIDER_VIEW=/var/lib/teleagent-worker-state/session-broker/provider-view
+Environment=WORKER_SESSION_WORKSPACE_ROOT=/srv/teleagent-agent-workspaces
+Environment=WORKER_SESSION_INSPECTION_ROOTS=/srv/teleagent-agent-workspaces/phone
+LoadCredential=teleagent-release-gate:/run/teleagent-release-gate/verified.json
+ExecStartPre=+/usr/bin/env -i HOME=/var/empty PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 /usr/local/libexec/verify-teleagent-release-closure --check-start-gate
+ExecStartPre=+/usr/bin/python3 -I /usr/local/libexec/verify-teleagent-release-closure --preflight-component worker-session ${CREDENTIALS_DIRECTORY}/teleagent-release-gate
+ExecStart=/usr/bin/python3 -I /usr/local/libexec/verify-teleagent-release-closure --start-component worker-session ${CREDENTIALS_DIRECTORY}/teleagent-release-gate
+Restart=on-failure
+RestartSec=2s
+KillMode=control-group
+TimeoutStopSec=20s
+LimitCORE=0
+MemoryHigh=384M
+MemoryMax=512M
+MemorySwapMax=0
+TasksMax=128
+CPUQuota=50%
+CPUWeight=100
+IOAccounting=yes
+IOWeight=100
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateDevices=yes
+# The explicit tmux socket is shared with separately launched worker-owned
+# interactive sessions; PrivateTmp would make that socket namespace diverge.
+PrivateTmp=no
+ProtectSystem=strict
+ProtectHome=yes
+ReadOnlyPaths=/srv/teleagent-agent-workspaces /var/lib/teleagent-provider-plane
+ReadWritePaths=/var/lib/teleagent-worker-state/session-broker /run/teleagent-worker-session
+InaccessiblePaths=/var/lib/teleagent-control /var/lib/teleagent-worker-state/claude-egress /var/lib/teleagent-worker-state/codex-egress /run/teleagent-privileged-action
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=all
+RestrictRealtime=yes
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native
+
+# Supplementary groups grant read-only workspace inspection and access to the
+# two narrow provider-supervisor sockets. Provider transcript/session stores
+# do not exist in the fresh-only execution architecture.
+# It receives the controller-only RPC listener as an inherited fd
+# and never joins teleagent-control or either provider group.

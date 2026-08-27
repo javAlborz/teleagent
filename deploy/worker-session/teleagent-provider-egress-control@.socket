@@ -1,0 +1,15 @@
+[Unit]
+Description=Teleagent root-only %i provider egress control socket
+ConditionPathExists=/etc/teleagent/worker-session/ENABLE
+
+[Socket]
+ListenStream=/run/teleagent-provider-egress-control/%i.sock
+SocketUser=root
+SocketGroup=root
+SocketMode=0600
+DirectoryMode=0711
+RemoveOnStop=yes
+FileDescriptorName=egress-control-%i
+Service=teleagent-provider-egress@%i.service
+
+# Deliberately dormant: no [Install] section.

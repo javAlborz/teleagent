@@ -1,0 +1,1137 @@
+#!/usr/local/libexec/teleagent-node
+
+import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const ACCOUNT = 'teleagent-sip-gateway';
+const STATE_PARENT = '/var/lib';
+const STATE_ROOT = '/var/lib/teleagent-sip-gateway';
+const STATE_DATABASE = `${STATE_ROOT}/gateway-state.sqlite3`;
+const STATE_SINGLETON = `${STATE_DATABASE}.lifetime-lock.sqlite3`;
+const CONFIG_ROOT = '/etc/teleagent/realtime-sip-gateway';
+const SENTINEL = `${CONFIG_ROOT}/ENABLE`;
+const STATE_MARKER = `${CONFIG_ROOT}/STATE_INITIALIZED`;
+const CONFIG_ENV = `${CONFIG_ROOT}/config.env`;
+const CREDENTIAL_ROOT = '/etc/teleagent/credentials';
+const CREDENTIALS = Object.freeze([
+  `${CREDENTIAL_ROOT}/openai-api-key`,
+  `${CREDENTIAL_ROOT}/openai-webhook-secret`,
+  `${CREDENTIAL_ROOT}/sip-pbx-auth-secret`,
+]);
+const INSTALLED_VERIFIER = '/usr/local/libexec/verify-realtime-sip-gateway';
+const INSTALLED_SYSUSERS = '/etc/sysusers.d/teleagent-realtime-sip-gateway.conf';
+const INSTALLED_TMPFILES = '/etc/tmpfiles.d/teleagent-realtime-sip-gateway.conf';
+const INSTALLED_UNIT = '/etc/systemd/system/teleagent-realtime-sip-gateway.service';
+const INSTALLED_INSTALLER = '/usr/local/libexec/teleagent-realtime-sip-gateway-install';
+const INSTALLED_MANIFEST = `${CONFIG_ROOT}/install.manifest`;
+const SYSTEMCTL = '/usr/bin/systemctl';
+const IMMUTABLE_RELEASE_ROOT = /^\/opt\/teleagent\/releases\/sha256-[a-f0-9]{64}$/u;
+const IMMUTABLE_PREFLIGHT_RELATIVE =
+  'realtime-sip-gateway/deploy/verify-realtime-sip-gateway';
+const HANDOFF_LOCK = '/run/teleagent-staging-handoff.lock';
+const LIFECYCLE_LOCK_ENV = 'TELEAGENT_HANDOFF_LIFECYCLE_LOCK_FD';
+const RELEASE_START_GATE = 'ExecStartPre=+/usr/bin/env -i HOME=/var/empty ' +
+  'PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 ' +
+  '/usr/local/libexec/verify-teleagent-release-closure --check-start-gate';
+const ACTIVATION_CHECK_COMMAND =
+  'ExecStartPre=+/usr/bin/python3 -I /usr/local/libexec/verify-teleagent-release-closure ' +
+  '--preflight-component realtime-sip-gateway ' +
+  '${CREDENTIALS_DIRECTORY}/teleagent-release-gate';
+const RELEASE_START_COMMAND = 'ExecStart=/usr/bin/python3 -I ' +
+  '/usr/local/libexec/verify-teleagent-release-closure ' +
+  '--start-component realtime-sip-gateway ${CREDENTIALS_DIRECTORY}/teleagent-release-gate';
+const REVIEWED_CREDENTIAL_DIRECTIVES = Object.freeze([
+  'LoadCredential=OPENAI_API_KEY:/etc/teleagent/credentials/openai-api-key',
+  'LoadCredential=OPENAI_WEBHOOK_SECRET:/etc/teleagent/credentials/openai-webhook-secret',
+  'LoadCredential=SIP_PBX_AUTH_SECRET:/etc/teleagent/credentials/sip-pbx-auth-secret',
+  'LoadCredential=SIP_STATE_INITIALIZED:' +
+    '/etc/teleagent/realtime-sip-gateway/STATE_INITIALIZED',
+  'LoadCredential=teleagent-release-gate:/run/teleagent-release-gate/verified.json',
+]);
+const EXECUTION_DIRECTIVE = /^Exec(?:Condition|StartPre|Start|StartPost|Reload|Stop|StopPost)=/u;
+const CREDENTIAL_DIRECTIVE = /^(?:LoadCredential|LoadCredentialEncrypted|SetCredential|SetCredentialEncrypted|ImportCredential|ImportCredentialEx)=/u;
+const REVIEWED_SERVICE_SHA256 = '78d6b9408714a1c565d1667b927cabf299a59fc955c6a16fa92b60ec92a91177';
+const GIB = 1024n * 1024n * 1024n;
+const MIB = 1024n * 1024n;
+const DURABLE_FILESYSTEMS = new Set([
+  0xef53n,
+  0x58465342n,
+  0x9123683en,
+  0xf2f52010n,
+  0x2fc12fc1n,
+]);
+const RUNTIME_CONFIGURATION_KEYS = new Set([
+  'OPENAI_REALTIME_INSTRUCTIONS',
+  'OPENAI_REALTIME_MODEL',
+  'OPENAI_REALTIME_VOICE',
+  'SIP_ALLOWED_FROM',
+  'SIP_ALLOWED_TO',
+  'SIP_ALLOW_ALL_CALLERS',
+  'SIP_ALLOW_NON_LOOPBACK_BIND',
+  'SIP_GATEWAY_HOST',
+  'SIP_GATEWAY_MODE',
+  'SIP_GATEWAY_PORT',
+  'SIP_GREETING_ENABLED',
+  'SIP_MAX_ACTIVE_CALLS',
+  'SIP_MAX_HTTP_CONNECTIONS',
+  'SIP_MAX_REALTIME_EVENT_BYTES',
+  'SIP_MAX_WEBHOOK_BYTES',
+  'SIP_PBX_PRINCIPAL',
+  'SIP_REJECT_STATUS',
+  'SIP_SIDEBAND_CONNECT_TIMEOUT_MS',
+]);
+const UNSET_ENVIRONMENT = [
+  'ENV', 'BASH_ENV', 'CDPATH', 'LD_PRELOAD', 'LD_LIBRARY_PATH', 'LD_AUDIT',
+  'GCONV_PATH', 'NODE_OPTIONS', 'NODE_PATH', 'NODE_EXTRA_CA_CERTS',
+  'NODE_TLS_REJECT_UNAUTHORIZED', 'NODE_USE_ENV_PROXY', 'PYTHONPATH', 'PERL5LIB',
+  'RUBYOPT', 'SSLKEYLOGFILE', 'SSL_CERT_FILE', 'SSL_CERT_DIR', 'HTTP_PROXY',
+  'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'all_proxy',
+  'no_proxy', 'OPENAI_API_KEY', 'OPENAI_WEBHOOK_SECRET', 'SIP_PBX_AUTH_SECRET',
+  'OPENAI_API_KEY_FILE', 'OPENAI_WEBHOOK_SECRET_FILE', 'SIP_PBX_AUTH_SECRET_FILE',
+].join(' ');
+
+function refuse(message) {
+  throw new Error(`Realtime SIP gateway verification refused: ${message}`);
+}
+
+export function requireImmutableActivationPreflight({
+  environment = process.env,
+  filesystem = fs,
+  executable = process.execPath,
+  invokedScript = process.argv[1],
+  execArguments = process.execArgv,
+  uid = process.geteuid(),
+} = {}) {
+  const releaseRoot = environment.TELEAGENT_RELEASE_ROOT;
+  const descriptorValue = environment[LIFECYCLE_LOCK_ENV];
+  if (uid !== 0 || !IMMUTABLE_RELEASE_ROOT.test(releaseRoot || '') ||
+      !/^(?:[3-9]|[1-9][0-9]+)$/u.test(descriptorValue || '') ||
+      !Array.isArray(execArguments) || execArguments.length !== 0) {
+    refuse('the SIP activation preflight requires one gated immutable release and retained lock');
+  }
+  const descriptor = Number.parseInt(descriptorValue, 10);
+  if (!Number.isSafeInteger(descriptor) || descriptor > 1_000_000) {
+    refuse('the SIP activation preflight lock descriptor is invalid');
+  }
+  const expectedNode = `${releaseRoot}/runtime/node/bin/node`;
+  const expectedScript = `${releaseRoot}/${IMMUTABLE_PREFLIGHT_RELATIVE}`;
+  let resolvedExecutable;
+  let resolvedScript;
+  let descriptorMetadata;
+  let pathMetadata;
+  try {
+    resolvedExecutable = filesystem.realpathSync(executable);
+    resolvedScript = filesystem.realpathSync(invokedScript || '');
+    descriptorMetadata = filesystem.fstatSync(descriptor);
+    pathMetadata = filesystem.lstatSync(HANDOFF_LOCK);
+  } catch {
+    refuse('the SIP activation preflight executable or retained lock is unavailable');
+  }
+  if (resolvedExecutable !== expectedNode || resolvedScript !== expectedScript) {
+    refuse('the SIP activation preflight escaped the immutable release');
+  }
+  if (!descriptorMetadata.isDirectory() || !pathMetadata.isDirectory() ||
+      descriptorMetadata.dev !== pathMetadata.dev || descriptorMetadata.ino !== pathMetadata.ino ||
+      pathMetadata.uid !== 0 || pathMetadata.gid !== 0 ||
+      (pathMetadata.mode & 0o7777) !== 0o755) {
+    refuse('the SIP activation preflight lock identity is unsafe');
+  }
+  delete environment[LIFECYCLE_LOCK_ENV];
+  return descriptor;
+}
+
+function meaningfulLines(source) {
+  return String(source).split('\n').map((line) => line.trim())
+    .filter((line) => line && !line.startsWith('#'));
+}
+
+function exactlyOnce(source, expression, label) {
+  const matches = String(source).match(expression) ?? [];
+  if (matches.length !== 1) refuse(`${label} must occur exactly once`);
+}
+
+function serviceDirectiveLines(source, expression, label) {
+  const result = [];
+  let section = null;
+  for (const line of String(source).split('\n')) {
+    const header = /^[^\S\r\n]*(\[[^\][\r\n]+\])[^\S\r\n]*$/u.exec(line);
+    if (header) {
+      section = header[1];
+      continue;
+    }
+    if (!expression.test(line)) continue;
+    if (section !== '[Service]') refuse(`${label} escaped the Service section`);
+    result.push(line);
+  }
+  return result;
+}
+
+function sameLineMultiset(actual, expected) {
+  return JSON.stringify([...actual].sort()) === JSON.stringify([...expected].sort());
+}
+
+export function validateSysusersSource(source) {
+  const expected = [
+    'u teleagent-sip-gateway - "Teleagent native SIP public-edge canary" /var/lib/teleagent-sip-gateway /usr/sbin/nologin',
+  ];
+  if (JSON.stringify(meaningfulLines(source)) !== JSON.stringify(expected)) {
+    refuse('the sysusers identity contract drifted');
+  }
+  return true;
+}
+
+export function validateTmpfilesSource(source) {
+  const expected = [
+    'd /etc/teleagent/realtime-sip-gateway 0700 root root - -',
+    'd /var/lib/teleagent-sip-gateway 0700 teleagent-sip-gateway teleagent-sip-gateway - -',
+  ];
+  if (JSON.stringify(meaningfulLines(source)) !== JSON.stringify(expected)
+      || String(source).includes(SENTINEL)) {
+    refuse('the tmpfiles contract drifted or creates activation/configuration');
+  }
+  return true;
+}
+
+export function validateRuntimeConfigurationSource(source) {
+  const input = String(source);
+  if (Buffer.byteLength(input, 'utf8') < 1 || Buffer.byteLength(input, 'utf8') > 64 * 1024
+      || input.includes('\0') || input.includes('\r') || !input.endsWith('\n')) {
+    refuse('the non-secret SIP configuration has invalid framing');
+  }
+  const seen = new Set();
+  for (const line of input.slice(0, -1).split('\n')) {
+    if (line === '' || line.startsWith('#')) continue;
+    const match = /^([A-Z][A-Z0-9_]*)=([^\u0000-\u001f\u007f]*)$/u.exec(line);
+    if (!match || match[2] === '' || match[2] !== match[2].trim()
+        || /[\\"']/u.test(match[2])) {
+      refuse('the non-secret SIP configuration contains a malformed assignment');
+    }
+    const [, name] = match;
+    if (!RUNTIME_CONFIGURATION_KEYS.has(name)) {
+      refuse(`the non-secret SIP configuration contains unreviewed key ${name}`);
+    }
+    if (seen.has(name)) refuse(`the non-secret SIP configuration repeats key ${name}`);
+    seen.add(name);
+  }
+  if (seen.size === 0) refuse('the non-secret SIP configuration has no settings');
+  return Object.freeze([...seen]);
+}
+
+export function validateServiceSource(source) {
+  if (/^\[Install\]\s*$/mu.test(source)
+      || /^Environment=.*(?:TOKEN|PASSWORD|SECRET|API_KEY|PRIVATE_KEY)=/imu.test(source)
+      || /^ConditionFileIsExecutable=/mu.test(source)) {
+    refuse('the unit became enableable or embeds a credential');
+  }
+  if (/[\u0000\r]/u.test(source)) {
+    refuse('the unit contains a forbidden control byte');
+  }
+  if (/\\[^\S\r\n]*$/mu.test(source)) {
+    refuse('the unit contains an unsupported line continuation');
+  }
+  if (/^(?:[^\S\r\n]+(?:Exec(?:Condition|StartPre|Start|StartPost|Reload|Stop|StopPost)|(?:LoadCredential|LoadCredentialEncrypted|SetCredential|SetCredentialEncrypted|ImportCredential|ImportCredentialEx))[^\S\r\n]*=|(?:Exec(?:Condition|StartPre|Start|StartPost|Reload|Stop|StopPost)|(?:LoadCredential|LoadCredentialEncrypted|SetCredential|SetCredentialEncrypted|ImportCredential|ImportCredentialEx))[^\S\r\n]+=)/mu
+    .test(source)) {
+    refuse('the unit contains noncanonical lifecycle or credential assignment whitespace');
+  }
+  for (const [expression, label] of [
+    [/^ConditionPathExists=\/etc\/teleagent\/realtime-sip-gateway\/ENABLE$/gmu,
+      'activation sentinel'],
+    [/^ConditionPathIsMountPoint=\/var\/lib\/teleagent-sip-gateway$/gmu,
+      'mount-point condition'],
+    [/^RequiresMountsFor=\/var\/lib\/teleagent-sip-gateway$/gmu,
+      'mount dependency'],
+    [/^User=teleagent-sip-gateway$/gmu, 'service user'],
+    [/^Group=teleagent-sip-gateway$/gmu, 'service group'],
+    [/^SupplementaryGroups=$/gmu, 'empty supplementary groups'],
+    [/^MemoryMax=512M$/gmu, 'memory cap'],
+    [/^MemorySwapMax=0$/gmu, 'swap cap'],
+    [/^CPUQuota=100%$/gmu, 'CPU cap'],
+    [/^TasksMax=128$/gmu, 'task cap'],
+    [/^LimitFSIZE=4294967296$/gmu, 'per-file cap'],
+    [/^Environment=TELEAGENT_SIP_STATE_BOUNDARY=required$/gmu,
+      'state-boundary contract'],
+    [/^Environment=SIP_STATE_DATABASE=\/var\/lib\/teleagent-sip-gateway\/gateway-state\.sqlite3$/gmu,
+      'fixed state database'],
+    [/^Environment=SIP_STATE_MARKER_FILE=%d\/SIP_STATE_INITIALIZED$/gmu,
+      'fixed state marker credential'],
+    [/^LoadCredential=SIP_STATE_INITIALIZED:\/etc\/teleagent\/realtime-sip-gateway\/STATE_INITIALIZED$/gmu,
+      'state marker credential'],
+    [/^LoadCredential=teleagent-release-gate:\/run\/teleagent-release-gate\/verified\.json$/gmu,
+      'release-gate credential'],
+    [new RegExp(`^UnsetEnvironment=${UNSET_ENVIRONMENT.replaceAll('/', '\\/')}$`, 'gmu'),
+      'final injection-variable removal'],
+    [/^ExecStartPre=\+\/usr\/bin\/env -i HOME=\/var\/empty PATH=\/usr\/sbin:\/usr\/bin:\/sbin:\/bin LANG=C\.UTF-8 LC_ALL=C\.UTF-8 \/usr\/local\/libexec\/verify-teleagent-release-closure --check-start-gate$/gmu,
+      'trusted release start gate'],
+    [/^ExecStartPre=\+\/usr\/bin\/python3 -I \/usr\/local\/libexec\/verify-teleagent-release-closure --preflight-component realtime-sip-gateway \$\{CREDENTIALS_DIRECTORY\}\/teleagent-release-gate$/gmu,
+      'immutable activation preflight'],
+    [/^ExecStart=\/usr\/bin\/python3 -I \/usr\/local\/libexec\/verify-teleagent-release-closure --start-component realtime-sip-gateway \$\{CREDENTIALS_DIRECTORY\}\/teleagent-release-gate$/gmu,
+      'immutable release launcher'],
+  ]) exactlyOnce(source, expression, label);
+  const startCommands = String(source).split('\n')
+    .filter((line) => /^ExecStart(?:Pre)?=/u.test(line));
+  const executionCommands = serviceDirectiveLines(
+    source, EXECUTION_DIRECTIVE, 'an execution command',
+  );
+  const credentialDirectives = serviceDirectiveLines(
+    source, CREDENTIAL_DIRECTIVE, 'a credential directive',
+  );
+  const expectedExecutionCommands = [
+    RELEASE_START_GATE,
+    ACTIVATION_CHECK_COMMAND,
+    RELEASE_START_COMMAND,
+  ];
+  const releaseGateReferences = String(source).match(
+    /\/usr\/local\/libexec\/verify-teleagent-release-closure/gu,
+  ) ?? [];
+  if (!sameLineMultiset(executionCommands, expectedExecutionCommands) ||
+      !sameLineMultiset(credentialDirectives, REVIEWED_CREDENTIAL_DIRECTIVES) ||
+      /^ExecCondition=/mu.test(source) || /^ExecReload=/mu.test(source) ||
+      /^ExecStartPost=/mu.test(source) || /^ExecStop(?:Post)?=/mu.test(source) ||
+      startCommands[0] !== RELEASE_START_GATE || releaseGateReferences.length !== 3 ||
+      executionCommands.some((line) => line.includes('/opt/teleagent/current'))) {
+    refuse('the trusted release start gate is weakened, duplicated, or out of order');
+  }
+  for (const inaccessible of [
+    '/var/lib/teleagent-provider-plane',
+    '/var/lib/teleagent-worker-state',
+    '/var/lib/teleagent-control',
+    '/var/lib/teleagent-privileged-action',
+    '/var/lib/teleagent-claude-supervisor',
+    '/var/lib/teleagent-codex-supervisor',
+    '/var/lib/teleagent-voice',
+    '/var/lib/teleagent-voice-stack',
+    '/srv/teleagent-agent-workspaces',
+    '/run/teleagent-worker-session',
+    '/run/teleagent-provider-launch',
+    '/run/teleagent-provider-egress',
+    '/run/teleagent-provider-egress-control',
+    '/run/teleagent-provider-capabilities',
+    '/run/teleagent-privileged-action',
+    '/run/teleagent-voice-stack',
+    '/run/teleagent-sip-local-peer-fence',
+    '/etc/teleagent/worker-session',
+    '/etc/teleagent/provider-egress',
+    '/etc/teleagent/provider-egress-secrets',
+    '/etc/teleagent/provider-runtime',
+    '/etc/teleagent/privileged-action',
+    '/etc/teleagent/controller',
+    '/etc/teleagent-voice',
+  ]) {
+    exactlyOnce(
+      source,
+      new RegExp(`^InaccessiblePaths=${inaccessible.replaceAll('/', '\\/')}$`, 'gmu'),
+      `inaccessible path ${inaccessible}`,
+    );
+  }
+  if (/^InaccessiblePaths=-/mu.test(source)) {
+    refuse('an inaccessible path became fail-open');
+  }
+  if (createHash('sha256').update(String(source)).digest('hex') !== REVIEWED_SERVICE_SHA256) {
+    refuse('the service policy does not match the exact reviewed unit');
+  }
+  return true;
+}
+
+function parseDatabase(source, fieldCount, label) {
+  const rows = [];
+  for (const line of String(source).split('\n')) {
+    if (!line || line.startsWith('#')) continue;
+    const fields = line.split(':');
+    if (fields.length !== fieldCount) refuse(`${label} contains a malformed record`);
+    rows.push(fields);
+  }
+  return rows;
+}
+
+function numeric(value, label) {
+  if (!/^[0-9]+$/u.test(String(value))) refuse(`${label} is not numeric`);
+  const result = Number(value);
+  if (!Number.isSafeInteger(result)) refuse(`${label} is outside the safe integer range`);
+  return result;
+}
+
+function uniqueNamed(rows, name, label) {
+  const matches = rows.filter((fields) => fields[0] === name);
+  if (matches.length !== 1) refuse(`${label} must contain exactly one ${name} record`);
+  return matches[0];
+}
+
+export function validateIdentityRecords(passwdSource, groupSource) {
+  const passwd = parseDatabase(passwdSource, 7, 'passwd');
+  const groups = parseDatabase(groupSource, 4, 'group');
+  const user = uniqueNamed(passwd, ACCOUNT, 'passwd');
+  const group = uniqueNamed(groups, ACCOUNT, 'group');
+  const uid = numeric(user[2], `${ACCOUNT} uid`);
+  const gid = numeric(user[3], `${ACCOUNT} primary gid`);
+  const groupGid = numeric(group[2], `${ACCOUNT} group gid`);
+  if (uid <= 0 || gid <= 0 || uid === 1000 || gid === 1000 || gid !== groupGid
+      || user[5] !== STATE_ROOT
+      || !['/usr/sbin/nologin', '/sbin/nologin'].includes(user[6])
+      || group[3] !== '') {
+    refuse('the public-edge account contract is unsafe');
+  }
+  const uidAliases = passwd.filter((candidate) => numeric(candidate[2], 'passwd uid') === uid);
+  const gidAliases = groups.filter((candidate) => numeric(candidate[2], 'group gid') === gid);
+  const primaryGidAliases = passwd.filter(
+    (candidate) => numeric(candidate[3], 'passwd primary gid') === gid,
+  );
+  if (uidAliases.length !== 1 || uidAliases[0] !== user
+      || gidAliases.length !== 1 || gidAliases[0] !== group
+      || primaryGidAliases.length !== 1 || primaryGidAliases[0] !== user) {
+    refuse('the public-edge numeric identity is reused');
+  }
+  for (const candidate of groups) {
+    if (candidate[3].split(',').filter(Boolean).includes(ACCOUNT)) {
+      refuse('the public-edge account has a supplementary group');
+    }
+  }
+  return Object.freeze({ uid, gid });
+}
+
+function numericBigInt(value) {
+  try {
+    return BigInt(value);
+  } catch {
+    return null;
+  }
+}
+
+function inspectExactPath(
+  filename,
+  { type, uid, gid, mode, nlink = null },
+  { lstat = fs.lstatSync, realpath = fs.realpathSync } = {},
+) {
+  const metadata = lstat(filename, { bigint: true });
+  const correctType = type === 'directory'
+    ? metadata.isDirectory()
+    : metadata.isFile();
+  if (metadata.isSymbolicLink() || !correctType
+      || numericBigInt(metadata.uid) !== BigInt(uid)
+      || numericBigInt(metadata.gid) !== BigInt(gid)
+      || (numericBigInt(metadata.mode) & 0o7777n) !== BigInt(mode)
+      || (nlink !== null && numericBigInt(metadata.nlink) !== BigInt(nlink))
+      || realpath(filename) !== filename) {
+    refuse(`unsafe metadata for ${filename}`);
+  }
+  return metadata;
+}
+
+function sameIdentity(left, right) {
+  return ['dev', 'ino', 'mode', 'uid', 'gid', 'nlink'].every(
+    (field) => numericBigInt(left?.[field]) === numericBigInt(right?.[field]),
+  );
+}
+
+function readBoundedExactFile(filename, { uid, gid, mode, maxBytes, nlink = 1 }) {
+  const metadata = inspectExactPath(filename, {
+    type: 'file', uid, gid, mode, nlink,
+  });
+  if (numericBigInt(metadata.size) > BigInt(maxBytes)) refuse(`${filename} is unexpectedly large`);
+  let descriptor;
+  try {
+    descriptor = fs.openSync(
+      filename,
+      fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0),
+    );
+    const opened = fs.fstatSync(descriptor, { bigint: true });
+    if (!opened.isFile() || !sameIdentity(metadata, opened)
+        || numericBigInt(opened.size) > BigInt(maxBytes)) {
+      refuse(`${filename} changed while it was opened`);
+    }
+    const contents = fs.readFileSync(descriptor, 'utf8');
+    const after = fs.fstatSync(descriptor, { bigint: true });
+    if (!sameIdentity(opened, after) || numericBigInt(after.size) !== numericBigInt(opened.size)) {
+      refuse(`${filename} changed while it was read`);
+    }
+    return contents;
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+  }
+}
+
+function readBoundedRootFile(filename, mode) {
+  return readBoundedExactFile(filename, {
+    uid: 0, gid: 0, mode, maxBytes: 4n * MIB,
+  });
+}
+
+const INSTALLED_MANIFEST_RECORDS = Object.freeze([
+  Object.freeze({
+    relative: 'deploy/teleagent-realtime-sip-gateway.service',
+    target: INSTALLED_UNIT,
+    mode: 0o644,
+  }),
+  Object.freeze({
+    relative: 'deploy/teleagent-realtime-sip-gateway.sysusers',
+    target: INSTALLED_SYSUSERS,
+    mode: 0o644,
+  }),
+  Object.freeze({
+    relative: 'deploy/teleagent-realtime-sip-gateway.tmpfiles',
+    target: INSTALLED_TMPFILES,
+    mode: 0o644,
+  }),
+  Object.freeze({
+    relative: 'deploy/verify-realtime-sip-gateway',
+    target: INSTALLED_VERIFIER,
+    mode: 0o755,
+  }),
+  Object.freeze({
+    relative: 'deploy/teleagent-realtime-sip-gateway-install',
+    target: INSTALLED_INSTALLER,
+    mode: 0o755,
+  }),
+]);
+
+export function validateInstalledManifestAssets(source, {
+  readAsset = (record) => readBoundedRootFile(record.target, record.mode),
+} = {}) {
+  const lines = String(source).split('\n');
+  if (lines.at(-1) !== '') refuse('the installed manifest has invalid framing');
+  lines.pop();
+  if (lines.length !== INSTALLED_MANIFEST_RECORDS.length) {
+    refuse('the installed manifest closure is incomplete');
+  }
+  for (let index = 0; index < INSTALLED_MANIFEST_RECORDS.length; index += 1) {
+    const record = INSTALLED_MANIFEST_RECORDS[index];
+    const fields = lines[index].split(' ');
+    const expectedMode = record.mode.toString(8).padStart(4, '0');
+    if (fields.length !== 4 || !/^[a-f0-9]{64}$/u.test(fields[0])
+        || fields[1] !== record.relative || fields[2] !== record.target
+        || fields[3] !== expectedMode) {
+      refuse('the installed manifest contains an unreviewed record');
+    }
+    const contents = readAsset(record);
+    const digest = createHash('sha256').update(contents).digest('hex');
+    if (digest !== fields[0]) refuse(`installed asset ${record.target} failed digest verification`);
+  }
+  return true;
+}
+
+export function inspectInstalledStorage({
+  uid,
+  gid,
+  lstat = fs.lstatSync,
+  realpath = fs.realpathSync,
+  statfs = fs.statfsSync,
+} = {}) {
+  const inspection = { lstat, realpath };
+  const parent = inspectExactPath(STATE_PARENT, {
+    type: 'directory', uid: 0, gid: 0, mode: 0o755,
+  }, inspection);
+  const root = inspectExactPath(STATE_ROOT, {
+    type: 'directory', uid, gid, mode: 0o700,
+  }, inspection);
+  if (numericBigInt(parent.dev) === numericBigInt(root.dev)) {
+    refuse('the SIP state root is not an exact dedicated mount');
+  }
+  const storage = statfs(STATE_ROOT, { bigint: true });
+  const blockSize = numericBigInt(storage.bsize);
+  const blocks = numericBigInt(storage.blocks);
+  const available = numericBigInt(storage.bavail);
+  const filesystemType = BigInt.asUintN(32, numericBigInt(storage.type) ?? -1n);
+  if (blockSize === null || blocks === null || available === null
+      || blockSize <= 0n || blocks <= 0n || available < 0n || available > blocks
+      || !DURABLE_FILESYSTEMS.has(filesystemType)) {
+    refuse('the SIP state filesystem is not a reviewed durable local filesystem');
+  }
+  const capacity = blockSize * blocks;
+  const free = blockSize * available;
+  const reserve = (capacity + 4n) / 5n > 512n * MIB
+    ? (capacity + 4n) / 5n
+    : 512n * MIB;
+  if (capacity < GIB || capacity > 4n * GIB) {
+    refuse('the SIP state filesystem is outside the reviewed 1-4 GiB boundary');
+  }
+  if (free < reserve) refuse('the SIP state admission reserve is exhausted');
+  return Object.freeze({
+    capacity,
+    free,
+    reserve,
+    filesystemType,
+    rootDev: numericBigInt(root.dev),
+  });
+}
+
+function existsEvenAsLink(filename) {
+  try {
+    fs.lstatSync(filename);
+    return true;
+  } catch (error) {
+    if (error?.code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+function syncDirectory(directory) {
+  const descriptor = fs.openSync(
+    directory,
+    fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | (fs.constants.O_NOFOLLOW ?? 0),
+  );
+  try {
+    fs.fsyncSync(descriptor);
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
+
+function stateMarkerPayload({
+  stateRoot,
+  databasePath,
+  singletonPath,
+  stateUid,
+  stateGid,
+  database,
+  singleton,
+}) {
+  return [
+    'version=1',
+    `state_root=${stateRoot}`,
+    `database_path=${databasePath}`,
+    `singleton_path=${singletonPath}`,
+    `state_dev=${numericBigInt(database.dev)}`,
+    `database_ino=${numericBigInt(database.ino)}`,
+    `database_birthtime_ns=${numericBigInt(database.birthtimeNs)}`,
+    `singleton_ino=${numericBigInt(singleton.ino)}`,
+    `singleton_birthtime_ns=${numericBigInt(singleton.birthtimeNs)}`,
+    `state_uid=${stateUid}`,
+    `state_gid=${stateGid}`,
+    '',
+  ].join('\n');
+}
+
+function parseStateMarker(source) {
+  const lines = String(source).split('\n');
+  if (lines.at(-1) !== '') refuse('the state initialization marker is malformed');
+  lines.pop();
+  const expectedKeys = [
+    'version', 'state_root', 'database_path', 'singleton_path', 'state_dev',
+    'database_ino', 'database_birthtime_ns', 'singleton_ino',
+    'singleton_birthtime_ns', 'state_uid', 'state_gid',
+  ];
+  if (lines.length !== expectedKeys.length) refuse('the state initialization marker is malformed');
+  const record = {};
+  for (let index = 0; index < expectedKeys.length; index += 1) {
+    const separator = lines[index].indexOf('=');
+    if (separator <= 0 || lines[index].slice(0, separator) !== expectedKeys[index]) {
+      refuse('the state initialization marker is malformed');
+    }
+    record[expectedKeys[index]] = lines[index].slice(separator + 1);
+  }
+  if (record.version !== '1') refuse('the state initialization marker version is unsupported');
+  for (const key of [
+    'state_dev', 'database_ino', 'database_birthtime_ns', 'singleton_ino',
+    'singleton_birthtime_ns', 'state_uid', 'state_gid',
+  ]) {
+    if (!/^[0-9]+$/u.test(record[key])) refuse('the state initialization marker is malformed');
+  }
+  return record;
+}
+
+function inspectStateDataFile(filename, { uid, gid, device }) {
+  const metadata = inspectExactPath(filename, {
+    type: 'file', uid, gid, mode: 0o600, nlink: 1,
+  });
+  if (numericBigInt(metadata.dev) !== BigInt(device)
+      || numericBigInt(metadata.birthtimeNs) === null
+      || numericBigInt(metadata.birthtimeNs) <= 0n
+      || numericBigInt(metadata.size) > GIB) {
+    refuse(`unsafe durable-state file ${filename}`);
+  }
+  return metadata;
+}
+
+export function verifyInitializedStateFiles({
+  stateRoot = STATE_ROOT,
+  configRoot = CONFIG_ROOT,
+  markerPath = STATE_MARKER,
+  databasePath = STATE_DATABASE,
+  singletonPath = STATE_SINGLETON,
+  stateUid,
+  stateGid,
+  markerUid = 0,
+  markerGid = 0,
+  expectedDevice = null,
+  markerNlink = 1,
+} = {}) {
+  const state = inspectExactPath(stateRoot, {
+    type: 'directory', uid: stateUid, gid: stateGid, mode: 0o700,
+  });
+  inspectExactPath(configRoot, {
+    type: 'directory', uid: markerUid, gid: markerGid, mode: 0o700,
+  });
+  const device = expectedDevice ?? numericBigInt(state.dev);
+  if (device === null || numericBigInt(state.dev) !== BigInt(device)) {
+    refuse('the durable-state mount identity changed');
+  }
+  const markerSource = readBoundedExactFile(markerPath, {
+    uid: markerUid,
+    gid: markerGid,
+    mode: 0o444,
+    maxBytes: 4_096,
+    nlink: markerNlink,
+  });
+  const marker = parseStateMarker(markerSource);
+  const database = inspectStateDataFile(databasePath, {
+    uid: stateUid, gid: stateGid, device,
+  });
+  const singleton = inspectStateDataFile(singletonPath, {
+    uid: stateUid, gid: stateGid, device,
+  });
+  if (marker.state_root !== stateRoot
+      || marker.database_path !== databasePath
+      || marker.singleton_path !== singletonPath
+      || BigInt(marker.state_dev) !== BigInt(device)
+      || BigInt(marker.database_ino) !== numericBigInt(database.ino)
+      || BigInt(marker.database_birthtime_ns) !== numericBigInt(database.birthtimeNs)
+      || BigInt(marker.singleton_ino) !== numericBigInt(singleton.ino)
+      || BigInt(marker.singleton_birthtime_ns) !== numericBigInt(singleton.birthtimeNs)
+      || Number(marker.state_uid) !== stateUid
+      || Number(marker.state_gid) !== stateGid) {
+    refuse('the durable-state files do not match their initialization marker');
+  }
+  return Object.freeze({ marker, database, singleton });
+}
+
+function createEmptyStateFile(filename, { uid, gid, device }) {
+  let descriptor;
+  let created;
+  try {
+    descriptor = fs.openSync(
+      filename,
+      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL
+        | (fs.constants.O_NOFOLLOW ?? 0),
+      0o600,
+    );
+    created = fs.fstatSync(descriptor, { bigint: true });
+    fs.fchownSync(descriptor, uid, gid);
+    fs.fchmodSync(descriptor, 0o600);
+    const initialized = fs.fstatSync(descriptor, { bigint: true });
+    if (!initialized.isFile() || initialized.nlink !== 1n || initialized.size !== 0n
+        || initialized.uid !== BigInt(uid) || initialized.gid !== BigInt(gid)
+        || (initialized.mode & 0o7777n) !== 0o600n
+        || initialized.dev !== BigInt(device)) {
+      refuse(`new durable-state file ${filename} has unsafe metadata`);
+    }
+    fs.fsyncSync(descriptor);
+    return initialized;
+  } catch (error) {
+    if (created && existsEvenAsLink(filename)) {
+      const candidate = fs.lstatSync(filename, { bigint: true });
+      if (candidate.dev === created.dev && candidate.ino === created.ino) fs.unlinkSync(filename);
+    }
+    throw error;
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+  }
+}
+
+function cleanupExactFile(filename, metadata) {
+  if (!metadata || !existsEvenAsLink(filename)) return;
+  const candidate = fs.lstatSync(filename, { bigint: true });
+  if (candidate.dev === metadata.dev && candidate.ino === metadata.ino) fs.unlinkSync(filename);
+}
+
+function assertFreshStateRoot(stateRoot, { markerUid, markerGid }) {
+  const entries = fs.readdirSync(stateRoot);
+  for (const entry of entries) {
+    if (entry !== 'lost+found') refuse('an unmarked durable-state mount is not empty');
+    const lostFound = path.join(stateRoot, entry);
+    inspectExactPath(lostFound, {
+      type: 'directory', uid: markerUid, gid: markerGid, mode: 0o700,
+    });
+    if (fs.readdirSync(lostFound).length !== 0) {
+      refuse('the unmarked durable-state mount has recovered filesystem content');
+    }
+  }
+}
+
+function recoverPublishedMarkerCompanion({
+  stateRoot,
+  configRoot,
+  markerPath,
+  databasePath,
+  singletonPath,
+  stateUid,
+  stateGid,
+  markerUid,
+  markerGid,
+  expectedDevice,
+}) {
+  const marker = inspectExactPath(markerPath, {
+    type: 'file', uid: markerUid, gid: markerGid, mode: 0o444, nlink: 2,
+  });
+  const companions = fs.readdirSync(configRoot)
+    .filter((entry) => entry.startsWith('.STATE_INITIALIZED.tmp.'))
+    .map((entry) => path.join(configRoot, entry))
+    .filter((candidate) => {
+      const metadata = fs.lstatSync(candidate, { bigint: true });
+      return metadata.dev === marker.dev && metadata.ino === marker.ino;
+    });
+  if (companions.length !== 1) {
+    refuse('the published state marker has no unique construction companion');
+  }
+  inspectExactPath(companions[0], {
+    type: 'file', uid: markerUid, gid: markerGid, mode: 0o444, nlink: 2,
+  });
+  verifyInitializedStateFiles({
+    stateRoot, configRoot, markerPath, databasePath, singletonPath,
+    stateUid, stateGid, markerUid, markerGid, expectedDevice, markerNlink: 2,
+  });
+  fs.unlinkSync(companions[0]);
+  syncDirectory(configRoot);
+  return verifyInitializedStateFiles({
+    stateRoot, configRoot, markerPath, databasePath, singletonPath,
+    stateUid, stateGid, markerUid, markerGid, expectedDevice,
+  });
+}
+
+export function initializeStateFiles({
+  stateRoot = STATE_ROOT,
+  configRoot = CONFIG_ROOT,
+  markerPath = STATE_MARKER,
+  databasePath = STATE_DATABASE,
+  singletonPath = STATE_SINGLETON,
+  stateUid,
+  stateGid,
+  markerUid = 0,
+  markerGid = 0,
+  expectedDevice = null,
+} = {}) {
+  const state = inspectExactPath(stateRoot, {
+    type: 'directory', uid: stateUid, gid: stateGid, mode: 0o700,
+  });
+  inspectExactPath(configRoot, {
+    type: 'directory', uid: markerUid, gid: markerGid, mode: 0o700,
+  });
+  const device = expectedDevice ?? numericBigInt(state.dev);
+  if (device === null || numericBigInt(state.dev) !== BigInt(device)) {
+    refuse('the durable-state mount identity changed before initialization');
+  }
+  if (existsEvenAsLink(markerPath)) {
+    const marker = fs.lstatSync(markerPath, { bigint: true });
+    if (marker.nlink === 2n) {
+      return Object.freeze({
+        created: false,
+        ...recoverPublishedMarkerCompanion({
+          stateRoot, configRoot, markerPath, databasePath, singletonPath,
+          stateUid, stateGid, markerUid, markerGid, expectedDevice: device,
+        }),
+      });
+    }
+    return Object.freeze({
+      created: false,
+      ...verifyInitializedStateFiles({
+        stateRoot, configRoot, markerPath, databasePath, singletonPath,
+        stateUid, stateGid, markerUid, markerGid, expectedDevice: device,
+      }),
+    });
+  }
+  assertFreshStateRoot(stateRoot, { markerUid, markerGid });
+  if (existsEvenAsLink(databasePath) || existsEvenAsLink(singletonPath)) {
+    refuse('unmarked durable-state database files already exist');
+  }
+
+  let database;
+  let singleton;
+  let temporary;
+  let temporaryMetadata;
+  let markerPublished = false;
+  try {
+    database = createEmptyStateFile(databasePath, { uid: stateUid, gid: stateGid, device });
+    singleton = createEmptyStateFile(singletonPath, { uid: stateUid, gid: stateGid, device });
+    syncDirectory(stateRoot);
+    const payload = stateMarkerPayload({
+      stateRoot, databasePath, singletonPath, stateUid, stateGid, database, singleton,
+    });
+    temporary = path.join(
+      configRoot,
+      `.STATE_INITIALIZED.tmp.${process.pid}.${Date.now()}`,
+    );
+    let descriptor;
+    try {
+      descriptor = fs.openSync(
+        temporary,
+        fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL
+          | (fs.constants.O_NOFOLLOW ?? 0),
+        0o400,
+      );
+      fs.fchownSync(descriptor, markerUid, markerGid);
+      fs.writeFileSync(descriptor, payload, 'utf8');
+      fs.fchmodSync(descriptor, 0o444);
+      temporaryMetadata = fs.fstatSync(descriptor, { bigint: true });
+      if (!temporaryMetadata.isFile() || temporaryMetadata.nlink !== 1n
+          || temporaryMetadata.uid !== BigInt(markerUid)
+          || temporaryMetadata.gid !== BigInt(markerGid)
+          || (temporaryMetadata.mode & 0o7777n) !== 0o444n
+          || temporaryMetadata.size !== BigInt(Buffer.byteLength(payload))) {
+        refuse('the state initialization marker staging file is unsafe');
+      }
+      fs.fsyncSync(descriptor);
+    } finally {
+      if (descriptor !== undefined) fs.closeSync(descriptor);
+    }
+    fs.linkSync(temporary, markerPath);
+    markerPublished = true;
+    syncDirectory(configRoot);
+    fs.unlinkSync(temporary);
+    temporary = null;
+    syncDirectory(configRoot);
+    return Object.freeze({
+      created: true,
+      ...verifyInitializedStateFiles({
+        stateRoot, configRoot, markerPath, databasePath, singletonPath,
+        stateUid, stateGid, markerUid, markerGid, expectedDevice: device,
+      }),
+    });
+  } catch (error) {
+    cleanupExactFile(temporary, temporaryMetadata);
+    if (!markerPublished) {
+      cleanupExactFile(singletonPath, singleton);
+      cleanupExactFile(databasePath, database);
+      try { syncDirectory(stateRoot); } catch {}
+    }
+    throw error;
+  }
+}
+
+export function sourceCheck(sourceRoot = path.dirname(fileURLToPath(import.meta.url))) {
+  const sysusers = path.join(sourceRoot, 'teleagent-realtime-sip-gateway.sysusers');
+  const tmpfiles = path.join(sourceRoot, 'teleagent-realtime-sip-gateway.tmpfiles');
+  const service = path.join(sourceRoot, 'teleagent-realtime-sip-gateway.service');
+  for (const [filename, mode] of [[sysusers, 0o644], [tmpfiles, 0o644], [service, 0o644]]) {
+    const metadata = fs.lstatSync(filename);
+    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1
+        || ![mode, mode & 0o555].includes(metadata.mode & 0o777)
+        || (metadata.mode & 0o022) !== 0) {
+      refuse(`reviewed source asset ${path.basename(filename)} has unsafe metadata`);
+    }
+  }
+  validateSysusersSource(fs.readFileSync(sysusers, 'utf8'));
+  validateTmpfilesSource(fs.readFileSync(tmpfiles, 'utf8'));
+  validateServiceSource(fs.readFileSync(service, 'utf8'));
+  return true;
+}
+
+function boundedMetadata(metadata, { min = 0n, max, label }) {
+  const size = numericBigInt(metadata.size);
+  if (size === null || size < min || size > max) refuse(`${label} has an unsafe size`);
+}
+
+export function validateActivationGate({
+  activation,
+  lstat = fs.lstatSync,
+  realpath = fs.realpathSync,
+  readConfiguration = () => readBoundedExactFile(CONFIG_ENV, {
+    uid: 0, gid: 0, mode: 0o600, maxBytes: 64n * 1024n,
+  }),
+} = {}) {
+  const inspection = { lstat, realpath };
+  if (!activation) {
+    try {
+      lstat(SENTINEL);
+      refuse('the activation sentinel must remain absent');
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+    }
+    return true;
+  }
+  const sentinel = inspectExactPath(SENTINEL, {
+    type: 'file', uid: 0, gid: 0, mode: 0o600, nlink: 1,
+  }, inspection);
+  boundedMetadata(sentinel, { max: 128n, label: 'the activation sentinel' });
+  const configuration = inspectExactPath(CONFIG_ENV, {
+    type: 'file', uid: 0, gid: 0, mode: 0o600, nlink: 1,
+  }, inspection);
+  boundedMetadata(configuration, {
+    min: 1n, max: 64n * 1024n, label: 'the non-secret SIP configuration file',
+  });
+  validateRuntimeConfigurationSource(readConfiguration(CONFIG_ENV));
+  inspectExactPath(CREDENTIAL_ROOT, {
+    type: 'directory', uid: 0, gid: 0, mode: 0o700,
+  }, inspection);
+  for (const filename of CREDENTIALS) {
+    const credential = inspectExactPath(filename, {
+      type: 'file', uid: 0, gid: 0, mode: 0o400, nlink: 1,
+    }, inspection);
+    boundedMetadata(credential, {
+      min: 1n, max: 8_192n, label: `credential metadata for ${filename}`,
+    });
+  }
+  return true;
+}
+
+function loadedSystemdProperty(name) {
+  const result = spawnSync(SYSTEMCTL, [
+    'show', 'teleagent-realtime-sip-gateway.service', `--property=${name}`, '--value',
+  ], {
+    encoding: 'utf8',
+    env: { LC_ALL: 'C', PATH: '/usr/sbin:/usr/bin:/sbin:/bin' },
+    maxBuffer: 8_192,
+    timeout: 5_000,
+  });
+  if (result.status !== 0 || result.signal !== null || result.error
+      || Buffer.byteLength(result.stdout ?? '', 'utf8') > 4_096
+      || /\r/u.test(result.stdout ?? '')) {
+    refuse(`loaded systemd property ${name} is unavailable`);
+  }
+  const value = result.stdout.endsWith('\n') ? result.stdout.slice(0, -1) : result.stdout;
+  if (value.includes('\n')) refuse(`loaded systemd property ${name} is malformed`);
+  return value;
+}
+
+export function verifyLoadedSystemdPolicy({ queryProperty = loadedSystemdProperty } = {}) {
+  const expected = new Map([
+    ['LoadState', 'loaded'],
+    ['FragmentPath', INSTALLED_UNIT],
+    ['NeedDaemonReload', 'no'],
+    ['UnitFileState', 'static'],
+    ['DropInPaths', ''],
+    ['User', ACCOUNT],
+    ['Group', ACCOUNT],
+  ]);
+  for (const [name, value] of expected) {
+    if (queryProperty(name) !== value) {
+      refuse(`loaded systemd property ${name} does not match installed dormant policy`);
+    }
+  }
+  return true;
+}
+
+function installedDiskPolicyCheck({ activation }) {
+  if (process.getuid() !== 0) refuse('the installed identity check requires root');
+  validateInstalledManifestAssets(readBoundedRootFile(INSTALLED_MANIFEST, 0o444));
+  const identity = validateIdentityRecords(
+    readBoundedRootFile('/etc/passwd', 0o644),
+    readBoundedRootFile('/etc/group', 0o644),
+  );
+  validateSysusersSource(readBoundedRootFile(INSTALLED_SYSUSERS, 0o644));
+  validateTmpfilesSource(readBoundedRootFile(INSTALLED_TMPFILES, 0o644));
+  validateServiceSource(readBoundedRootFile(INSTALLED_UNIT, 0o644));
+  inspectExactPath(CONFIG_ROOT, { type: 'directory', uid: 0, gid: 0, mode: 0o700 });
+  validateActivationGate({ activation });
+  const storage = inspectInstalledStorage(identity);
+  return Object.freeze({ identity, storage });
+}
+
+export function verifyInstalledModePolicy(mode, {
+  verifyLoadedPolicy = verifyLoadedSystemdPolicy,
+  verifyDiskPolicy,
+} = {}) {
+  if (![
+    '--initialize-empty-state', '--installed-check', '--activation-check',
+  ].includes(mode) || typeof verifyDiskPolicy !== 'function') {
+    refuse('the installed verification mode is invalid');
+  }
+  // This must run for disabled initialization/check as well as activation. A
+  // drop-in capable of replacing ExecStartPre must be rejected before an
+  // installer or aggregate can attest that the dormant unit is safe.
+  verifyLoadedPolicy();
+  return verifyDiskPolicy();
+}
+
+function installedPolicyCheck({ activation, mode }) {
+  return verifyInstalledModePolicy(mode, {
+    verifyDiskPolicy: () => installedDiskPolicyCheck({ activation }),
+  });
+}
+
+export function initializeInstalledState() {
+  const { identity, storage } = installedPolicyCheck({
+    activation: false,
+    mode: '--initialize-empty-state',
+  });
+  initializeStateFiles({
+    stateUid: identity.uid,
+    stateGid: identity.gid,
+    expectedDevice: storage.rootDev,
+  });
+  return identity;
+}
+
+export function installedCheck() {
+  const { identity, storage } = installedPolicyCheck({
+    activation: false,
+    mode: '--installed-check',
+  });
+  verifyInitializedStateFiles({
+    stateUid: identity.uid,
+    stateGid: identity.gid,
+    expectedDevice: storage.rootDev,
+  });
+  return identity;
+}
+
+export function activationCheck() {
+  const { identity, storage } = installedPolicyCheck({
+    activation: true,
+    mode: '--activation-check',
+  });
+  verifyInitializedStateFiles({
+    stateUid: identity.uid,
+    stateGid: identity.gid,
+    expectedDevice: storage.rootDev,
+  });
+  return identity;
+}
+
+function main() {
+  process.env.PATH = '/usr/sbin:/usr/bin:/sbin:/bin';
+  for (const name of [
+    'ENV', 'BASH_ENV', 'CDPATH', 'LD_PRELOAD', 'LD_LIBRARY_PATH', 'LD_AUDIT',
+    'GCONV_PATH', 'NODE_OPTIONS', 'NODE_PATH', 'NODE_EXTRA_CA_CERTS',
+    'NODE_TLS_REJECT_UNAUTHORIZED', 'NODE_USE_ENV_PROXY', 'PYTHONPATH', 'PERL5LIB',
+    'RUBYOPT', 'SSLKEYLOGFILE', 'SSL_CERT_FILE', 'SSL_CERT_DIR', 'HTTP_PROXY',
+    'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'all_proxy',
+    'no_proxy', 'OPENAI_API_KEY', 'OPENAI_WEBHOOK_SECRET', 'SIP_PBX_AUTH_SECRET',
+    'OPENAI_API_KEY_FILE', 'OPENAI_WEBHOOK_SECRET_FILE', 'SIP_PBX_AUTH_SECRET_FILE',
+  ]) delete process.env[name];
+  const mode = process.argv[2];
+  const installedModes = [
+    '--initialize-empty-state', '--installed-check', '--activation-check',
+  ];
+  const immutableActivationMode = '--immutable-activation-check';
+  if (process.argv.length !== 3 ||
+      !['--source-check', immutableActivationMode, ...installedModes].includes(mode)) {
+    refuse('usage: verify-realtime-sip-gateway --source-check|--initialize-empty-state|--installed-check|--activation-check|--immutable-activation-check');
+  }
+  const invoked = fs.realpathSync(process.argv[1]);
+  if (mode === immutableActivationMode) {
+    requireImmutableActivationPreflight();
+    activationCheck();
+    process.stdout.write('SIP_GATEWAY_ACTIVATION_OK\n');
+    return;
+  }
+  if (installedModes.includes(mode)) {
+    if (invoked !== INSTALLED_VERIFIER) refuse('use the fixed installed verifier');
+    inspectExactPath(INSTALLED_VERIFIER, {
+      type: 'file', uid: 0, gid: 0, mode: 0o755, nlink: 1,
+    });
+    if (mode === '--initialize-empty-state') {
+      initializeInstalledState();
+      process.stdout.write('SIP_GATEWAY_STATE_INITIALIZED_OK\n');
+    } else if (mode === '--activation-check') {
+      activationCheck();
+      process.stdout.write('SIP_GATEWAY_ACTIVATION_OK\n');
+    } else {
+      installedCheck();
+      process.stdout.write('SIP_GATEWAY_IDENTITY_OK\n');
+    }
+    return;
+  }
+  if (invoked !== fileURLToPath(import.meta.url)) refuse('source check entrypoint changed');
+  sourceCheck();
+  process.stdout.write('SIP_GATEWAY_IDENTITY_SOURCE_OK\n');
+}
+
+if (process.argv[1] && fs.realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  try {
+    main();
+  } catch (error) {
+    process.stderr.write(`${error.message}\n`);
+    process.exitCode = 77;
+  }
+}

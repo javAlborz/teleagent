@@ -25,6 +25,6 @@ export async function configPathCommand() {
   console.log(chalk.bold(`  ${configPath}`));
   console.log();
 
-  console.log(chalk.yellow('⚠️  Warning: This file contains API keys and passwords'));
+  console.log(chalk.yellow('⚠️  Warning: This file contains API keys and scoped runtime credentials'));
   console.log(chalk.gray('  Do not share or commit this file to version control\n'));
 }

@@ -1,0 +1,55 @@
+#!/bin/sh
+set -eu
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+unset ENV BASH_ENV CDPATH LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT GCONV_PATH \
+  NODE_OPTIONS NODE_PATH PYTHONPATH PERL5LIB RUBYOPT \
+  VOICE_APPROVAL_KEY_ID VOICE_APPROVAL_PUBLIC_KEY_FILE \
+  PRIVILEGED_ACTION_API_TOKEN PRIVILEGED_ACTION_PROXY_ENABLED \
+  PRIVILEGED_ACTION_PROXY_SOCKET_PATH PRIVILEGED_ACTION_PROXY_TIMEOUT_MS
+IFS=$(/usr/bin/printf ' \t\nx')
+IFS=${IFS%x}
+umask 077
+
+fail() {
+  /usr/bin/printf 'Teleagent control-plane verification refused: %s\n' "$1" >&2
+  exit 77
+}
+
+root_prefix=
+if [ "${TELEAGENT_CONTROL_PLANE_INSTALL_TEST_ONLY:-}" = 1 ]; then
+  root_prefix=$(/usr/bin/readlink -f -- \
+    "${TELEAGENT_CONTROL_PLANE_INSTALL_TEST_ROOT:-/nonexistent}")
+  case "$root_prefix" in
+    /tmp/teleagent-control-plane-install-*) ;;
+    *) fail 'the isolated test root is outside the allowed namespace' ;;
+  esac
+fi
+
+invoked=$(/usr/bin/readlink -f -- "$0")
+case "${1:-}" in
+  --source-check)
+    [ "$#" -eq 1 ] || fail 'unexpected source-check arguments'
+    source_root=$(/usr/bin/dirname -- "$invoked")
+    [ "$(/usr/bin/basename -- "$invoked")" = verify-teleagent-control-plane ] ||
+      fail 'the source verifier entrypoint is unreviewed'
+    exec "$source_root/teleagent-control-plane-install" --source-check
+    ;;
+  --installed-check)
+    [ "$#" -eq 1 ] || fail 'unexpected installed-check arguments'
+    fixed="$root_prefix/usr/local/libexec/verify-teleagent-control-plane"
+    installer="$root_prefix/usr/local/libexec/teleagent-control-plane-install"
+    [ "$invoked" = "$fixed" ] || fail 'use the fixed installed verifier entrypoint'
+    if [ -z "$root_prefix" ]; then
+      [ "$(/usr/bin/id -u)" -eq 0 ] || fail 'root is required for installed verification'
+      expected=0:0:755:1
+    else
+      expected="$(/usr/bin/id -u):$(/usr/bin/id -g):755:1"
+    fi
+    [ "$(/usr/bin/stat -c '%u:%g:%a:%h' "$fixed")" = "$expected" ] ||
+      fail 'the fixed installed verifier metadata is unsafe'
+    exec "$installer" --check
+    ;;
+  *) fail 'usage: verify-teleagent-control-plane --source-check|--installed-check' ;;
+esac

@@ -155,6 +155,7 @@ import json
 import os
 import urllib.request
 import urllib.error
+import uuid
 from typing import Optional, Dict, Any
 
 # ============================================================
@@ -292,17 +293,20 @@ def sanitize_message(message: str, max_words: int = 200) -> str:
 # ============================================================
 
 def _auth_headers() -> Dict[str, str]:
+    if not API_TOKEN:
+        raise RuntimeError("OUTBOUND_API_TOKEN is required")
     headers = {'Content-Type': 'application/json'}
-    if API_TOKEN:
-        headers['Authorization'] = f'Bearer {API_TOKEN}'
+    headers['Authorization'] = f'Bearer {API_TOKEN}'
     return headers
 
 def initiate_call(to: str, message: str, caller_id: str = DEFAULT_CALLER_ID,
                   mode: str = "announce", device: Optional[str] = None) -> Dict[str, Any]:
     """Initiate an outbound call via the Voice API."""
     url = f"{API_BASE_URL}/api/outbound-call"
+    idempotency_key = f"claude-outbound:{uuid.uuid4()}"
 
     payload = {
+        "idempotencyKey": idempotency_key,
         "to": to,
         "message": sanitize_message(message),
         "callerId": caller_id,
@@ -312,10 +316,12 @@ def initiate_call(to: str, message: str, caller_id: str = DEFAULT_CALLER_ID,
 
     try:
         request_body = json.dumps(payload).encode('utf-8')
+        headers = _auth_headers()
+        headers['Idempotency-Key'] = idempotency_key
         req = urllib.request.Request(
             url,
             data=request_body,
-            headers=_auth_headers(),
+            headers=headers,
             method='POST'
         )
 

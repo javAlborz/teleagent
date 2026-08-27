@@ -1,0 +1,99 @@
+{
+  "version": 1,
+  "enabled": true,
+  "max_timeout_seconds": 300,
+  "adapters": {
+    "systemctl": {
+      "enabled": true,
+      "executable": "/usr/bin/systemctl",
+      "units": {}
+    },
+    "journalctl": {
+      "enabled": true,
+      "executable": "/usr/bin/journalctl",
+      "units": ["teleagent-privileged-action.service"],
+      "max_lines": 200
+    },
+    "ssh": {
+      "enabled": true,
+      "executable": "/usr/bin/ssh",
+      "hosts": {
+        "hera": {
+          "os": "linux",
+          "actions": ["hostname", "uptime"],
+          "systemd_units": [],
+          "exact_rules": [],
+          "allowed_remote_executable_roots": ["/usr/bin", "/usr/local/bin"],
+          "allow_sudo": false
+        },
+        "aphrodite": {
+          "os": "linux",
+          "actions": ["hostname", "uptime"],
+          "systemd_units": [],
+          "exact_rules": [],
+          "allowed_remote_executable_roots": ["/usr/bin", "/usr/local/bin"],
+          "allow_sudo": false
+        },
+        "dionysus": {
+          "os": "linux",
+          "actions": ["hostname", "uptime"],
+          "systemd_units": [],
+          "exact_rules": [],
+          "allowed_remote_executable_roots": ["/usr/bin", "/usr/local/bin"],
+          "allow_sudo": false
+        },
+        "prometheus": {
+          "os": "linux",
+          "actions": ["hostname", "uptime"],
+          "systemd_units": [],
+          "exact_rules": [],
+          "allowed_remote_executable_roots": ["/usr/bin", "/usr/local/bin"],
+          "allow_sudo": false
+        },
+        "atlas": {
+          "os": "linux",
+          "actions": ["hostname", "uptime"],
+          "systemd_units": [],
+          "exact_rules": [],
+          "allowed_remote_executable_roots": ["/usr/bin", "/usr/local/bin"],
+          "allow_sudo": false
+        },
+        "hephaestus": {
+          "os": "linux",
+          "actions": ["hostname", "uptime"],
+          "systemd_units": [],
+          "exact_rules": [],
+          "allowed_remote_executable_roots": ["/usr/bin", "/usr/local/bin"],
+          "allow_sudo": false
+        },
+        "zeus": {
+          "os": "windows",
+          "actions": ["hostname"],
+          "systemd_units": [],
+          "exact_rules": [],
+          "allowed_remote_executable_roots": ["C:/Windows/System32"],
+          "allow_sudo": false
+        }
+      }
+    },
+    "kubectl": {
+      "enabled": true,
+      "ssh_executable": "/usr/bin/ssh",
+      "host": "hera",
+      "remote_kubectl": "/usr/local/bin/kubectl",
+      "namespaces": {
+        "default": {
+          "get": ["pod/*", "service/*", "deployment/*", "statefulset/*", "daemonset/*"],
+          "rollout_restart": [],
+          "scale": [],
+          "max_replicas": 0
+        }
+      }
+    },
+    "argv": {
+      "enabled": false,
+      "allowed_executable_roots": ["/usr/bin", "/usr/local/bin"],
+      "exact_rules": []
+    }
+  }
+}

@@ -45,11 +45,12 @@ install_nodejs() {
   echo "📦 Installing Node.js..."
   case "$PKG_MANAGER" in
     apt)
-      # Install Node.js 20.x LTS via NodeSource
-      curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+      # Install the supported Node.js 24 LTS line via NodeSource.
+      curl -fsSL https://deb.nodesource.com/setup_24.x | sudo -E bash -
       sudo apt-get install -y nodejs
       ;;
     dnf)
+      curl -fsSL https://rpm.nodesource.com/setup_24.x | sudo bash -
       sudo dnf install -y nodejs npm
       ;;
     pacman)
@@ -64,6 +65,15 @@ install_nodejs() {
       exit 1
       ;;
   esac
+  if ! command -v node &> /dev/null; then
+    echo "✗ Node.js installation did not provide a node executable"
+    exit 1
+  fi
+  installed_node_major="$(node -p 'Number(process.versions.node.split(".")[0])')"
+  if [[ ! "${installed_node_major}" =~ ^[0-9]+$ || "${installed_node_major}" -lt 24 ]]; then
+    echo "✗ The package manager installed unsupported Node.js $(node -v); Node.js 24+ is required"
+    exit 1
+  fi
   echo "✓ Node.js installed: $(node -v)"
 }
 
@@ -160,8 +170,8 @@ if ! command -v node &> /dev/null; then
   fi
 else
   NODE_VERSION=$(node -v | cut -d'v' -f2 | cut -d'.' -f1)
-  if [ "$NODE_VERSION" -lt 18 ]; then
-    echo "✗ Node.js 18+ required (found v$NODE_VERSION)"
+  if [ "$NODE_VERSION" -lt 24 ]; then
+    echo "✗ Node.js 24+ required for Teleagent services (found v$NODE_VERSION)"
     read -p "  Upgrade Node.js automatically? (Y/n) " -n 1 -r
     echo
     if [[ ! $REPLY =~ ^[Nn]$ ]]; then
@@ -229,7 +239,7 @@ fi
 echo ""
 echo "Installing dependencies..."
 cd "$INSTALL_DIR/cli"
-npm install --silent --production
+npm ci --silent --omit=dev
 
 # Create symlink
 echo ""

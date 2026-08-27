@@ -1,0 +1,65 @@
+[Unit]
+Description=Teleagent isolated %i provider launch supervisor
+Requires=teleagent-provider-model-apparmor.service teleagent-provider-supervisor@%i.socket teleagent-provider-egress@%i.socket teleagent-provider-egress-control@%i.socket
+After=local-fs.target teleagent-provider-model-apparmor.service teleagent-provider-supervisor@%i.socket teleagent-provider-egress@%i.socket teleagent-provider-egress-control@%i.socket
+RequiresMountsFor=/var/lib/teleagent-provider-plane
+ConditionPathExists=/etc/teleagent/worker-session/ENABLE
+
+[Service]
+Type=simple
+Slice=teleagent-provider.slice
+User=teleagent-%i-supervisor
+Group=teleagent-%i-supervisor
+UMask=0077
+WorkingDirectory=/
+LoadCredential=teleagent-release-gate:/run/teleagent-release-gate/verified.json
+Environment=HOME=/var/lib/teleagent-provider-plane/%i-supervisor
+Environment=PATH=/usr/sbin:/usr/bin:/sbin:/bin
+Environment=LANG=C.UTF-8
+Environment=LC_ALL=C.UTF-8
+Environment=TELEAGENT_PROVIDER=%i
+ExecStartPre=+/usr/bin/env -i HOME=/var/empty PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 /usr/local/libexec/verify-teleagent-release-closure --check-start-gate
+ExecStartPre=+/usr/bin/python3 -I /usr/local/libexec/verify-teleagent-release-closure --preflight-component provider-supervisor-%i ${CREDENTIALS_DIRECTORY}/teleagent-release-gate
+ExecStart=/usr/bin/python3 -I /usr/local/libexec/verify-teleagent-release-closure --start-component provider-supervisor-%i ${CREDENTIALS_DIRECTORY}/teleagent-release-gate
+Restart=on-failure
+RestartSec=2s
+KillMode=control-group
+TimeoutStopSec=30s
+LimitCORE=0
+MemoryHigh=384M
+MemoryMax=512M
+MemorySwapMax=0
+TasksMax=128
+CPUQuota=25%
+CPUWeight=100
+IOAccounting=yes
+IOWeight=100
+
+# This UID never runs model/tool code and never receives a provider bearer.
+# The sole privilege crossing is the exact root-owned boundary controller,
+# which creates one independently killable transient cgroup per launch.
+NoNewPrivileges=no
+AmbientCapabilities=
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadOnlyPaths=/opt/teleagent/releases /opt/teleagent/agent-tools /usr/local/libexec /srv/teleagent-agent-workspaces
+ReadWritePaths=/var/lib/teleagent-provider-plane /run/teleagent-provider-capabilities /run/systemd/system
+InaccessiblePaths=/var/lib/teleagent-control /var/lib/teleagent-worker-state /var/lib/teleagent-privileged-action -/var/lib/teleagent-claude-worker -/var/lib/teleagent-codex-worker /etc/teleagent/provider-egress-secrets -/etc/teleagent/credentials -/etc/teleagent-control -/etc/teleagent/controller -/etc/teleagent/privileged-action -/etc/teleagent-voice -/run/secrets /run/teleagent-worker-session /run/teleagent-privileged-action /opt/teleagent/current/voice-app/audio /opt/teleagent/current/voice-app/static
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictRealtime=yes
+RestrictNamespaces=yes
+RestrictSUIDSGID=no
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native
+
+# Deliberately dormant: no [Install] section.

@@ -1,0 +1,510 @@
+#!/bin/bash
+set -euo pipefail
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+unset ENV BASH_ENV CDPATH LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT GCONV_PATH \
+  NODE_OPTIONS NODE_PATH NODE_EXTRA_CA_CERTS NODE_TLS_REJECT_UNAUTHORIZED \
+  NODE_USE_ENV_PROXY PYTHONPATH PERL5LIB RUBYOPT SSLKEYLOGFILE SSL_CERT_FILE \
+  SSL_CERT_DIR HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy \
+  all_proxy no_proxy OPENAI_API_KEY OPENAI_WEBHOOK_SECRET SIP_PBX_AUTH_SECRET \
+  ANTHROPIC_API_KEY CLAUDE_API_KEY CLAUDE_API_TOKEN CODEX_API_KEY API_KEY \
+  API_TOKEN AUTH_TOKEN ACCESS_TOKEN PROVIDER_TOKEN PROVIDER_SECRET \
+  OPENAI_API_KEY_FILE OPENAI_WEBHOOK_SECRET_FILE SIP_PBX_AUTH_SECRET_FILE \
+  DOCKER_HOST DOCKER_CONTEXT DOCKER_CONFIG
+umask 077
+
+name=teleagent-voice-stack-install
+source_root=
+node_runtime=/usr/local/libexec/teleagent-node
+source_verifier=
+installed_verifier=/usr/local/libexec/verify-voice-stack-identity
+unit=teleagent-voice-stack.service
+slice_unit=teleagent-voice-containers.slice
+systemctl_bin=/usr/bin/systemctl
+sysusers_bin=/usr/bin/systemd-sysusers
+tmpfiles_bin=/usr/bin/systemd-tmpfiles
+docker_bin=/usr/bin/docker
+root_prefix=
+test_only=0
+docker_output=
+emergency_capture=
+requested_action=${1:-}
+declare -a voice_container_ids=()
+service_unit_properties=LoadState,ActiveState,SubState,UnitFileState,FragmentPath,NeedDaemonReload,DropInPaths,User,Group
+slice_unit_properties=LoadState,ActiveState,SubState,UnitFileState,FragmentPath,NeedDaemonReload,DropInPaths
+
+fail() {
+  printf 'Voice stack installation refused: %s\n' "$1" >&2
+  exit 77
+}
+
+validate_test_dependency() {
+  local filename=$1
+  [ -f "$filename" ] && [ ! -L "$filename" ] &&
+    [ "$(/usr/bin/readlink -f -- "$filename")" = "$filename" ] ||
+    fail 'a voice installer test dependency is unsafe'
+  [ "$(/usr/bin/stat -c '%u:%g:%a:%h' "$filename")" = \
+    "$(/usr/bin/id -u):$(/usr/bin/id -g):700:1" ] ||
+    fail 'a voice installer test dependency has unsafe metadata'
+  case "$filename" in "$root_prefix"/*) ;;
+    *) fail 'a voice installer test dependency escaped its fixture' ;;
+  esac
+}
+
+configure_environment() {
+  if [ "${TELEAGENT_VOICE_INSTALL_TEST_ONLY:-}" = 1 ]; then
+    [ "$(/usr/bin/id -u)" -ne 0 ] || fail 'the voice installer test lane forbids root'
+    root_prefix=$(/usr/bin/readlink -f -- "${TELEAGENT_VOICE_INSTALL_TEST_ROOT:-/nonexistent}")
+    case "$root_prefix" in /tmp/teleagent-voice-install-test-*) ;;
+      *) fail 'the voice installer test root is outside its fixed namespace' ;;
+    esac
+    [ -d "$root_prefix" ] && [ ! -L "$root_prefix" ] &&
+      [ "$(/usr/bin/stat -c '%u:%g:%a' "$root_prefix")" = \
+        "$(/usr/bin/id -u):$(/usr/bin/id -g):700" ] ||
+      fail 'the voice installer test root metadata is unsafe'
+    systemctl_bin=${TELEAGENT_VOICE_INSTALL_TEST_SYSTEMCTL:-}
+    installed_verifier=$root_prefix/usr/local/libexec/verify-voice-stack-identity
+    validate_test_dependency "$systemctl_bin"
+    validate_test_dependency "$installed_verifier"
+    if [ "$requested_action" = --emergency-cleanup ]; then
+      docker_bin=${TELEAGENT_VOICE_INSTALL_TEST_DOCKER:-}
+      validate_test_dependency "$docker_bin"
+    elif [ -n "${TELEAGENT_VOICE_INSTALL_TEST_DOCKER:-}" ]; then
+      fail 'the fake Docker dependency is restricted to emergency-cleanup tests'
+    fi
+    test_only=1
+    return
+  fi
+  [ -z "${TELEAGENT_VOICE_INSTALL_TEST_ONLY:-}" ] &&
+    [ -z "${TELEAGENT_VOICE_INSTALL_TEST_ROOT:-}" ] &&
+    [ -z "${TELEAGENT_VOICE_INSTALL_TEST_SYSTEMCTL:-}" ] &&
+    [ -z "${TELEAGENT_VOICE_INSTALL_TEST_DOCKER:-}" ] ||
+    fail 'voice installer test overrides require the isolated test lane'
+}
+
+host_path() {
+  printf '%s%s\n' "$root_prefix" "$1"
+}
+
+configure_environment
+
+resolve_source_bundle() {
+  local self app_root installed_entrypoint
+  case "$requested_action" in
+    --source-check|--install-disabled|--check) ;;
+    *) return ;;
+  esac
+  self=$(/usr/bin/readlink -f -- "$0") || fail 'the source entrypoint could not be resolved'
+  installed_entrypoint=$(host_path /usr/local/libexec/teleagent-voice-stack-install)
+  if [ "$self" = "$installed_entrypoint" ]; then
+    [ "$requested_action" = --check ] ||
+      fail 'source operations require an immutable release entrypoint'
+    source_root=$(/usr/bin/readlink -f -- \
+      "$(host_path /opt/teleagent/current/deploy/voice-stack)") ||
+      fail 'the installed check source directory could not be resolved'
+  else
+    [ "$(/usr/bin/basename -- "$self")" = "$name" ] ||
+      fail 'the source entrypoint is unreviewed'
+    source_root=$(/usr/bin/dirname -- "$self") ||
+      fail 'the source directory could not be resolved'
+  fi
+  app_root=$(/usr/bin/readlink -f -- "$source_root/../..") ||
+    fail 'the source release root could not be resolved'
+  [ "$source_root" = "$app_root/deploy/voice-stack" ] ||
+    fail 'the source bundle is outside one resolved release root'
+  source_verifier=$source_root/verify-voice-stack-identity
+}
+
+resolve_source_bundle
+systemctl_command=("$systemctl_bin")
+if [ "$test_only" -eq 0 ]; then
+  systemctl_command=(/usr/bin/env -i HOME=/var/empty PATH=/usr/sbin:/usr/bin:/sbin:/bin
+    LANG=C.UTF-8 LC_ALL=C.UTF-8 "$systemctl_bin")
+fi
+
+run_systemctl() {
+  "${systemctl_command[@]}" "$@"
+}
+
+target_unit=$(host_path /etc/systemd/system/teleagent-voice-stack.service)
+target_slice=$(host_path /etc/systemd/system/teleagent-voice-containers.slice)
+runtime_root=$(host_path /run/teleagent-voice-stack)
+installed_entrypoint=$(host_path /usr/local/libexec/teleagent-voice-stack-install)
+
+require_root() {
+  [ "$test_only" -eq 1 ] || [ "$(id -u)" -eq 0 ] || fail 'root is required'
+}
+
+cleanup_emergency_capture() {
+  if [ -n "$emergency_capture" ]; then
+    /usr/bin/rm -f -- "$emergency_capture"
+    emergency_capture=
+  fi
+}
+
+capture_docker() {
+  local label=$1
+  shift
+  local status=0 size last_byte unsafe_bytes
+  local -a command=("$docker_bin")
+  if [ "$test_only" -eq 0 ]; then
+    command=(/usr/bin/env -i HOME="$runtime_root" DOCKER_CONFIG="$runtime_root/docker-config"
+      PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 "$docker_bin")
+  fi
+  emergency_capture=$(/usr/bin/mktemp "$runtime_root/.emergency-cleanup.XXXXXX") ||
+    fail 'the emergency cleanup output capture could not be created'
+  /usr/bin/timeout --signal=TERM --kill-after=2s 20s \
+    "${command[@]}" "$@" 2>&1 |
+    /usr/bin/head -c 8193 >"$emergency_capture" || status=$?
+  size=$(/usr/bin/stat -c '%s' -- "$emergency_capture")
+  [ "$size" -le 8192 ] || fail "$label output exceeded its fixed byte bound"
+  [ "$status" -eq 0 ] || fail "$label failed or timed out"
+  if [ "$size" -gt 0 ]; then
+    last_byte=$(/usr/bin/od -An -tu1 -j "$((size - 1))" -N 1 -- "$emergency_capture")
+    unsafe_bytes=$(LC_ALL=C /usr/bin/tr -d '\012\040-\176' <"$emergency_capture" |
+      /usr/bin/wc -c)
+    [ "$last_byte" -eq 10 ] && [ "$unsafe_bytes" -eq 0 ] ||
+      fail "$label returned unsafe output framing"
+  fi
+  docker_output=$(/usr/bin/cat -- "$emergency_capture")
+  cleanup_emergency_capture
+}
+
+list_voice_container_ids() {
+  local identifier
+  local -A seen=()
+  voice_container_ids=()
+  capture_docker 'voice project enumeration' container ls --all --no-trunc --quiet \
+    --filter label=com.docker.compose.project=teleagent-voice
+  if [ -n "$docker_output" ]; then
+    while IFS= read -r identifier; do
+      [[ "$identifier" =~ ^[0-9a-f]{64}$ ]] ||
+        fail 'voice project enumeration returned an invalid container identity'
+      [ -z "${seen[$identifier]:-}" ] ||
+        fail 'voice project enumeration returned a duplicate container identity'
+      seen[$identifier]=1
+      voice_container_ids+=("$identifier")
+      [ "${#voice_container_ids[@]}" -le 16 ] ||
+        fail 'voice project enumeration exceeded its fixed container bound'
+    done <<<"$docker_output"
+  fi
+}
+
+remove_runtime_projection() {
+  local target
+  local -a secret_directories=()
+  local -a generated_files=()
+  shopt -s nullglob
+  secret_directories=("$runtime_root/voice-secrets" "$runtime_root"/voice-secrets.new-*)
+  generated_files=(
+    "$runtime_root/drachtio.conf.xml"
+    "$runtime_root/freeswitch-event-socket.conf.xml"
+    "$runtime_root"/drachtio.conf.xml.new-*
+    "$runtime_root"/freeswitch-event-socket.conf.xml.new-*
+  )
+  shopt -u nullglob
+  for target in "${secret_directories[@]}"; do
+    [ -e "$target" ] || [ -L "$target" ] || continue
+    ! /usr/bin/mountpoint -q -- "$target" ||
+      fail 'a runtime secret projection unexpectedly became a mountpoint'
+    /usr/bin/rm -rf --one-file-system -- "$target"
+  done
+  for target in "${generated_files[@]}"; do
+    [ -e "$target" ] || [ -L "$target" ] || continue
+    [ ! -d "$target" ] || [ -L "$target" ] ||
+      fail 'a generated voice configuration path became a directory'
+    /usr/bin/rm -f -- "$target"
+  done
+  /usr/bin/sync -- "$runtime_root"
+}
+
+emergency_cleanup() {
+  require_root
+  local expected_runtime_owner=0:0
+  if [ "$test_only" -eq 1 ]; then
+    expected_runtime_owner="$(/usr/bin/id -u):$(/usr/bin/id -g)"
+  fi
+  if [ "$test_only" -eq 0 ]; then
+    [ "$(/usr/bin/readlink -f -- "$0")" = "$installed_entrypoint" ] ||
+      fail 'emergency cleanup requires the fixed host-owned entrypoint'
+    [ -f "$docker_bin" ] && [ ! -L "$docker_bin" ] &&
+      [ "$(/usr/bin/readlink -f -- "$docker_bin")" = "$docker_bin" ] ||
+      fail 'the fixed Docker client is unsafe'
+    case "$(/usr/bin/stat -c '%u:%g:%a:%h' -- "$docker_bin")" in
+      0:0:755:1|0:0:555:1) ;;
+      *) fail 'the fixed Docker client metadata is unsafe' ;;
+    esac
+  fi
+  [ -d "$runtime_root" ] && [ ! -L "$runtime_root" ] &&
+    [ "$(/usr/bin/readlink -f -- "$runtime_root")" = "$runtime_root" ] &&
+    [ "$(/usr/bin/stat -c '%u:%g:%a' -- "$runtime_root")" = \
+      "${expected_runtime_owner}:700" ] ||
+    fail 'the emergency cleanup runtime root is unsafe'
+  trap cleanup_emergency_capture EXIT INT TERM
+  list_voice_container_ids
+  if [ "${#voice_container_ids[@]}" -gt 0 ]; then
+    capture_docker 'voice project removal' container rm --force "${voice_container_ids[@]}"
+  fi
+  list_voice_container_ids
+  [ "${#voice_container_ids[@]}" -eq 0 ] ||
+    fail 'emergency cleanup could not prove the voice project quiescent'
+  remove_runtime_projection
+  trap - EXIT INT TERM
+  cleanup_emergency_capture
+  printf 'VOICE_STACK_EMERGENCY_CLEANUP_OK\n'
+}
+
+assert_unit_truth() {
+  local queried_unit=$1 expected_fragment=$2 kind=$3 phase=$4 properties output
+  local capture capture_directory capture_status=0 capture_size
+  local last_byte unsafe_bytes
+  local -a query
+  local line key value load_state= active_state= sub_state= unit_file_state=
+  local fragment_path= need_reload= drop_in_paths= user= group=
+  local load_seen=0 active_seen=0 sub_seen=0 file_seen=0 fragment_seen=0
+  local reload_seen=0 dropin_seen=0 user_seen=0 group_seen=0 expected_counts
+  case "$kind" in
+    service) properties=$service_unit_properties; expected_counts=1:1:1:1:1:1:1:1:1 ;;
+    slice) properties=$slice_unit_properties; expected_counts=1:1:1:1:1:1:1:0:0 ;;
+    *) fail 'an internal voice unit kind is unreviewed' ;;
+  esac
+  if [ -n "$root_prefix" ]; then
+    capture_directory=$root_prefix
+  else
+    capture_directory=/run
+  fi
+  capture=$(/usr/bin/mktemp "$capture_directory/.teleagent-voice-unit-show.XXXXXX") ||
+    fail 'a voice unit state capture could not be created'
+  query=("${systemctl_command[@]}" show "$queried_unit" --property="$properties")
+  /usr/bin/timeout --signal=TERM --kill-after=1s 5s \
+    "${query[@]}" 2>/dev/null |
+    /usr/bin/head -c 4097 >"$capture" || capture_status=$?
+  capture_size=$(/usr/bin/stat -c '%s' -- "$capture")
+  if [ "$capture_size" -gt 4096 ]; then
+    /usr/bin/rm -f -- "$capture"
+    fail 'a voice unit state response is oversized'
+  fi
+  if [ "$capture_status" -ne 0 ]; then
+    /usr/bin/rm -f -- "$capture"
+    fail 'a voice unit state query failed'
+  fi
+  if [ "$capture_size" -eq 0 ]; then
+    /usr/bin/rm -f -- "$capture"
+    fail 'a voice unit state response is empty'
+  fi
+  last_byte=$(/usr/bin/od -An -tu1 -j "$((capture_size - 1))" -N 1 -- "$capture")
+  unsafe_bytes=$(LC_ALL=C /usr/bin/tr -d '\012\040-\176' <"$capture" | /usr/bin/wc -c)
+  if [ "$last_byte" -ne 10 ] || [ "$unsafe_bytes" -ne 0 ]; then
+    /usr/bin/rm -f -- "$capture"
+    fail 'a voice unit state response has unsafe framing'
+  fi
+  output=$(/usr/bin/cat -- "$capture")
+  /usr/bin/rm -f -- "$capture"
+  while IFS= read -r line; do
+    [ "${line#*=}" != "$line" ] || fail 'a voice unit state response is malformed'
+    key=${line%%=*}
+    value=${line#*=}
+    case "$key" in
+      LoadState) load_seen=$((load_seen + 1)); load_state=$value ;;
+      ActiveState) active_seen=$((active_seen + 1)); active_state=$value ;;
+      SubState) sub_seen=$((sub_seen + 1)); sub_state=$value ;;
+      UnitFileState) file_seen=$((file_seen + 1)); unit_file_state=$value ;;
+      FragmentPath) fragment_seen=$((fragment_seen + 1)); fragment_path=$value ;;
+      NeedDaemonReload) reload_seen=$((reload_seen + 1)); need_reload=$value ;;
+      DropInPaths) dropin_seen=$((dropin_seen + 1)); drop_in_paths=$value ;;
+      User) user_seen=$((user_seen + 1)); user=$value ;;
+      Group) group_seen=$((group_seen + 1)); group=$value ;;
+      *) fail 'a voice unit state response contains an unexpected property' ;;
+    esac
+  done <<<"$output"
+  [ "$load_seen:$active_seen:$sub_seen:$file_seen:$fragment_seen:$reload_seen:$dropin_seen:$user_seen:$group_seen" = \
+    "$expected_counts" ] || fail 'a voice unit state response is incomplete or ambiguous'
+  [ "$active_state:$sub_state" = inactive:dead ] ||
+    fail 'a voice unit is active, failed, or transitional'
+  case "$load_state:$phase" in
+    loaded:pre|loaded:installed)
+      [ "$unit_file_state" = static ] || fail 'a loaded voice unit is not static'
+      [ "$fragment_path" = "$expected_fragment" ] ||
+        fail 'a loaded voice unit uses an unreviewed fragment'
+      [ "$need_reload" = no ] || fail 'a loaded voice unit needs a daemon reload'
+      [ -z "$drop_in_paths" ] || fail 'a loaded voice unit has an unreviewed drop-in'
+      if [ "$kind" = service ]; then
+        [ "$user:$group" = root:root ] || fail 'the loaded voice service identity drifted'
+      fi
+      ;;
+    not-found:pre)
+      [ -z "$unit_file_state$fragment_path$drop_in_paths$user$group" ] &&
+        [ "$need_reload" = no ] || fail 'an absent voice unit has stale manager state'
+      [ ! -e "$expected_fragment" ] && [ ! -L "$expected_fragment" ] ||
+        fail 'an absent voice unit conflicts with an installed unit file'
+      ;;
+    *) fail 'a voice unit load state is unavailable or unsafe' ;;
+  esac
+}
+
+assert_inactive() {
+  assert_unit_truth "$unit" "$target_unit" service pre
+  assert_slice_inactive_or_absent
+}
+
+assert_slice_inactive_or_absent() {
+  assert_unit_truth "$slice_unit" "$target_slice" slice pre
+}
+
+assert_slice_installed_dormant() {
+  assert_unit_truth "$slice_unit" "$target_slice" slice installed
+}
+
+assert_disabled() {
+  assert_unit_truth "$unit" "$target_unit" service installed
+  assert_slice_installed_dormant
+}
+
+source_check() {
+  [ -x "$node_runtime" ] || fail 'the fixed Node runtime is unavailable'
+  [ -f "$source_verifier" ] && [ ! -L "$source_verifier" ] ||
+    fail 'the source identity verifier is unsafe'
+  "$node_runtime" "$source_verifier" --source-check |
+    /usr/bin/grep -qx VOICE_STACK_SOURCE_OK || fail 'the source bundle failed review checks'
+}
+
+assert_source_file() {
+  local filename=$1
+  local mode=$2
+  local immutable_mode metadata
+  [ -f "$filename" ] && [ ! -L "$filename" ] || fail 'a reviewed source asset is absent'
+  case "$mode" in
+    644) immutable_mode=444 ;;
+    755) immutable_mode=555 ;;
+    *) fail 'a reviewed source asset has an unsupported target mode' ;;
+  esac
+  metadata=$(stat -c '%u:%g:%a:%h' "$filename")
+  case "$metadata" in
+    "0:0:${mode}:1"|"0:0:${immutable_mode}:1") ;;
+    *) fail 'a reviewed source asset has unsafe metadata' ;;
+  esac
+}
+
+install_disabled() {
+  require_root
+  assert_inactive
+  source_check
+
+  local -a sources=(
+    "$source_root/teleagent-voice-stack.service"
+    "$source_root/teleagent-voice-containers.slice"
+    "$source_root/teleagent-voice-stack.sysusers"
+    "$source_root/teleagent-voice-stack.tmpfiles"
+    "$source_root/teleagent-voice-stack-launch.js"
+    "$source_root/verify-voice-stack-identity"
+    "$source_root/teleagent-voice-stack-install"
+  )
+  local -a targets=(
+    "$target_unit"
+    "$target_slice"
+    /etc/sysusers.d/teleagent-voice-stack.conf
+    /etc/tmpfiles.d/teleagent-voice-stack.conf
+    /usr/local/libexec/teleagent-voice-stack-launch
+    /usr/local/libexec/verify-voice-stack-identity
+    /usr/local/libexec/teleagent-voice-stack-install
+  )
+  local -a modes=(644 644 644 644 755 755 755)
+  local staging
+  staging=$(/usr/bin/mktemp -d /run/teleagent-voice-install.XXXXXX)
+  chmod 0700 "$staging"
+  local committed=0
+  local complete=0
+
+  rollback() {
+    local status=$?
+    trap - EXIT INT TERM
+    for ((index = 0; index < ${#targets[@]}; index += 1)); do
+      /usr/bin/rm -f -- "${targets[$index]}.new-$$"
+    done
+    if [ "$complete" -ne 1 ] && [ "$committed" -eq 1 ]; then
+      for ((index = ${#targets[@]} - 1; index >= 0; index -= 1)); do
+        if [ -f "$staging/backup-$index" ]; then
+          /usr/bin/install -o root -g root -m "${modes[$index]}" \
+            "$staging/backup-$index" "${targets[$index]}"
+        else
+          /usr/bin/rm -f -- "${targets[$index]}"
+        fi
+      done
+      run_systemctl daemon-reload >/dev/null 2>&1 || true
+    fi
+    /usr/bin/rm -rf -- "$staging"
+    exit "$status"
+  }
+  trap rollback EXIT INT TERM
+
+  for ((index = 0; index < ${#sources[@]}; index += 1)); do
+    assert_source_file "${sources[$index]}" "${modes[$index]}"
+    /usr/bin/mkdir -p -- "$(dirname "${targets[$index]}")"
+    if [ -e "${targets[$index]}" ] || [ -L "${targets[$index]}" ]; then
+      [ -f "${targets[$index]}" ] && [ ! -L "${targets[$index]}" ] ||
+        fail 'an installed voice asset has an unsafe type'
+      [ "$(stat -c '%u:%g:%a:%h' "${targets[$index]}")" = \
+        "0:0:${modes[$index]}:1" ] || fail 'an installed voice asset has unsafe metadata'
+      /usr/bin/cp --preserve=mode,ownership,timestamps -- \
+        "${targets[$index]}" "$staging/backup-$index"
+    fi
+    /usr/bin/install -o root -g root -m "${modes[$index]}" -- \
+      "${sources[$index]}" "${targets[$index]}.new-$$"
+    /usr/bin/sync -- "${targets[$index]}.new-$$"
+  done
+
+  committed=1
+  for ((index = 0; index < ${#targets[@]}; index += 1)); do
+    /usr/bin/mv -f -- "${targets[$index]}.new-$$" "${targets[$index]}"
+    /usr/bin/sync -- "$(dirname "${targets[$index]}")"
+  done
+
+  # These tools create only the reviewed identity and empty directories. They
+  # never provision, open, or print a credential file.
+  "$sysusers_bin" /etc/sysusers.d/teleagent-voice-stack.conf
+  "$tmpfiles_bin" --create /etc/tmpfiles.d/teleagent-voice-stack.conf
+  run_systemctl daemon-reload
+  "$installed_verifier" --installed-check --source-root "$source_root" |
+    /usr/bin/grep -qx VOICE_STACK_IDENTITY_OK ||
+    fail 'the installed voice identity did not verify'
+  assert_disabled
+  complete=1
+  printf 'VOICE_STACK_INSTALLED_DISABLED\n'
+}
+
+check_installed() {
+  require_root
+  assert_disabled
+  "$installed_verifier" --installed-check --source-root "$source_root" |
+    /usr/bin/grep -qx VOICE_STACK_IDENTITY_OK ||
+    fail 'the installed voice identity did not verify'
+  printf 'VOICE_STACK_INSTALLED_DISABLED_OK\n'
+}
+
+if [ "$test_only" -eq 1 ] &&
+   [ "${1:-}" != --check ] && [ "${1:-}" != --emergency-cleanup ]; then
+  fail 'the isolated voice installer test lane permits only --check or --emergency-cleanup'
+fi
+
+case "${1:-}" in
+  --source-check)
+    [ "$#" -eq 1 ] || fail 'unexpected arguments'
+    source_check
+    ;;
+  --install-disabled)
+    [ "$#" -eq 1 ] || fail 'unexpected arguments'
+    install_disabled
+    ;;
+  --check)
+    [ "$#" -eq 1 ] || fail 'unexpected arguments'
+    check_installed
+    ;;
+  --emergency-cleanup)
+    [ "$#" -eq 1 ] || fail 'unexpected arguments'
+    emergency_cleanup
+    ;;
+  *)
+    fail 'usage: teleagent-voice-stack-install --source-check|--install-disabled|--check|--emergency-cleanup'
+    ;;
+esac

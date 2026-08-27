@@ -1,0 +1,4 @@
+# This creates only the empty mountpoint. The service and application require a
+# separate reviewed 2-8 GiB durable filesystem mounted on this exact path.
+d /var/lib/teleagent-control 0700 teleagent-control teleagent-control -
+d /etc/teleagent/controller 0700 root root -

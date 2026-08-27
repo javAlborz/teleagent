@@ -1,0 +1,158 @@
+# Controller and durable control-plane deployment
+
+The host controller and privileged broker are separate trust planes with
+separate bounded filesystems. Source deployment is deliberately dormant: both
+units are static, both activation sentinels are absent by default, and the
+installer never starts, enables, or restarts a unit.
+
+## Durable-state contract
+
+Provision both exact mountpoints before installing this plane:
+
+- `/var/lib/teleagent-control`: a dedicated durable local 2-8 GiB filesystem,
+  owned `teleagent-control:teleagent-control` and mode `0700` after mounting;
+- `/var/lib/teleagent-privileged-action`: a different dedicated durable local
+  1-8 GiB filesystem, owned `root:root` and mode `0700` after mounting.
+
+Each mount must have a different device from `/var/lib`, resolve canonically,
+and use a reviewed local durable filesystem (ext4, XFS, Btrfs, F2FS, or ZFS).
+Use `nodev,nosuid,noexec` where supported. A project directory, ordinary
+`/var/lib` directory, overlay/tmpfs, network filesystem, or shared root volume
+is rejected. At startup and before every new submission, free space must be at
+least the greater of 20 percent and 512 MiB.
+
+The controller mount contains:
+
+- `executor-tasks.sqlite`, including task/idempotency/panic/audit history;
+- `voice-execution.lock.json`, an exact canonical explicit locked or unlocked
+  record which is never deleted in hardened mode;
+- SQLite WAL/SHM files while SQLite requires them.
+
+The privileged mount contains `actions.sqlite`, including actions,
+idempotency, capability replay fingerprints, process/recovery truth,
+`outcome_unknown`, panic, append-only audit, and outbox history. These trust
+records are not pruned. The filesystem bound and low-water admission protect
+the host while leaving reserved capacity for cancellation, panic, recovery,
+and terminal truth. Archive a quiesced whole state filesystem under a separate
+reviewed design; never delete individual database, lock, marker, audit, panic,
+or replay files to recover space.
+
+## Authenticated disabled installation
+
+First complete the worker-session disabled install. The controller installer
+requires the worker service, AppArmor loader, and both provider socket units to
+be exactly loaded, static, inactive, and dead.
+
+With all three sentinels absent (`worker-session`, `controller`, and
+`privileged-action`), provision and mount both filesystems, then run the fixed
+infrastructure-owned handoff:
+
+```sh
+sudo /usr/bin/env -i HOME=/var/empty PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+  /usr/local/libexec/teleagent-staging-handoff --source-check
+sudo /usr/bin/env -i HOME=/var/empty PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+  /usr/local/libexec/teleagent-staging-handoff --install-disabled
+sudo /usr/bin/env -i HOME=/var/empty PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+  /usr/local/libexec/teleagent-staging-handoff --check
+```
+
+The handoff authenticates one external approval and invokes the component
+installer only through that release's canonical
+`/opt/teleagent/releases/sha256-*` path. The installed component-installer copy
+is check-only; it refuses both `--source-check` and `--install-disabled`.
+Never use `/opt/teleagent/current` as an installer entrypoint.
+
+The digest-pinned installer transactionally installs only the two units,
+tmpfiles/sysusers declarations, manifest, installer, and verifier. It proves
+exact `LoadState=loaded`, `UnitFileState=static`, `ActiveState=inactive`, and
+`SubState=dead` after `daemon-reload`. Every loaded controller, broker, and
+worker/provider prerequisite must also use its exact `/etc/systemd/system`
+fragment (provider instances map to their reviewed template), with no drop-in
+and no pending daemon reload. It never invokes `start`, `enable`, or `restart`.
+
+On objectively empty mounted filesystems, the installer creates and fsyncs the
+two zero-length SQLite roots, the explicit canonical controller unlocked
+record, and root-owned `STATE_INITIALIZED` markers. Publication uses exclusive
+temporary files, exact metadata checks, hard-link no-replace publication, and
+file/directory fsync. Once a marker exists, a missing database or controller
+lock is treated as lost trust evidence and reinstall refuses—even if the mount
+looks empty. A nonempty unmarked mount also refuses.
+
+The initial `locked:false` record is intentional only for an objectively empty
+mount: there is no prior execution or panic evidence to preserve, and installation
+still leaves the service disabled with every activation sentinel absent. After
+initialization, unlocked is always an explicit durable state transition; absence
+of the record never means unlocked and can never be reinitialized by reinstall.
+
+The combined installer is intentionally separate from
+`teleagent-worker-session-install`; the aggregate homelab/release handoff must
+invoke it explicitly after provisioning these mounts.
+
+## Configuration and activation
+
+Install `/etc/teleagent/controller/runtime.env` as a canonical root-owned
+`0600` regular file. It carries only the active scoped controller tokens and
+reviewed worker settings. Do not place provider credentials, legacy phone
+approval trust anchors, or privileged-proxy settings there. The production
+unit applies `UnsetEnvironment` after this file for every retired verifier and
+proxy name and makes `/run/teleagent-privileged-action` inaccessible. The
+unit fixes and the application revalidates `HOME`, database/lock paths,
+loopback binding, and the hardened state-boundary mode; alternate paths are
+rejected.
+
+The privileged policy and public/replay keys remain as documented in
+`PRIVILEGED-ACTIONS.md`. Its socket directory comes only from tmpfiles as
+`0750 root:teleagent-control`; systemd `RuntimeDirectory` ownership management
+must not be added. The broker keeps primary group `root` for root-owned state
+and receives `teleagent-control` only as a supplementary group so it can
+publish the `0660` controller socket without `CAP_CHOWN`.
+
+At every controller or broker start, the first start command is the external,
+host-owned `verify-teleagent-release-closure --check-start-gate` under an empty
+environment. This cheap gate rechecks current-boot release approval, selector,
+manifest identity, and installed runtime metadata; it deliberately does not
+rescan or content-hash the full release. Systemd also snapshots the nonsecret,
+host-owned global gate into a private mode-`0400` service credential with
+`LoadCredential`. The ordinary sandboxed service identity passes that
+snapshot to the fixed host verifier's `--start-component` launcher, which
+revalidates the boot, immutable release device/inode, exact component, UID/GID,
+and scrubbed environment before `execve` of the exact release entrypoint. No
+application start resolves `/opt/teleagent/current`. The serialized disabled
+host handoff retains the full `--check-runtime` verification. A failed precheck
+or launcher check prevents the application-owned preflight and Node entrypoint
+from running.
+
+After the installed verifier is green:
+
+1. create and activate the worker-session sentinel/units using the reviewed
+   worker activation procedure;
+2. leave `/etc/teleagent/privileged-action/ENABLE` absent; phone privileged
+   actions remain blocked pending an independent PBX attester and
+   controller-owned approval authority;
+3. create `/etc/teleagent/controller/ENABLE` as `0600 root:root` and start the
+   controller unit explicitly;
+4. let the guarded voice launcher authenticate `/operator/health` with the
+   source voice-control credential before any activation intent or credential
+   projection. It requires canonical `phoneAuthority` read-only status, no
+   verifier or privileged proxy/bearer, and valid active scoped auth.
+
+Do not create a sentinel until the immediately preceding verifier and canary
+is green. Neither unit has an `[Install]` section.
+
+## Failure and recovery
+
+Low capacity returns HTTP 507 for a genuinely new submission. Exact
+idempotent retries remain readable and do not consume another capability;
+panic, cancellation, recovery, and terminalization remain writable from the
+reserved space. Health becomes not-ready whenever mount identity, metadata,
+filesystem type/capacity, free-space admission, or a state file is unsafe.
+
+In hardened mode, corrupt, missing, linked, non-`0600`, noncanonical, or
+transition-pending controller lock state prevents startup. Panic and unlock
+replace the explicit record atomically, fsync the file and parent, recheck
+inode/metadata, and preserve an unresolved transition fence on ambiguous
+failure. Unlock writes `locked:false`; it never unlinks the state file.
+
+If a marker or trust-state file is missing, stop. Do not reinitialize it.
+Restore the complete verified filesystem snapshot or investigate and migrate
+it with an explicitly reviewed recovery procedure.

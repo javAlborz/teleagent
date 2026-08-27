@@ -1,0 +1,16 @@
+[Unit]
+Description=Load the enforced Teleagent model-only AppArmor profile
+Requires=teleagent-provider-libexec-install.service
+After=teleagent-provider-libexec-install.service
+Before=teleagent-provider-supervisor@claude.service teleagent-provider-supervisor@codex.service
+ConditionPathExists=/etc/teleagent/worker-session/ENABLE
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/teleagent-provider-apparmor-install install
+RemainAfterExit=yes
+UMask=0077
+LimitCORE=0
+
+# Deliberately dormant: provider supervisors pull this unit in only after the
+# root-owned ENABLE gate is installed and activation verification succeeds.

@@ -1,0 +1,10 @@
+# Each non-credentialed supervisor may invoke only the fixed root boundary.
+# The validator binds SUDO_USER to provider, canonical workspace, launch ID,
+# mode, and bounded argv; provider code itself never receives sudo or this
+# socket. Cancellation masks remain until reboot so a canceled launch ID can
+# never be garbage-collected/reused during the boot.
+Defaults!/usr/local/libexec/teleagent-provider-boundary env_reset,secure_path=/usr/sbin:/usr/bin:/sbin:/bin,!setenv
+teleagent-claude-supervisor ALL=(root) NOPASSWD: /usr/local/libexec/teleagent-provider-boundary *
+teleagent-codex-supervisor ALL=(root) NOPASSWD: /usr/local/libexec/teleagent-provider-boundary *
+teleagent-session-broker ALL=(root) NOPASSWD: /usr/local/libexec/teleagent-provider-boundary --action panic-all
+teleagent-session-broker ALL=(root) NOPASSWD: /usr/local/libexec/teleagent-provider-boundary --action recover-root-panic

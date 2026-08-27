@@ -1,13 +1,18 @@
 import inquirer from 'inquirer';
 import chalk from 'chalk';
 import ora from 'ora';
-import { loadConfig, saveConfig, configExists } from '../../config.js';
+import {
+  loadConfigWithVoiceRuntimeIdentityPreflight,
+  peekConfig,
+  saveConfig,
+  configExists,
+} from '../../config.js';
 import { validateExtension, validateTtsVoice } from '../../validators.js';
 import { writeDockerConfig } from '../../docker.js';
 import { getAgentProfileChoices } from '../../agents.js';
 
 /**
- * Device add command - Add a new SIP device
+ * Device add command - Add a new phone persona/routing entry
  * @returns {Promise<void>}
  */
 export async function deviceAddCommand() {
@@ -19,7 +24,11 @@ export async function deviceAddCommand() {
     process.exit(1);
   }
 
-  const config = await loadConfig();
+  // Gate every voice-mode write on the complete three-account preflight. The
+  // snapshot read itself performs no migration or save.
+  const configSnapshot = await peekConfig();
+  const { config, voiceRuntimeIdentities } =
+    await loadConfigWithVoiceRuntimeIdentityPreflight({ snapshot: configSnapshot });
   const profileChoices = getAgentProfileChoices(config);
 
   // Gather device information
@@ -65,23 +74,6 @@ export async function deviceAddCommand() {
     },
     {
       type: 'input',
-      name: 'authId',
-      message: 'SIP auth ID (press Enter to use extension):',
-      default: (answers) => answers.extension
-    },
-    {
-      type: 'password',
-      name: 'password',
-      message: 'SIP password:',
-      validate: (input) => {
-        if (!input || input.trim() === '') {
-          return 'Password cannot be empty';
-        }
-        return true;
-      }
-    },
-    {
-      type: 'input',
       name: 'voiceId',
       message: 'TTS voice name/ID:',
       default: config.api.tts.defaultVoice || '',
@@ -116,8 +108,6 @@ export async function deviceAddCommand() {
   const newDevice = {
     name: answers.name.trim(),
     extension: answers.extension,
-    authId: answers.authId || answers.extension,
-    password: answers.password,
     voiceId: answers.voiceId,
     sessionType: answers.sessionType,
     prompt: answers.prompt || `You are ${answers.name}, a helpful AI assistant accessible via phone.`
@@ -129,8 +119,10 @@ export async function deviceAddCommand() {
   const saveSpinner = ora('Saving configuration...').start();
   await saveConfig(config);
 
-  // Regenerate Docker config with new device
-  await writeDockerConfig(config);
+  // API-only installations have no voice deployment artifacts to regenerate.
+  if (voiceRuntimeIdentities) {
+    await writeDockerConfig(config, voiceRuntimeIdentities);
+  }
 
   saveSpinner.succeed(chalk.green('Configuration saved'));
 

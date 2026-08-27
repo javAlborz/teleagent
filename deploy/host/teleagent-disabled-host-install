@@ -1,0 +1,846 @@
+#!/bin/bash
+set -euo pipefail
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+unset ENV BASH_ENV CDPATH LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT GCONV_PATH \
+  NODE_OPTIONS NODE_PATH PYTHONPATH PERL5LIB RUBYOPT
+umask 077
+ulimit -f 256
+
+name=teleagent-disabled-host-install
+root_prefix=
+expected_uid=0
+expected_gid=0
+systemctl_bin=/usr/bin/systemctl
+mountpoint_bin=/usr/bin/mountpoint
+device_map=
+capture_root=
+runtime_fingerprints_ready=0
+release_runtime_fingerprint=
+installed_runtime_a_fingerprint=
+installed_runtime_b_fingerprint=
+executing_script_fd=
+executing_script_descriptor=
+executing_entrypoint=
+executing_release_root=
+executing_entrypoint_fingerprint=
+
+release_link=/opt/teleagent/current
+release_parent=/opt/teleagent/releases
+gate_dir=/run/teleagent-release-gate
+gate_file=$gate_dir/verified.json
+manifest_name=teleagent-release.manifest.json
+release_node_relative=runtime/node/bin/node
+installed_node_a=/opt/teleagent/node/bin/node
+installed_node_b=/usr/local/libexec/teleagent-node
+boot_id_file=/proc/sys/kernel/random/boot_id
+
+worker_source=deploy/worker-session/teleagent-worker-session-install
+host_installer_source=deploy/host/teleagent-disabled-host-install
+controller_source=deploy/controller/teleagent-control-plane-install
+sip_fence_source=deploy/voice-stack/teleagent-sip-local-peer-fence-install
+voice_verifier_source=deploy/voice-stack/verify-voice-stack-identity
+sip_verifier_source=realtime-sip-gateway/deploy/verify-realtime-sip-gateway
+sip_installer_source=realtime-sip-gateway/deploy/teleagent-realtime-sip-gateway-install
+voice_installer_source=deploy/voice-stack/teleagent-voice-stack-install
+claude_artifact=artifacts/provider-cli/claude
+codex_artifact=artifacts/provider-cli/codex-vendor
+
+worker_installed=/usr/local/libexec/teleagent-worker-session-install
+provider_installer=/usr/local/libexec/teleagent-provider-cli-install
+provider_checker=/usr/local/libexec/teleagent-provider-cli-check
+controller_installed=/usr/local/libexec/teleagent-control-plane-install
+sip_installer_installed=/usr/local/libexec/teleagent-realtime-sip-gateway-install
+voice_installer_installed=/usr/local/libexec/teleagent-voice-stack-install
+
+state_roots=(
+  /var/lib/teleagent-worker-state
+  /var/lib/teleagent-provider-plane
+  /var/lib/teleagent-control
+  /var/lib/teleagent-privileged-action
+  /var/lib/teleagent-sip-gateway
+  /var/lib/teleagent-voice
+)
+workspace_root=/srv/teleagent-agent-workspaces
+
+sentinels=(
+  /etc/teleagent/worker-session/ENABLE
+  /etc/teleagent/controller/ENABLE
+  /etc/teleagent/privileged-action/ENABLE
+  /etc/teleagent/realtime-sip-gateway/ENABLE
+)
+
+dormant_units=(
+  teleagent-worker-session.service
+  teleagent-worker-session.socket
+  teleagent-provider-libexec-install.service
+  teleagent-provider-model-apparmor.service
+  teleagent-provider.slice
+  teleagent-provider-model.slice
+  teleagent-provider-supervisor@claude.service
+  teleagent-provider-supervisor@claude.socket
+  teleagent-provider-supervisor@codex.service
+  teleagent-provider-supervisor@codex.socket
+  teleagent-provider-egress@claude.service
+  teleagent-provider-egress@claude.socket
+  teleagent-provider-egress-control@claude.socket
+  teleagent-provider-egress@codex.service
+  teleagent-provider-egress@codex.socket
+  teleagent-provider-egress-control@codex.socket
+  teleagent-agent-controller.service
+  teleagent-privileged-action.service
+  teleagent-realtime-sip-gateway.service
+  teleagent-voice-stack.service
+  teleagent-voice-containers.slice
+)
+
+fail() {
+  printf 'Disabled host installation refused: %s\n' "$1" >&2
+  exit "${2:-77}"
+}
+
+host_path() {
+  printf '%s%s\n' "$root_prefix" "$1"
+}
+
+assert_test_dependency() {
+  local filename=$1
+  [ -f "$filename" ] && [ ! -L "$filename" ] ||
+    fail 'a test dependency is not a regular file'
+  [ "$(/usr/bin/stat -c '%u:%g:%a:%h' -- "$filename")" = \
+    "${expected_uid}:${expected_gid}:700:1" ] ||
+    fail 'a test dependency has unsafe metadata'
+  case "$(/usr/bin/readlink -f -- "$filename")" in
+    "$root_prefix"/*) ;;
+    *) fail 'a test dependency escaped the isolated fixture' ;;
+  esac
+}
+
+configure_environment() {
+  if [ "${TELEAGENT_DISABLED_HOST_INSTALL_TEST_ONLY:-}" = 1 ]; then
+    [ -n "${TELEAGENT_DISABLED_HOST_INSTALL_TEST_ROOT:-}" ] ||
+      fail 'the isolated test root is required'
+    root_prefix=$(/usr/bin/readlink -f -- \
+      "$TELEAGENT_DISABLED_HOST_INSTALL_TEST_ROOT")
+    case "$root_prefix" in
+      /tmp/teleagent-disabled-host-install-test-*) ;;
+      *) fail 'the isolated test root is outside the allowed namespace' ;;
+    esac
+    expected_uid=$(/usr/bin/id -u)
+    expected_gid=$(/usr/bin/id -g)
+    [ -d "$root_prefix" ] && [ ! -L "$root_prefix" ] ||
+      fail 'the isolated test root is unsafe'
+    [ "$(/usr/bin/stat -c '%u:%g:%a' -- "$root_prefix")" = \
+      "${expected_uid}:${expected_gid}:700" ] ||
+      fail 'the isolated test root has unsafe metadata'
+    systemctl_bin=${TELEAGENT_DISABLED_HOST_INSTALL_TEST_SYSTEMCTL:-}
+    mountpoint_bin=${TELEAGENT_DISABLED_HOST_INSTALL_TEST_MOUNTPOINT:-}
+    device_map=${TELEAGENT_DISABLED_HOST_INSTALL_TEST_DEVICE_MAP:-}
+    assert_test_dependency "$systemctl_bin"
+    assert_test_dependency "$mountpoint_bin"
+    [ -f "$device_map" ] && [ ! -L "$device_map" ] ||
+      fail 'the test device map is unsafe'
+    [ "$(/usr/bin/stat -c '%u:%g:%a:%h' -- "$device_map")" = \
+      "${expected_uid}:${expected_gid}:600:1" ] ||
+      fail 'the test device map has unsafe metadata'
+    case "$(/usr/bin/readlink -f -- "$device_map")" in
+      "$root_prefix"/*) ;;
+      *) fail 'the test device map escaped the isolated fixture' ;;
+    esac
+    return
+  fi
+
+  [ "$(/usr/bin/id -u)" -eq 0 ] || fail 'root is required'
+  for forbidden in \
+    "${TELEAGENT_DISABLED_HOST_INSTALL_TEST_ROOT:-}" \
+    "${TELEAGENT_DISABLED_HOST_INSTALL_TEST_SYSTEMCTL:-}" \
+    "${TELEAGENT_DISABLED_HOST_INSTALL_TEST_MOUNTPOINT:-}" \
+    "${TELEAGENT_DISABLED_HOST_INSTALL_TEST_DEVICE_MAP:-}"; do
+    [ -z "$forbidden" ] || fail 'test overrides require the isolated test lane'
+  done
+}
+
+configure_environment
+
+capture_executing_release() {
+  local bash_script_fd release_id expected_parent path_fingerprint
+  # Bash keeps the script it is executing open on descriptor 255. Resolve that
+  # descriptor instead of resolving $0 again: current may already have changed
+  # after Bash opened release A but before this script began executing.
+  bash_script_fd="/proc/$$/fd/255"
+  [ -r "$bash_script_fd" ] && [ -f "$bash_script_fd" ] ||
+    fail 'the executing aggregate descriptor is unavailable or unsafe'
+  exec {executing_script_descriptor}<"$bash_script_fd" ||
+    fail 'the executing aggregate descriptor could not be retained'
+  executing_script_fd="/proc/$$/fd/$executing_script_descriptor"
+  executing_entrypoint=$(/usr/bin/readlink -f -- "$executing_script_fd") ||
+    fail 'the executing aggregate descriptor could not be resolved'
+  executing_release_root=${executing_entrypoint%"/$host_installer_source"}
+  [ "$executing_entrypoint" = "$executing_release_root/$host_installer_source" ] ||
+    fail 'the executing aggregate is outside a release root'
+  [ "$0" = "$executing_entrypoint" ] ||
+    fail 'use the exact canonical immutable-release entrypoint'
+  expected_parent=$(host_path "$release_parent")
+  [ "$(/usr/bin/dirname -- "$executing_release_root")" = "$expected_parent" ] ||
+    fail 'the executing aggregate release parent is unreviewed'
+  release_id=$(/usr/bin/basename -- "$executing_release_root")
+  [[ "$release_id" =~ ^sha256-[a-f0-9]{64}$ ]] ||
+    fail 'the executing aggregate release identity is invalid'
+  executing_entrypoint_fingerprint=$(/usr/bin/stat -Lc \
+    '%d:%i:%s:%u:%g:%a:%h:%y:%z' -- "$executing_script_fd") ||
+    fail 'the executing aggregate descriptor metadata is unavailable'
+  path_fingerprint=$(/usr/bin/stat -c '%d:%i:%s:%u:%g:%a:%h:%y:%z' -- \
+    "$executing_entrypoint") || fail 'the executing aggregate path metadata is unavailable'
+  [ "$executing_entrypoint_fingerprint" = "$path_fingerprint" ] ||
+    fail 'the executing aggregate descriptor and path identities differ'
+}
+
+capture_executing_release
+
+cleanup_capture() {
+  if [ -n "$capture_root" ] && [ -d "$capture_root" ] && [ ! -L "$capture_root" ]; then
+    /usr/bin/rm -rf -- "$capture_root"
+  fi
+}
+trap cleanup_capture EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+prepare_capture() {
+  local runtime
+  runtime=$(host_path /run)
+  [ -d "$runtime" ] && [ ! -L "$runtime" ] || fail 'the runtime root is unsafe'
+  capture_root=$(/usr/bin/mktemp -d "$runtime/teleagent-disabled-host-install.XXXXXX")
+  /usr/bin/chmod 0700 -- "$capture_root"
+  [ "$(/usr/bin/stat -c '%u:%g:%a' -- "$capture_root")" = \
+    "${expected_uid}:${expected_gid}:700" ] || fail 'the output capture is unsafe'
+}
+
+run_captured() {
+  local expectation=$1 expected=$2 label=$3
+  shift 3
+  local output status=0 size
+  output=$(/usr/bin/mktemp "$capture_root/output.XXXXXX")
+  /usr/bin/timeout --kill-after=5s 120s \
+    /usr/bin/env -i HOME=/var/empty PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+      LANG=C.UTF-8 LC_ALL=C.UTF-8 "$@" >"$output" 2>&1 || status=$?
+  size=$(/usr/bin/stat -c '%s' -- "$output")
+  [ "$size" -le 131072 ] || fail 'a bounded child command exceeded its output limit'
+  [ "$status" -eq 0 ] || fail "$label failed"
+  case "$expectation" in
+    exact)
+      [ "$size" -eq $((${#expected} + 1)) ] &&
+        printf '%s\n' "$expected" | /usr/bin/cmp -s - "$output" ||
+        fail "$label returned an unexpected result"
+      ;;
+    empty)
+      [ "$size" -eq 0 ] || fail "$label returned unexpected output"
+      ;;
+    optional-exact)
+      if [ "$size" -ne 0 ]; then
+        [ "$size" -eq $((${#expected} + 1)) ] &&
+          printf '%s\n' "$expected" | /usr/bin/cmp -s - "$output" ||
+          fail "$label returned an unexpected result"
+      fi
+      ;;
+    *) fail 'an internal child-output contract is invalid' ;;
+  esac
+  /usr/bin/rm -f -- "$output"
+}
+
+run_exact() {
+  local expected=$1 label=$2
+  shift 2
+  run_captured exact "$expected" "$label" "$@"
+}
+
+run_empty() {
+  local label=$1
+  shift
+  run_captured empty '' "$label" "$@"
+}
+
+run_optional_exact() {
+  local expected=$1 label=$2
+  shift 2
+  run_captured optional-exact "$expected" "$label" "$@"
+}
+
+assert_directory_safe() {
+  local filename=$1 exact_mode=${2:-} metadata mode
+  [ -d "$filename" ] && [ ! -L "$filename" ] || fail 'a trusted directory is absent or unsafe'
+  [ "$(/usr/bin/readlink -f -- "$filename")" = "$filename" ] ||
+    fail 'a trusted directory resolves through a link'
+  metadata=$(/usr/bin/stat -c '%u:%g:%a' -- "$filename")
+  [ "${metadata%%:*}" = "$expected_uid" ] || fail 'a trusted directory has the wrong owner'
+  metadata=${metadata#*:}
+  [ "${metadata%%:*}" = "$expected_gid" ] || fail 'a trusted directory has the wrong group'
+  mode=${metadata##*:}
+  if [ -n "$exact_mode" ]; then
+    [ "$mode" = "$exact_mode" ] || fail 'a trusted directory has the wrong mode'
+  else
+    [ $((8#$mode & 0022)) -eq 0 ] || fail 'a trusted directory is writable by an untrusted identity'
+  fi
+}
+
+assert_release_file() {
+  local release_root=$1 relative=$2 expected_mode=$3 filename metadata
+  filename="$release_root/$relative"
+  [ -f "$filename" ] && [ ! -L "$filename" ] || fail 'a release asset is absent or unsafe'
+  [ "$(/usr/bin/readlink -f -- "$filename")" = "$filename" ] ||
+    fail 'a release asset resolves through a link'
+  metadata=$(/usr/bin/stat -c '%u:%g:%a:%h' -- "$filename")
+  [ "$metadata" = "${expected_uid}:${expected_gid}:${expected_mode}:1" ] ||
+    fail 'a release asset has unsafe metadata'
+}
+
+assert_installed_file() {
+  local absolute=$1 filename metadata mode
+  filename=$(host_path "$absolute")
+  [ -f "$filename" ] && [ ! -L "$filename" ] || fail 'an installed executable is absent or unsafe'
+  [ "$(/usr/bin/readlink -f -- "$filename")" = "$filename" ] ||
+    fail 'an installed executable resolves through a link'
+  metadata=$(/usr/bin/stat -c '%u:%g:%a:%h' -- "$filename")
+  [ "${metadata%%:*}" = "$expected_uid" ] || fail 'an installed executable has the wrong owner'
+  metadata=${metadata#*:}
+  [ "${metadata%%:*}" = "$expected_gid" ] || fail 'an installed executable has the wrong group'
+  metadata=${metadata#*:}
+  mode=${metadata%%:*}
+  [ "$mode" = 755 ] || fail 'an installed executable has the wrong mode'
+  [ "${metadata##*:}" = 1 ] || fail 'an installed executable has multiple links'
+}
+
+gate_release_root=
+gate_release_id=
+gate_source_revision=
+
+assert_executing_release_binding() {
+  local expected_entrypoint descriptor_path descriptor_fingerprint path_fingerprint
+  expected_entrypoint="$gate_release_root/$host_installer_source"
+  [ "$executing_release_root" = "$gate_release_root" ] &&
+    [ "$executing_entrypoint" = "$expected_entrypoint" ] ||
+    fail 'the executing aggregate differs from the gated release'
+  [ -r "$executing_script_fd" ] && [ -f "$executing_script_fd" ] ||
+    fail 'the executing aggregate descriptor became unavailable or unsafe'
+  descriptor_path=$(/usr/bin/readlink -f -- "$executing_script_fd") ||
+    fail 'the executing aggregate descriptor could not be re-resolved'
+  [ "$descriptor_path" = "$expected_entrypoint" ] ||
+    fail 'the executing aggregate descriptor moved outside the gated release'
+  descriptor_fingerprint=$(/usr/bin/stat -Lc \
+    '%d:%i:%s:%u:%g:%a:%h:%y:%z' -- "$executing_script_fd") ||
+    fail 'the executing aggregate descriptor metadata became unavailable'
+  path_fingerprint=$(/usr/bin/stat -c '%d:%i:%s:%u:%g:%a:%h:%y:%z' -- \
+    "$expected_entrypoint") || fail 'the gated aggregate metadata became unavailable'
+  [ "$descriptor_fingerprint" = "$executing_entrypoint_fingerprint" ] &&
+    [ "$path_fingerprint" = "$executing_entrypoint_fingerprint" ] ||
+    fail 'the executing aggregate identity changed or differs from the gated release'
+}
+
+verify_gate_and_release() {
+  local gate_directory gate manifest release_id manifest_digest source_revision
+  local current_target release_device release_inode gate_boot_id gate_contents gate_regex
+  local gate_before gate_after current actual_target release_root root_snapshot manifest_snapshot
+  local actual_digest manifest_line manifest_regex manifest_revision boot_id
+
+  assert_directory_safe "$(host_path /run)"
+  gate_directory=$(host_path "$gate_dir")
+  gate=$(host_path "$gate_file")
+  assert_directory_safe "$gate_directory" 755
+  [ -f "$gate" ] && [ ! -L "$gate" ] || fail 'the boot-bound release gate is absent or unsafe'
+  [ "$(/usr/bin/readlink -f -- "$gate")" = "$gate" ] || fail 'the release gate resolves through a link'
+  [ "$(/usr/bin/stat -c '%u:%g:%a:%h' -- "$gate")" = \
+    "${expected_uid}:${expected_gid}:444:1" ] || fail 'the release gate metadata is unsafe'
+  gate_before=$(/usr/bin/stat -c '%d:%i:%s:%u:%g:%a:%h:%Y:%Z' -- "$gate")
+  [ "$(/usr/bin/stat -c '%s' -- "$gate")" -le 1024 ] || fail 'the release gate is oversized'
+  [ "$(/usr/bin/wc -l < "$gate")" -eq 1 ] || fail 'the release gate is not canonical one-line JSON'
+  IFS= read -r gate_contents < "$gate" || fail 'the release gate could not be read'
+  gate_after=$(/usr/bin/stat -c '%d:%i:%s:%u:%g:%a:%h:%Y:%Z' -- "$gate")
+  [ "$gate_before" = "$gate_after" ] || fail 'the release gate changed while it was read'
+
+  gate_regex='^\{"version":1,"application":"teleagent","releaseId":"(sha256-[a-f0-9]{64})","manifestSha256":"(sha256:[a-f0-9]{64})","sourceRevision":"([a-f0-9]+)","currentTarget":"(/opt/teleagent/releases/sha256-[a-f0-9]{64})","releaseDevice":([0-9]+),"releaseInode":([1-9][0-9]*),"bootId":"([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})"\}$'
+  [[ "$gate_contents" =~ $gate_regex ]] || fail 'the release gate schema is invalid'
+  release_id=${BASH_REMATCH[1]}
+  manifest_digest=${BASH_REMATCH[2]}
+  source_revision=${BASH_REMATCH[3]}
+  current_target=${BASH_REMATCH[4]}
+  release_device=${BASH_REMATCH[5]}
+  release_inode=${BASH_REMATCH[6]}
+  gate_boot_id=${BASH_REMATCH[7]}
+  [[ "$source_revision" =~ ^([a-f0-9]{40}|[a-f0-9]{64})$ ]] ||
+    fail 'the gated source revision is invalid'
+  [ "$manifest_digest" = "sha256:${release_id#sha256-}" ] ||
+    fail 'the gate release and manifest digests differ'
+  [ "$current_target" = "$release_parent/$release_id" ] ||
+    fail 'the gate selected a noncanonical release target'
+
+  current=$(host_path "$release_link")
+  actual_target=$(host_path "$current_target")
+  [ -L "$current" ] || fail 'the current release selector is not a symbolic link'
+  [ "$(/usr/bin/stat -c '%u:%g:%h' -- "$current")" = "${expected_uid}:${expected_gid}:1" ] ||
+    fail 'the current release selector has the wrong owner'
+  if [ -n "$root_prefix" ]; then
+    [ "$(/usr/bin/readlink -- "$current")" = "releases/$release_id" ] ||
+      fail 'the fixture current selector is not literal'
+  else
+    [ "$(/usr/bin/readlink -- "$current")" = "$current_target" ] ||
+      fail 'the current release selector is not literal'
+  fi
+  [ "$(/usr/bin/readlink -f -- "$current")" = "$actual_target" ] ||
+    fail 'the current release selector resolves elsewhere'
+
+  assert_directory_safe "$(host_path /opt)"
+  assert_directory_safe "$(host_path /opt/teleagent)"
+  assert_directory_safe "$(host_path "$release_parent")"
+  release_root=$actual_target
+  assert_directory_safe "$release_root" 555
+  [ "$(/usr/bin/basename -- "$release_root")" = "$release_id" ] ||
+    fail 'the release directory basename differs from its gate'
+  root_snapshot=$(/usr/bin/stat -c '%d:%i' -- "$release_root")
+  [ "$root_snapshot" = "${release_device}:${release_inode}" ] ||
+    fail 'the release directory identity differs from its gate'
+
+  manifest="$release_root/$manifest_name"
+  assert_release_file "$release_root" "$manifest_name" 444
+  [ "$(/usr/bin/stat -c '%s' -- "$manifest")" -le 131072 ] || fail 'the release manifest is oversized'
+  manifest_snapshot=$(/usr/bin/stat -c '%d:%i:%s:%u:%g:%a:%h:%Y:%Z' -- "$manifest")
+  actual_digest=$(/usr/bin/sha256sum -- "$manifest" | /usr/bin/awk '{print $1}')
+  [ "$actual_digest" = "${manifest_digest#sha256:}" ] ||
+    fail 'the release manifest digest differs from its boot gate'
+  IFS= read -r manifest_line < "$manifest" || fail 'the release manifest could not be read'
+  manifest_regex='^\{"version":2,"application":"teleagent","source":\{"repository":"https://github\.com/javAlborz/teleagent\.git","revision":"([a-f0-9]+)","tree":"([a-f0-9]+)"\},'
+  [[ "$manifest_line" =~ $manifest_regex ]] || fail 'the release manifest source binding is invalid'
+  manifest_revision=${BASH_REMATCH[1]}
+  [[ "$manifest_revision" =~ ^([a-f0-9]{40}|[a-f0-9]{64})$ ]] ||
+    fail 'the manifest source revision is invalid'
+  [ "$manifest_revision" = "$source_revision" ] ||
+    fail 'the manifest source revision differs from its gate'
+  [ "$manifest_snapshot" = \
+    "$(/usr/bin/stat -c '%d:%i:%s:%u:%g:%a:%h:%Y:%Z' -- "$manifest")" ] ||
+    fail 'the release manifest changed while it was checked'
+  [ "$root_snapshot" = "$(/usr/bin/stat -c '%d:%i' -- "$release_root")" ] ||
+    fail 'the release root changed while it was checked'
+
+  boot_id=$(<"$(host_path "$boot_id_file")")
+  [[ "$boot_id" =~ ^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$ ]] ||
+    fail 'the current boot identifier is invalid'
+  [ "$boot_id" = "$gate_boot_id" ] || fail 'the release gate belongs to another boot'
+
+  assert_release_file "$release_root" "$release_node_relative" 555
+  gate_release_root=$release_root
+  gate_release_id=$release_id
+  gate_source_revision=$source_revision
+  assert_executing_release_binding
+}
+
+assert_release_sources() {
+  local relative
+  for relative in \
+    "$host_installer_source" "$worker_source" "$controller_source" "$sip_fence_source" \
+    "$voice_verifier_source" "$sip_verifier_source" "$sip_installer_source" \
+    "$voice_installer_source" "$claude_artifact" "$codex_artifact"; do
+    assert_release_file "$gate_release_root" "$relative" 555
+  done
+}
+
+source_checks() {
+  local release_node="$gate_release_root/$release_node_relative"
+  run_exact WORKER_SESSION_SOURCE_OK 'worker source check' \
+    /bin/bash "$gate_release_root/$worker_source" --source-check
+  run_exact TELEAGENT_CONTROL_PLANE_SOURCE_OK 'controller source check' \
+    /bin/bash "$gate_release_root/$controller_source" --source-check
+  run_exact 'PASS Teleagent SIP fence source is exact and inactive' 'SIP fence source check' \
+    /bin/bash "$gate_release_root/$sip_fence_source" --source-check
+  run_exact VOICE_STACK_SOURCE_OK 'voice source check' \
+    "$release_node" "$gate_release_root/$voice_verifier_source" --source-check
+  run_exact SIP_GATEWAY_SOURCE_OK 'SIP gateway installer source check' \
+    /bin/bash "$gate_release_root/$sip_installer_source" --source-check
+  run_exact SIP_GATEWAY_IDENTITY_SOURCE_OK 'SIP gateway source check' \
+    "$release_node" "$gate_release_root/$sip_verifier_source" --source-check
+}
+
+device_id() {
+  local absolute=$1 translated line path value count=0 result=
+  translated=$(host_path "$absolute")
+  if [ -z "$device_map" ]; then
+    /usr/bin/stat -c '%d' -- "$translated"
+    return
+  fi
+  while IFS=' ' read -r path value extra; do
+    [ -z "${extra:-}" ] || fail 'the fixture device map is malformed'
+    if [ "$path" = "$absolute" ]; then
+      [[ "$value" =~ ^[1-9][0-9]*$ ]] || fail 'the fixture device identifier is invalid'
+      result=$value
+      count=$((count + 1))
+    fi
+  done < "$device_map"
+  [ "$count" -eq 1 ] || fail 'the fixture device map is incomplete or ambiguous'
+  printf '%s\n' "$result"
+}
+
+assert_state_mounts() {
+  local var_parent_device srv_parent_device root translated device seen=':'
+  assert_directory_safe "$(host_path /var/lib)"
+  assert_directory_safe "$(host_path /srv)"
+  var_parent_device=$(device_id /var/lib)
+  srv_parent_device=$(device_id /srv)
+  for root in "${state_roots[@]}" "$workspace_root"; do
+    translated=$(host_path "$root")
+    [ -d "$translated" ] && [ ! -L "$translated" ] || fail 'a dedicated state root is absent or unsafe'
+    [ "$(/usr/bin/readlink -f -- "$translated")" = "$translated" ] ||
+      fail 'a dedicated state root resolves through a link'
+    run_empty 'state mount-point check' "$mountpoint_bin" --quiet -- "$translated"
+    device=$(device_id "$root")
+    [ "$device" != "$var_parent_device" ] || fail 'a workload root shares the /var/lib device'
+    if [ "$root" = "$workspace_root" ]; then
+      [ "$device" != "$srv_parent_device" ] || fail 'the workspace root shares the /srv device'
+    fi
+    case "$seen" in *:"$device":*) fail 'dedicated workload roots share one device' ;; esac
+    seen="${seen}${device}:"
+  done
+}
+
+runtime_fingerprint() {
+  /usr/bin/stat -c '%d|%i|%s|%u|%g|%a|%h|%y|%z' -- "$1"
+}
+
+assert_runtime_path_safe() {
+  local target=$1 kind=$2 metadata
+  [ -f "$target" ] && [ ! -L "$target" ] || fail "$kind Node runtime is absent or unsafe"
+  [ "$(/usr/bin/readlink -f -- "$target")" = "$target" ] ||
+    fail "$kind Node runtime resolves through a link"
+  metadata=$(/usr/bin/stat -c '%u:%g:%a:%h' -- "$target")
+  case "$kind:$metadata" in
+    release:"${expected_uid}:${expected_gid}:555:1"|\
+    installed:"${expected_uid}:${expected_gid}:555:1"|\
+    installed:"${expected_uid}:${expected_gid}:755:1") ;;
+    *) fail "$kind Node runtime has unsafe metadata" ;;
+  esac
+}
+
+assert_installed_runtimes_full() {
+  local capture=${1:-0}
+  local release_node="$gate_release_root/$release_node_relative"
+  local release_before release_after release_final absolute target before after
+  local runtime_a_after= runtime_b_after= runtime_a_final runtime_b_final
+  assert_runtime_path_safe "$release_node" release
+  release_before=$(runtime_fingerprint "$release_node")
+  for absolute in "$installed_node_a" "$installed_node_b"; do
+    target=$(host_path "$absolute")
+    assert_runtime_path_safe "$target" installed
+    before=$(runtime_fingerprint "$target")
+    /usr/bin/cmp -s -- "$release_node" "$target" ||
+      fail 'an installed Node target differs from the gated release runtime'
+    after=$(runtime_fingerprint "$target")
+    [ "$before" = "$after" ] || fail 'an installed Node target changed while it was checked'
+    case "$absolute" in
+      "$installed_node_a") runtime_a_after=$after ;;
+      "$installed_node_b") runtime_b_after=$after ;;
+      *) fail 'an internal installed runtime target is unreviewed' ;;
+    esac
+  done
+  release_after=$(runtime_fingerprint "$release_node")
+  assert_runtime_path_safe "$release_node" release
+  assert_runtime_path_safe "$(host_path "$installed_node_a")" installed
+  assert_runtime_path_safe "$(host_path "$installed_node_b")" installed
+  release_final=$(runtime_fingerprint "$release_node")
+  runtime_a_final=$(runtime_fingerprint "$(host_path "$installed_node_a")")
+  runtime_b_final=$(runtime_fingerprint "$(host_path "$installed_node_b")")
+  [ "$release_before" = "$release_after" ] && [ "$release_after" = "$release_final" ] ||
+    fail 'the gated release Node runtime changed while it was checked'
+  [ "$runtime_a_final" = "$runtime_a_after" ] &&
+    [ "$runtime_b_final" = "$runtime_b_after" ] ||
+    fail 'an installed Node target changed across the full comparison'
+  if [ "$capture" -eq 1 ]; then
+    release_runtime_fingerprint=$release_final
+    installed_runtime_a_fingerprint=$runtime_a_final
+    installed_runtime_b_fingerprint=$runtime_b_final
+  fi
+}
+
+capture_installed_runtime_fingerprints() {
+  assert_installed_runtimes_full 1
+  runtime_fingerprints_ready=1
+}
+
+assert_runtime_fingerprints_unchanged() {
+  [ "$runtime_fingerprints_ready" -eq 1 ] || fail 'runtime fingerprints were not initialized'
+  local release_node="$gate_release_root/$release_node_relative"
+  local target_a target_b
+  target_a=$(host_path "$installed_node_a")
+  target_b=$(host_path "$installed_node_b")
+  assert_runtime_path_safe "$release_node" release
+  assert_runtime_path_safe "$target_a" installed
+  assert_runtime_path_safe "$target_b" installed
+  [ "$(runtime_fingerprint "$release_node")" = "$release_runtime_fingerprint" ] &&
+    [ "$(runtime_fingerprint "$target_a")" = "$installed_runtime_a_fingerprint" ] &&
+    [ "$(runtime_fingerprint "$target_b")" = "$installed_runtime_b_fingerprint" ] ||
+    fail 'a Node runtime fingerprint changed during the disabled handoff'
+}
+
+assert_installed_runtimes_final() {
+  assert_runtime_fingerprints_unchanged
+  assert_installed_runtimes_full
+}
+
+assert_sentinels_absent() {
+  local sentinel translated
+  for sentinel in "${sentinels[@]}"; do
+    translated=$(host_path "$sentinel")
+    if [ -e "$translated" ] || [ -L "$translated" ]; then
+      fail 'every activation sentinel must remain absent'
+    fi
+  done
+}
+
+assert_sip_fence() {
+  # Run the gate-authenticated release checker directly. A stale fixed-path
+  # checker is not an authority and cannot bypass the current descriptor or
+  # transaction policy.
+  run_exact 'PASS Teleagent SIP fence is installed and exact' 'installed SIP fence check' \
+    /bin/bash "$gate_release_root/$sip_fence_source" --check
+}
+
+unit_fragment_path() {
+  case "$1" in
+    teleagent-provider-supervisor@*.service)
+      host_path /etc/systemd/system/teleagent-provider-supervisor@.service ;;
+    teleagent-provider-supervisor@*.socket)
+      host_path /etc/systemd/system/teleagent-provider-supervisor@.socket ;;
+    teleagent-provider-egress@*.service)
+      host_path /etc/systemd/system/teleagent-provider-egress@.service ;;
+    teleagent-provider-egress@*.socket)
+      host_path /etc/systemd/system/teleagent-provider-egress@.socket ;;
+    teleagent-provider-egress-control@*.socket)
+      host_path /etc/systemd/system/teleagent-provider-egress-control@.socket ;;
+    *) host_path "/etc/systemd/system/$1" ;;
+  esac
+}
+
+assert_unit_dormant() {
+  local unit=$1 expected_fragment output status=0 size count=0 seen=:
+  local key value
+  expected_fragment=$(unit_fragment_path "$unit")
+  output=$(/usr/bin/mktemp "$capture_root/systemctl-show.XXXXXX")
+  /usr/bin/timeout --signal=TERM --kill-after=1s 10s \
+    /usr/bin/env -i HOME=/var/empty PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+      LANG=C.UTF-8 LC_ALL=C.UTF-8 \
+      "$systemctl_bin" show "$unit" \
+      --property=LoadState,ActiveState,SubState,UnitFileState,FragmentPath,NeedDaemonReload,DropInPaths \
+      2>&1 | /usr/bin/head -c 4097 >"$output" || status=$?
+  size=$(/usr/bin/stat -c '%s' -- "$output")
+  [ "$size" -le 4096 ] || fail 'a unit metadata query exceeded its output limit'
+  [ "$status" -eq 0 ] || fail 'a unit metadata query failed'
+  while IFS='=' read -r key value; do
+    [ -n "$key" ] || fail 'a unit metadata query returned a malformed record'
+    case "$seen" in *:"$key":*) fail 'a unit metadata query duplicated a property' ;; esac
+    seen="${seen}${key}:"
+    count=$((count + 1))
+    case "$key" in
+      LoadState) [ "$value" = loaded ] || fail 'a dormant unit is not loaded' ;;
+      ActiveState) [ "$value" = inactive ] || fail 'a dormant unit is active or transitional' ;;
+      SubState) [ "$value" = dead ] || fail 'a dormant unit substate is not dead' ;;
+      UnitFileState) [ "$value" = static ] || fail 'a dormant unit is not static' ;;
+      FragmentPath) [ "$value" = "$expected_fragment" ] ||
+        fail 'a dormant unit loaded an unreviewed fragment' ;;
+      NeedDaemonReload) [ "$value" = no ] ||
+        fail 'a dormant unit has unapplied manager state' ;;
+      DropInPaths) [ -z "$value" ] || fail 'a dormant unit has an unreviewed drop-in' ;;
+      *) fail 'a unit metadata query returned an unexpected property' ;;
+    esac
+  done < "$output"
+  [ "$count" -eq 7 ] || fail 'a unit metadata query is incomplete'
+  /usr/bin/rm -f -- "$output"
+}
+
+assert_dormant_units() {
+  local unit
+  for unit in "${dormant_units[@]}"; do
+    assert_unit_dormant "$unit"
+  done
+  run_empty 'provider transient-unit check' "$systemctl_bin" list-units \
+    --all --plain --no-legend 'teleagent-provider-launch-*.service'
+}
+
+preinstalled_checks_without_fence() {
+  capture_installed_runtime_fingerprints
+  assert_state_mounts
+  assert_sentinels_absent
+}
+
+preinstalled_checks() {
+  preinstalled_checks_without_fence
+  assert_sip_fence
+}
+
+bootstrap_guard() {
+  verify_gate_and_release
+  assert_release_sources
+  assert_runtime_fingerprints_unchanged
+  assert_state_mounts
+  assert_sentinels_absent
+}
+
+mutation_guard() {
+  verify_gate_and_release
+  assert_release_sources
+  assert_runtime_fingerprints_unchanged
+  assert_state_mounts
+  assert_sentinels_absent
+  assert_sip_fence
+}
+
+install_worker() {
+  mutation_guard
+  run_exact WORKER_SESSION_INSTALLED_DISABLED 'worker disabled install' \
+    /bin/bash "$gate_release_root/$worker_source" --install-disabled
+  verify_gate_and_release
+  assert_sentinels_absent
+  assert_installed_file "$worker_installed"
+  run_exact WORKER_SESSION_INSTALLED_DISABLED_OK 'worker installed check' \
+    /bin/bash "$gate_release_root/$worker_source" --check
+  mutation_guard
+}
+
+install_provider_cli() {
+  local node installer checker
+  node=$(host_path "$installed_node_b")
+  installer=$(host_path "$provider_installer")
+  checker=$(host_path "$provider_checker")
+  assert_installed_file "$provider_installer"
+  assert_installed_file "$provider_checker"
+  mutation_guard
+  run_empty 'provider CLI install' "$node" "$installer" --install \
+    --claude-source "$gate_release_root/$claude_artifact" \
+    --codex-vendor-source "$gate_release_root/$codex_artifact"
+  run_exact 'PROVIDER_CLI_OK claude' 'Claude CLI credentialless check' \
+    "$node" "$checker" --provider claude
+  run_exact 'PROVIDER_CLI_OK codex' 'Codex CLI credentialless check' \
+    "$node" "$checker" --provider codex
+  mutation_guard
+}
+
+check_provider_cli() {
+  local node installer checker
+  node=$(host_path "$installed_node_b")
+  installer=$(host_path "$provider_installer")
+  checker=$(host_path "$provider_checker")
+  assert_installed_file "$provider_installer"
+  assert_installed_file "$provider_checker"
+  run_empty 'provider CLI aggregate check' "$node" "$installer" --check
+  run_exact 'PROVIDER_CLI_OK claude' 'Claude CLI credentialless check' \
+    "$node" "$checker" --provider claude
+  run_exact 'PROVIDER_CLI_OK codex' 'Codex CLI credentialless check' \
+    "$node" "$checker" --provider codex
+}
+
+install_controller() {
+  mutation_guard
+  run_exact TELEAGENT_CONTROL_PLANE_INSTALLED_DISABLED 'controller disabled install' \
+    /bin/bash "$gate_release_root/$controller_source" --install-disabled
+  verify_gate_and_release
+  assert_sentinels_absent
+  assert_installed_file "$controller_installed"
+  run_exact TELEAGENT_CONTROL_PLANE_INSTALLED_DISABLED_OK 'controller installed check' \
+    /bin/bash "$gate_release_root/$controller_source" --check
+  mutation_guard
+}
+
+install_sip_gateway() {
+  mutation_guard
+  run_exact SIP_GATEWAY_INSTALLED_DISABLED 'SIP gateway disabled install' \
+    /bin/bash "$gate_release_root/$sip_installer_source" --install-disabled
+  verify_gate_and_release
+  assert_sentinels_absent
+  assert_installed_file "$sip_installer_installed"
+  run_exact SIP_GATEWAY_INSTALLED_DISABLED_OK 'SIP gateway installed check' \
+    /bin/bash "$gate_release_root/$sip_installer_source" --check
+  mutation_guard
+}
+
+install_voice() {
+  bootstrap_guard
+  run_exact VOICE_STACK_INSTALLED_DISABLED 'voice disabled install' \
+    /bin/bash "$gate_release_root/$voice_installer_source" --install-disabled
+  verify_gate_and_release
+  assert_sentinels_absent
+  assert_installed_file "$voice_installer_installed"
+  run_exact VOICE_STACK_INSTALLED_DISABLED_OK 'voice installed check' \
+    /bin/bash "$gate_release_root/$voice_installer_source" --check
+  bootstrap_guard
+}
+
+install_sip_fence() {
+  bootstrap_guard
+  run_optional_exact \
+    'Teleagent SIP fence install: recovered an interrupted fence operation; prior bundle restored' \
+    'SIP fence install' /bin/bash "$gate_release_root/$sip_fence_source" --install
+  verify_gate_and_release
+  assert_sentinels_absent
+  assert_sip_fence
+  mutation_guard
+}
+
+check_components() {
+  assert_installed_file "$worker_installed"
+  run_exact WORKER_SESSION_INSTALLED_DISABLED_OK 'worker installed check' \
+    /bin/bash "$gate_release_root/$worker_source" --check
+  check_provider_cli
+  assert_installed_file "$controller_installed"
+  run_exact TELEAGENT_CONTROL_PLANE_INSTALLED_DISABLED_OK 'controller installed check' \
+    /bin/bash "$gate_release_root/$controller_source" --check
+  assert_installed_file "$sip_installer_installed"
+  run_exact SIP_GATEWAY_INSTALLED_DISABLED_OK 'SIP gateway installed check' \
+    /bin/bash "$gate_release_root/$sip_installer_source" --check
+  assert_installed_file "$voice_installer_installed"
+  run_exact VOICE_STACK_INSTALLED_DISABLED_OK 'voice installed check' \
+    /bin/bash "$gate_release_root/$voice_installer_source" --check
+}
+
+final_checks() {
+  assert_sentinels_absent
+  assert_dormant_units
+  assert_installed_runtimes_final
+  assert_state_mounts
+  assert_sip_fence
+  verify_gate_and_release
+  assert_release_sources
+  assert_sentinels_absent
+}
+
+main() {
+  [ "$#" -eq 1 ] || fail 'select exactly one mode'
+  prepare_capture
+  verify_gate_and_release
+  assert_release_sources
+  source_checks
+  case "$1" in
+    --source-check)
+      verify_gate_and_release
+      printf 'TELEAGENT_HOST_SOURCE_OK\n'
+      ;;
+    --install-disabled)
+      # Voice identities and their fixed verifier must exist before the current
+      # SIP fence can attest and start. The voice service itself remains
+      # disabled; only the security fence is activated before other mutations.
+      preinstalled_checks_without_fence
+      install_voice
+      install_sip_fence
+      install_worker
+      install_provider_cli
+      install_controller
+      install_sip_gateway
+      final_checks
+      printf 'TELEAGENT_HOST_INSTALLED_DISABLED\n'
+      ;;
+    --check)
+      preinstalled_checks
+      check_components
+      final_checks
+      printf 'TELEAGENT_HOST_INSTALLED_DISABLED_OK\n'
+      ;;
+    *) fail 'usage: teleagent-disabled-host-install --source-check|--install-disabled|--check' ;;
+  esac
+}
+
+main "$@"

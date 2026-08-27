@@ -1,5 +1,5 @@
 import chalk from 'chalk';
-import { loadConfig, configExists } from '../../config.js';
+import { loadConfigReadOnly, configExists } from '../../config.js';
 
 /**
  * Redact sensitive values for display
@@ -36,7 +36,7 @@ export async function configShowCommand() {
     return;
   }
 
-  const config = await loadConfig();
+  const config = await loadConfigReadOnly();
   const ttsConfig = config.api?.tts || {};
   const sttConfig = config.api?.stt || {};
   const realtimeConfig = config.api?.realtime || {};
@@ -52,11 +52,6 @@ export async function configShowCommand() {
   console.log(chalk.gray(`  Realtime Voice: ${realtimeConfig.voice || '[not set]'}`));
   console.log(chalk.gray(`  OpenAI API Key: ${redactValue(realtimeConfig.apiKey)}`));
 
-  // 3CX Configuration
-  console.log(chalk.bold('\n3CX Configuration:'));
-  console.log(chalk.gray(`  SIP Domain: ${config.sip.domain}`));
-  console.log(chalk.gray(`  SIP Registrar: ${config.sip.registrar}`));
-
   // Server Configuration
   console.log(chalk.bold('\nServer:'));
   console.log(chalk.gray(`  External IP: ${config.server.externalIp}`));
@@ -71,8 +66,6 @@ export async function configShowCommand() {
   } else {
     for (const device of config.devices) {
       console.log(chalk.gray(`  • ${device.name} (extension ${device.extension})`));
-      console.log(chalk.gray(`    Auth ID: ${device.authId}`));
-      console.log(chalk.gray(`    Password: ${redactValue(device.password)}`));
       console.log(chalk.gray(`    Voice ID: ${device.voiceId}`));
       if (device.prompt) {
         const shortPrompt = device.prompt.length > 50

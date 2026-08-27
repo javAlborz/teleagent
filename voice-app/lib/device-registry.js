@@ -7,8 +7,8 @@
  * Each device has:
  * - name: Human-readable identifier (e.g., "Cephanie", "Morpheus")
  * - extension: SIP extension number (e.g., "9002")
- * - authId: 3CX authentication ID for SIP REGISTER
- * - password: 3CX authentication password
+ * Device data is persona/routing metadata only. SIP authentication belongs to
+ * the fixed, mutually authenticated Asterisk trunks and is forbidden here.
  * - voiceId: TTS provider voice name or ID
  * - sessionType: Agent profile selector (e.g. phone-haiku or phone-codex-luna)
  * - agentTimeoutSeconds: Agent request timeout for this phone agent
@@ -25,6 +25,9 @@
 const fs = require('fs');
 const path = require('path');
 const logger = require('./logger');
+const {
+  assertDeviceConfigHasNoAuthentication,
+} = require('./device-config-security');
 
 const CONFIG_PATHS = [
   '/app/config/devices.json',
@@ -39,6 +42,14 @@ const MORPHEUS_DEFAULT = {
   sessionType: 'phone-sonnet',
   prompt: 'You are Morpheus, the primary AI assistant. You are meticulous, systematic, and excellence-driven. Keep voice responses under 40 words.'
 };
+
+function invalidDeviceSummary(extension, device) {
+  const value = device && typeof device === 'object' ? device : {};
+  return {
+    extension: String(extension || ''),
+    missingFields: ['name', 'extension'].filter((field) => !value[field])
+  };
+}
 
 class DeviceRegistry {
   constructor() {
@@ -75,13 +86,16 @@ class DeviceRegistry {
       if (typeof devicesJson !== 'object') {
         throw new Error('Device config must be an object');
       }
+      assertDeviceConfigHasNoAuthentication(devicesJson);
 
       this.devices = {};
       this.devicesByName = {};
 
       for (const [extension, device] of Object.entries(devicesJson)) {
         if (!device.name || !device.extension) {
-          logger.warn('Skipping invalid device config', { extension, device });
+          // Device entries can contain SIP auth IDs and passwords. Report only
+          // the key and missing schema fields, never the rejected object.
+          logger.warn('Skipping invalid device config', invalidDeviceSummary(extension, device));
           continue;
         }
 
@@ -104,6 +118,7 @@ class DeviceRegistry {
       });
 
     } catch (error) {
+      if (error?.code === 'DEVICE_CONFIG_CONTAINS_AUTHENTICATION') throw error;
       logger.error('Failed to load device config', { error: error.message });
       this.devices = { [MORPHEUS_DEFAULT.extension]: MORPHEUS_DEFAULT };
       this.devicesByName = { [MORPHEUS_DEFAULT.name.toLowerCase()]: MORPHEUS_DEFAULT };
@@ -150,36 +165,10 @@ class DeviceRegistry {
     return this.loaded;
   }
 
-  /**
-   * Get devices that have auth credentials for SIP registration
-   * Returns array of devices with authId and password
-   */
-  getRegistrableDevices() {
-    const registrable = [];
-    for (const device of Object.values(this.devices)) {
-      if (device.authId && device.password) {
-        registrable.push(device);
-      }
-    }
-    return registrable;
-  }
-
-  /**
-   * Get registration configs for all registrable devices
-   * Returns object keyed by extension
-   */
-  getRegistrationConfigs() {
-    const configs = {};
-    for (const [ext, device] of Object.entries(this.devices)) {
-      if (device.authId && device.password) {
-        configs[ext] = device;
-      }
-    }
-    return configs;
-  }
 }
 
 // Singleton instance
 const registry = new DeviceRegistry();
 
 module.exports = registry;
+module.exports.invalidDeviceSummary = invalidDeviceSummary;

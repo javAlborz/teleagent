@@ -452,11 +452,22 @@ class OperatorInspector {
     allowedRoots = parseRoots(process.env.VOICE_INSPECTION_ROOTS),
     home = os.homedir(),
     execFileImpl = execFileAsync,
+    recentOutputMs = process.env.VOICE_AGENT_RECENT_OUTPUT_MS || 5000,
+    tmuxSocketPath = null,
   } = {}) {
     this.home = home;
     this.configuredRoots = allowedRoots.map((root) => path.resolve(root));
     this.realRootsPromise = null;
     this.execFile = execFileImpl;
+    this.tmuxSocketPath = tmuxSocketPath ? path.resolve(String(tmuxSocketPath)) : null;
+    this.recentOutputMs = Math.max(
+      1000,
+      Math.min(Number.parseInt(recentOutputMs, 10) || 5000, 30000)
+    );
+  }
+
+  _tmuxArgs(args) {
+    return this.tmuxSocketPath ? ['-S', this.tmuxSocketPath, ...args] : args;
   }
 
   async _realRoots() {
@@ -470,6 +481,52 @@ class OperatorInspector {
       })).then((roots) => roots.filter(Boolean));
     }
     return this.realRootsPromise;
+  }
+
+  async _activityForResolved(targetSession) {
+    // Required lazily to avoid the controller/inspector module cycle during startup.
+    const { readProviderActivityState } = require('./tmux-agent-controller');
+    const provider = targetSession.inspected.pane.agent;
+    const activity = await readProviderActivityState(targetSession.resolved.filename, provider);
+    const recentOutput = activity.busy &&
+      activity.millisecondsSinceLogUpdate <= this.recentOutputMs;
+    const state = recentOutput
+      ? 'producing_output'
+      : (activity.busy
+        ? 'working_quietly'
+        : (activity.observed ? 'waiting_for_input' : 'unknown'));
+    return {
+      agent_state: state,
+      task_state: activity.busy ? 'running' : (activity.observed ? 'waiting_for_input' : 'unknown'),
+      output_state: recentOutput ? 'recent_output' : (activity.observed ? 'quiet' : 'unknown'),
+      generating: recentOutput,
+      agent_busy: Boolean(activity.busy),
+      last_activity_at: activity.logUpdatedAt || activity.lastRecordAt || null,
+      last_transition_at: activity.lastTransitionAt || null,
+      seconds_since_activity: Math.floor(activity.millisecondsSinceLogUpdate / 1000),
+      activity_source: 'provider_session_log',
+      activity_confidence: activity.observed ? (recentOutput ? 'medium' : 'high') : 'low',
+      activity_note: recentOutput
+        ? 'The provider task is running and its session log changed recently; this is the closest available signal to current output.'
+        : (activity.busy
+          ? 'The provider task is running, but its session log is currently quiet.'
+          : 'The provider process is waiting for input.'),
+    };
+  }
+
+  async inspectAgentActivity({ target } = {}) {
+    const targetSession = await this.resolveAgentSessionTarget(target);
+    return {
+      target: targetSession.inspected.pane.target,
+      stable_target: targetSession.inspected.pane.stable_target,
+      named_target: targetSession.inspected.pane.named_target,
+      provider: targetSession.inspected.pane.agent,
+      conversation_name: targetSession.inspected.pane.ai_session_name ||
+        targetSession.inspected.pane.window_name || null,
+      agent_running: true,
+      agent_process_present: true,
+      ...(await this._activityForResolved(targetSession)),
+    };
   }
 
   async resolveAllowedPath(requestedPath) {
@@ -593,7 +650,7 @@ class OperatorInspector {
       throw Object.assign(new Error('The tmux target is invalid.'), { code: 'INVALID_TMUX_TARGET' });
     }
     const [metadataResult, processResult] = await Promise.all([
-      this.execFile('tmux', ['display-message', '-p', '-t', safeTarget, TMUX_FORMAT], {
+      this.execFile('tmux', this._tmuxArgs(['display-message', '-p', '-t', safeTarget, TMUX_FORMAT]), {
         timeout: 5000,
         maxBuffer: 4096,
       }),
@@ -732,6 +789,17 @@ class OperatorInspector {
     };
   }
 
+  async inspectWorkerSessionBoundary(target) {
+    const inspected = await this._inspectTmuxTarget(target);
+    return {
+      target: inspected.pane.target,
+      stable_target: inspected.pane.stable_target,
+      provider: inspected.pane.agent,
+      cwd: inspected.pane.cwd,
+      agent_running: inspected.pane.agent_running,
+    };
+  }
+
   async inspectAgentSessionHistory({
     target,
     cursor = 0,
@@ -747,6 +815,7 @@ class OperatorInspector {
       position,
       role,
     });
+    const activity = await this._activityForResolved(targetSession);
     const chunkStart = history.messages[0]?.number || null;
     const chunkEnd = history.messages.at(-1)?.number || null;
     return {
@@ -764,6 +833,7 @@ class OperatorInspector {
       resolution: resolved.resolution,
       exact_provider_history: true,
       redacted: true,
+      ...activity,
       messages: history.messages,
       chunk: {
         start: chunkStart,
@@ -791,7 +861,7 @@ class OperatorInspector {
     try {
       const tmuxArgs = ['list-panes', ...(safeSession ? ['-s', '-t', safeSession] : ['-a']), '-F', TMUX_FORMAT];
       const [tmuxResult, processResult] = await Promise.all([
-        this.execFile('tmux', tmuxArgs, { timeout: 5000, maxBuffer: TMUX_MAX_BYTES }),
+        this.execFile('tmux', this._tmuxArgs(tmuxArgs), { timeout: 5000, maxBuffer: TMUX_MAX_BYTES }),
         this.execFile('ps', ['-eo', 'pid=,ppid=,stat=,args='], { timeout: 5000, maxBuffer: 256 * 1024 }),
       ]);
       const panes = enrichTmuxPanes(tmuxResult.stdout, processResult.stdout);
@@ -803,6 +873,8 @@ class OperatorInspector {
         pane_count: panes.length,
         sessions,
         terminology: 'A tmux session contains windows; each window contains one or more panes.',
+        activity_included: false,
+        activity_semantics: 'agent_running means process present only. Inspect one exact agent pane to retrieve provider-log activity.',
       };
     } catch (error) {
       if (/no server running|failed to connect|not found/i.test(`${error.message}\n${error.stderr || ''}`)) {
@@ -819,17 +891,35 @@ class OperatorInspector {
     }
     const safeLines = Math.max(10, Math.min(Number.parseInt(lines, 10) || 40, 120));
     const [captureResult, metadataResult, processResult] = await Promise.all([
-      this.execFile('tmux', ['capture-pane', '-p', '-J', '-t', safeTarget, '-S', `-${safeLines}`], {
+      this.execFile('tmux', this._tmuxArgs(['capture-pane', '-p', '-J', '-t', safeTarget, '-S', `-${safeLines}`]), {
         timeout: 5000,
         maxBuffer: TMUX_MAX_BYTES,
       }),
-      this.execFile('tmux', ['display-message', '-p', '-t', safeTarget, TMUX_FORMAT], {
+      this.execFile('tmux', this._tmuxArgs(['display-message', '-p', '-t', safeTarget, TMUX_FORMAT]), {
         timeout: 5000,
         maxBuffer: 4096,
       }),
       this.execFile('ps', ['-eo', 'pid=,ppid=,stat=,args='], { timeout: 5000, maxBuffer: 256 * 1024 }),
     ]);
     const pane = enrichTmuxPanes(metadataResult.stdout, processResult.stdout)[0] || null;
+    let activity = {};
+    if (['codex', 'claude'].includes(pane?.agent)) {
+      try {
+        activity = await this.inspectAgentActivity({ target: pane.stable_target || safeTarget });
+      } catch (error) {
+        activity = {
+          agent_state: 'unknown',
+          task_state: 'unknown',
+          output_state: 'unknown',
+          generating: false,
+          agent_busy: null,
+          last_activity_at: null,
+          activity_source: 'provider_session_unresolved',
+          activity_confidence: 'low',
+          activity_error: error.code || 'SESSION_HISTORY_UNRESOLVED',
+        };
+      }
+    }
     return {
       requested_target: safeTarget,
       target: pane?.target || safeTarget,
@@ -841,11 +931,12 @@ class OperatorInspector {
       agent_running: Boolean(pane?.agent_running),
       agent_attribution: pane?.agent_attribution || 'none',
       agent_process_count: pane?.agent_process_count || 0,
+      ...activity,
       content: redactSensitiveText(clip(captureResult.stdout, TMUX_MAX_BYTES)).trim(),
       context_only: true,
       native_resume: false,
       display_note: pane?.agent_running
-        ? 'The process tree proves an agent is running even if the captured TUI looks idle.'
+        ? 'The process tree proves only that an agent process exists; use agent_state and output_state for current activity.'
         : 'No Claude or Codex process was found in the pane process tree.',
     };
   }
@@ -894,7 +985,7 @@ class OperatorInspector {
       uptime_seconds: Math.floor(os.uptime()),
       allowed_roots: [...this.configuredRoots],
       filesystem_access: 'bounded-read-only',
-      tmux_access: 'bounded read-only inspection; approved target-bound messaging uses a separate controller',
+      tmux_access: 'bounded read-only inspection; target-bound messaging is unavailable from production phone',
     };
   }
 
@@ -906,6 +997,7 @@ class OperatorInspector {
       case 'git_status': return this.gitStatus(args);
       case 'list_tmux_sessions': return this.listTmuxSessions(args);
       case 'inspect_tmux_pane': return this.inspectTmuxPane(args);
+      case 'inspect_agent_activity': return this.inspectAgentActivity(args);
       case 'inspect_agent_session_history': return this.inspectAgentSessionHistory(args);
       case 'list_agent_processes': return this.listAgentProcesses();
       case 'homelab_status': return this.homelabStatus();

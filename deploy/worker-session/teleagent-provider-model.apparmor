@@ -1,0 +1,15 @@
+#include <tunables/global>
+
+# Model/tool descendants run inside a launch-private network namespace and may
+# connect only to the matching loopback TCP shim. Pathname AF_UNIX sockets are
+# host-global even with PrivateNetwork=yes, so they are denied by a model-only
+# enforced LSM profile. The root wrapper and shim do not enter this profile.
+profile teleagent-provider-model flags=(attach_disconnected,mediate_deleted) {
+  file,
+  signal,
+
+  network inet stream,
+  network inet6 stream,
+
+  deny network unix,
+}

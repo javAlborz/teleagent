@@ -62,8 +62,13 @@ test('Codex-only configuration does not include Claude profiles or requirements'
     'phone-codex-sol'
   ]);
   assert.equal(environment.AGENT_PROVIDERS, 'codex');
-  assert.equal(environment.PHONE_CODEX_TERRA_SANDBOX, 'workspace-write');
-  assert.equal(environment.PHONE_CODEX_SOL_SANDBOX, 'danger-full-access');
+  assert.equal(environment.PHONE_CODEX_TERRA_SANDBOX, 'read-only');
+  assert.equal(environment.PHONE_CODEX_SOL_SANDBOX, 'read-only');
+  assert.equal(environment.PRIVILEGED_ACTION_API_TOKEN, '');
+  assert.equal(environment.PRIVILEGED_ACTION_PROXY_ENABLED, 'false');
+  assert.equal(environment.PRIVILEGED_ACTION_PROXY_SOCKET_PATH, '');
+  assert.equal(environment.VOICE_APPROVAL_KEY_ID, '');
+  assert.equal(environment.VOICE_APPROVAL_PUBLIC_KEY_FILE, '');
 });
 
 test('Codex readiness checks version and authenticated login status', async () => {

@@ -248,7 +248,7 @@ device.command('remove <name>').description('Remove device').action(deviceRemove
 2. Check prerequisites:
    - docker --version || exit "Install Docker first"
    - claude --version || warn "Claude CLI not found, needed for API server"
-   - node --version >= 18 || exit "Node.js 18+ required"
+   - node --version >= 24 || exit "Node.js 24+ required for deployed services"
 3. Create temp directory
 4. Download latest release tarball from GitHub
 5. Extract to ~/.claude-phone/cli/

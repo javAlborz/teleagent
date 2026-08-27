@@ -1,0 +1,1015 @@
+#!/bin/bash
+set -euo pipefail
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+unset ENV BASH_ENV CDPATH LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT GCONV_PATH \
+  NODE_OPTIONS NODE_PATH PYTHONPATH PERL5LIB RUBYOPT
+umask 077
+
+name=teleagent-control-plane-install
+requested_action=${1:-}
+root_prefix=
+expected_uid=0
+expected_gid=0
+systemctl_bin=/usr/bin/systemctl
+sysusers_bin=/usr/bin/systemd-sysusers
+tmpfiles_bin=/usr/bin/systemd-tmpfiles
+id_bin=/usr/bin/id
+getent_bin=/usr/bin/getent
+release_preflight='ExecStartPre=+/usr/bin/env -i HOME=/var/empty PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 /usr/local/libexec/verify-teleagent-release-closure --check-start-gate'
+dormant_unit_properties=LoadState,ActiveState,SubState,UnitFileState,FragmentPath,NeedDaemonReload,DropInPaths
+test_source_root=
+test_state_mount=0
+test_state_capacity=
+test_state_free=
+test_controller_state_device=
+test_privileged_state_device=
+controller_uid=
+controller_gid=
+controller_state_root=/var/lib/teleagent-control
+controller_database=/var/lib/teleagent-control/executor-tasks.sqlite
+controller_state_file=/var/lib/teleagent-control/voice-execution.lock.json
+controller_state_marker=/etc/teleagent/controller/STATE_INITIALIZED
+controller_initial_state='{"version":1,"locked":false,"revision":0,"updatedAt":"1970-01-01T00:00:00.000Z","lockedAt":null,"unlockedAt":"1970-01-01T00:00:00.000Z","reason":null,"source":"disabled_installer_initialization","remotePanicPending":false,"remotePanicConfirmedAt":null}'
+controller_initial_marker=TELEAGENT_CONTROLLER_STATE_INITIALIZED_V1
+privileged_state_root=/var/lib/teleagent-privileged-action
+privileged_database=/var/lib/teleagent-privileged-action/actions.sqlite
+privileged_state_marker=/etc/teleagent/privileged-action/STATE_INITIALIZED
+privileged_initial_marker=TELEAGENT_PRIVILEGED_STATE_INITIALIZED_V1
+install_staging=
+install_committed=0
+install_complete=0
+
+fail() {
+  local message=$1
+  local status=${2:-77}
+  printf 'Teleagent control-plane installation refused: %s\n' "$message" >&2
+  exit "$status"
+}
+
+validate_test_dependency() {
+  local filename=$1
+  [ -f "$filename" ] && [ ! -L "$filename" ] ||
+    fail 'a test dependency is not a regular file'
+  [ "$(/usr/bin/stat -c '%u:%g:%a:%h' "$filename")" = \
+    "${expected_uid}:${expected_gid}:700:1" ] ||
+    fail 'a test dependency has unsafe metadata'
+  case "$(/usr/bin/readlink -f -- "$filename")" in
+    "$root_prefix"/*) ;;
+    *) fail 'a test dependency escaped the isolated fixture' ;;
+  esac
+}
+
+configure_environment() {
+  if [ "${TELEAGENT_CONTROL_PLANE_INSTALL_TEST_ONLY:-}" = 1 ]; then
+    [ -n "${TELEAGENT_CONTROL_PLANE_INSTALL_TEST_ROOT:-}" ] ||
+      fail 'the isolated test root is required'
+    root_prefix=$(/usr/bin/readlink -f -- "$TELEAGENT_CONTROL_PLANE_INSTALL_TEST_ROOT")
+    case "$root_prefix" in
+      /tmp/teleagent-control-plane-install-*) ;;
+      *) fail 'the isolated test root is outside the allowed namespace' ;;
+    esac
+    expected_uid=$(/usr/bin/id -u)
+    expected_gid=$(/usr/bin/id -g)
+    [ -d "$root_prefix" ] && [ ! -L "$root_prefix" ] ||
+      fail 'the isolated test root is unsafe'
+    [ "$(/usr/bin/stat -c '%u:%g:%a' "$root_prefix")" = \
+      "${expected_uid}:${expected_gid}:700" ] ||
+      fail 'the isolated test root has unsafe metadata'
+    systemctl_bin=${TELEAGENT_CONTROL_PLANE_INSTALL_TEST_SYSTEMCTL:-}
+    sysusers_bin=${TELEAGENT_CONTROL_PLANE_INSTALL_TEST_SYSUSERS:-}
+    tmpfiles_bin=${TELEAGENT_CONTROL_PLANE_INSTALL_TEST_TMPFILES:-}
+    id_bin=${TELEAGENT_CONTROL_PLANE_INSTALL_TEST_ID:-}
+    getent_bin=${TELEAGENT_CONTROL_PLANE_INSTALL_TEST_GETENT:-}
+    test_source_root=${TELEAGENT_CONTROL_PLANE_INSTALL_TEST_SOURCE_ROOT:-}
+    test_state_mount=${TELEAGENT_CONTROL_PLANE_INSTALL_TEST_STATE_MOUNT:-0}
+    test_state_capacity=${TELEAGENT_CONTROL_PLANE_INSTALL_TEST_STATE_CAPACITY_BYTES:-}
+    test_state_free=${TELEAGENT_CONTROL_PLANE_INSTALL_TEST_STATE_FREE_BYTES:-}
+    test_controller_state_device=${TELEAGENT_CONTROL_PLANE_INSTALL_TEST_CONTROLLER_STATE_DEVICE:-}
+    test_privileged_state_device=${TELEAGENT_CONTROL_PLANE_INSTALL_TEST_PRIVILEGED_STATE_DEVICE:-}
+    case "$test_state_mount" in 0|1) ;; *) fail 'the test state-mount flag is invalid' ;; esac
+    case "$test_state_capacity:$test_state_free" in
+      *[!0-9:]*) fail 'the test state capacity override is invalid' ;;
+    esac
+    if [ -n "$test_state_capacity" ] || [ -n "$test_state_free" ]; then
+      [ -n "$test_state_capacity" ] && [ -n "$test_state_free" ] ||
+        fail 'both test state accounting values are required together'
+    fi
+    if [ "$test_state_mount" = 1 ]; then
+      case "$test_controller_state_device:$test_privileged_state_device" in
+        ''|*[!0-9:]*) fail 'both synthetic state device IDs are required' ;;
+      esac
+      [ -n "$test_controller_state_device" ] && [ -n "$test_privileged_state_device" ] ||
+        fail 'both synthetic state device IDs are required'
+    fi
+    for dependency in \
+      "$systemctl_bin" "$sysusers_bin" "$tmpfiles_bin" "$id_bin" "$getent_bin"; do
+      validate_test_dependency "$dependency"
+    done
+    return
+  fi
+
+  for forbidden in \
+    "${TELEAGENT_CONTROL_PLANE_INSTALL_TEST_ROOT:-}" \
+    "${TELEAGENT_CONTROL_PLANE_INSTALL_TEST_SYSTEMCTL:-}" \
+    "${TELEAGENT_CONTROL_PLANE_INSTALL_TEST_SYSUSERS:-}" \
+    "${TELEAGENT_CONTROL_PLANE_INSTALL_TEST_TMPFILES:-}" \
+    "${TELEAGENT_CONTROL_PLANE_INSTALL_TEST_ID:-}" \
+    "${TELEAGENT_CONTROL_PLANE_INSTALL_TEST_GETENT:-}" \
+    "${TELEAGENT_CONTROL_PLANE_INSTALL_TEST_SOURCE_ROOT:-}" \
+    "${TELEAGENT_CONTROL_PLANE_INSTALL_TEST_STATE_MOUNT:-}" \
+    "${TELEAGENT_CONTROL_PLANE_INSTALL_TEST_STATE_CAPACITY_BYTES:-}" \
+    "${TELEAGENT_CONTROL_PLANE_INSTALL_TEST_STATE_FREE_BYTES:-}" \
+    "${TELEAGENT_CONTROL_PLANE_INSTALL_TEST_CONTROLLER_STATE_DEVICE:-}" \
+    "${TELEAGENT_CONTROL_PLANE_INSTALL_TEST_PRIVILEGED_STATE_DEVICE:-}"; do
+    [ -z "$forbidden" ] || fail 'test overrides require the isolated test lane'
+  done
+}
+
+host_path() {
+  printf '%s%s\n' "$root_prefix" "$1"
+}
+
+configure_environment
+systemctl_command=("$systemctl_bin")
+if [ -z "$root_prefix" ]; then
+  systemctl_command=(/usr/bin/env -i HOME=/var/empty PATH=/usr/sbin:/usr/bin:/sbin:/bin
+    LANG=C.UTF-8 LC_ALL=C.UTF-8 "$systemctl_bin")
+fi
+
+run_systemctl() {
+  "${systemctl_command[@]}" "$@"
+}
+
+self=$(/usr/bin/readlink -f -- "$0")
+installed_entrypoint=$(host_path /usr/local/libexec/teleagent-control-plane-install)
+if [ "$self" = "$installed_entrypoint" ]; then
+  case "$requested_action" in
+    --check) ;;
+    --source-check|--install-disabled)
+      fail 'the installed entrypoint is check-only; source and mutating modes require an immutable release entrypoint'
+      ;;
+  esac
+  if [ -n "$test_source_root" ]; then
+    source_root=$(/usr/bin/readlink -f -- "$test_source_root")
+  else
+    source_root=$(/usr/bin/readlink -f -- \
+      "$(host_path /opt/teleagent/current/deploy/controller)")
+  fi
+else
+  [ "$(/usr/bin/basename -- "$self")" = "$name" ] ||
+    fail 'the installer entrypoint is unreviewed'
+  source_root=$(/usr/bin/dirname -- "$self")
+fi
+app_root=$(/usr/bin/readlink -f -- "$source_root/../..")
+[ "$source_root" = "$app_root/deploy/controller" ] ||
+  fail 'the control-plane source bundle is outside a release root'
+
+require_immutable_mutation_entrypoint() {
+  [ -n "$root_prefix" ] && return
+  [ "$0" = "$self" ] ||
+    fail 'disabled installation requires the literal canonical immutable release entrypoint'
+  [[ "$app_root" =~ ^/opt/teleagent/releases/sha256-[a-f0-9]{64}$ ]] ||
+    fail 'disabled installation requires an immutable release root'
+}
+
+manifest="$source_root/control-plane-install.manifest"
+manifest_target=/etc/teleagent/control-plane-install.manifest
+source_uid=$(/usr/bin/stat -c '%u' "$app_root")
+source_gid=$(/usr/bin/stat -c '%g' "$app_root")
+
+declare -a sources=()
+declare -a targets=()
+declare -a modes=()
+declare -a digests=()
+
+assert_source_file() {
+  local filename=$1
+  local target_mode=$2
+  local metadata
+  [ -f "$filename" ] && [ ! -L "$filename" ] ||
+    fail 'a reviewed source asset is absent or unsafe'
+  [ "$(/usr/bin/readlink -f -- "$filename")" = "$filename" ] ||
+    fail 'a reviewed source asset resolves through a link'
+  metadata=$(/usr/bin/stat -c '%u:%g:%a:%h' "$filename")
+  case "$target_mode:$metadata" in
+    0755:"${source_uid}:${source_gid}:555:1"|\
+    0755:"${source_uid}:${source_gid}:755:1"|\
+    0644:"${source_uid}:${source_gid}:444:1"|\
+    0644:"${source_uid}:${source_gid}:644:1"|\
+    0444:"${source_uid}:${source_gid}:444:1"|\
+    0444:"${source_uid}:${source_gid}:644:1") ;;
+    *) fail 'a reviewed source asset has unsafe metadata' ;;
+  esac
+}
+
+load_manifest() {
+  assert_source_file "$manifest" 0644
+  local digest mode relative target extra
+  local closure=
+  while IFS=' ' read -r digest mode relative target extra; do
+    [ -n "$digest" ] && [ -z "${extra:-}" ] && [ "${#digest}" -eq 64 ] ||
+      fail 'the control-plane manifest has a malformed record'
+    case "$digest" in *[!0-9a-f]*) fail 'a control-plane digest is invalid' ;; esac
+    case "$mode" in 0644|0755) ;; *) fail 'a control-plane target mode is invalid' ;; esac
+    case "$relative:$target" in
+      *..*) fail 'the control-plane manifest contains path traversal' ;;
+      deploy/controller/*:/etc/systemd/system/teleagent-agent-controller.service|\
+      deploy/controller/*:/etc/tmpfiles.d/teleagent-agent-controller.conf|\
+      deploy/controller/*:/usr/local/libexec/teleagent-control-plane-install|\
+      deploy/controller/*:/usr/local/libexec/verify-teleagent-control-plane|\
+      deploy/privileged-action/*:/etc/systemd/system/teleagent-privileged-action.service|\
+      deploy/privileged-action/*:/etc/tmpfiles.d/teleagent-privileged-action.conf|\
+      deploy/privileged-action/*:/etc/sysusers.d/teleagent-privileged-action.conf) ;;
+      *) fail 'the control-plane manifest contains an unapproved path' ;;
+    esac
+    [ "$target" != /etc/teleagent/controller/ENABLE ] &&
+      [ "$target" != /etc/teleagent/privileged-action/ENABLE ] ||
+      fail 'an activation sentinel entered the install closure'
+    assert_source_file "$app_root/$relative" "$mode"
+    [ "$(/usr/bin/sha256sum "$app_root/$relative" | /usr/bin/awk '{print $1}')" = \
+      "$digest" ] || fail 'a control-plane source digest is unreviewed'
+    sources+=("$relative")
+    targets+=("$target")
+    modes+=("$mode")
+    digests+=("$digest")
+    closure="${closure}${mode} ${relative} ${target}\n"
+  done < "$manifest"
+
+  local expected
+  expected='0644 deploy/controller/teleagent-agent-controller.service /etc/systemd/system/teleagent-agent-controller.service
+0644 deploy/controller/teleagent-agent-controller.tmpfiles /etc/tmpfiles.d/teleagent-agent-controller.conf
+0755 deploy/controller/teleagent-control-plane-install /usr/local/libexec/teleagent-control-plane-install
+0755 deploy/controller/verify-teleagent-control-plane /usr/local/libexec/verify-teleagent-control-plane
+0644 deploy/privileged-action/teleagent-privileged-action.service /etc/systemd/system/teleagent-privileged-action.service
+0644 deploy/privileged-action/teleagent-privileged-action.sysusers /etc/sysusers.d/teleagent-privileged-action.conf
+0644 deploy/privileged-action/teleagent-privileged-action.tmpfiles /etc/tmpfiles.d/teleagent-privileged-action.conf'
+  [ "$(printf '%b' "$closure" | /usr/bin/sed '/^$/d' | LC_ALL=C /usr/bin/sort)" = \
+    "$(printf '%s\n' "$expected" | LC_ALL=C /usr/bin/sort)" ] ||
+    fail 'the control-plane install closure is incomplete or duplicated'
+
+  sources+=(deploy/controller/control-plane-install.manifest)
+  targets+=("$manifest_target")
+  modes+=(0444)
+  digests+=('')
+}
+
+assert_release_preflight() {
+  local service=$1 exact_count reference_count preflight_line first_boundary
+  local component=$2 expected_start credential_count actual_execution expected_execution
+  local actual_credentials expected_credentials service_execution service_credentials
+  local execution_pattern credential_pattern
+  execution_pattern='^Exec(Condition|StartPre|Start|StartPost|Reload|Stop|StopPost)='
+  credential_pattern='^(LoadCredential|LoadCredentialEncrypted|SetCredential|SetCredentialEncrypted|ImportCredential|ImportCredentialEx)='
+  /usr/bin/cmp -s -- "$service" <(LC_ALL=C /usr/bin/tr -d '\000\r' < "$service") ||
+    fail 'a control-plane unit contains a forbidden control byte'
+  ! /usr/bin/grep -Eq '\\[[:space:]]*$' "$service" ||
+    fail 'a control-plane unit contains an unsupported line continuation'
+  ! /usr/bin/grep -Eq \
+    '(^[[:space:]]+(Exec(Condition|StartPre|Start|StartPost|Reload|Stop|StopPost)|(LoadCredential|LoadCredentialEncrypted|SetCredential|SetCredentialEncrypted|ImportCredential|ImportCredentialEx))[[:space:]]*=|^(Exec(Condition|StartPre|Start|StartPost|Reload|Stop|StopPost)|(LoadCredential|LoadCredentialEncrypted|SetCredential|SetCredentialEncrypted|ImportCredential|ImportCredentialEx))[[:space:]]+=)' \
+    "$service" ||
+    fail 'a control-plane unit contains noncanonical lifecycle or credential assignment whitespace'
+  ! /usr/bin/grep -Eq '^ExecCondition=|^ExecReload=|^ExecStartPost=|^ExecStop=|^ExecStopPost=' "$service" ||
+    fail 'a control-plane unit added an execution path that bypasses the start gate'
+  exact_count=$(/usr/bin/grep -Fxc "$release_preflight" "$service" || true)
+  reference_count=$(/usr/bin/grep -Fc \
+    '/usr/local/libexec/verify-teleagent-release-closure' "$service" || true)
+  [ "$exact_count" -eq 1 ] && [ "$reference_count" -eq 2 ] ||
+    fail 'a control-plane unit lost or weakened its exact release preflight'
+  expected_start="ExecStart=/usr/bin/python3 -I /usr/local/libexec/verify-teleagent-release-closure --start-component $component \${CREDENTIALS_DIRECTORY}/teleagent-release-gate"
+  [ "$(/usr/bin/grep -Fxc "$expected_start" "$service" || true)" -eq 1 ] ||
+    fail 'a control-plane unit lost its immutable release launcher'
+  actual_execution=$(/usr/bin/grep -E "$execution_pattern" "$service" || true)
+  expected_execution=$(printf '%s\n' "$release_preflight" "$expected_start")
+  [ "$(printf '%s\n' "$actual_execution" | LC_ALL=C /usr/bin/sort)" = \
+    "$(printf '%s\n' "$expected_execution" | LC_ALL=C /usr/bin/sort)" ] ||
+    fail 'a control-plane unit execution command closure drifted'
+  service_execution=$(/usr/bin/awk -v pattern="$execution_pattern" '
+    /^[[:space:]]*\[[^][]+\][[:space:]]*$/ {
+      section = $0
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", section)
+      next
+    }
+    section == "[Service]" && $0 ~ pattern { print }
+  ' "$service")
+  [ "$service_execution" = "$actual_execution" ] ||
+    fail 'a control-plane unit execution command escaped the Service section'
+  credential_count=$(/usr/bin/grep -Fxc \
+    'LoadCredential=teleagent-release-gate:/run/teleagent-release-gate/verified.json' \
+    "$service" || true)
+  [ "$credential_count" -eq 1 ] ||
+    fail 'a control-plane unit lost its release-gate credential'
+  case "$component" in
+    agent-controller)
+      expected_credentials='LoadCredential=teleagent-release-gate:/run/teleagent-release-gate/verified.json'
+      ;;
+    privileged-action)
+      expected_credentials='LoadCredential=approval-public-key:/etc/teleagent/privileged-action/approval-public.pem
+LoadCredential=replay-fingerprint-key:/etc/teleagent/privileged-action/replay-fingerprint.key
+LoadCredential=teleagent-release-gate:/run/teleagent-release-gate/verified.json'
+      ;;
+    *) fail 'a control-plane unit has an unsupported release component' ;;
+  esac
+  actual_credentials=$(/usr/bin/grep -E "$credential_pattern" "$service" || true)
+  [ "$(printf '%s\n' "$actual_credentials" | LC_ALL=C /usr/bin/sort)" = \
+    "$(printf '%s\n' "$expected_credentials" | LC_ALL=C /usr/bin/sort)" ] ||
+    fail 'a control-plane unit credential directive closure drifted'
+  service_credentials=$(/usr/bin/awk -v pattern="$credential_pattern" '
+    /^[[:space:]]*\[[^][]+\][[:space:]]*$/ {
+      section = $0
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", section)
+      next
+    }
+    section == "[Service]" && $0 ~ pattern { print }
+  ' "$service")
+  [ "$service_credentials" = "$actual_credentials" ] ||
+    fail 'a control-plane unit credential directive escaped the Service section'
+  ! /usr/bin/grep -E '^Exec(Condition|StartPre|StartPost|Start|StopPost|Stop|Reload)=.*\/opt\/teleagent\/current' \
+    "$service" | /usr/bin/grep -q . ||
+    fail 'a control-plane unit still executes mutable current'
+  preflight_line=$(/usr/bin/grep -nFx "$release_preflight" "$service" |
+    /usr/bin/cut -d: -f1)
+  first_boundary=$(/usr/bin/grep -nE '^ExecStart(Pre)?=' "$service" |
+    /usr/bin/sed -n '1s/:.*//p')
+  case "$preflight_line:$first_boundary" in *[!0-9:]*)
+    fail 'a control-plane unit start-command order is malformed' ;;
+  esac
+  [ "$preflight_line" -eq "$first_boundary" ] ||
+    fail 'the trusted release preflight is not the first start command'
+}
+
+source_check() {
+  load_manifest
+  local controller="$source_root/teleagent-agent-controller.service"
+  local privileged="$app_root/deploy/privileged-action/teleagent-privileged-action.service"
+  local retired_authority_environment='UnsetEnvironment=VOICE_APPROVAL_KEY_ID VOICE_APPROVAL_PUBLIC_KEY_FILE PRIVILEGED_ACTION_API_TOKEN PRIVILEGED_ACTION_PROXY_ENABLED PRIVILEGED_ACTION_PROXY_SOCKET_PATH PRIVILEGED_ACTION_PROXY_TIMEOUT_MS'
+  [ "$(/usr/bin/grep -Fxc \
+    'ConditionPathExists=/etc/teleagent/controller/ENABLE' "$controller" || true)" -eq 1 ] ||
+    fail 'the controller unit lost its exact activation sentinel'
+  [ "$(/usr/bin/grep -Fxc \
+    'ConditionPathExists=/etc/teleagent/worker-session/ENABLE' "$controller" || true)" -eq 1 ] ||
+    fail 'the controller unit lost its worker prerequisite sentinel'
+  [ "$(/usr/bin/grep -Fxc \
+    'ConditionPathExists=/etc/teleagent/privileged-action/ENABLE' "$privileged" || true)" -eq 1 ] ||
+    fail 'the privileged unit lost its exact activation sentinel'
+  [ "$(/usr/bin/grep -Fxc "$retired_authority_environment" "$controller" || true)" -eq 1 ] ||
+    fail 'the controller can inherit retired phone approval authority'
+  /usr/bin/grep -Eq \
+    '^InaccessiblePaths=.*[[:space:]]/run/teleagent-privileged-action([[:space:]]|$)' \
+    "$controller" || fail 'the controller can reach the retired privileged-action socket'
+  assert_release_preflight "$controller" agent-controller
+  assert_release_preflight "$privileged" privileged-action
+  ! /usr/bin/grep -Eq '^\[Install\][[:space:]]*$' "$controller" "$privileged" ||
+    fail 'a dormant control-plane unit became enableable'
+  ! /usr/bin/grep -Fq '/ENABLE' \
+    "$source_root/teleagent-agent-controller.tmpfiles" \
+    "$app_root/deploy/privileged-action/teleagent-privileged-action.tmpfiles" ||
+    fail 'tmpfiles must never create an activation sentinel'
+  /bin/bash -n "$source_root/teleagent-control-plane-install"
+  /bin/sh -n "$source_root/verify-teleagent-control-plane"
+}
+
+assert_sentinels_absent() {
+  local sentinel
+  for sentinel in \
+    /etc/teleagent/controller/ENABLE \
+    /etc/teleagent/privileged-action/ENABLE \
+    /etc/teleagent/worker-session/ENABLE; do
+    sentinel=$(host_path "$sentinel")
+    if [ -e "$sentinel" ] || [ -L "$sentinel" ]; then
+      fail 'every activation sentinel must remain absent'
+    fi
+  done
+}
+
+unit_file_target() {
+  case "$1" in
+    teleagent-provider-supervisor@*.socket)
+      host_path /etc/systemd/system/teleagent-provider-supervisor@.socket ;;
+    *) host_path "/etc/systemd/system/$1" ;;
+  esac
+}
+
+assert_unit_dormant() {
+  local unit=$1
+  local phase=$2
+  local target output capture capture_directory capture_status=0 capture_size
+  local last_byte unsafe_bytes line key value status
+  local -a query
+  local load_state= active_state= sub_state= unit_file_state= fragment_path=
+  local need_reload= drop_in_paths=
+  local load_seen=0 active_seen=0 sub_seen=0 file_seen=0 fragment_seen=0
+  local reload_seen=0 dropin_seen=0
+  target=$(unit_file_target "$unit")
+  if [ -n "$root_prefix" ]; then
+    capture_directory=$root_prefix
+  else
+    capture_directory=/run
+  fi
+  capture=$(/usr/bin/mktemp "$capture_directory/.teleagent-control-plane-show.XXXXXX") ||
+    fail 'a control-plane unit state capture could not be created' 75
+  query=("${systemctl_command[@]}" show "$unit" --property="$dormant_unit_properties")
+  /usr/bin/timeout --signal=TERM --kill-after=1s 5s \
+    "${query[@]}" 2>/dev/null |
+    /usr/bin/head -c 4097 >"$capture" || capture_status=$?
+  capture_size=$(/usr/bin/stat -c '%s' -- "$capture")
+  if [ "$capture_size" -gt 4096 ]; then
+    /usr/bin/rm -f -- "$capture"
+    fail 'a control-plane unit state response is oversized' 75
+  fi
+  if [ "$capture_status" -ne 0 ]; then
+    /usr/bin/rm -f -- "$capture"
+    fail 'a control-plane unit state is unavailable' 75
+  fi
+  if [ "$capture_size" -eq 0 ]; then
+    /usr/bin/rm -f -- "$capture"
+    fail 'a control-plane unit state response is empty' 75
+  fi
+  last_byte=$(/usr/bin/od -An -tu1 -j "$((capture_size - 1))" -N 1 -- "$capture")
+  unsafe_bytes=$(LC_ALL=C /usr/bin/tr -d '\012\040-\176' <"$capture" | /usr/bin/wc -c)
+  if [ "$last_byte" -ne 10 ] || [ "$unsafe_bytes" -ne 0 ]; then
+    /usr/bin/rm -f -- "$capture"
+    fail 'a control-plane unit state response has unsafe framing' 75
+  fi
+  output=$(/usr/bin/cat -- "$capture")
+  /usr/bin/rm -f -- "$capture"
+  while IFS= read -r line; do
+    [ "${line#*=}" != "$line" ] || fail 'a control-plane unit state is malformed' 75
+    key=${line%%=*}
+    value=${line#*=}
+    case "$key" in
+      LoadState) load_seen=$((load_seen + 1)); load_state=$value ;;
+      ActiveState) active_seen=$((active_seen + 1)); active_state=$value ;;
+      SubState) sub_seen=$((sub_seen + 1)); sub_state=$value ;;
+      UnitFileState) file_seen=$((file_seen + 1)); unit_file_state=$value ;;
+      FragmentPath) fragment_seen=$((fragment_seen + 1)); fragment_path=$value ;;
+      NeedDaemonReload) reload_seen=$((reload_seen + 1)); need_reload=$value ;;
+      DropInPaths) dropin_seen=$((dropin_seen + 1)); drop_in_paths=$value ;;
+      *) fail 'a control-plane unit state contains an unexpected property' 75 ;;
+    esac
+  done <<<"$output"
+  [ "$load_seen:$active_seen:$sub_seen:$file_seen:$fragment_seen:$reload_seen:$dropin_seen" = \
+    1:1:1:1:1:1:1 ] || fail 'a control-plane unit state is incomplete or ambiguous' 75
+  [ "$active_state:$sub_state" = inactive:dead ] ||
+    fail 'a control-plane unit is active, failed, or transitional' 75
+  case "$load_state:$phase" in
+    loaded:pre|loaded:installed|loaded:prerequisite)
+      [ "$unit_file_state" = static ] ||
+        fail 'a control-plane unit is not exactly static' 75
+      [ "$fragment_path" = "$target" ] ||
+        fail 'a control-plane unit loaded from an unreviewed fragment' 75
+      [ "$need_reload" = no ] ||
+        fail 'a control-plane unit has a pending daemon reload' 75
+      [ -z "$drop_in_paths" ] ||
+        fail 'a control-plane unit has an unreviewed drop-in' 75
+      ;;
+    not-found:pre)
+      [ -z "$unit_file_state$fragment_path$drop_in_paths" ] && [ "$need_reload" = no ] ||
+        fail 'a missing control-plane unit has stale manager state' 75
+      [ ! -e "$target" ] && [ ! -L "$target" ] ||
+        fail 'a missing control-plane unit conflicts with an installed file' 75
+      if run_systemctl is-enabled "$unit" >/dev/null 2>&1; then
+        fail 'a missing control-plane unit unexpectedly has enablement state' 75
+      else
+        status=$?
+      fi
+      [ "$status" -eq 4 ] ||
+        fail 'a missing control-plane unit cannot be proved absent' 75
+      ;;
+    *) fail 'a control-plane unit state is unavailable or unsafe' 75 ;;
+  esac
+}
+
+assert_dormant() {
+  local phase=$1
+  assert_sentinels_absent
+  assert_unit_dormant teleagent-worker-session.service prerequisite
+  assert_unit_dormant teleagent-provider-model-apparmor.service prerequisite
+  assert_unit_dormant teleagent-provider-supervisor@claude.socket prerequisite
+  assert_unit_dormant teleagent-provider-supervisor@codex.socket prerequisite
+  assert_unit_dormant teleagent-agent-controller.service "$phase"
+  assert_unit_dormant teleagent-privileged-action.service "$phase"
+  assert_sentinels_absent
+}
+
+require_install_authority() {
+  if [ -n "$root_prefix" ]; then
+    return
+  fi
+  [ "$(/usr/bin/id -u)" -eq 0 ] || fail 'root is required'
+  [ "$source_uid:$source_gid" = 0:0 ] ||
+    fail 'production installation requires a root-owned release tree'
+  local directory
+  for directory in "$app_root" "$app_root/deploy" "$source_root" \
+    "$app_root/deploy/privileged-action"; do
+    [ -d "$directory" ] && [ ! -L "$directory" ] &&
+      [ "$(/usr/bin/readlink -f -- "$directory")" = "$directory" ] ||
+      fail 'a production source directory is unsafe'
+    [ $((8#$(/usr/bin/stat -c '%a' "$directory") & 0022)) -eq 0 ] ||
+      fail 'a production source directory is replaceable'
+  done
+}
+
+inspect_target_directory() {
+  local directory=$1
+  [ -d "$directory" ] && [ ! -L "$directory" ] ||
+    fail 'a trusted target directory is absent or unsafe'
+  [ "$(/usr/bin/readlink -f -- "$directory")" = "$directory" ] ||
+    fail 'a trusted target directory resolves through a link'
+  local metadata mode
+  metadata=$(/usr/bin/stat -c '%u:%g:%a' "$directory")
+  [ "${metadata%:*}" = "${expected_uid}:${expected_gid}" ] ||
+    fail 'a trusted target directory has the wrong owner'
+  mode=${metadata##*:}
+  [ $((8#$mode & 0022)) -eq 0 ] ||
+    fail 'a trusted target directory is group- or world-writable'
+}
+
+ensure_directory() {
+  local absolute=$1
+  local mode=$2
+  local directory
+  directory=$(host_path "$absolute")
+  if [ ! -e "$directory" ] && [ ! -L "$directory" ]; then
+    /usr/bin/install -d -o "$expected_uid" -g "$expected_gid" -m "$mode" -- "$directory"
+  fi
+  inspect_target_directory "$directory"
+}
+
+prepare_target_directories() {
+  ensure_directory /etc 0755
+  ensure_directory /etc/systemd 0755
+  ensure_directory /etc/systemd/system 0755
+  ensure_directory /etc/sysusers.d 0755
+  ensure_directory /etc/tmpfiles.d 0755
+  ensure_directory /etc/teleagent 0755
+  ensure_directory /usr 0755
+  ensure_directory /usr/local 0755
+  ensure_directory /usr/local/libexec 0755
+  ensure_directory /run 0755
+}
+
+assert_target_file() {
+  local filename=$1
+  local mode=$2
+  [ -f "$filename" ] && [ ! -L "$filename" ] ||
+    fail 'an installed control-plane asset is absent or unsafe'
+  [ "$(/usr/bin/readlink -f -- "$filename")" = "$filename" ] ||
+    fail 'an installed control-plane asset resolves through a link'
+  [ "$(/usr/bin/stat -c '%u:%g:%a:%h' "$filename")" = \
+    "${expected_uid}:${expected_gid}:${mode#0}:1" ] ||
+    fail 'an installed control-plane asset has unsafe metadata'
+}
+
+check_installed_assets() {
+  local index source target
+  for ((index = 0; index < ${#sources[@]}; index += 1)); do
+    source="$app_root/${sources[$index]}"
+    target=$(host_path "${targets[$index]}")
+    assert_target_file "$target" "${modes[$index]}"
+    /usr/bin/cmp -s -- "$source" "$target" ||
+      fail 'an installed control-plane asset differs from reviewed source'
+  done
+}
+
+verify_controller_identity() {
+  local group_gid
+  controller_uid=$("$id_bin" -u teleagent-control) ||
+    fail 'the controller identity is absent'
+  controller_gid=$("$id_bin" -g teleagent-control) ||
+    fail 'the controller primary group is absent'
+  case "$controller_uid:$controller_gid" in
+    *[!0-9:]*|0:*|*:0|'') fail 'the controller numeric identity is unsafe' ;;
+  esac
+  group_gid=$("$getent_bin" group teleagent-control | /usr/bin/awk -F: \
+    'NF == 4 && $1 == "teleagent-control" { print $3 }')
+  [ "$group_gid" = "$controller_gid" ] ||
+    fail 'the controller user and group identities diverged'
+}
+
+assert_distinct_state_mount_devices() {
+  local root parent controller_root privileged_root parent_dev controller_dev privileged_dev
+  parent=$(host_path /var/lib)
+  controller_root=$(host_path "$controller_state_root")
+  privileged_root=$(host_path "$privileged_state_root")
+  for root in "$controller_root" "$privileged_root"; do
+    [ -d "$root" ] && [ ! -L "$root" ] &&
+      [ "$(/usr/bin/readlink -f -- "$root")" = "$root" ] ||
+      fail 'a durable state mountpoint is absent, linked, or noncanonical'
+  done
+  if [ "$test_state_mount" = 1 ]; then
+    controller_dev=$test_controller_state_device
+    privileged_dev=$test_privileged_state_device
+  else
+    parent_dev=$(/usr/bin/stat -c '%d' "$parent")
+    controller_dev=$(/usr/bin/stat -c '%d' "$controller_root")
+    privileged_dev=$(/usr/bin/stat -c '%d' "$privileged_root")
+    [ "$controller_dev" != "$parent_dev" ] ||
+      fail 'the exact dedicated controller state mount is absent'
+    [ "$privileged_dev" != "$parent_dev" ] ||
+      fail 'the exact dedicated privileged state mount is absent'
+  fi
+  case "$controller_dev:$privileged_dev" in
+    ''|*[!0-9:]*) fail 'durable state mount device identities are invalid' ;;
+  esac
+  [ "$controller_dev" != "$privileged_dev" ] ||
+    fail 'controller and privileged state must use distinct dedicated filesystems'
+}
+
+assert_exact_controller_state_file() {
+  local filename
+  filename=$(host_path "$controller_state_file")
+  [ -f "$filename" ] && [ ! -L "$filename" ] ||
+    fail 'the explicit controller lock state is absent or unsafe'
+  [ "$(/usr/bin/readlink -f -- "$filename")" = "$filename" ] ||
+    fail 'the explicit controller lock state resolves through a link'
+  [ "$(/usr/bin/stat -c '%u:%g:%a:%h' "$filename")" = \
+    "${controller_uid}:${controller_gid}:600:1" ] ||
+    fail 'the explicit controller lock state metadata is unsafe'
+  [ "$(/usr/bin/stat -c '%s' "$filename")" -le 4096 ] &&
+    [ "$(/usr/bin/wc -l < "$filename")" -eq 1 ] ||
+    fail 'the explicit controller lock state size is unsafe'
+  /usr/bin/grep -Eq \
+    '^\{"version":1,"locked":false,"revision":[0-9]+,"updatedAt":"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z","lockedAt":null,"unlockedAt":"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z","reason":null,"source":"[A-Za-z0-9_.:-]+","remotePanicPending":false,"remotePanicConfirmedAt":null\}$' \
+    "$filename" || /usr/bin/grep -Eq \
+    '^\{"version":1,"locked":true,"revision":[0-9]+,"updatedAt":"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z","lockedAt":"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z","unlockedAt":null,"reason":"[A-Za-z0-9_.:-]+","source":"[A-Za-z0-9_.:-]+","remotePanicPending":(true,"remotePanicConfirmedAt":null|false,"remotePanicConfirmedAt":(null|"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z"))\}$' \
+    "$filename" || fail 'the explicit controller lock state schema is not exact canonical JSON'
+  local transition="${filename}.transition"
+  [ ! -e "$transition" ] && [ ! -L "$transition" ] ||
+    fail 'a controller lock-state transition remains unresolved'
+}
+
+assert_controller_state_marker() {
+  local marker
+  marker=$(host_path "$controller_state_marker")
+  [ -f "$marker" ] && [ ! -L "$marker" ] ||
+    fail 'the controller initialization marker is absent or unsafe'
+  [ "$(/usr/bin/readlink -f -- "$marker")" = "$marker" ] ||
+    fail 'the controller initialization marker resolves through a link'
+  [ "$(/usr/bin/stat -c '%u:%g:%a:%h' "$marker")" = \
+    "${expected_uid}:${expected_gid}:400:1" ] ||
+    fail 'the controller initialization marker metadata is unsafe'
+  [ "$(/usr/bin/sed -n '1p' "$marker")" = "$controller_initial_marker" ] &&
+    [ "$(/usr/bin/wc -l < "$marker")" -eq 1 ] ||
+    fail 'the controller initialization marker content is invalid'
+}
+
+assert_privileged_state_marker() {
+  local marker
+  marker=$(host_path "$privileged_state_marker")
+  [ -f "$marker" ] && [ ! -L "$marker" ] ||
+    fail 'the privileged initialization marker is absent or unsafe'
+  [ "$(/usr/bin/readlink -f -- "$marker")" = "$marker" ] ||
+    fail 'the privileged initialization marker resolves through a link'
+  [ "$(/usr/bin/stat -c '%u:%g:%a:%h' "$marker")" = \
+    "${expected_uid}:${expected_gid}:400:1" ] ||
+    fail 'the privileged initialization marker metadata is unsafe'
+  [ "$(/usr/bin/sed -n '1p' "$marker")" = "$privileged_initial_marker" ] &&
+    [ "$(/usr/bin/wc -l < "$marker")" -eq 1 ] ||
+    fail 'the privileged initialization marker content is invalid'
+}
+
+assert_exact_database() {
+  local filename=$1
+  local uid=$2
+  local gid=$3
+  [ -f "$filename" ] && [ ! -L "$filename" ] ||
+    fail 'an initialized durable database is absent or unsafe'
+  [ "$(/usr/bin/readlink -f -- "$filename")" = "$filename" ] ||
+    fail 'an initialized durable database resolves through a link'
+  [ "$(/usr/bin/stat -c '%u:%g:%a:%h' "$filename")" = \
+    "${uid}:${gid}:600:1" ] ||
+    fail 'an initialized durable database has unsafe metadata'
+}
+
+create_exact_initial_file() {
+  local filename=$1
+  local uid=$2
+  local gid=$3
+  local mode=$4
+  local content=$5
+  local temporary="${filename}.new-$$"
+  [ ! -e "$filename" ] && [ ! -L "$filename" ] &&
+    [ ! -e "$temporary" ] && [ ! -L "$temporary" ] ||
+    fail 'a controller initialization target already exists'
+  ( set -o noclobber; umask 077; /usr/bin/printf '%s\n' "$content" > "$temporary" ) ||
+    fail 'a controller initialization file could not be staged'
+  /usr/bin/chown "$expected_uid:$expected_gid" "$temporary"
+  /usr/bin/chmod "$mode" "$temporary"
+  /usr/bin/sync -- "$temporary"
+  /usr/bin/ln -- "$temporary" "$filename" ||
+    fail 'a controller initialization file raced with another publisher'
+  /usr/bin/rm -f -- "$temporary"
+  /usr/bin/chown "$uid:$gid" "$filename"
+  /usr/bin/chmod "$mode" "$filename"
+  /usr/bin/sync -- "$filename"
+  /usr/bin/sync -- "$(/usr/bin/dirname -- "$filename")"
+}
+
+create_exact_empty_file() {
+  local filename=$1
+  local uid=$2
+  local gid=$3
+  local temporary="${filename}.new-$$"
+  [ ! -e "$filename" ] && [ ! -L "$filename" ] &&
+    [ ! -e "$temporary" ] && [ ! -L "$temporary" ] ||
+    fail 'a durable database initialization target already exists'
+  ( set -o noclobber; umask 077; : > "$temporary" ) ||
+    fail 'a durable database initialization file could not be staged'
+  /usr/bin/chown "$expected_uid:$expected_gid" "$temporary"
+  /usr/bin/chmod 0600 "$temporary"
+  /usr/bin/sync -- "$temporary"
+  /usr/bin/ln -- "$temporary" "$filename" ||
+    fail 'a durable database initialization raced with another publisher'
+  /usr/bin/rm -f -- "$temporary"
+  /usr/bin/chown "$uid:$gid" "$filename"
+  /usr/bin/chmod 0600 "$filename"
+  /usr/bin/sync -- "$filename"
+  /usr/bin/sync -- "$(/usr/bin/dirname -- "$filename")"
+}
+
+ensure_controller_state_initialized() {
+  local allow_initialize=${1:-0}
+  local parent root marker parent_dev root_dev metadata filesystem capacity free reserve
+  parent=$(host_path /var/lib)
+  root=$(host_path "$controller_state_root")
+  marker=$(host_path "$controller_state_marker")
+  [ "$(/usr/bin/readlink -f -- "$parent")" = "$parent" ] &&
+    [ "$(/usr/bin/stat -c '%u:%g:%a' "$parent")" = \
+      "${expected_uid}:${expected_gid}:755" ] ||
+    fail 'the controller state parent is unsafe'
+  parent_dev=$(/usr/bin/stat -c '%d' "$parent")
+  root_dev=$(/usr/bin/stat -c '%d' "$root")
+  if [ "$root_dev" = "$parent_dev" ] && [ "$test_state_mount" != 1 ]; then
+    fail 'the exact dedicated controller state mount is absent'
+  fi
+  [ "$(/usr/bin/readlink -f -- "$root")" = "$root" ] ||
+    fail 'the controller state mount resolves through a link'
+  metadata=$(/usr/bin/stat -c '%u:%g:%a' "$root")
+  [ "$metadata" = "${controller_uid}:${controller_gid}:700" ] ||
+    fail 'the controller state mount metadata is unsafe'
+  filesystem=$(/usr/bin/stat -f -c '%t' "$root")
+  if [ "$test_state_mount" != 1 ]; then
+    case "$filesystem" in ef53|58465342|9123683e|f2f52010|2fc12fc1) ;;
+      *) fail 'the controller state filesystem type is unreviewed' ;;
+    esac
+  fi
+  if [ -n "$test_state_capacity" ]; then
+    capacity=$test_state_capacity
+    free=$test_state_free
+  else
+    local accounting block_size blocks available
+    accounting=$(/usr/bin/stat -f -c '%S:%b:%a' "$root")
+    block_size=${accounting%%:*}
+    accounting=${accounting#*:}
+    blocks=${accounting%%:*}
+    available=${accounting##*:}
+    case "$block_size:$blocks:$available" in
+      ''|*[!0-9:]*|::*|*::) fail 'controller state accounting is invalid' ;;
+    esac
+    capacity=$((block_size * blocks))
+    free=$((block_size * available))
+  fi
+  [ "$capacity" -ge $((2 * 1024 * 1024 * 1024)) ] &&
+    [ "$capacity" -le $((8 * 1024 * 1024 * 1024)) ] ||
+    fail 'controller state capacity is outside the reviewed 2-8 GiB boundary'
+  reserve=$(((capacity + 4) / 5))
+  [ "$reserve" -ge $((512 * 1024 * 1024)) ] || reserve=$((512 * 1024 * 1024))
+  [ "$free" -ge "$reserve" ] || fail 'controller state free-space reserve is exhausted'
+
+  if [ -e "$marker" ] || [ -L "$marker" ]; then
+    assert_controller_state_marker
+    assert_exact_controller_state_file
+    assert_exact_database \
+      "$(host_path "$controller_database")" "$controller_uid" "$controller_gid"
+    return
+  fi
+
+  [ "$allow_initialize" = 1 ] ||
+    fail 'a provisioned controller state mount has not been initialized by the installer'
+
+  local state_file database initial_body other
+  state_file=$(host_path "$controller_state_file")
+  database=$(host_path "$controller_database")
+  if [ -e "$state_file" ] || [ -L "$state_file" ]; then
+    assert_exact_controller_state_file
+    initial_body=$(/usr/bin/sed -n '1p' "$state_file")
+    [ "$initial_body" = "$controller_initial_state" ] ||
+      fail 'unmarked controller state is not the exact fresh initializer record'
+    other=$(/usr/bin/find "$root" -mindepth 1 -maxdepth 1 \
+      ! -path "$state_file" ! -path "$database" -print -quit)
+    [ -z "$other" ] || fail 'unmarked controller state contains prior durable evidence'
+    if [ -e "$database" ] || [ -L "$database" ]; then
+      assert_exact_database "$database" "$controller_uid" "$controller_gid"
+      [ "$(/usr/bin/stat -c '%s' "$database")" -eq 0 ] ||
+        fail 'an unmarked controller database contains prior durable evidence'
+    else
+      create_exact_empty_file "$database" "$controller_uid" "$controller_gid"
+    fi
+  else
+    other=$(/usr/bin/find "$root" -mindepth 1 -maxdepth 1 -print -quit)
+    [ -z "$other" ] ||
+      fail 'missing controller lock state is allowed only on an objectively empty fresh mount'
+    create_exact_initial_file \
+      "$state_file" "$controller_uid" "$controller_gid" 0600 "$controller_initial_state"
+    create_exact_empty_file "$database" "$controller_uid" "$controller_gid"
+    [ "$(/usr/bin/stat -c '%s' "$database")" -eq 0 ] ||
+      fail 'a fresh controller database was modified during initialization'
+    assert_exact_controller_state_file
+  fi
+  [ "$(/usr/bin/stat -c '%s' "$database")" -eq 0 ] ||
+    fail 'a fresh controller database was modified during initialization'
+  create_exact_initial_file \
+    "$marker" "$expected_uid" "$expected_gid" 0400 "$controller_initial_marker"
+  assert_controller_state_marker
+  assert_exact_controller_state_file
+  assert_exact_database "$database" "$controller_uid" "$controller_gid"
+}
+
+ensure_privileged_state_initialized() {
+  local allow_initialize=${1:-0}
+  local parent root marker parent_dev root_dev metadata filesystem capacity free reserve
+  parent=$(host_path /var/lib)
+  root=$(host_path "$privileged_state_root")
+  marker=$(host_path "$privileged_state_marker")
+  [ "$(/usr/bin/readlink -f -- "$parent")" = "$parent" ] &&
+    [ "$(/usr/bin/stat -c '%u:%g:%a' "$parent")" = \
+      "${expected_uid}:${expected_gid}:755" ] ||
+    fail 'the privileged state parent is unsafe'
+  parent_dev=$(/usr/bin/stat -c '%d' "$parent")
+  root_dev=$(/usr/bin/stat -c '%d' "$root")
+  if [ "$root_dev" = "$parent_dev" ] && [ "$test_state_mount" != 1 ]; then
+    fail 'the exact dedicated privileged state mount is absent'
+  fi
+  [ "$(/usr/bin/readlink -f -- "$root")" = "$root" ] &&
+    [ "$(/usr/bin/stat -c '%u:%g:%a' "$root")" = \
+      "${expected_uid}:${expected_gid}:700" ] ||
+    fail 'the privileged state mount metadata is unsafe'
+  filesystem=$(/usr/bin/stat -f -c '%t' "$root")
+  if [ "$test_state_mount" != 1 ]; then
+    case "$filesystem" in ef53|58465342|9123683e|f2f52010|2fc12fc1) ;;
+      *) fail 'the privileged state filesystem type is unreviewed' ;;
+    esac
+  fi
+  if [ -n "$test_state_capacity" ]; then
+    capacity=$test_state_capacity
+    free=$test_state_free
+  else
+    local accounting block_size blocks available
+    accounting=$(/usr/bin/stat -f -c '%S:%b:%a' "$root")
+    block_size=${accounting%%:*}
+    accounting=${accounting#*:}
+    blocks=${accounting%%:*}
+    available=${accounting##*:}
+    case "$block_size:$blocks:$available" in
+      ''|*[!0-9:]*|::*|*::) fail 'privileged state accounting is invalid' ;;
+    esac
+    capacity=$((block_size * blocks))
+    free=$((block_size * available))
+  fi
+  [ "$capacity" -ge $((1024 * 1024 * 1024)) ] &&
+    [ "$capacity" -le $((8 * 1024 * 1024 * 1024)) ] ||
+    fail 'privileged state capacity is outside the reviewed 1-8 GiB boundary'
+  reserve=$(((capacity + 4) / 5))
+  [ "$reserve" -ge $((512 * 1024 * 1024)) ] || reserve=$((512 * 1024 * 1024))
+  [ "$free" -ge "$reserve" ] || fail 'privileged state free-space reserve is exhausted'
+
+  local database other
+  database=$(host_path "$privileged_database")
+  if [ -e "$marker" ] || [ -L "$marker" ]; then
+    assert_privileged_state_marker
+    assert_exact_database "$database" "$expected_uid" "$expected_gid"
+    return
+  fi
+  [ "$allow_initialize" = 1 ] ||
+    fail 'a provisioned privileged state mount has not been initialized by the installer'
+  other=$(/usr/bin/find "$root" -mindepth 1 -maxdepth 1 ! -path "$database" -print -quit)
+  [ -z "$other" ] || fail 'unmarked privileged state contains prior durable evidence'
+  if [ -e "$database" ] || [ -L "$database" ]; then
+    assert_exact_database "$database" "$expected_uid" "$expected_gid"
+    [ "$(/usr/bin/stat -c '%s' "$database")" -eq 0 ] ||
+      fail 'an unmarked privileged database contains prior durable evidence'
+  else
+    create_exact_empty_file "$database" "$expected_uid" "$expected_gid"
+  fi
+  [ "$(/usr/bin/stat -c '%s' "$database")" -eq 0 ] ||
+    fail 'a fresh privileged database was modified during initialization'
+  create_exact_initial_file \
+    "$marker" "$expected_uid" "$expected_gid" 0400 "$privileged_initial_marker"
+  assert_privileged_state_marker
+  assert_exact_database "$database" "$expected_uid" "$expected_gid"
+}
+
+install_disabled() {
+  require_install_authority
+  source_check
+  assert_dormant pre
+  prepare_target_directories
+
+  install_staging=$(/usr/bin/mktemp -d \
+    "$(host_path /run)/teleagent-control-plane-install.XXXXXX")
+  /usr/bin/chmod 0700 "$install_staging"
+  install_committed=0
+  install_complete=0
+  local index target temporary
+
+  rollback() {
+    local status=$?
+    local rollback_index rollback_target
+    trap - EXIT INT TERM
+    set +e
+    for ((rollback_index = 0; rollback_index < ${#targets[@]}; rollback_index += 1)); do
+      rollback_target=$(host_path "${targets[$rollback_index]}")
+      /usr/bin/rm -f -- \
+        "${rollback_target}.new-$$" "${rollback_target}.rollback-$$"
+    done
+    if [ "$install_complete" -ne 1 ] && [ "$install_committed" -eq 1 ]; then
+      for ((rollback_index = ${#targets[@]} - 1; rollback_index >= 0; rollback_index -= 1)); do
+        rollback_target=$(host_path "${targets[$rollback_index]}")
+        if [ -f "$install_staging/backup-$rollback_index" ]; then
+          /usr/bin/install -o "$expected_uid" -g "$expected_gid" \
+            -m "${modes[$rollback_index]}" -- \
+            "$install_staging/backup-$rollback_index" "${rollback_target}.rollback-$$"
+          /usr/bin/mv -f -- "${rollback_target}.rollback-$$" "$rollback_target"
+        else
+          /usr/bin/rm -f -- "$rollback_target"
+        fi
+        /usr/bin/sync -- "$(/usr/bin/dirname -- "$rollback_target")"
+      done
+      run_systemctl daemon-reload >/dev/null 2>&1
+    fi
+    /usr/bin/rm -rf -- "$install_staging"
+    exit "$status"
+  }
+  trap rollback EXIT INT TERM
+
+  for ((index = 0; index < ${#sources[@]}; index += 1)); do
+    target=$(host_path "${targets[$index]}")
+    temporary="${target}.new-$$"
+    [ ! -e "$temporary" ] && [ ! -L "$temporary" ] ||
+      fail 'an installation staging path already exists'
+    if [ -e "$target" ] || [ -L "$target" ]; then
+      assert_target_file "$target" "${modes[$index]}"
+      /usr/bin/cp --preserve=mode,ownership,timestamps -- \
+        "$target" "$install_staging/backup-$index"
+    fi
+    /usr/bin/install -o "$expected_uid" -g "$expected_gid" \
+      -m "${modes[$index]}" -- "$app_root/${sources[$index]}" "$temporary"
+    /usr/bin/sync -- "$temporary"
+  done
+
+  install_committed=1
+  for ((index = 0; index < ${#targets[@]}; index += 1)); do
+    target=$(host_path "${targets[$index]}")
+    /usr/bin/mv -f -- "${target}.new-$$" "$target"
+    /usr/bin/sync -- "$(/usr/bin/dirname -- "$target")"
+  done
+
+  "$sysusers_bin" "$(host_path /etc/sysusers.d/teleagent-privileged-action.conf)"
+  verify_controller_identity
+  "$tmpfiles_bin" --create "$(host_path /etc/tmpfiles.d/teleagent-agent-controller.conf)"
+  "$tmpfiles_bin" --create "$(host_path /etc/tmpfiles.d/teleagent-privileged-action.conf)"
+  assert_distinct_state_mount_devices
+  ensure_controller_state_initialized 1
+  ensure_privileged_state_initialized 1
+  run_systemctl daemon-reload
+  assert_dormant installed
+  check_installed_assets
+  install_complete=1
+  /usr/bin/rm -rf -- "$install_staging"
+  trap - EXIT INT TERM
+}
+
+check_installed() {
+  require_install_authority
+  source_check
+  assert_dormant installed
+  check_installed_assets
+  verify_controller_identity
+  assert_distinct_state_mount_devices
+  ensure_controller_state_initialized 0
+  ensure_privileged_state_initialized 0
+}
+
+case "$requested_action" in
+  --source-check)
+    [ "$#" -eq 1 ] || fail 'unexpected arguments'
+    source_check
+    printf 'TELEAGENT_CONTROL_PLANE_SOURCE_OK\n'
+    ;;
+  --install-disabled)
+    [ "$#" -eq 1 ] || fail 'unexpected arguments'
+    require_immutable_mutation_entrypoint
+    install_disabled
+    printf 'TELEAGENT_CONTROL_PLANE_INSTALLED_DISABLED\n'
+    ;;
+  --check)
+    [ "$#" -eq 1 ] || fail 'unexpected arguments'
+    check_installed
+    printf 'TELEAGENT_CONTROL_PLANE_INSTALLED_DISABLED_OK\n'
+    ;;
+  *)
+    fail 'usage: teleagent-control-plane-install --source-check|--install-disabled|--check'
+    ;;
+esac

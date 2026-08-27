@@ -1,0 +1,104 @@
+#!/bin/sh
+set -eu
+
+source_profile=/usr/local/libexec/teleagent-provider-model.apparmor
+installed_profile=/etc/apparmor.d/teleagent-provider-model
+parser=/usr/sbin/apparmor_parser
+profiles=/sys/kernel/security/apparmor/profiles
+
+require_quiescent_provider_plane() {
+  for unit in \
+    teleagent-provider-supervisor@claude.service \
+    teleagent-provider-supervisor@codex.service; do
+    state=$(systemctl show "$unit" -p ActiveState --value 2>/dev/null) || {
+      echo "provider supervisor state is unavailable" >&2
+      exit 75
+    }
+    case "$state" in
+      inactive|failed) ;;
+      *) echo "provider AppArmor change requires stopped supervisors" >&2; exit 75 ;;
+    esac
+  done
+  units=$(systemctl list-units --all --plain --no-legend \
+    'teleagent-provider-launch-*.service') || {
+    echo "provider transient-unit enumeration is unavailable" >&2
+    exit 75
+  }
+  if [ -n "$(printf '%s\n' "$units" | sed '/^[[:space:]]*$/d')" ]; then
+    echo "provider AppArmor change requires zero transient launch units" >&2
+    exit 75
+  fi
+}
+
+if [ "$(id -u)" -ne 0 ]; then
+  echo "provider AppArmor installation requires root" >&2
+  exit 77
+fi
+if [ ! -x "$parser" ] || [ ! -r "$profiles" ]; then
+  echo "AppArmor enforcement is unavailable" >&2
+  exit 77
+fi
+require_quiescent_provider_plane
+
+case "${1:-install}" in
+  install)
+    if [ ! -f "$source_profile" ] || [ -L "$source_profile" ] ||
+       [ "$(stat -c '%U:%G:%a' "$source_profile")" != root:root:444 ]; then
+      echo "provider AppArmor source metadata is unsafe" >&2
+      exit 77
+    fi
+    stage=$(mktemp /etc/apparmor.d/.teleagent-provider-model.XXXXXX)
+    backup=
+    cleanup() {
+      rm -f "$stage" ${backup:+"$backup"}
+    }
+    trap cleanup EXIT INT TERM
+    /usr/bin/install -o root -g root -m 0644 "$source_profile" "$stage"
+    # Parse the complete staged file before replacing either the installed
+    # source or the enforced kernel policy.
+    "$parser" -Q -T "$stage"
+    if [ -e "$installed_profile" ] || [ -L "$installed_profile" ]; then
+      if [ ! -f "$installed_profile" ] || [ -L "$installed_profile" ] ||
+         [ "$(stat -c '%U:%G:%a' "$installed_profile")" != root:root:644 ]; then
+        echo "installed provider AppArmor profile is unsafe" >&2
+        exit 77
+      fi
+      backup=$(mktemp /etc/apparmor.d/.teleagent-provider-model-backup.XXXXXX)
+      /usr/bin/install -o root -g root -m 0644 "$installed_profile" "$backup"
+    fi
+    mv -f "$stage" "$installed_profile"
+    sync -- "$installed_profile" /etc/apparmor.d
+    if ! "$parser" -r -W "$installed_profile" ||
+       ! grep -qx 'teleagent-provider-model (enforce)' "$profiles"; then
+      if [ -n "$backup" ]; then
+        mv -f "$backup" "$installed_profile"
+        sync -- "$installed_profile" /etc/apparmor.d
+        "$parser" -r -W "$installed_profile" || true
+      else
+        "$parser" -R "$installed_profile" 2>/dev/null || true
+        rm -f "$installed_profile"
+        sync -- /etc/apparmor.d
+      fi
+      echo "provider AppArmor profile could not be atomically enforced" >&2
+      exit 77
+    fi
+    rm -f ${backup:+"$backup"}
+    backup=
+    trap - EXIT INT TERM
+    if ! grep -qx 'teleagent-provider-model (enforce)' "$profiles"; then
+      echo "provider AppArmor profile is not enforced" >&2
+      exit 77
+    fi
+    ;;
+  --remove)
+    if grep -qx 'teleagent-provider-model (enforce)' "$profiles"; then
+      "$parser" -R "$installed_profile"
+    fi
+    rm -f "$installed_profile"
+    sync -- /etc/apparmor.d
+    ;;
+  *)
+    echo "usage: teleagent-provider-apparmor-install [install|--remove]" >&2
+    exit 64
+    ;;
+esac

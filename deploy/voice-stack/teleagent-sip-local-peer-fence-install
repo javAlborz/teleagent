@@ -1,0 +1,1105 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+unset BASH_ENV CDPATH ENV GLOBIGNORE
+umask 0077
+
+installer_name=teleagent-sip-local-peer-fence-install
+app_root=
+source_helper=
+source_unit=
+source_bundle=
+target_helper=/usr/local/libexec/teleagent-sip-local-peer-fence
+target_unit=/etc/systemd/system/teleagent-sip-local-peer-fence.service
+unit=teleagent-sip-local-peer-fence.service
+runtime_dir=/run/teleagent-sip-local-peer-fence
+state_parent=/var/lib
+state_dir=${state_parent}/teleagent-sip-local-peer-fence-install
+transaction_marker=${state_dir}/install.transaction
+transaction_new=${state_dir}/install.transaction.new
+operation_lock=${state_dir}/operation.lock
+installed_bundle=${state_dir}/installed.bundle
+installed_bundle_pending=${state_dir}/installed.bundle.new
+rollback_helper=${state_dir}/rollback.helper
+rollback_unit=${state_dir}/rollback.unit
+rollback_bundle=${state_dir}/rollback.bundle
+helper_pending=/usr/local/libexec/.teleagent-sip-local-peer-fence.installing
+unit_pending=/etc/systemd/system/.teleagent-sip-local-peer-fence.service.installing
+systemctl_bin=/usr/bin/systemctl
+flock_bin=/usr/bin/flock
+unit_properties=LoadState,ActiveState,SubState,UnitFileState,FragmentPath,NeedDaemonReload,DropInPaths,User,Group
+expected_uid=0
+expected_gid=0
+test_only=0
+
+fail() {
+  printf 'Teleagent SIP fence install: %s\n' "$*" >&2
+  exit 1
+}
+
+# The test lane is confined to one caller-owned /tmp tree and substitutes only
+# filesystem roots plus systemctl. It cannot run as root and therefore cannot
+# mutate the host service manager, firewall, /etc, /run, or /var/lib.
+if [[ "${TELEAGENT_SIP_FENCE_INSTALL_TEST_ONLY:-}" == 1 ]]; then
+  ((EUID != 0)) || fail 'the installer test lane is forbidden for root'
+  test_root=${TELEAGENT_SIP_FENCE_INSTALL_TEST_ROOT:-}
+  [[ "${test_root}" =~ ^/tmp/teleagent-sip-fence-install-test-[A-Za-z0-9._-]+$ ]] ||
+    fail 'the installer test root is outside its fixed namespace'
+  [[ -d "${test_root}" && ! -L "${test_root}" ]] || fail 'the installer test root is unsafe'
+  [[ "$(readlink -e -- "${test_root}")" == "${test_root}" ]] || fail 'the installer test root is not canonical'
+  [[ "$(stat -c '%u:%a' -- "${test_root}")" == "${EUID}:700" ]] ||
+    fail 'the installer test root metadata is unsafe'
+
+  expected_uid=${EUID}
+  expected_gid=$(id -g)
+  app_root=${test_root}/opt/teleagent/current
+  source_helper=${app_root}/deploy/voice-stack/teleagent-sip-local-peer-fence
+  source_unit=${app_root}/deploy/voice-stack/teleagent-sip-local-peer-fence.service
+  source_bundle=${app_root}/deploy/voice-stack/teleagent-sip-local-peer-fence.bundle
+  target_helper=${test_root}/usr/local/libexec/teleagent-sip-local-peer-fence
+  target_unit=${test_root}/etc/systemd/system/teleagent-sip-local-peer-fence.service
+  runtime_dir=${test_root}/run/teleagent-sip-local-peer-fence
+  state_parent=${test_root}/var/lib
+  state_dir=${state_parent}/teleagent-sip-local-peer-fence-install
+  transaction_marker=${state_dir}/install.transaction
+  transaction_new=${state_dir}/install.transaction.new
+  operation_lock=${state_dir}/operation.lock
+  installed_bundle=${state_dir}/installed.bundle
+  installed_bundle_pending=${state_dir}/installed.bundle.new
+  rollback_helper=${state_dir}/rollback.helper
+  rollback_unit=${state_dir}/rollback.unit
+  rollback_bundle=${state_dir}/rollback.bundle
+  helper_pending=${test_root}/usr/local/libexec/.teleagent-sip-local-peer-fence.installing
+  unit_pending=${test_root}/etc/systemd/system/.teleagent-sip-local-peer-fence.service.installing
+  systemctl_bin=${test_root}/bin/systemctl
+  [[ -f "${systemctl_bin}" && ! -L "${systemctl_bin}" && -x "${systemctl_bin}" ]] ||
+    fail 'the fake systemctl dependency is unsafe'
+  [[ "$(stat -c '%u' -- "${systemctl_bin}")" == "${EUID}" ]] ||
+    fail 'the fake systemctl dependency owner is unsafe'
+  fake_systemctl_permissions=$(stat -c '%a' -- "${systemctl_bin}") ||
+    fail 'could not inspect the fake systemctl dependency permissions'
+  (((8#${fake_systemctl_permissions} & 8#022) == 0)) ||
+    fail 'the fake systemctl dependency is writable by another identity'
+  test_only=1
+elif [[ -n "${TELEAGENT_SIP_FENCE_INSTALL_TEST_ONLY:-}" ||
+        -n "${TELEAGENT_SIP_FENCE_INSTALL_TEST_ROOT:-}" ]]; then
+  fail 'installer test overrides require the explicit non-root test lane'
+else
+  installer_self=$(readlink -f -- "${BASH_SOURCE[0]}") ||
+    fail 'the source entrypoint could not be resolved'
+  [[ "$(basename -- "${installer_self}")" == "${installer_name}" ]] ||
+    fail 'the source entrypoint is unreviewed'
+  source_directory=$(dirname -- "${installer_self}") ||
+    fail 'the source directory could not be resolved'
+  app_root=$(readlink -f -- "${source_directory}/../..") ||
+    fail 'the source release root could not be resolved'
+  [[ "${source_directory}" == "${app_root}/deploy/voice-stack" ]] ||
+    fail 'the source bundle is outside one resolved release root'
+  source_helper=${source_directory}/teleagent-sip-local-peer-fence
+  source_unit=${source_directory}/teleagent-sip-local-peer-fence.service
+  source_bundle=${source_directory}/teleagent-sip-local-peer-fence.bundle
+fi
+
+validate_owned_file() {
+  local filename="$1" mode="$2" description="$3"
+  [[ -f "${filename}" && ! -L "${filename}" ]] || fail "${description} is missing or unsafe"
+  [[ "$(stat -c '%u:%g:%a' -- "${filename}")" == "${expected_uid}:${expected_gid}:${mode}" ]] ||
+    fail "${description} metadata is unsafe"
+  [[ "$(stat -c '%h' -- "${filename}")" == 1 ]] || fail "${description} has an unsafe link count"
+}
+
+require_not_untrusted_writable() {
+  local filename="$1" description="$2" permissions
+  permissions=$(stat -c '%a' -- "${filename}") || fail "could not inspect ${description} permissions"
+  (((8#${permissions} & 8#022) == 0)) || fail "${description} is writable by another identity"
+}
+
+source_bundle_version=
+source_helper_sha256=
+source_unit_sha256=
+legacy_bundle_version=
+legacy_helper_sha256=
+legacy_unit_sha256=
+
+parse_source_bundle() {
+  local source_bundle_metadata
+  local -a lines=()
+  [[ -f "${source_bundle}" && ! -L "${source_bundle}" ]] ||
+    fail 'the source fence bundle descriptor is missing or unsafe'
+  source_bundle_metadata=$(stat -c '%u:%g:%a:%h' -- "${source_bundle}") ||
+    fail 'could not inspect the source fence bundle descriptor'
+  [[ "${source_bundle_metadata}" == "${expected_uid}:${expected_gid}:644:1" ||
+     "${source_bundle_metadata}" == "${expected_uid}:${expected_gid}:444:1" ]] ||
+    fail 'the source fence bundle descriptor metadata is unsafe'
+  require_not_untrusted_writable "${source_bundle}" 'source fence bundle descriptor'
+  mapfile -t lines <"${source_bundle}"
+  ((${#lines[@]} == 7)) || fail 'the source fence bundle descriptor shape is invalid'
+  [[ "${lines[0]}" == schema=1 ]] || fail 'the source fence bundle schema is unsupported'
+  [[ "${lines[1]}" =~ ^bundle_version=([1-9][0-9]*)$ ]] ||
+    fail 'the source fence bundle version is invalid'
+  source_bundle_version=${BASH_REMATCH[1]}
+  [[ "${lines[2]}" =~ ^helper_sha256=([0-9a-f]{64})$ ]] ||
+    fail 'the source fence helper digest is invalid'
+  source_helper_sha256=${BASH_REMATCH[1]}
+  [[ "${lines[3]}" =~ ^unit_sha256=([0-9a-f]{64})$ ]] ||
+    fail 'the source fence unit digest is invalid'
+  source_unit_sha256=${BASH_REMATCH[1]}
+  [[ "${lines[4]}" =~ ^legacy_bundle_version=([1-9][0-9]*)$ ]] ||
+    fail 'the legacy fence bundle version is invalid'
+  legacy_bundle_version=${BASH_REMATCH[1]}
+  [[ "${lines[5]}" =~ ^legacy_helper_sha256=([0-9a-f]{64})$ ]] ||
+    fail 'the legacy fence helper digest is invalid'
+  legacy_helper_sha256=${BASH_REMATCH[1]}
+  [[ "${lines[6]}" =~ ^legacy_unit_sha256=([0-9a-f]{64})$ ]] ||
+    fail 'the legacy fence unit digest is invalid'
+  legacy_unit_sha256=${BASH_REMATCH[1]}
+  ((legacy_bundle_version < source_bundle_version)) ||
+    fail 'the legacy fence bundle version is not older than the source bundle'
+}
+
+validate_source() {
+  local filename identity port
+  for filename in "${source_helper}" "${source_unit}"; do
+    [[ -f "${filename}" && ! -L "${filename}" ]] || fail 'a source artifact is missing or unsafe'
+    [[ "$(stat -c '%u:%g' -- "${filename}")" == "${expected_uid}:${expected_gid}" ]] ||
+      fail 'source ownership is unsafe'
+    require_not_untrusted_writable "${filename}" 'source artifact'
+  done
+  parse_source_bundle
+  [[ "$(sha256_file "${source_helper}")" == "${source_helper_sha256}" &&
+     "$(sha256_file "${source_unit}")" == "${source_unit_sha256}" ]] ||
+    fail 'the source fence bundle descriptor does not match its artifacts'
+  bash -n "${source_helper}"
+  ! grep -Eq 'meta skuid != 0([^0-9]|$)' "${source_helper}" ||
+    fail 'the obsolete root-owned SIP peer fence returned'
+  for identity in teleagent-voice teleagent-drachtio teleagent-freeswitch teleagent-asterisk; do
+    grep -Fq "${identity}" "${source_helper}" || fail "the ${identity} fence identity is absent"
+  done
+  for port in 5060 5070 5080 9022 8021 3001 30000-30100; do
+    grep -Fq "${port}" "${source_helper}" || fail "the local peer fence omitted port ${port}"
+  done
+  grep -Fqx 'Before=teleagent-voice-stack.service' "${source_unit}" || fail 'unit ordering drifted'
+  grep -Fqx 'ExecStartPre=/usr/local/libexec/verify-voice-stack-identity --installed-check' \
+    "${source_unit}" || fail 'the exact installed identity gate drifted'
+  grep -Fqx 'CapabilityBoundingSet=CAP_NET_ADMIN' "${source_unit}" || fail 'unit capability boundary drifted'
+}
+
+require_operator_identity() {
+  ((test_only == 1 || EUID == 0)) || fail 'live operations require root'
+}
+
+install_directory() {
+  local mode="$1" directory="$2"
+  if ((test_only == 1)); then
+    install -d -m "${mode}" -- "${directory}"
+  else
+    install -d -o root -g root -m "${mode}" -- "${directory}"
+  fi
+}
+
+install_file() {
+  local mode="$1" source="$2" target="$3"
+  if ((test_only == 1)); then
+    install -m "${mode}" -- "${source}" "${target}"
+  else
+    install -o root -g root -m "${mode}" -- "${source}" "${target}"
+  fi
+}
+
+sync_path() {
+  /usr/bin/sync -- "$1"
+}
+
+require_safe_directory() {
+  local directory="$1" mode="$2" description="$3"
+  [[ -d "${directory}" && ! -L "${directory}" ]] || fail "${description} is unsafe"
+  [[ "$(readlink -e -- "${directory}")" == "${directory}" ]] || fail "${description} is not canonical"
+  [[ "$(stat -c '%u:%g:%a' -- "${directory}")" == "${expected_uid}:${expected_gid}:${mode}" ]] ||
+    fail "${description} metadata is unsafe"
+}
+
+require_trusted_parent() {
+  local directory="$1" description="$2"
+  [[ -d "${directory}" && ! -L "${directory}" ]] || fail "${description} is unsafe"
+  [[ "$(readlink -e -- "${directory}")" == "${directory}" ]] || fail "${description} is not canonical"
+  [[ "$(stat -c '%u:%g' -- "${directory}")" == "${expected_uid}:${expected_gid}" ]] ||
+    fail "${description} ownership is unsafe"
+  require_not_untrusted_writable "${directory}" "${description}"
+}
+
+prepare_state_lock() {
+  require_trusted_parent "${state_parent}" 'installer state parent'
+  if [[ -e "${state_dir}" || -L "${state_dir}" ]]; then
+    require_safe_directory "${state_dir}" 700 'installer state directory'
+  else
+    install_directory 0700 "${state_dir}"
+    sync_path "${state_parent}"
+    require_safe_directory "${state_dir}" 700 'installer state directory'
+  fi
+
+  if [[ -e "${operation_lock}" || -L "${operation_lock}" ]]; then
+    validate_owned_file "${operation_lock}" 600 'installer operation lock'
+  else
+    install_file 0600 /dev/null "${operation_lock}"
+    sync_path "${operation_lock}"
+    sync_path "${state_dir}"
+  fi
+  exec 8<>"${operation_lock}"
+  "${flock_bin}" --exclusive --timeout 10 8 || fail 'timed out acquiring the installer lock'
+}
+
+sha256_file() {
+  /usr/bin/sha256sum -- "$1" | /usr/bin/cut -d ' ' -f 1
+}
+
+installed_kind=
+installed_bundle_version=
+installed_helper_sha256=
+installed_unit_sha256=
+
+validate_bundle_descriptor() {
+  local filename="$1" mode="$2" description="$3"
+  local -a lines=()
+  validate_owned_file "${filename}" "${mode}" "${description}"
+  mapfile -t lines <"${filename}"
+  ((${#lines[@]} == 4)) || fail "${description} shape is invalid"
+  [[ "${lines[0]}" == schema=1 ]] || fail "${description} schema is unsupported"
+  [[ "${lines[1]}" =~ ^bundle_version=([1-9][0-9]*)$ ]] ||
+    fail "${description} version is invalid"
+  installed_bundle_version=${BASH_REMATCH[1]}
+  [[ "${lines[2]}" =~ ^helper_sha256=([0-9a-f]{64})$ ]] ||
+    fail "${description} helper digest is invalid"
+  installed_helper_sha256=${BASH_REMATCH[1]}
+  [[ "${lines[3]}" =~ ^unit_sha256=([0-9a-f]{64})$ ]] ||
+    fail "${description} unit digest is invalid"
+  installed_unit_sha256=${BASH_REMATCH[1]}
+}
+
+validate_installed_artifact() {
+  local filename="$1" mode="$2" digest="$3" description="$4"
+  validate_owned_file "${filename}" "${mode}" "${description}"
+  [[ "$(sha256_file "${filename}")" == "${digest}" ]] || fail "${description} digest drifted"
+}
+
+write_bundle_descriptor() {
+  local target="$1" pending="$2" version="$3" helper_sha="$4" unit_sha="$5"
+  local parent
+  parent=$(dirname -- "${target}")
+  [[ ! -e "${pending}" && ! -L "${pending}" ]] ||
+    fail 'a bundle descriptor staging file is unexpectedly present'
+  install_file 0600 /dev/null "${pending}" || return 1
+  printf '%s\n' \
+    'schema=1' \
+    "bundle_version=${version}" \
+    "helper_sha256=${helper_sha}" \
+    "unit_sha256=${unit_sha}" >"${pending}" || return 1
+  sync_path "${pending}" || return 1
+  mv -T -- "${pending}" "${target}" || return 1
+  sync_path "${parent}" || return 1
+}
+
+classify_installation() {
+  local adopt_known="$1" helper_present=0 unit_present=0 helper_sha unit_sha
+  installed_kind=
+  installed_bundle_version=
+  installed_helper_sha256=
+  installed_unit_sha256=
+  [[ -e "${target_helper}" || -L "${target_helper}" ]] && helper_present=1
+  [[ -e "${target_unit}" || -L "${target_unit}" ]] && unit_present=1
+
+  if [[ -e "${installed_bundle}" || -L "${installed_bundle}" ]]; then
+    ((helper_present == 1 && unit_present == 1)) ||
+      fail 'the installed fence bundle is incomplete'
+    validate_bundle_descriptor "${installed_bundle}" 600 'installed fence bundle descriptor'
+    if [[ "${installed_bundle_version}:${installed_helper_sha256}:${installed_unit_sha256}" == \
+          "${source_bundle_version}:${source_helper_sha256}:${source_unit_sha256}" ]]; then
+      installed_kind=current
+    elif [[ "${installed_bundle_version}:${installed_helper_sha256}:${installed_unit_sha256}" == \
+            "${legacy_bundle_version}:${legacy_helper_sha256}:${legacy_unit_sha256}" ]]; then
+      installed_kind=legacy
+    else
+      fail 'the installed fence bundle descriptor is not a reviewed version'
+    fi
+    validate_installed_artifact "${target_helper}" 755 "${installed_helper_sha256}" \
+      'installed fence helper'
+    validate_installed_artifact "${target_unit}" 644 "${installed_unit_sha256}" \
+      'installed fence unit'
+    return
+  fi
+
+  ((helper_present == unit_present)) || fail 'the installed fence bundle is incomplete'
+  if ((helper_present == 0)); then
+    installed_kind=absent
+    return
+  fi
+
+  validate_owned_file "${target_helper}" 755 'descriptor-less installed fence helper'
+  validate_owned_file "${target_unit}" 644 'descriptor-less installed fence unit'
+  helper_sha=$(sha256_file "${target_helper}")
+  unit_sha=$(sha256_file "${target_unit}")
+  if [[ "${helper_sha}:${unit_sha}" == "${source_helper_sha256}:${source_unit_sha256}" ]]; then
+    installed_kind=current
+    installed_bundle_version=${source_bundle_version}
+    installed_helper_sha256=${source_helper_sha256}
+    installed_unit_sha256=${source_unit_sha256}
+  elif [[ "${helper_sha}:${unit_sha}" == "${legacy_helper_sha256}:${legacy_unit_sha256}" ]]; then
+    installed_kind=legacy
+    installed_bundle_version=${legacy_bundle_version}
+    installed_helper_sha256=${legacy_helper_sha256}
+    installed_unit_sha256=${legacy_unit_sha256}
+  else
+    fail 'refusing to overwrite an unknown install target'
+  fi
+  ((adopt_known == 1)) || fail 'the installed fence bundle descriptor is missing'
+  write_bundle_descriptor "${installed_bundle}" "${installed_bundle_pending}" \
+    "${installed_bundle_version}" "${installed_helper_sha256}" "${installed_unit_sha256}"
+}
+
+unit_active_state() {
+  local service="$1" output status=0
+  output=$("${systemctl_bin}" is-active "${service}" 2>/dev/null) || status=$?
+  case "${status}:${output}" in
+    0:active) printf '%s\n' active ;;
+    3:inactive|4:inactive) printf '%s\n' inactive ;;
+    3:failed) printf '%s\n' failed ;;
+    *) return 1 ;;
+  esac
+}
+
+unit_enabled_state() {
+  local service="$1" output status=0
+  output=$("${systemctl_bin}" is-enabled "${service}" 2>/dev/null) || status=$?
+  case "${status}:${output}" in
+    0:enabled) printf '%s\n' enabled ;;
+    1:disabled|4:not-found) printf '%s\n' disabled ;;
+    *) return 1 ;;
+  esac
+}
+
+assert_live_unit_truth() {
+  local output line key value
+  local load_seen=0 active_seen=0 sub_seen=0 enabled_seen=0 fragment_seen=0
+  local reload_seen=0 dropin_seen=0 user_seen=0 group_seen=0
+
+  # Bound both the service-manager response time and the amount Bash may
+  # capture. pipefail turns an oversized response (and its resulting SIGPIPE)
+  # into a refusal; the explicit length check also covers a graceful writer.
+  if ! output=$(
+    /usr/bin/timeout --signal=TERM --kill-after=1s 5s \
+      "${systemctl_bin}" show --property="${unit_properties}" "${unit}" 2>/dev/null |
+      /usr/bin/head -c 4097
+  ); then
+    fail 'could not prove the loaded SIP fence unit identity'
+  fi
+  ((${#output} <= 4096)) || fail 'the loaded SIP fence unit identity response is oversized'
+
+  while IFS= read -r line; do
+    [[ "${line}" == *=* ]] || fail 'the loaded SIP fence unit identity is malformed'
+    key=${line%%=*}
+    value=${line#*=}
+    case "${key}" in
+      LoadState)
+        ((load_seen += 1))
+        [[ "${value}" == loaded ]] || fail 'the SIP fence unit is not loaded'
+        ;;
+      ActiveState)
+        ((active_seen += 1))
+        [[ "${value}" == active ]] || fail 'the SIP fence monitor is not active'
+        ;;
+      SubState)
+        ((sub_seen += 1))
+        [[ "${value}" == running ]] || fail 'the SIP fence monitor is not running'
+        ;;
+      UnitFileState)
+        ((enabled_seen += 1))
+        [[ "${value}" == enabled ]] || fail 'the SIP fence unit is not enabled'
+        ;;
+      FragmentPath)
+        ((fragment_seen += 1))
+        [[ "${value}" == "${target_unit}" ]] || fail 'the SIP fence loaded fragment drifted'
+        ;;
+      NeedDaemonReload)
+        ((reload_seen += 1))
+        [[ "${value}" == no ]] || fail 'the SIP fence unit needs a daemon reload'
+        ;;
+      DropInPaths)
+        ((dropin_seen += 1))
+        [[ -z "${value}" ]] || fail 'the SIP fence unit has an unreviewed drop-in'
+        ;;
+      User)
+        ((user_seen += 1))
+        [[ "${value}" == root ]] || fail 'the SIP fence unit user drifted'
+        ;;
+      Group)
+        ((group_seen += 1))
+        [[ "${value}" == root ]] || fail 'the SIP fence unit group drifted'
+        ;;
+      *) fail 'the loaded SIP fence unit identity contains an unexpected property' ;;
+    esac
+  done <<<"${output}"
+
+  ((load_seen == 1 && active_seen == 1 && sub_seen == 1 && enabled_seen == 1 &&
+    fragment_seen == 1 && reload_seen == 1 && dropin_seen == 1 &&
+    user_seen == 1 && group_seen == 1)) ||
+    fail 'the loaded SIP fence unit identity is incomplete or ambiguous'
+}
+
+tx_phase=
+tx_operation=
+tx_prior_kind=
+tx_prior_bundle_version=
+tx_prior_helper_sha256=
+tx_prior_unit_sha256=
+tx_unit_was_enabled=
+tx_unit_was_active=
+tx_libexec_existed=
+tx_new_bundle_version=
+tx_new_helper_sha256=
+tx_new_unit_sha256=
+
+write_transaction_marker() {
+  [[ ! -e "${transaction_new}" && ! -L "${transaction_new}" ]] ||
+    fail 'a stale transaction staging file requires operator review'
+  install_file 0600 /dev/null "${transaction_new}" || return 1
+  printf '%s\n' \
+    'version=3' \
+    "operation=${tx_operation}" \
+    "phase=${tx_phase}" \
+    "prior_kind=${tx_prior_kind}" \
+    "prior_bundle_version=${tx_prior_bundle_version}" \
+    "prior_helper_sha256=${tx_prior_helper_sha256}" \
+    "prior_unit_sha256=${tx_prior_unit_sha256}" \
+    "unit_was_enabled=${tx_unit_was_enabled}" \
+    "unit_was_active=${tx_unit_was_active}" \
+    "libexec_existed=${tx_libexec_existed}" \
+    "new_bundle_version=${tx_new_bundle_version}" \
+    "new_helper_sha256=${tx_new_helper_sha256}" \
+    "new_unit_sha256=${tx_new_unit_sha256}" >"${transaction_new}" || return 1
+  sync_path "${transaction_new}" || return 1
+  mv -T -- "${transaction_new}" "${transaction_marker}" || return 1
+  sync_path "${state_dir}" || return 1
+}
+
+parse_transaction_marker() {
+  local -a lines=()
+  local size
+  [[ -f "${transaction_marker}" && ! -L "${transaction_marker}" ]] || {
+    printf '%s\n' 'Teleagent SIP fence install: transaction marker is unsafe' >&2
+    return 1
+  }
+  [[ "$(stat -c '%u:%g:%a' -- "${transaction_marker}")" == "${expected_uid}:${expected_gid}:600" ]] || {
+    printf '%s\n' 'Teleagent SIP fence install: transaction marker metadata is unsafe' >&2
+    return 1
+  }
+  [[ "$(stat -c '%h' -- "${transaction_marker}")" == 1 ]] || {
+    printf '%s\n' 'Teleagent SIP fence install: transaction marker link count is unsafe' >&2
+    return 1
+  }
+  size=$(stat -c '%s' -- "${transaction_marker}")
+  ((size > 0 && size <= 1024)) || {
+    printf '%s\n' 'Teleagent SIP fence install: transaction marker size is unsafe' >&2
+    return 1
+  }
+  mapfile -t lines <"${transaction_marker}"
+  ((${#lines[@]} == 13)) || {
+    printf '%s\n' 'Teleagent SIP fence install: transaction marker shape is invalid' >&2
+    return 1
+  }
+  [[ "${lines[0]}" == version=3 ]] || return 1
+  [[ "${lines[1]}" =~ ^operation=(install|remove)$ ]] || return 1
+  tx_operation=${BASH_REMATCH[1]}
+  [[ "${lines[2]}" =~ ^phase=(prepared|files|activation|descriptor)$ ]] || return 1
+  tx_phase=${BASH_REMATCH[1]}
+  [[ "${lines[3]}" =~ ^prior_kind=(absent|installed)$ ]] || return 1
+  tx_prior_kind=${BASH_REMATCH[1]}
+  [[ "${lines[4]}" =~ ^prior_bundle_version=(0|[1-9][0-9]*)$ ]] || return 1
+  tx_prior_bundle_version=${BASH_REMATCH[1]}
+  [[ "${lines[5]}" =~ ^prior_helper_sha256=([0-9a-f]{64})$ ]] || return 1
+  tx_prior_helper_sha256=${BASH_REMATCH[1]}
+  [[ "${lines[6]}" =~ ^prior_unit_sha256=([0-9a-f]{64})$ ]] || return 1
+  tx_prior_unit_sha256=${BASH_REMATCH[1]}
+  [[ "${lines[7]}" =~ ^unit_was_enabled=([01])$ ]] || return 1
+  tx_unit_was_enabled=${BASH_REMATCH[1]}
+  [[ "${lines[8]}" =~ ^unit_was_active=([01])$ ]] || return 1
+  tx_unit_was_active=${BASH_REMATCH[1]}
+  [[ "${lines[9]}" =~ ^libexec_existed=([01])$ ]] || return 1
+  tx_libexec_existed=${BASH_REMATCH[1]}
+  [[ "${lines[10]}" =~ ^new_bundle_version=([1-9][0-9]*)$ ]] || return 1
+  tx_new_bundle_version=${BASH_REMATCH[1]}
+  [[ "${lines[11]}" =~ ^new_helper_sha256=([0-9a-f]{64})$ ]] || return 1
+  tx_new_helper_sha256=${BASH_REMATCH[1]}
+  [[ "${lines[12]}" =~ ^new_unit_sha256=([0-9a-f]{64})$ ]] || return 1
+  tx_new_unit_sha256=${BASH_REMATCH[1]}
+  [[ "${tx_new_bundle_version}:${tx_new_helper_sha256}:${tx_new_unit_sha256}" == \
+     "${source_bundle_version}:${source_helper_sha256}:${source_unit_sha256}" ||
+     "${tx_new_bundle_version}:${tx_new_helper_sha256}:${tx_new_unit_sha256}" == \
+     "${legacy_bundle_version}:${legacy_helper_sha256}:${legacy_unit_sha256}" ]] || return 1
+  if [[ "${tx_prior_kind}" == absent ]]; then
+    [[ "${tx_prior_bundle_version}" == 0 &&
+       "${tx_prior_helper_sha256}" == 0000000000000000000000000000000000000000000000000000000000000000 &&
+       "${tx_prior_unit_sha256}" == 0000000000000000000000000000000000000000000000000000000000000000 &&
+       "${tx_unit_was_enabled}" == 0 && "${tx_unit_was_active}" == 0 ]] || return 1
+  else
+    [[ "${tx_prior_bundle_version}:${tx_prior_helper_sha256}:${tx_prior_unit_sha256}" == \
+       "${source_bundle_version}:${source_helper_sha256}:${source_unit_sha256}" ||
+       "${tx_prior_bundle_version}:${tx_prior_helper_sha256}:${tx_prior_unit_sha256}" == \
+       "${legacy_bundle_version}:${legacy_helper_sha256}:${legacy_unit_sha256}" ]] || return 1
+  fi
+  [[ "${tx_operation}" != remove || "${tx_prior_kind}" == installed ]] || return 1
+  [[ "${tx_operation}" != remove || "${tx_phase}" != descriptor ]] || return 1
+}
+
+remove_if_owned_transaction_file() {
+  local filename="$1"
+  if [[ -e "${filename}" || -L "${filename}" ]]; then
+    [[ -f "${filename}" && ! -L "${filename}" ]] || return 1
+    [[ "$(stat -c '%u:%g' -- "${filename}")" == "${expected_uid}:${expected_gid}" ]] || return 1
+    [[ "$(stat -c '%h' -- "${filename}")" == 1 ]] || return 1
+    rm -f -- "${filename}" || return 1
+    sync_path "$(dirname -- "${filename}")" || return 1
+  fi
+}
+
+remove_exact_target() {
+  local filename="$1" expected_sha="$2"
+  if [[ -e "${filename}" || -L "${filename}" ]]; then
+    [[ -f "${filename}" && ! -L "${filename}" ]] || return 1
+    [[ "$(sha256_file "${filename}")" == "${expected_sha}" ]] || return 1
+    rm -f -- "${filename}" || return 1
+    sync_path "$(dirname -- "${filename}")" || return 1
+  fi
+}
+
+bundle_descriptor_matches() {
+  local filename="$1" mode="$2" version="$3" helper_sha="$4" unit_sha="$5"
+  local -a lines=()
+  [[ -f "${filename}" && ! -L "${filename}" ]] || return 1
+  [[ "$(stat -c '%u:%g:%a:%h' -- "${filename}")" == \
+     "${expected_uid}:${expected_gid}:${mode}:1" ]] || return 1
+  mapfile -t lines <"${filename}"
+  [[ "${#lines[@]}:${lines[0]:-}:${lines[1]:-}:${lines[2]:-}:${lines[3]:-}" == \
+     "4:schema=1:bundle_version=${version}:helper_sha256=${helper_sha}:unit_sha256=${unit_sha}" ]]
+}
+
+prepare_rollback_backups() {
+  local filename
+  for filename in "${rollback_helper}" "${rollback_unit}" "${rollback_bundle}"; do
+    [[ ! -e "${filename}" && ! -L "${filename}" ]] ||
+      fail 'a stale rollback artifact requires operator review'
+  done
+  if [[ "${tx_prior_kind}" == installed ]]; then
+    install_file 0600 "${target_helper}" "${rollback_helper}"
+    install_file 0600 "${target_unit}" "${rollback_unit}"
+    install_file 0600 "${installed_bundle}" "${rollback_bundle}"
+    sync_path "${rollback_helper}"
+    sync_path "${rollback_unit}"
+    sync_path "${rollback_bundle}"
+    sync_path "${state_dir}"
+  fi
+}
+
+validate_rollback_backups() {
+  if [[ "${tx_prior_kind}" == installed ]]; then
+    [[ -f "${rollback_helper}" && ! -L "${rollback_helper}" &&
+       "$(stat -c '%u:%g:%a:%h' -- "${rollback_helper}")" == \
+       "${expected_uid}:${expected_gid}:600:1" &&
+       "$(sha256_file "${rollback_helper}")" == "${tx_prior_helper_sha256}" ]] || return 1
+    [[ -f "${rollback_unit}" && ! -L "${rollback_unit}" &&
+       "$(stat -c '%u:%g:%a:%h' -- "${rollback_unit}")" == \
+       "${expected_uid}:${expected_gid}:600:1" &&
+       "$(sha256_file "${rollback_unit}")" == "${tx_prior_unit_sha256}" ]] || return 1
+    bundle_descriptor_matches "${rollback_bundle}" 600 "${tx_prior_bundle_version}" \
+      "${tx_prior_helper_sha256}" "${tx_prior_unit_sha256}" || return 1
+  else
+    [[ ! -e "${rollback_helper}" && ! -L "${rollback_helper}" &&
+       ! -e "${rollback_unit}" && ! -L "${rollback_unit}" &&
+       ! -e "${rollback_bundle}" && ! -L "${rollback_bundle}" ]] ||
+      return 1
+  fi
+}
+
+transaction_target_state() {
+  local filename="$1" mode="$2" prior_sha="$3" new_sha="$4" digest metadata
+  if [[ ! -e "${filename}" && ! -L "${filename}" ]]; then
+    printf '%s\n' missing
+    return 0
+  fi
+  [[ -f "${filename}" && ! -L "${filename}" ]] || return 1
+  metadata=$(stat -c '%u:%g:%a:%h' -- "${filename}") || return 1
+  [[ "${metadata}" == "${expected_uid}:${expected_gid}:${mode}:1" ]] || return 1
+  digest=$(sha256_file "${filename}") || return 1
+  if [[ "${digest}" == "${prior_sha}" ]]; then
+    printf '%s\n' prior
+  elif [[ "${digest}" == "${new_sha}" ]]; then
+    printf '%s\n' new
+  else
+    return 1
+  fi
+}
+
+require_known_transaction_target() {
+  local filename="$1" mode="$2" prior_sha="$3" new_sha="$4" state
+  state=$(transaction_target_state "${filename}" "${mode}" "${prior_sha}" "${new_sha}") ||
+    return 1
+  if [[ "${tx_operation}" == remove ]]; then
+    case "${tx_phase}:${state}" in
+      prepared:prior|activation:prior|files:prior|files:missing) return 0 ;;
+      *) return 1 ;;
+    esac
+  elif [[ "${tx_prior_kind}" == installed ]]; then
+    case "${tx_phase}:${state}" in
+      prepared:prior|files:prior|files:new|activation:prior|activation:new|\
+        descriptor:prior|descriptor:new) return 0 ;;
+      *) return 1 ;;
+    esac
+  else
+    case "${tx_phase}:${state}" in
+      prepared:missing|files:missing|files:new|activation:new|\
+        descriptor:new) return 0 ;;
+      *) return 1 ;;
+    esac
+  fi
+}
+
+transaction_bundle_state() {
+  if [[ ! -e "${installed_bundle}" && ! -L "${installed_bundle}" ]]; then
+    printf '%s\n' missing
+  elif bundle_descriptor_matches "${installed_bundle}" 600 "${tx_prior_bundle_version}" \
+    "${tx_prior_helper_sha256}" "${tx_prior_unit_sha256}"; then
+    printf '%s\n' prior
+  elif bundle_descriptor_matches "${installed_bundle}" 600 "${tx_new_bundle_version}" \
+    "${tx_new_helper_sha256}" "${tx_new_unit_sha256}"; then
+    printf '%s\n' new
+  else
+    return 1
+  fi
+}
+
+require_known_transaction_bundle() {
+  local state
+  state=$(transaction_bundle_state) || return 1
+  if [[ "${tx_operation}" == remove ]]; then
+    case "${tx_phase}:${state}" in
+      prepared:prior|activation:prior|files:prior|files:missing) return 0 ;;
+      *) return 1 ;;
+    esac
+  elif [[ "${tx_prior_kind}" == installed ]]; then
+    case "${tx_phase}:${state}" in
+      prepared:prior|files:prior|activation:prior|descriptor:prior|descriptor:new) return 0 ;;
+      *) return 1 ;;
+    esac
+  else
+    case "${tx_phase}:${state}" in
+      prepared:missing|files:missing|files:new|activation:missing|\
+        descriptor:missing|descriptor:new) return 0 ;;
+      *) return 1 ;;
+    esac
+  fi
+}
+
+cleanup_rollback_artifacts() {
+  local failed=0 filename
+  for filename in "${rollback_helper}" "${rollback_unit}" "${rollback_bundle}" \
+    "${helper_pending}" "${unit_pending}" "${installed_bundle_pending}" "${transaction_new}"; do
+    remove_if_owned_transaction_file "${filename}" || failed=1
+  done
+  ((failed == 0))
+}
+
+ensure_runtime_dir_for_rollback() {
+  local parent
+  parent=$(dirname -- "${runtime_dir}") || return 1
+  require_trusted_parent "${parent}" 'SIP fence runtime parent' || return 1
+  if [[ -e "${runtime_dir}" || -L "${runtime_dir}" ]]; then
+    require_safe_directory "${runtime_dir}" 700 'SIP fence runtime directory' || return 1
+  else
+    install_directory 0700 "${runtime_dir}" || return 1
+    sync_path "${parent}" || return 1
+  fi
+}
+
+rollback_transaction() {
+  local active_state enabled_state rollback_failed=0
+  parse_transaction_marker || return 1
+  validate_rollback_backups || return 1
+
+  # A missing unit can make `disable` report failure during first-install
+  # rollback. The independently queried inactive state is authoritative.
+  "${systemctl_bin}" disable --now "${unit}" >/dev/null 2>&1 || true
+  active_state=$(unit_active_state "${unit}") || return 1
+  [[ "${active_state}" == inactive ]] || return 1
+  remove_if_owned_transaction_file "${helper_pending}" || rollback_failed=1
+  remove_if_owned_transaction_file "${unit_pending}" || rollback_failed=1
+  remove_if_owned_transaction_file "${installed_bundle_pending}" || rollback_failed=1
+  remove_if_owned_transaction_file "${transaction_new}" || rollback_failed=1
+
+  if [[ "${tx_prior_kind}" == installed ]]; then
+    require_known_transaction_target "${target_helper}" 755 "${tx_prior_helper_sha256}" \
+      "${tx_new_helper_sha256}" || rollback_failed=1
+    require_known_transaction_target "${target_unit}" 644 "${tx_prior_unit_sha256}" \
+      "${tx_new_unit_sha256}" || rollback_failed=1
+    require_known_transaction_bundle || rollback_failed=1
+    if ((rollback_failed == 0)); then
+      atomic_install_target "${rollback_helper}" "${helper_pending}" "${target_helper}" 0755 ||
+        rollback_failed=1
+    fi
+    if ((rollback_failed == 0)); then
+      atomic_install_target "${rollback_unit}" "${unit_pending}" "${target_unit}" 0644 ||
+        rollback_failed=1
+    fi
+    if ((rollback_failed == 0)); then
+      write_bundle_descriptor "${installed_bundle}" "${installed_bundle_pending}" \
+        "${tx_prior_bundle_version}" "${tx_prior_helper_sha256}" "${tx_prior_unit_sha256}" ||
+        rollback_failed=1
+    fi
+    if ((rollback_failed == 0)); then
+      [[ "$(transaction_target_state "${target_helper}" 755 \
+        "${tx_prior_helper_sha256}" "${tx_new_helper_sha256}")" == prior ]] || rollback_failed=1
+      [[ "$(transaction_target_state "${target_unit}" 644 \
+        "${tx_prior_unit_sha256}" "${tx_new_unit_sha256}")" == prior ]] || rollback_failed=1
+      bundle_descriptor_matches "${installed_bundle}" 600 "${tx_prior_bundle_version}" \
+        "${tx_prior_helper_sha256}" "${tx_prior_unit_sha256}" || rollback_failed=1
+    fi
+    if ((rollback_failed == 0)); then
+      "${systemctl_bin}" daemon-reload >/dev/null 2>&1 || rollback_failed=1
+      ensure_runtime_dir_for_rollback || rollback_failed=1
+      ((rollback_failed != 0)) || "${target_helper}" reconcile >/dev/null 2>&1 || rollback_failed=1
+    fi
+    # Never reactivate a restored unit unless its bytes were reloaded and its
+    # exact nftables state was reconciled. Ambiguity remains disabled/inactive
+    # with the durable transaction marker retained for operator recovery.
+    if ((rollback_failed == 0)); then
+      if ((tx_unit_was_enabled == 1)); then
+        "${systemctl_bin}" enable "${unit}" >/dev/null 2>&1 || rollback_failed=1
+      fi
+      if ((rollback_failed == 0 && tx_unit_was_active == 1)); then
+        if ((tx_unit_was_enabled == 1)); then
+          "${systemctl_bin}" enable --now "${unit}" >/dev/null 2>&1 || rollback_failed=1
+        else
+          "${systemctl_bin}" start "${unit}" >/dev/null 2>&1 || rollback_failed=1
+        fi
+      fi
+    fi
+  else
+    require_known_transaction_target "${target_helper}" 755 "${tx_prior_helper_sha256}" \
+      "${tx_new_helper_sha256}" || rollback_failed=1
+    require_known_transaction_target "${target_unit}" 644 "${tx_prior_unit_sha256}" \
+      "${tx_new_unit_sha256}" || rollback_failed=1
+    require_known_transaction_bundle || rollback_failed=1
+    if [[ "${tx_phase}" == activation || "${tx_phase}" == descriptor ]]; then
+      if ((rollback_failed == 0)); then
+        ensure_runtime_dir_for_rollback || rollback_failed=1
+        ((rollback_failed != 0)) || "${target_helper}" remove >/dev/null 2>&1 || rollback_failed=1
+        if ((rollback_failed == 0)); then
+          # Persist table-removal truth before deleting the only exact helper
+          # that can safely retry it. A later recovery at phase=files must not
+          # infer or repeat an already confirmed nftables transition.
+          tx_phase=files
+          write_transaction_marker || rollback_failed=1
+        fi
+      fi
+    fi
+    # If table removal is ambiguous, retain the exact reviewed helper/unit and
+    # durable marker. They are the only safe retry path for later recovery.
+    if ((rollback_failed == 0)); then
+      remove_exact_target "${target_unit}" "${tx_new_unit_sha256}" || rollback_failed=1
+      remove_exact_target "${target_helper}" "${tx_new_helper_sha256}" || rollback_failed=1
+      if [[ -e "${installed_bundle}" || -L "${installed_bundle}" ]]; then
+        if bundle_descriptor_matches "${installed_bundle}" 600 "${tx_new_bundle_version}" \
+          "${tx_new_helper_sha256}" "${tx_new_unit_sha256}"; then
+          rm -f -- "${installed_bundle}" || rollback_failed=1
+          sync_path "${state_dir}" || rollback_failed=1
+        else
+          rollback_failed=1
+        fi
+      fi
+      ((rollback_failed != 0)) || "${systemctl_bin}" daemon-reload >/dev/null 2>&1 || rollback_failed=1
+      if ((rollback_failed == 0 && tx_libexec_existed == 0)) &&
+          [[ -d "$(dirname -- "${target_helper}")" ]]; then
+        rmdir -- "$(dirname -- "${target_helper}")" >/dev/null 2>&1 || rollback_failed=1
+        sync_path "$(dirname -- "$(dirname -- "${target_helper}")")" || rollback_failed=1
+      fi
+    fi
+  fi
+
+  enabled_state=$(unit_enabled_state "${unit}") || rollback_failed=1
+  active_state=$(unit_active_state "${unit}") || rollback_failed=1
+  if ((tx_unit_was_enabled == 1)); then
+    [[ "${enabled_state:-}" == enabled ]] || rollback_failed=1
+  else
+    [[ "${enabled_state:-}" == disabled ]] || rollback_failed=1
+  fi
+  if ((tx_unit_was_active == 1)); then
+    [[ "${active_state:-}" == active ]] || rollback_failed=1
+  else
+    [[ "${active_state:-}" == inactive ]] || rollback_failed=1
+  fi
+
+  ((rollback_failed == 0)) || return 1
+  rm -f -- "${transaction_marker}" || return 1
+  sync_path "${state_dir}" || return 1
+  cleanup_rollback_artifacts || return 1
+  return 0
+}
+
+recover_incomplete_transaction() {
+  if [[ -e "${transaction_marker}" || -L "${transaction_marker}" ]]; then
+    rollback_transaction || fail 'an incomplete activation could not be rolled back exactly'
+    printf '%s\n' 'Teleagent SIP fence install: recovered an interrupted fence operation; prior bundle restored' >&2
+  elif [[ -e "${transaction_new}" || -L "${transaction_new}" ||
+          -e "${helper_pending}" || -L "${helper_pending}" ||
+          -e "${unit_pending}" || -L "${unit_pending}" ||
+          -e "${installed_bundle_pending}" || -L "${installed_bundle_pending}" ||
+          -e "${rollback_helper}" || -L "${rollback_helper}" ||
+          -e "${rollback_unit}" || -L "${rollback_unit}" ||
+          -e "${rollback_bundle}" || -L "${rollback_bundle}" ]]; then
+    # The durable marker is published before the first target mutation. A
+    # staging or rollback inode without the marker is safe to discard exactly.
+    cleanup_rollback_artifacts || fail 'a stale transaction artifact requires operator review'
+  fi
+}
+
+assert_no_incomplete_transaction() {
+  [[ ! -e "${transaction_marker}" && ! -L "${transaction_marker}" &&
+     ! -e "${transaction_new}" && ! -L "${transaction_new}" &&
+     ! -e "${helper_pending}" && ! -L "${helper_pending}" &&
+     ! -e "${unit_pending}" && ! -L "${unit_pending}" &&
+     ! -e "${installed_bundle_pending}" && ! -L "${installed_bundle_pending}" &&
+     ! -e "${rollback_helper}" && ! -L "${rollback_helper}" &&
+     ! -e "${rollback_unit}" && ! -L "${rollback_unit}" &&
+     ! -e "${rollback_bundle}" && ! -L "${rollback_bundle}" ]] ||
+    fail 'an interrupted fence operation must be recovered with --install before checking live state'
+}
+
+check_loaded_installation() {
+  [[ "${installed_kind}" != absent ]] || fail 'the SIP fence bundle is not installed'
+  assert_live_unit_truth
+  "${target_helper}" check
+}
+
+check_current_live() {
+  classify_installation 0
+  [[ "${installed_kind}" == current ]] || fail 'the installed SIP fence bundle is not current'
+  check_loaded_installation
+}
+
+transaction_exit() {
+  local status=$?
+  trap - EXIT HUP INT TERM
+  if [[ -e "${transaction_marker}" || -L "${transaction_marker}" ]]; then
+    if rollback_transaction; then
+      printf '%s\n' 'Teleagent SIP fence install: fence operation failed; prior bundle restored' >&2
+    else
+      printf '%s\n' 'Teleagent SIP fence install: fence operation failed and rollback was incomplete' >&2
+      exit 77
+    fi
+  fi
+  ((status != 0)) || status=1
+  exit "${status}"
+}
+
+atomic_install_target() {
+  local source="$1" pending="$2" target="$3" mode="$4"
+  [[ ! -e "${pending}" && ! -L "${pending}" ]] || fail 'an install staging target is unexpectedly present'
+  install_file "${mode}" "${source}" "${pending}" || return 1
+  sync_path "${pending}" || return 1
+  mv -T -- "${pending}" "${target}" || return 1
+  sync_path "$(dirname -- "${target}")" || return 1
+}
+
+install_fence() {
+  local enabled_state fence_state voice_state
+  voice_state=$(unit_active_state teleagent-voice-stack.service) ||
+    fail 'could not prove the voice stack state'
+  [[ "${voice_state}" == inactive ]] || fail 'stop the voice stack before changing its SIP fence'
+  classify_installation 1
+
+  # An already-active exact installation is idempotent and needs no rewrite.
+  fence_state=$(unit_active_state "${unit}") || fail 'could not prove the SIP fence state'
+  if [[ "${installed_kind}" == current && "${fence_state}" == active ]]; then
+    check_loaded_installation
+    return
+  fi
+  [[ "${fence_state}" == active || "${fence_state}" == inactive ]] ||
+    fail 'reset the failed SIP fence unit before installation'
+  if [[ "${installed_kind}" == absent ]]; then
+    [[ "${fence_state}" == inactive ]] || fail 'an absent fence bundle cannot have an active unit'
+  else
+    # Upgrades preserve only a prior exact table. Stopped monitors retain that
+    # table by design, so both active and inactive reviewed bundles must check.
+    if [[ "${fence_state}" == active ]]; then
+      assert_live_unit_truth
+    fi
+    "${target_helper}" check || fail 'the prior installed fence table is not exact'
+  fi
+  require_trusted_parent "$(dirname -- "${target_unit}")" 'systemd unit directory'
+  if [[ -e "$(dirname -- "${target_helper}")" || -L "$(dirname -- "${target_helper}")" ]]; then
+    require_trusted_parent "$(dirname -- "${target_helper}")" 'local libexec directory'
+    tx_libexec_existed=1
+  else
+    require_trusted_parent "$(dirname -- "$(dirname -- "${target_helper}")")" 'local prefix directory'
+    tx_libexec_existed=0
+  fi
+  [[ ! -e "${helper_pending}" && ! -L "${helper_pending}" &&
+     ! -e "${unit_pending}" && ! -L "${unit_pending}" ]] ||
+    fail 'an install staging target is unexpectedly present'
+
+  tx_prior_kind=installed
+  tx_prior_bundle_version=${installed_bundle_version:-0}
+  tx_prior_helper_sha256=${installed_helper_sha256:-0000000000000000000000000000000000000000000000000000000000000000}
+  tx_prior_unit_sha256=${installed_unit_sha256:-0000000000000000000000000000000000000000000000000000000000000000}
+  tx_unit_was_enabled=0
+  tx_unit_was_active=0
+  if [[ "${installed_kind}" == absent ]]; then
+    tx_prior_kind=absent
+  fi
+  enabled_state=$(unit_enabled_state "${unit}") || fail 'could not prove the SIP fence enablement state'
+  [[ "${enabled_state}" == disabled ]] || tx_unit_was_enabled=1
+  [[ "${fence_state}" == inactive ]] || tx_unit_was_active=1
+  if [[ "${tx_prior_kind}" == absent &&
+        ("${tx_unit_was_enabled}" != 0 || "${tx_unit_was_active}" != 0) ]]; then
+    fail 'an absent fence bundle has stale service-manager state'
+  fi
+  tx_new_bundle_version=${source_bundle_version}
+  tx_new_helper_sha256=${source_helper_sha256}
+  tx_new_unit_sha256=${source_unit_sha256}
+  prepare_rollback_backups
+  tx_operation=install
+  tx_phase=prepared
+  write_transaction_marker
+
+  trap transaction_exit EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+
+  if ((tx_unit_was_active == 1 || tx_unit_was_enabled == 1)); then
+    # The aggregate installer captures this program's complete output and
+    # accepts only the documented recovery diagnostic. Keep normal successful
+    # systemd link-management chatter out of that authority channel while
+    # retaining systemctl's failure status and diagnostics.
+    "${systemctl_bin}" --quiet disable --now "${unit}"
+    [[ "$(unit_active_state "${unit}")" == inactive ]] ||
+      fail 'the prior SIP fence monitor did not stop for upgrade'
+  fi
+
+  tx_phase=files
+  write_transaction_marker
+  if ((tx_libexec_existed == 0)); then
+    install_directory 0755 "$(dirname -- "${target_helper}")"
+    sync_path "$(dirname -- "$(dirname -- "${target_helper}")")"
+  fi
+  atomic_install_target "${source_helper}" "${helper_pending}" "${target_helper}" 0755
+  atomic_install_target "${source_unit}" "${unit_pending}" "${target_unit}" 0644
+
+  tx_phase=activation
+  write_transaction_marker
+  "${systemctl_bin}" --quiet daemon-reload
+  # systemd creates the root-only RuntimeDirectory before ExecStart. The
+  # service monitor performs the sole atomic initial reconciliation there.
+  "${systemctl_bin}" --quiet enable --now "${unit}"
+  assert_live_unit_truth
+  "${target_helper}" check
+
+  tx_phase=descriptor
+  write_transaction_marker
+  write_bundle_descriptor "${installed_bundle}" "${installed_bundle_pending}" \
+    "${source_bundle_version}" "${source_helper_sha256}" "${source_unit_sha256}"
+  classify_installation 0
+  [[ "${installed_kind}" == current ]] || fail 'the current fence bundle descriptor was not committed'
+  check_loaded_installation
+
+  rm -f -- "${transaction_marker}"
+  sync_path "${state_dir}"
+  trap - EXIT HUP INT TERM
+  cleanup_rollback_artifacts || fail 'the committed fence left unsafe transaction artifacts'
+}
+
+remove_fence() {
+  local active_state enabled_state
+  [[ "$(unit_active_state teleagent-voice-stack.service)" == inactive ]] ||
+    fail 'stop the voice stack before removing its SIP fence'
+  [[ "$(unit_active_state docker.service)" == inactive ]] ||
+    fail 'stop Docker before removing its SIP fence'
+  classify_installation 1
+  check_loaded_installation
+  active_state=$(unit_active_state "${unit}") || fail 'could not prove the SIP fence state'
+  enabled_state=$(unit_enabled_state "${unit}") || fail 'could not prove the SIP fence enablement state'
+  [[ "${active_state}:${enabled_state}" == active:enabled ]] ||
+    fail 'the SIP fence changed while removal was prepared'
+
+  tx_operation=remove
+  tx_prior_kind=installed
+  tx_prior_bundle_version=${installed_bundle_version}
+  tx_prior_helper_sha256=${installed_helper_sha256}
+  tx_prior_unit_sha256=${installed_unit_sha256}
+  tx_unit_was_enabled=1
+  tx_unit_was_active=1
+  tx_libexec_existed=1
+  tx_new_bundle_version=${source_bundle_version}
+  tx_new_helper_sha256=${source_helper_sha256}
+  tx_new_unit_sha256=${source_unit_sha256}
+  prepare_rollback_backups
+  tx_phase=prepared
+  write_transaction_marker
+
+  trap transaction_exit EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+
+  "${systemctl_bin}" --quiet disable --now "${unit}"
+  [[ "$(unit_active_state "${unit}")" == inactive ]] ||
+    fail 'the SIP fence monitor did not stop for removal'
+  tx_phase=activation
+  write_transaction_marker
+  "${target_helper}" remove
+  tx_phase=files
+  write_transaction_marker
+  rm -f -- "${target_helper}" "${target_unit}" "${installed_bundle}"
+  sync_path "$(dirname -- "${target_helper}")"
+  sync_path "$(dirname -- "${target_unit}")"
+  sync_path "${state_dir}"
+  "${systemctl_bin}" --quiet daemon-reload
+  [[ "$(unit_active_state "${unit}")" == inactive &&
+     "$(unit_enabled_state "${unit}")" == disabled ]] ||
+    fail 'the removed SIP fence retained service-manager state'
+
+  rm -f -- "${transaction_marker}"
+  sync_path "${state_dir}"
+  trap - EXIT HUP INT TERM
+  cleanup_rollback_artifacts || fail 'the removed fence left unsafe transaction artifacts'
+}
+
+validate_source
+case "${1:---source-check}" in
+  --source-check)
+    [[ $# -le 1 ]] || fail 'select exactly one mode'
+    printf '%s\n' 'PASS Teleagent SIP fence source is exact and inactive'
+    ;;
+  --check)
+    [[ $# == 1 ]] || fail 'select exactly one mode'
+    require_operator_identity
+    prepare_state_lock
+    assert_no_incomplete_transaction
+    check_current_live
+    printf '%s\n' 'PASS Teleagent SIP fence is installed and exact'
+    ;;
+  --install)
+    [[ $# == 1 ]] || fail 'select exactly one mode'
+    require_operator_identity
+    prepare_state_lock
+    recover_incomplete_transaction
+    install_fence
+    ;;
+  --remove)
+    [[ $# == 1 ]] || fail 'select exactly one mode'
+    require_operator_identity
+    prepare_state_lock
+    recover_incomplete_transaction
+    remove_fence
+    ;;
+  *) fail 'usage: teleagent-sip-local-peer-fence-install {--source-check|--check|--install|--remove}' ;;
+esac

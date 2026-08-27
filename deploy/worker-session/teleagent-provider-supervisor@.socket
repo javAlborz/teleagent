@@ -1,0 +1,15 @@
+[Unit]
+Description=Teleagent %i provider supervisor socket
+ConditionPathExists=/etc/teleagent/worker-session/ENABLE
+
+[Socket]
+ListenStream=/run/teleagent-provider-launch/%i.sock
+SocketUser=root
+SocketGroup=teleagent-provider-launch
+SocketMode=0660
+DirectoryMode=0711
+RemoveOnStop=yes
+FileDescriptorName=provider-%i
+Service=teleagent-provider-supervisor@%i.service
+
+# Deliberately dormant: no [Install] section.

@@ -1,7 +1,7 @@
 import chalk from 'chalk';
 import ora from 'ora';
 import axios from 'axios';
-import { loadConfig, configExists, getInstallationType } from '../config.js';
+import { loadConfigReadOnly, configExists, getInstallationType } from '../config.js';
 import { checkDocker, getContainerStatus } from '../docker.js';
 import { isServerRunning, getServerPid } from '../process-manager.js';
 import { validateTtsEndpoint, validateSttEndpoint } from '../validators.js';
@@ -135,7 +135,7 @@ export async function doctorCommand() {
     process.exit(1);
   }
 
-  const config = await loadConfig();
+  const config = await loadConfigReadOnly();
   const installationType = getInstallationType(config);
   const isPiSplit = config.deployment && config.deployment.mode === 'pi-split';
 

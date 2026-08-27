@@ -1,0 +1,19 @@
+[Unit]
+Description=Aggregate resource boundary for the Teleagent provider plane
+ConditionPathExists=/etc/teleagent/worker-session/ENABLE
+
+[Slice]
+CPUAccounting=yes
+CPUQuota=250%
+CPUWeight=25
+MemoryAccounting=yes
+MemoryHigh=5G
+MemoryMax=6G
+MemorySwapMax=0
+TasksAccounting=yes
+TasksMax=1024
+IOAccounting=yes
+IOWeight=25
+
+# Deliberately dormant and non-enableable. Provider supervisors, credential
+# egress services, and the tighter child model slice are assigned here.

@@ -1,257 +1,284 @@
 # Teleagent
 
-Voice interface for Claude Code and OpenAI Codex via SIP. Call your AI, and your AI can call you.
+Teleagent is a SIP phone interface for OpenAI Realtime, Claude Code, and OpenAI
+Codex. The maintained CLI command remains `claude-phone` for compatibility with
+the former Claude Phone project.
 
-## Project Overview
+This file is the canonical repository guidance. Read it before changing the
+call path, execution controller, authentication, approval flow, or deployment
+artifacts.
 
-Teleagent gives Claude Code and Codex CLI profiles a phone interface through SIP/PBX integration.
-It is the maintained continuation of the old Claude Phone project; the CLI
-command remains `claude-phone` for compatibility.
+## Product shape
 
-- **Inbound**: Call an extension and talk to Claude or Codex - run commands, check status, ask questions
-- **Outbound**: Your server can call YOU with alerts, then have a conversation about what to do
+- Extensions `1`–`6` directly select Claude Haiku/Sonnet/Opus or Codex
+  Luna/Terra/Sol profiles. These legacy calls use the configured STT and TTS
+  services.
+- Extensions `7` and `77` use OpenAI Realtime for a full-duplex conductor.
+  They do not depend on the Zeus TTS/STT services. `7` starts a thread and `77`
+  resumes its durable phone state.
+- The Realtime conductor orchestrates the six Claude/Codex profiles; it is not
+  itself a shell or a privileged agent.
+- Outbound calls durably notify the caller about results and alerts.
+- The native OpenAI SIP gateway is a separate, dormant canary until its public
+  ingress, PBX authentication, provider configuration, and activation gates
+  have been reviewed explicitly.
 
-## Tech Stack
+Hermes' model map is:
 
-| Component | Technology |
-|-----------|------------|
-| Language | Node.js (ES modules for CLI, CommonJS for voice-app) |
-| SIP Server | drachtio-srf |
-| Media Server | FreeSWITCH (via drachtio-fsmrf) |
-| STT | OpenAI Whisper API |
-| TTS | OpenAI-compatible speech API |
-| AI Backend | Claude Code CLI and Codex CLI (via HTTP wrapper) |
-| PBX | Asterisk on Hermes; any compatible SIP PBX works |
-| Container | Docker Compose |
+| Fresh | Resume | Profile | Production phone boundary |
+| --- | --- | --- | --- |
+| `1` | `11` | Claude Haiku | read-only, fastest tier |
+| `2` | `22` | Claude Sonnet | read-only, stronger tier |
+| `3` | `33` | Claude Opus | read-only, strongest tier |
+| `4` | `44` | Codex GPT-5.6 Luna | read-only, low reasoning |
+| `5` | `55` | Codex GPT-5.6 Terra | read-only, medium reasoning |
+| `6` | `66` | Codex GPT-5.6 Sol | read-only, high reasoning |
+| `7` | `77` | OpenAI Realtime conductor | read-only typed tools |
 
-## Architecture
+Model tier changes reasoning quality, not authority. Every production phone job
+is forced read-only. Mutating, target-session, deployment, and root work are
+unavailable until the independently attested authority described below exists.
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│  Phone Call                                                  │
-│      │                                                       │
-│      ↓ Call a configured agent extension                    │
-│  ┌─────────────┐                                            │
-│  │  SIP/PBX    │  ← PBX routes the call                    │
-│  └──────┬──────┘                                            │
-│         │ SIP                                               │
-│         ↓                                                    │
-│  ┌─────────────────────────────────────────────────┐       │
-│  │           voice-app (Docker)                     │       │
-│  │  ┌─────────────────────────────────────────┐   │       │
-│  │  │ drachtio  │  FreeSWITCH  │  Node.js     │   │       │
-│  │  │ (SIP)     │  (Media)     │  (Logic)     │   │       │
-│  │  └─────────────────────────────────────────┘   │       │
-│  └────────────────────┬────────────────────────────┘       │
-│                       │ HTTP                                │
-│                       ↓                                      │
-│  ┌─────────────────────────────────────────────────┐       │
-│  │   claude-api-server (legacy service name)        │       │
-│  │   Wraps Claude and Codex with session management │       │
-│  └─────────────────────────────────────────────────┘       │
-└─────────────────────────────────────────────────────────────┘
-```
+## Architecture and trust boundaries
 
-## Directory Structure
+```text
+owner handset
+    |
+    v
+Asterisk private PBX
+    |
+    +--> drachtio + FreeSWITCH + voice-app (unprivileged container)
+             |          |
+             |          +--> outbound WSS to OpenAI Realtime for 7/77
+             |
+             +--> authenticated loopback controller on :3333
+                       |
+                       +--> durable task executor
+                       |       +--> fixed launcher -> teleagent-worker
+                       |                    +--> Claude/Codex CLI
+                       |
+                       +--> private worker-session Unix-socket proxy
+                       |       +--> worker-owned tmux sessions only
+                       |
+                       + - - retired privileged-action proxy boundary
 
-```
-teleagent/
-├── CLAUDE.md                 # This file
-├── CONSTITUTION.md           # DevFlow 2.0 development principles
-├── README.md                 # User-facing documentation
-├── install.sh                # One-command installer
-├── package.json              # Root package (hooks, linting, tests)
-├── eslint.config.js          # ESLint configuration
-├── docker-compose.yml        # Multi-container orchestration
-├── .env.example              # Environment template
-│
-├── .claude/commands/         # DevFlow slash commands
-│   ├── feature.md            # /feature spec|start|ship
-│   ├── test.md               # /test
-│   ├── fix.md                # /fix [N]
-│   ├── issues.md             # /issues
-│   ├── investigate.md        # /investigate
-│   ├── project.md            # /project
-│   ├── batch.md              # /batch
-│   └── design.md             # /design
-│
-├── cli/                      # Unified CLI tool
-│   ├── package.json
-│   ├── README.md
-│   ├── bin/
-│   │   ├── claude-phone.js   # CLI entry point
-│   │   └── cli-main.js       # Command definitions
-│   ├── lib/
-│   │   ├── commands/         # Command implementations
-│   │   │   ├── setup.js      # Interactive setup wizard
-│   │   │   ├── start.js      # Start services
-│   │   │   ├── stop.js       # Stop services
-│   │   │   ├── status.js     # Service status
-│   │   │   ├── doctor.js     # Health checks
-│   │   │   ├── api-server.js # Start API server standalone
-│   │   │   ├── logs.js       # Tail service logs
-│   │   │   ├── backup.js     # Create backups
-│   │   │   ├── restore.js    # Restore backups
-│   │   │   ├── update.js     # Self-update
-│   │   │   ├── uninstall.js  # Clean removal
-│   │   │   ├── config/       # Config subcommands
-│   │   │   │   ├── show.js
-│   │   │   │   ├── path.js
-│   │   │   │   └── reset.js
-│   │   │   └── device/       # Device subcommands
-│   │   │       ├── add.js
-│   │   │       ├── list.js
-│   │   │       └── remove.js
-│   │   ├── config.js         # Config read/write
-│   │   ├── docker.js         # Docker compose wrapper
-│   │   ├── network.js        # Network utilities
-│   │   ├── platform.js       # Platform detection
-│   │   ├── port-check.js     # Port availability checks
-│   │   ├── prereqs.js        # Prerequisite checks
-│   │   ├── prerequisites.js  # Pi-specific prereqs
-│   │   ├── process-manager.js# PID-based process management
-│   │   ├── utils.js          # Shared utilities
-│   │   └── validators.js     # API key validation
-│   └── test/                 # Test suite
-│
-├── voice-app/                # Docker container for voice handling
-│   ├── Dockerfile
-│   ├── package.json
-│   ├── index.js              # Main entry point
-│   ├── config/
-│   │   └── devices.json      # Device configurations
-│   ├── lib/
-│   │   ├── audio-fork.js     # WebSocket audio streaming
-│   │   ├── claude-bridge.js  # HTTP client for Claude API
-│   │   ├── connection-retry.js # Connection retry logic
-│   │   ├── conversation-loop.js  # Core conversation flow
-│   │   ├── device-registry.js    # Multi-device management
-│   │   ├── http-server.js    # Express server for audio/API
-│   │   ├── logger.js         # Logging utility
-│   │   ├── multi-registrar.js    # Multi-extension SIP registration
-│   │   ├── outbound-handler.js   # Outbound call logic
-│   │   ├── outbound-routes.js    # Outbound API endpoints
-│   │   ├── outbound-session.js   # Outbound call sessions
-│   │   ├── registrar.js      # Single SIP registration
-│   │   ├── sip-handler.js    # Inbound call handling
-│   │   ├── tts-service.js    # OpenAI-compatible TTS
-│   │   └── whisper-client.js # OpenAI Whisper STT
-│   ├── DEPLOYMENT.md         # Production deployment guide
-│   ├── README-OUTBOUND.md    # Outbound calling API docs
-│   └── API-QUERY-CONTRACT.md # Query API specification
-│
-├── claude-api-server/        # HTTP wrapper for Claude and Codex CLIs
-│   ├── package.json
-│   ├── server.js             # Express server
-│   ├── agent-cli.js          # Provider CLI args and JSONL parsing
-│   ├── test/                 # Agent bridge tests
-│   └── structured.js         # JSON validation helpers
-│
-├── docs/
-│   └── TROUBLESHOOTING.md    # Troubleshooting guide
-│
-└── src/features/             # DevFlow feature specs (planning docs)
-    └── */SPEC.md, PLAN.md, TASKS.md
+exact-rule root broker (separate, dormant, and inaccessible to the controller)
 ```
 
-## CLI Commands
+The important split is capability-based:
+
+- `voice-app` owns SIP/media, the Realtime API key, and durable phone state. It
+  has no approval signing key, privileged-action bearer, sudo access,
+  root-broker socket, general `/ask` bearer, or provider credentials.
+- `claude-api-server` is the private controller. It owns durable executor state
+  but production service hardening removes phone approval verifier trust and
+  privileged-proxy access. It is not public ingress.
+- `teleagent-worker` owns the bounded Claude/Codex workspace and provider
+  processes. The controller reaches it only through the fixed root-owned
+  launcher. Agent prompts go over stdin, never process argv.
+- The worker-session broker runs as `teleagent-worker`, sees only its dedicated
+  tmux socket and approved workspace roots, and receives no controller or root
+  credential.
+- The privileged-action broker runs separately as root, accepts only a private
+  Unix socket, verifies signed canonical plans, and executes exact reviewed argv
+  without a shell. Conversational agents never receive sudo or this socket.
+- The optional native SIP gateway is a public-edge canary identity. It must not
+  receive controller tools or infer caller authorization from a spoofable SIP
+  `From` header.
+
+Do not collapse these identities, mount a private broker socket into
+`voice-app`, put a reusable bearer in an agent environment, share the owner's
+tmux socket with the worker, or grant the worker broad sudo/group membership.
+
+## Authorization invariants
+
+Three active HTTP bearer tokens are mandatory, clean, pairwise distinct, and
+scoped:
+
+| Credential | Routes |
+| --- | --- |
+| `AGENT_API_TOKEN` | general non-phone bridge routes |
+| `EXECUTOR_API_TOKEN` | durable `/executor/**` routes |
+| `VOICE_CONTROL_TOKEN` | `/voice-control/**`, operator, and unlock routes |
+
+The privileged-action bearer and proxy implementation remain only as
+unit-tested future substrate. The production controller service removes their
+environment settings after `EnvironmentFile` processing and cannot access the
+broker socket.
+
+Committed example, placeholder, `changeme`, or `replace-with` values are
+invalid. The controller defaults to `127.0.0.1`; a non-loopback bind requires
+`AGENT_API_NON_LOOPBACK_ENABLED=true` plus reviewed network controls. Docker
+Compose explicitly blanks the general and legacy Claude bearer inside
+`voice-app`.
+
+Phone mutation, target-session delivery, and privileged work are production
+disabled. Voice always constructs `AgentJobBroker` without a capability issuer
+or privileged bridge, so these requests fail before an approval can authorize
+execution. The retained capability primitives describe the future two-phase
+protocol, not a production activation path:
+
+1. Store the exact normalized request and canonical execution plan.
+2. Have an independently isolated PBX attester, not `voice-app`, play the exact
+   controller-canonical approval prompt and observe handset-side DTMF.
+3. Persist request-bound prompt-completion and `#` evidence tied to the exact
+   call leg; voice/FreeSWITCH events that voice can forge are insufficient.
+4. Have a controller-owned authority atomically validate and consume that
+   evidence, then issue a short-lived Ed25519 capability bound to job, call,
+   request hash, canonical plan hash, target, provider/profile, key ID, expiry,
+   and nonce.
+5. The executor derives the SHA-256 SPKI fingerprint of the verifying public
+   key and persists it with the admitting key ID. Immediately before the first
+   external effect, both must still match the active verifier epoch—even when a
+   replacement key reuses the same ID.
+6. The executor or root broker atomically consumes replay state while inserting
+   the durable work item. Raw capabilities and reusable credentials are never
+   persisted.
+
+Dormant `telereq1`, `teleattest1`, and `telecap2` fixture contracts plus the
+attester state machine make this three-key protocol testable. They are not
+imported by production, have no Asterisk adapter or service wiring, and do not
+close the PBX promotion blocker. See
+`docs/PBX-APPROVAL-ATTESTATION-CONTRACT.md`.
+
+Any future call-start integration must durably invalidate an old approval arm
+before it starts a new call, then replay the exact prompt before re-arming. The
+current dormant store does not implement controller-driven supersession, so
+this remains part of the PBX adapter promotion blocker. Early, clipped, cleared,
+backpressured, lost, mismatched, or timed-out audio never authorizes execution.
+
+Dial `9` is the independent emergency path. A STOPPED response is truthful only
+after every configured execution plane has durably accepted the panic and is
+quiesced. Partial failures stay locked and report PARTIAL. Unlock is refused
+while durable work remains active.
+
+## Durability and truthful outcomes
+
+SQLite databases use WAL and `synchronous=FULL` for durable controller state.
+Use compare-and-swap revisions and transactional outbox records for state
+changes with external effects.
+
+- Executor submission uses an exact idempotency key. Ambiguous POSTs are
+  recovered with GET; never resend a one-time capability.
+- Cancellation creates a durable reservation so a stale submit cannot start
+  after cancel.
+- Do not steal a live task lease during restart. Reconcile expired work with
+  revision fencing and verify process PID/start identity before adoption.
+- A crash or timeout after an external side effect may be `outcome_unknown`.
+  Never rewrite uncertainty as a safe failure or silently retry a possibly
+  executed mutation.
+- Voice terminal state, audit/event rows, provider-session binding, and callback
+  intent belong in one transaction. The callback drainer retries with a stable
+  idempotency key and ACKs only an explicit queued response.
+- Outbound dialing is restartable only before `dial_intent`. A crash after the
+  intent becomes `outbound_outcome_unknown` and must not auto-redial.
+- Shutdown first stops new accepts/claims, then boundedly drains tracked work,
+  then releases leases and closes SQLite.
+- Existing tmux delivery is completed only from exact provider-log evidence.
+  After delivery starts, ambiguous interruption is never represented as
+  "not delivered" and the message is never blindly resent.
+
+Exactly-once external SIP delivery or physical speech is not achievable across
+all crash points. Persist honest unknown states and require reconciliation.
+
+## Privileged actions
+
+Privileged plans use typed adapters (`systemctl`, `journalctl`, fixed SSH/Hera
+routing, and fixed kubectl routing) or a complete exact reviewed argv/cwd rule.
+There is no unlisted/spontaneous argv mode. Shells, interpreters, `env`, `sudo`
+as a user-supplied executable, and dispatchers such as `find`, `xargs`, and
+`systemd-run` are denied.
+
+The root broker never returns or persists stdout/stderr previews. It stores only
+bounded byte/line counts, truncation metadata, and a digest. Voice speaks the
+canonical expected-result description; detailed root output requires a local
+reviewed retrieval workflow.
+
+See [docs/PRIVILEGED-ACTIONS.md](docs/PRIVILEGED-ACTIONS.md).
+
+## Repository map
+
+- `voice-app/`: SIP/media runtime, Realtime conductor, approvals, durable voice
+  state, callback/outbound outbox, and scoped bridge clients.
+- `claude-api-server/`: private HTTP controller, durable executor, worker
+  launcher, operator/session proxy, approval verifier, and panic coordinator.
+- `privileged-action-broker/`: root-only exact-plan policy, verifier, durable
+  store, executor, and Unix-socket service.
+- `realtime-sip-gateway/`: isolated native OpenAI SIP canary and webhook state.
+- `lib/`: shared canonical plan, authorization, execution-environment, and
+  approval-capability modules.
+- `deploy/`: source-only policies and hardened service examples.
+- `cli/`: compatibility installer and `claude-phone` command.
+- `docs/OPENAI-REALTIME.md`: detailed conductor behavior and configuration.
+- `voice-app/DEPLOYMENT.md`: service deployment and credential guidance.
+
+The host systemd source lives in the sibling homelab repository. A release must
+deploy each service together with the shared `lib/` modules it imports; the
+individual npm package directories are not standalone source closures.
+
+## Development workflow
+
+Use Node 22.13+ for the aggregate repository validation. The API, privileged
+broker, and voice packages declare Node 20+; the native SIP package declares
+Node 22.13+.
 
 ```bash
-# One-line install
-curl -sSL https://raw.githubusercontent.com/javAlborz/teleagent/main/install.sh | bash
-
-# Setup and run
-claude-phone setup    # Interactive configuration
-claude-phone start    # Launch services
-claude-phone stop     # Stop services
-claude-phone status   # Check status
-claude-phone doctor   # Health checks
+npm test
+npm run lint
+git diff --check
 ```
 
-## Development
+The root test delegates to CLI, API server, voice app, privileged broker, and
+native SIP suites. Deployable services keep committed lockfiles and production
+installation uses `npm ci --omit=dev`. When changing a lock, also run a clean
+production install/native-module import and `npm audit` for that package.
 
-### Running Tests
+Useful focused commands:
 
 ```bash
-npm test              # All tests
-npm run test:cli      # CLI tests only
-npm run test:api-server # Agent bridge tests only
-npm run test:voice-app # Voice app tests only
+npm run test:cli
+npm run test:api-server
+npm run test:voice-app
+npm --prefix privileged-action-broker test
+npm --prefix realtime-sip-gateway run check
 ```
 
-### Linting
+Preserve unrelated dirty-worktree changes. Add crash-boundary, replay,
+cross-scope-auth, cancellation-race, and restart tests for changes to durable or
+privileged flows. Do not weaken a fail-closed activation gate merely to make a
+development environment report ready.
+
+## Configuration and operations
+
+`.env.example` documents variables; it intentionally contains nonfunctional
+placeholders. Secrets belong in ignored mode-`0600` files or systemd
+`LoadCredential`, never Git, command argv, logs, transcripts, or agent prompts.
+No approval private key belongs in voice. Production controller and root trust
+anchors for the retired phone signer must remain absent/revoked. A future
+private key belongs only inside the independently attested controller authority;
+executor/root verifiers receive only its public key.
+
+Useful local checks:
 
 ```bash
-npm run lint          # Check for issues
-npm run lint:fix      # Auto-fix issues
+curl -fsS http://127.0.0.1:3000/api/realtime-health
+curl -fsS http://127.0.0.1:3333/health
+npm run voice-history -- --limit 500
+npm run voice-control -- status
 ```
 
-### DevFlow Commands
-
-| Command | Purpose |
-|---------|---------|
-| `/feature spec [name]` | Create feature spec |
-| `/feature start [name]` | Build with TDD |
-| `/feature ship` | Review and merge |
-| `/test` | Run tests |
-| `/fix [N]` | Fix GitHub issue #N |
-| `/investigate [problem]` | Debug without changing code |
-
-## API Endpoints
-
-### Voice App (port 3000)
-
-| Method | Endpoint | Purpose |
-|--------|----------|---------|
-| POST | `/api/outbound-call` | Initiate outbound call |
-| GET | `/api/call/:callId` | Get call status |
-| GET | `/api/calls` | List active calls |
-| GET | `/api/devices` | List configured devices |
-| GET | `/api/device/:identifier` | Get one configured device |
-
-### Agent API Bridge (port 3333)
-
-| Method | Endpoint | Purpose |
-|--------|----------|---------|
-| POST | `/ask` | Send a prompt to the selected Claude/Codex profile |
-| POST | `/ask-structured` | Send prompt, return JSON |
-| POST | `/cancel-session` | Cancel active agent work for a call |
-| POST | `/voice-control/stop` | Lock and terminate all phone-originated work |
-| GET | `/voice-control/status` | Read the persistent phone execution lock |
-| POST | `/voice-control/unlock` | Authenticated operator unlock |
-| POST | `/end-session` | Clean up session |
-| GET | `/health` | Health check |
-
-## Key Design Decisions
-
-1. **CommonJS for voice-app** - Compatibility with drachtio ecosystem
-2. **ES Modules for CLI** - Modern Node.js tooling
-3. **Host networking mode** - Required for FreeSWITCH RTP
-4. **Separate claude-api-server** - Legacy service name; runs where the selected agent CLIs are installed and authenticated
-5. **Session-per-call** - Each call gets a provider-specific session for multi-turn context
-6. **RTP ports 30000-30100** - Avoids conflict with 3CX SBC (uses 20000-20099)
-7. **Config in ~/.claude-phone** - User config separate from codebase
-
-## Environment Variables
-
-See `.env.example` for all variables. Key ones:
-
-| Variable | Purpose |
-|----------|---------|
-| `EXTERNAL_IP` | Server LAN IP for RTP routing |
-| `CLAUDE_API_URL` | URL to claude-api-server |
-| `TTS_BASE_URL` / `TTS_API_KEY` | OpenAI-compatible TTS endpoint and credential |
-| `STT_BASE_URL` / `STT_API_KEY` | OpenAI-compatible STT endpoint and credential |
-| `CODEX_WORKING_DIR` | Codex CLI workspace for phone profiles |
-| `PHONE_CODEX_*` | Codex model, effort, and sandbox profile settings |
-| `SIP_DOMAIN` | 3CX server FQDN |
-| `SIP_REGISTRAR` | SIP registrar address |
+New host services are sentinel-gated and installed disabled. Source readiness
+does not authorize identity migration, provider login, port cutover, DNS,
+Cloudflare Tunnel, OpenAI webhook subscription, SIP routing, service start, or
+creation of an activation sentinel. Keep the native SIP/controller/root path
+dormant until every documented manual gate and real call-path canary passes.
 
 ## Documentation
 
-- [README.md](README.md) - User quickstart
-- [cli/README.md](cli/README.md) - CLI reference
-- [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) - Common issues
-- [voice-app/DEPLOYMENT.md](voice-app/DEPLOYMENT.md) - Production deployment
-- [voice-app/README-OUTBOUND.md](voice-app/README-OUTBOUND.md) - Outbound API
-- [CONSTITUTION.md](CONSTITUTION.md) - DevFlow principles
+- [README.md](README.md)
+- [docs/OPENAI-REALTIME.md](docs/OPENAI-REALTIME.md)
+- [docs/PRIVILEGED-ACTIONS.md](docs/PRIVILEGED-ACTIONS.md)
+- [voice-app/DEPLOYMENT.md](voice-app/DEPLOYMENT.md)
+- [voice-app/README-OUTBOUND.md](voice-app/README-OUTBOUND.md)
+- [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)
+- [CONSTITUTION.md](CONSTITUTION.md)

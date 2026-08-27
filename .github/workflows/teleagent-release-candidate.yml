@@ -1,0 +1,58 @@
+name: Teleagent non-promotable release evidence
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: teleagent-release-candidate
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build-release-evidence:
+    if: >-
+      github.repository == 'javAlborz/teleagent' &&
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/main'
+    runs-on:
+      - self-hosted
+      - Linux
+      - X64
+      - ci-build
+      - teleagent
+    timeout-minutes: 120
+    env:
+      CI: 'true'
+      TELEAGENT_CI_RELEASE_BUILD: '1'
+    steps:
+      - name: Check out the exact workflow commit
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          clean: true
+          persist-credentials: false
+
+      - name: Require the repo-scoped Hephaestus guest
+        shell: /usr/bin/bash --noprofile --norc -euo pipefail {0}
+        run: |
+          [[ "$RUNNER_NAME" == 'hephaestus-ci-build-vm01-teleagent' ]]
+          [[ "$RUNNER_OS" == 'Linux' ]]
+          [[ "$RUNNER_ARCH" == 'X64' ]]
+          ulimit -c 0
+
+      - name: Build, scan, and reproduce the v2 closure
+        shell: /usr/bin/bash --noprofile --norc -euo pipefail {0}
+        run: /usr/bin/bash scripts/release/build-ci-release.sh
+
+      - name: Upload release evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: teleagent-nonpromotable-release-evidence-${{ github.sha }}
+          path: ${{ runner.temp }}/teleagent-release-output/
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+          include-hidden-files: false

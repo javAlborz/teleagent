@@ -26,7 +26,6 @@ class OutboundSession extends EventEmitter {
     this.message = options.message;
     this.mode = options.mode || 'announce'; // 'announce' or 'conversation'
     this.callerId = options.callerId;
-    this.webhookUrl = options.webhookUrl;
 
     // State tracking
     this.state = 'QUEUED';
@@ -54,7 +53,7 @@ class OutboundSession extends EventEmitter {
   }
 
   /**
-   * Transition to new state with logging and webhook notification
+   * Transition to a new state.
    *
    * @param {string} newState - New state
    * @param {string} [reason] - Optional reason for transition
@@ -84,72 +83,16 @@ class OutboundSession extends EventEmitter {
       reason
     });
 
-    // Send webhook on key events
-    if (this.webhookUrl) {
-      this.sendWebhook(newState, reason).catch(err => {
-        logger.warn('Webhook delivery failed', {
-          callId: this.callId,
-          error: err.message
-        });
-      });
-    }
-
     // Cleanup on terminal states
-    if (newState === 'COMPLETED' || newState === 'FAILED') {
+    if (newState === 'COMPLETED' || newState === 'FAILED' || newState === 'CANCELED') {
       this.endedAt = Date.now();
 
       // Keep session for 1 minute for status queries, then remove
-      setTimeout(() => {
+      const cleanupTimer = setTimeout(() => {
         activeSessions.delete(this.callId);
         logger.info('Session cleaned up', { callId: this.callId });
       }, 60000);
-    }
-  }
-
-  /**
-   * Send webhook notification
-   *
-   * @param {string} event - Event type (state name)
-   * @param {string} [reason] - Optional reason
-   */
-  async sendWebhook(event, reason = '') {
-    if (!this.webhookUrl) {
-      return;
-    }
-
-    try {
-      const payload = {
-        callId: this.callId,
-        timestamp: new Date().toISOString(),
-        event: event.toLowerCase(),
-        to: this.to,
-        duration: this.getDuration(),
-        reason: reason || undefined
-      };
-
-      const response = await fetch(this.webhookUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-
-      if (!response.ok) {
-        logger.warn('Webhook returned non-200', {
-          callId: this.callId,
-          status: response.status
-        });
-      } else {
-        logger.info('Webhook delivered', {
-          callId: this.callId,
-          event
-        });
-      }
-
-    } catch (error) {
-      logger.error('Webhook send failed', {
-        callId: this.callId,
-        error: error.message
-      });
+      cleanupTimer.unref?.();
     }
   }
 
@@ -180,16 +123,6 @@ class OutboundSession extends EventEmitter {
     dialog.on('destroy', () => {
       logger.info('Remote hangup detected', { callId: this.callId });
       this.transition('COMPLETED', 'remote_hangup');
-
-      // Cleanup endpoint if still active
-      if (this.endpoint) {
-        this.endpoint.destroy().catch(err => {
-          logger.warn('Failed to destroy endpoint on remote hangup', {
-            callId: this.callId,
-            error: err.message
-          });
-        });
-      }
     });
   }
 

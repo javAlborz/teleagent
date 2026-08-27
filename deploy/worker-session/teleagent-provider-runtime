@@ -1,0 +1,333 @@
+#!/usr/local/libexec/teleagent-node
+'use strict';
+
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { spawn, spawnSync } = require('node:child_process');
+
+const WORKSPACE_ROOT = '/srv/teleagent-agent-workspaces';
+const EMPTY_SETTINGS = '/etc/teleagent/provider-runtime/empty-settings.json';
+const EMPTY_MCP = '/etc/teleagent/provider-runtime/empty-mcp.json';
+const PROVIDERS = Object.freeze({
+  claude: Object.freeze({
+    user: 'teleagent-claude-worker',
+    command: '/opt/teleagent/agent-tools/claude',
+    forbiddenAuth: Object.freeze(['.claude/.credentials.json', '.claude.json']),
+    baseUrl: 'http://127.0.0.1:18443',
+  }),
+  codex: Object.freeze({
+    user: 'teleagent-codex-worker',
+    command: '/opt/teleagent/agent-tools/codex',
+    forbiddenAuth: Object.freeze(['.codex/auth.json']),
+    baseUrl: 'http://127.0.0.1:18444/v1',
+  }),
+});
+const SAFE_TASK_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const LAUNCH_ID = /^launch_[a-f0-9]{32}$/;
+const LOCAL_PROVIDER_SENTINEL = 'teleagent-local-provider-key';
+const MODEL_APPARMOR_PROFILE = 'teleagent-provider-model';
+const CLAUDE_FIXED_FLAGS = Object.freeze([
+  '--bare',
+  '--safe-mode',
+  '--strict-mcp-config',
+  '--mcp-config', EMPTY_MCP,
+  '--settings', EMPTY_SETTINGS,
+]);
+
+function fail(message) {
+  process.stderr.write(`Provider runtime refused: ${message}\n`);
+  process.exit(77);
+}
+
+function take(options, name, required = true) {
+  const matches = options.flatMap((value, index) => value === name ? [index] : []);
+  if (matches.length === 0 && !required) return null;
+  if (matches.length !== 1 || matches[0] + 1 >= options.length) fail(`${name} is invalid`);
+  const index = matches[0];
+  const value = options[index + 1];
+  options.splice(index, 2);
+  return value;
+}
+
+const argv = process.argv.slice(2);
+const separator = argv.indexOf('--');
+const options = separator >= 0 ? argv.slice(0, separator) : [...argv];
+const args = separator >= 0 ? argv.slice(separator + 1) : [];
+const provider = take(options, '--provider');
+const launchId = take(options, '--launch-id');
+const mode = take(options, '--mode');
+const accessMode = take(options, '--access-mode');
+const workspaceInput = take(options, '--workspace');
+const taskId = take(options, '--task-id', false);
+const sessionId = take(options, '--session-id', false);
+if (options.length !== 0) fail('unknown control argument');
+const spec = PROVIDERS[provider];
+if (!spec || process.getuid() === 0 || os.userInfo().username !== spec.user) {
+  fail('runtime identity mismatch');
+}
+let apparmorProfile = '';
+try { apparmorProfile = fs.readFileSync('/proc/self/attr/current', 'utf8').trim(); }
+catch { fail('provider model AppArmor state is unavailable'); }
+if (apparmorProfile !== `${MODEL_APPARMOR_PROFILE} (enforce)`) {
+  fail('provider model AppArmor profile is not enforced');
+}
+
+// This check runs as the actual model/tool UID after setpriv. A successful
+// provider invocation therefore proves the child cannot regain privilege and
+// has no ambient, inheritable, permitted, effective, or bounding capability.
+const processStatus = fs.readFileSync('/proc/self/status', 'utf8');
+const statusField = (name) => processStatus.match(new RegExp(`^${name}:\\s+([^\\s]+)$`, 'm'))?.[1];
+if (statusField('NoNewPrivs') !== '1' ||
+    ['CapInh', 'CapPrm', 'CapEff', 'CapBnd', 'CapAmb'].some((name) => (
+      !/^0+$/.test(statusField(name) || '')
+    ))) {
+  fail('provider runtime privilege drop is incomplete');
+}
+
+// The model and every tool child receive only their launch-private loopback.
+// The matching shim shares this namespace and crosses one provider-specific
+// UDS; there is no host/private/public route available for exfiltration or SIP.
+let networkDevices;
+try { networkDevices = fs.readdirSync('/sys/class/net').sort(); }
+catch { fail('provider runtime network namespace cannot be inspected'); }
+if (networkDevices.length !== 1 || networkDevices[0] !== 'lo' ||
+    fs.readFileSync('/sys/class/net/lo/type', 'utf8').trim() !== '772') {
+  fail('provider runtime network namespace is not loopback-only');
+}
+const ipv4Routes = fs.readFileSync('/proc/net/route', 'utf8').trim().split('\n').slice(1);
+if (ipv4Routes.some((line) => {
+  const fields = line.trim().split(/\s+/);
+  return fields[1] === '00000000' && fields[0] !== 'lo';
+})) fail('provider runtime has an external IPv4 route');
+let ipv6Routes = '';
+try { ipv6Routes = fs.readFileSync('/proc/net/ipv6_route', 'utf8'); }
+catch { /* IPv6 may be disabled entirely */ }
+if (ipv6Routes.split('\n').some((line) => {
+  const fields = line.trim().split(/\s+/);
+  return fields.length >= 10 && /^0{32}$/.test(fields[0]) && fields[9] !== 'lo';
+})) fail('provider runtime has an external IPv6 route');
+for (const forbiddenHostRuntimePath of [
+  '/run/dbus/system_bus_socket',
+  '/run/systemd/resolve/io.systemd.Resolve',
+  '/run/snapd.socket',
+  '/run/systemd/journal/socket',
+  '/run/teleagent-provider-host-socket-probe.sock',
+]) {
+  if (fs.existsSync(forbiddenHostRuntimePath)) {
+    fail('provider runtime can see a forbidden host Unix socket');
+  }
+}
+if (!LAUNCH_ID.test(launchId || '') ||
+    mode !== 'managed' ||
+    !['read-only', 'mutating'].includes(accessMode) ||
+    (taskId && !SAFE_TASK_ID.test(taskId)) ||
+    args.length > 256 || args.some((arg) => arg.length > 8192 || /[\0\r\n]/.test(arg))) {
+  fail('runtime arguments exceed policy');
+}
+if (mode === 'interactive') fail('persistent interactive provider sessions are disabled');
+if (mode === 'managed' && sessionId) fail('managed work cannot select a session ID');
+if (process.env.TELEAGENT_PROVIDER_CAPABILITY ||
+    process.env.TELEAGENT_PROVIDER_SHIM_CAPABILITY) {
+  fail('provider launch capabilities must be absent from the model runtime');
+}
+
+let workspace;
+try { workspace = fs.realpathSync(workspaceInput); }
+catch { fail('workspace is unavailable'); }
+const relative = path.relative(WORKSPACE_ROOT, workspace);
+if (!relative || relative.startsWith('..') || path.isAbsolute(relative) ||
+    !/^[A-Za-z0-9_./-]+$/.test(workspace)) fail('workspace is outside the shared root');
+
+// The activation verifier projects this world-connectable host socket through
+// the selected workspace. Unlike the separate /run probe, mount namespacing
+// cannot hide it. A child inheriting the enforced model profile must receive
+// an LSM denial; otherwise pathname AF_UNIX access is not actually fenced.
+const visibleUnixSocketProbe = path.join(
+  workspace,
+  '.teleagent-visible-host-socket-probe.sock'
+);
+if (fs.existsSync(visibleUnixSocketProbe)) {
+  const metadata = fs.lstatSync(visibleUnixSocketProbe);
+  if (!metadata.isSocket() || metadata.isSymbolicLink() ||
+      (metadata.mode & 0o777) !== 0o777) {
+    fail('visible host Unix socket probe metadata is unsafe');
+  }
+  const probe = spawnSync(process.execPath, ['-e', `
+    const net = require('node:net');
+    const socket = net.createConnection({ path: process.argv[1] });
+    const timer = setTimeout(() => process.exit(44), 1500);
+    socket.once('connect', () => {
+      clearTimeout(timer);
+      socket.destroy();
+      process.exit(42);
+    });
+    socket.once('error', (error) => {
+      clearTimeout(timer);
+      if (!['EACCES', 'EPERM'].includes(error.code)) process.exit(43);
+      process.stdout.write('VISIBLE_UNIX_SOCKET_DENIED\\n');
+    });
+  `, visibleUnixSocketProbe], {
+    encoding: 'utf8',
+    timeout: 2000,
+    maxBuffer: 4096,
+    env: { PATH: '/usr/bin:/bin', LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8' },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  if (probe.status !== 0 || probe.stdout !== 'VISIBLE_UNIX_SOCKET_DENIED\n') {
+    fail('model profile does not deny a visible host Unix socket');
+  }
+}
+
+const launchHome = '/tmp/teleagent-provider-home';
+try { fs.mkdirSync(launchHome, { mode: 0o700 }); }
+catch (error) { if (error?.code !== 'EEXIST') fail('ephemeral provider home could not be created'); }
+const launchHomeMetadata = fs.lstatSync(launchHome);
+if (process.env.HOME !== launchHome || fs.realpathSync(launchHome) !== launchHome ||
+    !launchHomeMetadata.isDirectory() || launchHomeMetadata.isSymbolicLink() ||
+    launchHomeMetadata.uid !== process.getuid() || (launchHomeMetadata.mode & 0o077) !== 0) {
+  fail('ephemeral provider home is invalid');
+}
+for (const entry of spec.forbiddenAuth) {
+  if (fs.existsSync(path.join(launchHome, entry))) {
+    fail('provider runtime credentials must be absent; use the credential egress broker');
+  }
+}
+for (const filename of [process.argv[1], spec.command]) {
+  const metadata = fs.lstatSync(filename);
+  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.uid !== 0 ||
+      (metadata.mode & 0o022) !== 0 || (metadata.mode & 0o111) === 0 ||
+      fs.realpathSync(filename) !== filename) fail('provider executable trust path is unsafe');
+}
+
+function requireRootJson(filename, expected) {
+  const metadata = fs.lstatSync(filename);
+  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.uid !== 0 ||
+      (metadata.mode & 0o022) !== 0 || metadata.size > 4096 ||
+      fs.realpathSync(filename) !== filename) fail('provider runtime policy file is unsafe');
+  let value;
+  try { value = JSON.parse(fs.readFileSync(filename, 'utf8')); }
+  catch { fail('provider runtime policy file is invalid'); }
+  if (JSON.stringify(value) !== JSON.stringify(expected)) {
+    fail('provider runtime policy file is not the pinned empty policy');
+  }
+}
+
+function prepareLaunchConfig() {
+  const configRoot = path.join(launchHome, provider === 'claude' ? '.claude' : '.codex');
+  fs.mkdirSync(configRoot, { mode: 0o700 });
+  fs.chmodSync(configRoot, 0o700);
+  return configRoot;
+}
+
+function requireExactFlag(argsToCheck, flag, value = null) {
+  const indexes = argsToCheck.flatMap((entry, index) => entry === flag ? [index] : []);
+  if (indexes.length !== 1 || (value !== null && argsToCheck[indexes[0] + 1] !== value)) {
+    fail(`provider launch is missing pinned ${flag}`);
+  }
+}
+
+requireRootJson(EMPTY_SETTINGS, {});
+requireRootJson(EMPTY_MCP, { mcpServers: {} });
+const launchConfig = prepareLaunchConfig();
+
+let providerArgs = args;
+if (provider === 'claude' && mode === 'managed') {
+  for (const flag of ['--bare', '--safe-mode', '--strict-mcp-config']) {
+    requireExactFlag(providerArgs, flag);
+  }
+  requireExactFlag(providerArgs, '--mcp-config', EMPTY_MCP);
+  requireExactFlag(providerArgs, '--settings', EMPTY_SETTINGS);
+  if (providerArgs.includes('--resume') || providerArgs.includes('--session-id')) {
+    fail('persistent Claude provider sessions are disabled');
+  }
+} else if (provider === 'codex') {
+  if (mode === 'managed') {
+    for (const flag of ['--ignore-user-config', '--ignore-rules', '--strict-config']) {
+      requireExactFlag(providerArgs, flag);
+    }
+    if (providerArgs.includes('resume')) fail('persistent Codex provider sessions are disabled');
+  }
+  for (let index = 0; index < providerArgs.length; index += 1) {
+    if (!['-c', '--config'].includes(providerArgs[index])) continue;
+    const value = providerArgs[index + 1] || '';
+    if (!/^model_reasoning_effort="(?:none|low|medium|high|xhigh|max|ultra)"$/.test(value)) {
+      fail('Codex provider configuration cannot be overridden by a launch');
+    }
+    index += 1;
+  }
+  providerArgs = [
+    '-c', 'model_provider="teleagent-egress"',
+    '-c', 'model_providers.teleagent-egress.name="Teleagent bounded egress"',
+    '-c', `model_providers.teleagent-egress.base_url="${spec.baseUrl}"`,
+    '-c', 'model_providers.teleagent-egress.wire_api="responses"',
+    '-c', 'model_providers.teleagent-egress.env_key="TELEAGENT_LOCAL_PROVIDER_KEY"',
+    '-c', 'model_providers.teleagent-egress.requires_openai_auth=false',
+    '-c', 'model_providers.teleagent-egress.supports_websockets=false',
+    ...providerArgs,
+  ];
+}
+process.umask(0o027);
+const child = spawn(spec.command, providerArgs, {
+  cwd: workspace,
+  env: {
+    HOME: launchHome,
+    USER: spec.user,
+    LOGNAME: spec.user,
+    PATH: '/opt/teleagent/node/bin:/opt/teleagent/agent-tools:/usr/local/bin:/usr/bin:/bin',
+    LANG: 'C.UTF-8',
+    LC_ALL: 'C.UTF-8',
+    TELEAGENT_TASK_ID: taskId || '',
+    TELEAGENT_LAUNCH_ID: launchId,
+    TELEAGENT_LOCAL_PROVIDER_KEY: LOCAL_PROVIDER_SENTINEL,
+    ...(provider === 'claude' ? {
+      CLAUDE_CONFIG_DIR: launchConfig,
+      ANTHROPIC_BASE_URL: spec.baseUrl,
+      ANTHROPIC_API_KEY: LOCAL_PROVIDER_SENTINEL,
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+    } : {
+      CODEX_HOME: launchConfig,
+    }),
+  },
+  // fd 3 belongs only to this root-owned wrapper. The untrusted provider and
+  // its tools explicitly do not inherit it.
+  stdio: ['inherit', 'inherit', 'inherit', 'ignore'],
+  shell: false,
+});
+child.once('spawn', () => {
+  // The spawn event itself is the conservative execution boundary. Persist
+  // that fact even if an instant-exit executable disappears before /proc can
+  // supply a PID/starttime attestation. The latter can never be treated as a
+  // retry-safe pre-provider denial.
+  let starttime = null;
+  try {
+    const serialized = fs.readFileSync(`/proc/${child.pid}/stat`, 'utf8');
+    const close = serialized.lastIndexOf(')');
+    const fields = close >= 0 ? serialized.slice(close + 2).trim().split(/\s+/) : [];
+    if (/^[0-9]+$/.test(fields[19] || '')) starttime = fields[19];
+  } catch { /* spawned-ever remains authoritative even without live identity */ }
+  const marker = {
+    version: 1,
+    type: 'provider_spawned',
+    provider,
+    launchId,
+    ...(starttime ? { pid: child.pid, starttime } : { identityUnavailable: true }),
+  };
+  try {
+    fs.writeSync(3, `${JSON.stringify(marker)}\n`);
+    fs.closeSync(3);
+  } catch {
+    child.kill('SIGKILL');
+    fail('provider spawn readiness channel is unavailable');
+  }
+  if (!starttime) child.kill('SIGKILL');
+});
+for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
+  process.on(signal, () => child.kill(signal));
+}
+child.once('error', (error) => fail(error.message));
+child.once('exit', (code, signal) => {
+  if (signal) process.kill(process.pid, signal);
+  else process.exit(Number.isInteger(code) ? code : 1);
+});

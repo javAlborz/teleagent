@@ -1,5 +1,5 @@
 import chalk from 'chalk';
-import { loadConfig, configExists, getInstallationType } from '../config.js';
+import { loadConfigReadOnly, configExists, getInstallationType } from '../config.js';
 import { getContainerStatus } from '../docker.js';
 import { isServerRunning, getServerPid } from '../process-manager.js';
 import { checkClaudeApiServer } from '../network.js';
@@ -18,7 +18,7 @@ export async function statusCommand() {
     return;
   }
 
-  const config = await loadConfig();
+  const config = await loadConfigReadOnly();
   const installationType = getInstallationType(config);
   const isPiSplit = config.deployment && config.deployment.mode === 'pi-split';
 
@@ -132,8 +132,5 @@ async function showVoiceServerStatus(config, isPiSplit, installationType) {
     console.log(chalk.gray(`  External IP: ${config.server.externalIp}`));
   }
 
-  if (config.sip) {
-    console.log(chalk.gray(`  SIP Domain: ${config.sip.domain}`));
-    console.log(chalk.gray(`  SIP Registrar: ${config.sip.registrar}`));
-  }
+  console.log(chalk.gray('  SIP: fixed mutually authenticated local Asterisk trunk'));
 }

@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<configuration name="switch.conf" description="Teleagent bounded FreeSWITCH core">
+  <settings>
+    <param name="colorize-console" value="false"/>
+    <param name="dialplan-timestamps" value="false"/>
+    <param name="max-db-handles" value="20"/>
+    <param name="db-handle-timeout" value="10"/>
+    <param name="max-sessions" value="32"/>
+    <param name="sessions-per-second" value="8"/>
+    <param name="loglevel" value="notice"/>
+    <param name="dump-cores" value="no"/>
+    <param name="rtp-start-port" value="30000"/>
+    <param name="rtp-end-port" value="30100"/>
+    <param name="rtp-port-usage-robustness" value="true"/>
+    <param name="rtp-enable-zrtp" value="false"/>
+  </settings>
+</configuration>

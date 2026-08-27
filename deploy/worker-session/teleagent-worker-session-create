@@ -1,0 +1,51 @@
+#!/usr/local/libexec/teleagent-node
+'use strict';
+
+const crypto = require('node:crypto');
+const http = require('node:http');
+
+const socketPath = '/run/teleagent-worker-session/broker.sock';
+const [provider, workspace, providerSessionId] = process.argv.slice(2);
+if (!['claude', 'codex'].includes(provider) ||
+    !/^\/srv\/teleagent-agent-workspaces\/[A-Za-z0-9_./-]+$/.test(workspace || '') ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+      .test(providerSessionId || '')) {
+  process.stderr.write(
+    'usage: teleagent-worker-session-create <claude|codex> <workspace> <provider-session-uuid>\n'
+  );
+  process.exit(64);
+}
+const body = Buffer.from(JSON.stringify({
+  creationId: `session_${crypto.randomBytes(24).toString('hex')}`,
+  provider,
+  workspace,
+  providerSessionId,
+}));
+const request = http.request({
+  socketPath,
+  method: 'POST',
+  path: '/v1/session/create',
+  headers: {
+    'content-type': 'application/json',
+    'content-length': body.length,
+    connection: 'close',
+  },
+}, (response) => {
+  const chunks = [];
+  response.on('data', (chunk) => chunks.push(chunk));
+  response.on('end', () => {
+    const output = Buffer.concat(chunks);
+    if (response.statusCode !== 201) {
+      process.stderr.write('Attested session creation was refused.\n');
+      process.exitCode = 1;
+      return;
+    }
+    process.stdout.write(output);
+    process.stdout.write('\n');
+  });
+});
+request.once('error', () => {
+  process.stderr.write('Worker-session broker unavailable.\n');
+  process.exitCode = 1;
+});
+request.end(body);

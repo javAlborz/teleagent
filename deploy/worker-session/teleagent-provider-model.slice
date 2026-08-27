@@ -1,0 +1,19 @@
+[Unit]
+Description=Aggregate resource boundary for Teleagent provider model launches
+ConditionPathExists=/etc/teleagent/worker-session/ENABLE
+
+[Slice]
+CPUAccounting=yes
+CPUQuota=200%
+CPUWeight=25
+MemoryAccounting=yes
+MemoryHigh=3G
+MemoryMax=4G
+MemorySwapMax=0
+TasksAccounting=yes
+TasksMax=768
+IOAccounting=yes
+IOWeight=25
+
+# Deliberately dormant and non-enableable. Only transient model/tool cgroups
+# enter this child slice; supervisor and egress recovery retain parent headroom.
