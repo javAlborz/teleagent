@@ -118,7 +118,12 @@ test('operator wrapper fixes provenance, namespaces, cached refresh, and route c
   assert.match(wrapper, /evaluation-up/u);
   assert.match(wrapper, /evaluation-down-if/u);
   assert.doesNotMatch(wrapper, /\bup "\$https_port"|down-if "\$https_port"/u);
-  assert.match(wrapper, /RuntimeMaxSec=2h/u);
+  assert.match(wrapper, /readonly preview_lifetime='5h'/u);
+  assert.match(wrapper, /readonly watchdog_lifetime='5h10m'/u);
+  assert.match(
+    wrapper,
+    /--property="RuntimeMaxSec=\$preview_lifetime" --property=TimeoutStopSec=10s/u,
+  );
   assert.match(wrapper, /CPUQuota=100%/u);
   assert.match(wrapper, /MemoryMax=1536M/u);
   assert.match(wrapper, /MemorySwapMax=128M/u);
@@ -127,7 +132,15 @@ test('operator wrapper fixes provenance, namespaces, cached refresh, and route c
   assert.match(wrapper, /RestrictSUIDSGID=yes/u);
   assert.match(wrapper, /LockPersonality=yes/u);
   assert.match(wrapper, /RestrictAddressFamilies=AF_UNIX AF_INET AF_NETLINK/u);
-  assert.match(wrapper, /--on-active=2h/u);
+  assert.match(
+    wrapper,
+    /--property="RuntimeMaxSec=\$watchdog_lifetime" --property=TimeoutStopSec=5s/u,
+  );
+  assert.match(
+    wrapper,
+    /--unit="\$expiry_unit_base" --on-active="\$preview_lifetime" \\\n\s+--timer-property=AccuracySec=1s/u,
+  );
+  assert.doesNotMatch(wrapper, /RuntimeMaxSec=2h(?:10m)?|--on-active=2h/u);
   assert.match(wrapper, /RuntimeMaxSec=2m/u);
   assert.match(wrapper, /Restart=on-failure/u);
   assert.match(wrapper, /health_failures.*-ge 3/u);

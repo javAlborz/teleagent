@@ -12,6 +12,8 @@ readonly watchdog_unit='teleagent-hermes-evaluation-preview-watch.service'
 readonly expiry_unit_base='teleagent-hermes-evaluation-preview-expiry'
 readonly expiry_service="$expiry_unit_base.service"
 readonly expiry_timer="$expiry_unit_base.timer"
+readonly preview_lifetime='5h'
+readonly watchdog_lifetime='5h10m'
 readonly preview_helper='/usr/local/sbin/hermes-dev-preview'
 readonly node_bin='/home/alborz/.nvm/versions/node/v24.13.0/bin/node'
 readonly bwrap_bin='/usr/bin/bwrap'
@@ -502,7 +504,7 @@ start_preview() {
       --unit="$unit_name" --collect --service-type=exec \
       --description='Teleagent isolated read-only Hermes evaluation' \
       --working-directory="$evaluation_directory" \
-      --property=RuntimeMaxSec=2h --property=TimeoutStopSec=10s \
+      --property="RuntimeMaxSec=$preview_lifetime" --property=TimeoutStopSec=10s \
       --property=KillMode=control-group --property=Restart=no \
       --property=CPUAccounting=yes --property=CPUQuota=100% \
       --property=MemoryAccounting=yes --property=MemoryMax=1536M --property=MemorySwapMax=128M \
@@ -527,14 +529,15 @@ start_preview() {
   if ! "$systemd_run_bin" --user \
       --unit="${watchdog_unit%.service}" --collect --service-type=exec \
       --description='Remove Teleagent evaluation route when facade exits' \
-      --property=RuntimeMaxSec=2h10m --property=TimeoutStopSec=5s \
+      --property="RuntimeMaxSec=$watchdog_lifetime" --property=TimeoutStopSec=5s \
       --property=KillMode=control-group --property=Restart=on-failure --property=RestartSec=2s \
       -- "$script_path" _watch >/dev/null; then
     abort_unpublished_start 'evaluation route watchdog could not be started' 1
   fi
 
   if ! "$systemd_run_bin" --user \
-      --unit="$expiry_unit_base" --on-active=2h --timer-property=AccuracySec=1s --collect \
+      --unit="$expiry_unit_base" --on-active="$preview_lifetime" \
+      --timer-property=AccuracySec=1s --collect \
       --description='Expire Teleagent Hermes evaluation route' \
       --property=RuntimeMaxSec=2m --property=TimeoutStopSec=15s \
       --property=KillMode=control-group --property=Restart=no \
