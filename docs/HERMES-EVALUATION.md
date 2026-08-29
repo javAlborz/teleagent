@@ -128,7 +128,7 @@ scripts/hermes-evaluation-preview stop
 ```
 
 `start` collects the first snapshot and proves the Unix facade healthy before
-arming both the route watchdog and bounded two-hour expiry timer. It verifies
+arming both the route watchdog and bounded five-hour expiry timer. It verifies
 both guards active before invoking the helper's fixed `evaluation-up`. A failure
 before publication leaves no new route. After publication, every failure path
 first creates a private `cleanup-pending` marker and attempts the same verified
@@ -148,7 +148,7 @@ cannot return it to monitoring mode. Normal stop and expiry use the same state
 machine; cleanup guards are stopped only after teardown succeeds. The trial
 epoch persists.
 
-The outer transient service has a hard two-hour lifetime, one-CPU quota,
+The outer transient service has a hard five-hour lifetime, one-CPU quota,
 1536-MB memory limit, 128-MB swap limit, 192-task limit, and 256-file-descriptor
 limit. It is not network-facing. It serially launches the short-lived
 collectors and owns the network-isolated facade cgroup. Neither the facade nor a
