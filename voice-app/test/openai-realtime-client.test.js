@@ -54,6 +54,7 @@ async function createConnectedClient(overrides = {}) {
     apiKey: 'test-key',
     instructions: 'Be concise.',
     profiles: ['codex-terra'],
+    capabilities: require('./controller-capabilities-fixture').READY_CAPABILITIES,
     WebSocketImpl: FakeWebSocket,
     ...overrides,
   });
@@ -69,6 +70,29 @@ function spokenWords(count, { period = false } = {}) {
   const text = Array.from({ length: count }, (_, index) => `word${index + 1}`).join(' ');
   return period ? `${text}.` : text;
 }
+
+test('hidden and direct unclassified function calls cannot bypass capability filtering', async (t) => {
+  let invoked = 0;
+  const client = await createConnectedClient({
+    capabilities: undefined,
+    toolHandler: async () => { invoked += 1; return { success: true }; },
+  });
+  t.after(() => client.close());
+  const router = client.ws.sentEvents().find((event) => event.type === 'session.update').session.tools[0];
+  assert.ok(!router.parameters.properties.action.enum.includes('send_agent_message'));
+  for (const [index, name] of ['send_agent_message', 'start_privileged_action', 'arbitrary_shell'].entries()) {
+    const result = await client._handleToolCall({
+      call_id: `hidden-${index}`, name, arguments: JSON.stringify({ approved: true }),
+    });
+    assert.equal(result.output.success, false);
+  }
+  const routed = await client._handleToolCall({
+    call_id: 'hidden-route', name: 'route_turn',
+    arguments: JSON.stringify({ action: 'send_agent_message', arguments_json: '{}' }),
+  });
+  assert.equal(routed.output.code, 'INVALID_ROUTE_ACTION');
+  assert.equal(invoked, 0);
+});
 
 test('Realtime session uses 24 kHz PCM, manual semantic VAD, tuned transcription, and bounded tools', async (t) => {
   const client = await createConnectedClient();
@@ -393,7 +417,8 @@ test('tool schema exposes only the supplied profile enum', () => {
     tools.find((tool) => tool.name === 'remember_preference').parameters.properties.value,
     { type: 'string' }
   );
-  const router = buildRealtimeRouterTool(['claude-opus', 'codex-sol']);
+  const router = buildRealtimeRouterTool(['claude-opus', 'codex-sol'],
+    require('./controller-capabilities-fixture').READY_CAPABILITIES);
   assert.ok(router.parameters.properties.action.enum.includes('respond'));
   assert.ok(router.parameters.properties.action.enum.includes('codex-sol') === false);
   assert.ok(router.parameters.properties.action.enum.includes('send_agent_message'));

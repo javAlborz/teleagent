@@ -11,6 +11,7 @@ const {
   buildVoiceControlApiHeaders,
 } = require('./claude-api-config');
 const { looksLikePhoneDeployRequest } = require('../../lib/phone-deploy-intent');
+const { UNAVAILABLE, capabilitiesFromHealth } = require('./controller-capabilities');
 const {
   assertSensitiveAgentLoggingDisabled,
   summarizeSensitiveText,
@@ -834,6 +835,38 @@ async function isAvailable() {
   }
 }
 
+// Read-only, bounded scope proofs; never fall back to the general bearer,
+// follow a redirect, submit a job, or clear a panic to discover availability.
+async function getRuntimeCapabilities() {
+  const options = (headers) => ({
+    headers,
+    timeout: 1500,
+    signal: AbortSignal.timeout(1500),
+    maxRedirects: 0,
+    maxContentLength: 32768,
+    proxy: false,
+    validateStatus: (status) => status === 200 || status === 503,
+  });
+  try {
+    const operator = await axios.get(`${AGENT_API_URL}/operator/health`,
+      options(buildVoiceControlApiHeaders()));
+    const inspected = capabilitiesFromHealth(operator.data, null);
+    if (operator.status !== 200 && inspected.workerInspectionAvailable) return UNAVAILABLE;
+    if (!inspected.workerInspectionAvailable) return inspected;
+    try {
+      const executor = await axios.get(`${AGENT_API_URL}/executor/health`,
+        options(buildExecutorApiHeaders()));
+      return capabilitiesFromHealth(operator.data, executor.status === 200 ? executor.data : null);
+    } catch {
+      // A valid inspection scope never inherits executor authority, and an
+      // executor auth failure need not erase the valid read-only scope.
+      return inspected;
+    }
+  } catch {
+    return UNAVAILABLE;
+  }
+}
+
 module.exports = {
   query,
   queryDetailed,
@@ -853,5 +886,6 @@ module.exports = {
   prepareAgentSessionMessage,
   sendAgentSessionMessage,
   endSession,
+  getRuntimeCapabilities,
   isAvailable
 };

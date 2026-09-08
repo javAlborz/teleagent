@@ -424,7 +424,8 @@ class CiReleaseTests(unittest.TestCase):
             | sip_sources
         )
         self.assertEqual(BOUND_SOURCE_PATHS, tuple(sorted(expected)))
-        self.assertEqual(len(BOUND_SOURCE_PATHS), 131)
+        self.assertEqual(len(BOUND_SOURCE_PATHS), 132)
+        self.assertIn("lib/worker-inspection-contract.js", BOUND_SOURCE_PATHS)
         self.assertEqual(len(BOUND_SOURCE_PATHS), len(set(BOUND_SOURCE_PATHS)))
         package_scopes = {
             nearest_package_scope(relative)

@@ -151,6 +151,7 @@ BOUND_SOURCE_PATHS = (
     "lib/voice-authorization-plan.js",
     "lib/voice-execution-control.js",
     "lib/voice-operation-risk.js",
+    "lib/worker-inspection-contract.js",
     "package.json",
     "privileged-action-broker/broker.js",
     "privileged-action-broker/control.js",

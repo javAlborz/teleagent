@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const { VoiceStateStore } = require('../lib/voice-state-store');
 const { VoiceToolController, getWeather } = require('../lib/voice-tool-controller');
+const { READY_CAPABILITIES } = require('./controller-capabilities-fixture');
 
 function createController(t) {
   const stateStore = new VoiceStateStore({ dbPath: ':memory:' });
@@ -36,6 +37,7 @@ function createController(t) {
     handoffAgentTask: async () => ({ accepted: true }),
   };
   const agentBridge = {
+    getRuntimeCapabilities: async () => READY_CAPABILITIES,
     async inspectOperator(action, args) {
       inspections.push({ action, args });
       return { success: true, result: { action, path: args.path || null } };
@@ -52,18 +54,111 @@ function createController(t) {
   return { canceled, controller, inspections, realtime, stateStore, targeted, thread };
 }
 
-test('targeted session messages and ambiguous session listings use their dedicated control paths', async (t) => {
+test('the failed-call session request still returns local records without controller authentication', async (t) => {
+  const { controller, inspections } = createController(t);
+  delete controller.agentBridge.getRuntimeCapabilities;
+  controller.jobBroker.listAgentSessions = () => ({ sessions: [{ profile: 'codex-terra', status: 'saved' }] });
+  const runtime = await controller.handle('list_runtime_sessions', {});
+  assert.equal(runtime.success, true);
+  assert.equal(runtime.partial, true);
+  assert.deepEqual(runtime.unavailable_sections, ['tmux']);
+  assert.equal(runtime.managed.sessions.length, 1);
+  assert.equal(runtime.managed.execution_available, false);
+  assert.equal(runtime.tmux.available, false);
+  assert.equal(Object.hasOwn(runtime.tmux, 'sessions'), false, 'unavailable must not look like an empty live list');
+  assert.equal(runtime.tmux.scope, 'teleagent-worker');
+  assert.equal(inspections.length, 0);
+  const description = await controller.handle('describe_runtime', {});
+  assert.equal(description.success, true);
+  assert.equal(description.partial, true);
+  assert.equal(description.emergency_controls.pound, 'no production authority');
+});
+
+test('a post-probe inspection failure preserves the local answer and scrubs private errors', async (t) => {
+  const { controller } = createController(t);
+  controller.agentBridge.inspectOperator = async () => ({
+    success: false, code: 'VOICE_CONTROL_AUTH_NOT_CONFIGURED', error: 'private-controller-secret',
+  });
+  const result = await controller.handle('list_runtime_sessions', {});
+  assert.equal(result.success, true);
+  assert.equal(result.partial, true);
+  assert.ok(Array.isArray(result.managed.sessions));
+  assert.doesNotMatch(JSON.stringify(result), /private-controller-secret/);
+});
+
+test('remote work checks fresh readiness on every action; local tools do not depend on probes', async (t) => {
+  const { controller, inspections } = createController(t);
+  let probes = 0;
+  let accepted = 0;
+  controller.agentBridge.getRuntimeCapabilities = async () => {
+    probes += 1;
+    return probes === 1 ? READY_CAPABILITIES : {
+      controllerAvailable: true, workerInspectionAvailable: false, managedExecutionAvailable: false,
+      reasonCode: 'VOICE_EXECUTION_LOCKED',
+    };
+  };
+  controller.jobBroker.startAgentTask = async () => { accepted += 1; return { accepted: true }; };
+  const first = await controller.handle('send_agent_message', { request: 'Inspect the approved workspace.' });
+  assert.equal(first.accepted, true);
+  const second = await controller.handle('send_agent_message', { request: 'Inspect again.' });
+  assert.equal(second.code, 'VOICE_EXECUTION_LOCKED');
+  assert.equal(accepted, 1);
+  assert.equal(probes, 2);
+  const local = await controller.handle('list_agent_sessions', {});
+  assert.ok(Array.isArray(local.sessions));
+  assert.equal(probes, 2);
+  assert.equal(inspections.length, 0);
+});
+
+test('context adoption passes the real worker output and stable pane into a bounded managed request', async (t) => {
+  const { controller } = createController(t);
+  const requests = [];
+  controller.agentBridge.inspectOperator = async () => ({ success: true, result: {
+    stable_target: '%12', target: 'worker:1.0', output: 'The exact captured worker context.',
+  } });
+  controller.jobBroker.startAgentTask = async (request) => { requests.push(request); return { accepted: true }; };
+  const result = await controller.handle('adopt_tmux_context', {
+    target: 'worker:1.0', objective: 'Explain this output read-only.', profile: 'codex-terra',
+  }, { callId: 'adopt-context' });
+  assert.equal(result.accepted, true);
+  assert.equal(requests.length, 1);
+  assert.match(requests[0].request, /Tmux target: %12/);
+  assert.match(requests[0].request, /The exact captured worker context/);
+  assert.match(requests[0].request, /untrusted reference data/);
+  assert.doesNotMatch(requests[0].request, /undefined/);
+  assert.equal(requests[0].toolCallId, 'adopt-context');
+});
+
+test('context adoption cannot create a job from missing or legacy-shaped capture evidence', async (t) => {
+  const { controller } = createController(t);
+  controller.jobBroker.startAgentTask = async () => assert.fail('missing context must not launch a job');
+  for (const result of [{}, { content: 'legacy text', stable_target: '%12' }, { output: 'screen without stable identity' }]) {
+    controller.agentBridge.inspectOperator = async () => ({ success: true, result });
+    const response = await controller.handle('adopt_tmux_context', { target: 'worker:1.0', objective: 'Explain.' });
+    assert.equal(response.code, 'WORKER_CONTEXT_UNAVAILABLE');
+  }
+});
+
+test('unclassified and disabled actions cannot reach any broker even with forged tool arguments', async (t) => {
+  const { controller, targeted, inspections } = createController(t);
+  for (const name of ['start_privileged_action', 'send_agent_session_message', 'future_shell_tool', '__proto__']) {
+    const result = await controller.handle(name, { capabilities: READY_CAPABILITIES, approved: true });
+    assert.equal(result.code, 'PHONE_AUTHORITY_UNAVAILABLE');
+  }
+  assert.equal(targeted.length, 0);
+  assert.equal(inspections.length, 0);
+});
+
+test('targeted delivery stays disabled while ready worker and saved session listings are separated', async (t) => {
   const { controller, inspections, targeted } = createController(t);
   const sent = await controller.handle('send_agent_session_message', {
     target: 'main:phone',
     message: 'Continue with the agreed fixes.',
     notify_when_complete: 'callback',
   }, { callId: 'targeted-tool-call' });
-  assert.equal(sent.accepted, true);
-  assert.equal(sent.target, 'main:phone');
-  assert.equal(targeted.length, 1);
-  assert.equal(targeted[0].toolCallId, 'targeted-tool-call');
-  assert.equal(targeted[0].notificationMode, 'callback');
+  assert.equal(sent.success, false);
+  assert.equal(sent.code, 'PHONE_AUTHORITY_UNAVAILABLE');
+  assert.equal(targeted.length, 0);
 
   const runtime = await controller.handle('list_runtime_sessions', { session: 'main' }, { callId: 'runtime-list' });
   assert.equal(runtime.success, true);
@@ -93,7 +188,7 @@ test('current activity uses the dedicated provider-log inspector', async (t) => 
   });
 });
 
-test('tmux aliases are rebound to the stable pane identity for later reads and writes', async (t) => {
+test('tmux aliases are rebound for later reads but can never grant targeted delivery', async (t) => {
   const { controller, targeted } = createController(t);
   const calls = [];
   controller.agentBridge.inspectOperator = async (action, args) => {
@@ -131,18 +226,18 @@ test('tmux aliases are rebound to the stable pane identity for later reads and w
   };
 
   await controller.handle('list_runtime_sessions', { session: 'main' }, { callId: 'bind-target' });
-  await controller.handle('inspect_agent_session_history', {
-    target: 'main:5.1', limit: 1,
+  await controller.handle('inspect_tmux_pane', {
+    target: 'main:5.1', lines: 10,
   }, { callId: 'read-stable' });
   await controller.handle('send_agent_session_message', {
     target: 'main:phone.1', message: 'Continue with the exact fix.',
   }, { callId: 'write-stable' });
 
   assert.equal(calls.at(-1).args.target, '%12');
-  assert.equal(targeted[0].target, '%12');
+  assert.equal(targeted.length, 0);
 });
 
-test('latest-message role follows caller ownership language instead of model defaults', async (t) => {
+test('legacy role parsing preserves ownership language without exposing provider history', async (t) => {
   const { controller, stateStore, thread } = createController(t);
   const calls = [];
   controller.agentBridge.inspectOperator = async (action, args) => {
@@ -163,10 +258,11 @@ test('latest-message role follows caller ownership language instead of model def
     content: 'What was the last message I sent to Codex?',
   });
 
-  await controller.handle('get_latest_agent_session_message', {
+  const refused = await controller.handle('get_latest_agent_session_message', {
     target: 'main:phone', role: 'assistant',
   }, { callId: 'latest-user-message' });
-  assert.equal(calls.at(-1).args.role, 'user');
+  assert.equal(refused.code, 'WORKER_INSPECTION_UNSUPPORTED');
+  assert.equal(controller._latestMessageRole('assistant'), 'user');
 
   stateStore.appendEvent({
     voiceThreadId: thread.id,
@@ -177,7 +273,8 @@ test('latest-message role follows caller ownership language instead of model def
   await controller.handle('get_latest_agent_session_message', {
     target: 'main:phone', role: 'user',
   }, { callId: 'latest-assistant-message' });
-  assert.equal(calls.at(-1).args.role, 'assistant');
+  assert.equal(controller._latestMessageRole('user'), 'assistant');
+  assert.equal(calls.length, 0);
 });
 
 test('voice cancellation is fail-closed and directs the caller to DTMF star', async (t) => {
@@ -248,7 +345,7 @@ test('history reads exact caller events and inspection actions stay bounded by t
   assert.match(usage.budget_note, /dashboard/i);
 });
 
-test('provider history uses an app-owned continuation cursor without repeating chunks', async (t) => {
+test('legacy history continuation remains bounded but cannot bypass the worker inspection contract', async (t) => {
   const { controller } = createController(t);
   const calls = [];
   controller.agentBridge.inspectOperator = async (action, args) => {
@@ -275,18 +372,22 @@ test('provider history uses an app-owned continuation cursor without repeating c
     };
   };
 
-  const first = await controller.handle('inspect_agent_session_history', {
-    target: 'main:phone', limit: 1,
-  }, { callId: 'provider-history-1' });
-  assert.equal(first.messages[0].number, 289);
-  const second = await controller.handle('continue_agent_session_history', {}, { callId: 'provider-history-2' });
-  assert.equal(second.messages[0].number, 288);
+  const first = await controller.agentBridge.inspectOperator('inspect_agent_session_history', {
+    target: 'main:phone', limit: 1, cursor: 0, position: 'latest',
+  });
+  controller._rememberHistoryContinuation(first.result, 'main:phone', 1);
+  assert.equal(first.result.messages[0].number, 289);
+  const second = await controller.agentBridge.inspectOperator('inspect_agent_session_history',
+    controller.agentHistoryContinuation);
+  controller._rememberHistoryContinuation(second.result, 'main:phone', 1);
+  assert.equal(second.result.messages[0].number, 288);
   assert.deepEqual(calls.map((call) => call.args.cursor), [0, 289]);
   assert.deepEqual(calls.map((call) => call.args.position), ['latest', 'before']);
 
   const exhausted = await controller.handle('continue_agent_session_history', {}, { callId: 'provider-history-3' });
   assert.equal(exhausted.success, false);
-  assert.equal(exhausted.code, 'NO_HISTORY_CONTINUATION');
+  assert.equal(exhausted.code, 'WORKER_INSPECTION_UNSUPPORTED');
+  assert.equal(calls.length, 2, 'the production handler did not invoke the fixture inspector');
 });
 
 test('weather uses geocoding plus current conditions and end_call requests one farewell', async () => {

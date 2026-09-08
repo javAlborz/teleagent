@@ -4,6 +4,7 @@ const { EventEmitter } = require('node:events');
 const { URL } = require('node:url');
 const WebSocket = require('ws');
 const { getRuntimeSecret } = require('./runtime-secrets');
+const { UNAVAILABLE, isToolAvailable, unavailableResult } = require('./controller-capabilities');
 
 const DEFAULT_BASE_URL = 'wss://api.openai.com/v1/realtime';
 const DEFAULT_MODEL = 'gpt-realtime-2.1-mini';
@@ -180,7 +181,7 @@ function buildRealtimeTools(profiles) {
     {
       type: 'function',
       name: 'list_runtime_sessions',
-      description: 'List both namespaces together: Teleagent-managed profile sessions and live tmux-attached Codex/Claude processes. Use this whenever the caller says sessions without clearly naming one namespace.',
+      description: 'Return saved Teleagent profile-session records and, when available, dedicated phone-worker tmux processes. Never claim this covers owner Hermes sessions. Preserve partial/unavailable sections. Use this for ambiguous session requests.',
       parameters: {
         type: 'object',
         properties: {
@@ -252,7 +253,7 @@ function buildRealtimeTools(profiles) {
     {
       type: 'function',
       name: 'list_directory',
-      description: 'List a directory through the bounded read-only Hermes inspector. Protected credential paths are denied.',
+      description: 'List a directory inside the approved phone-worker workspace. Owner home directories and protected credential paths are outside this read-only scope.',
       parameters: {
         type: 'object',
         properties: { path: { type: 'string' }, limit: { type: 'integer', minimum: 1, maximum: 200 } },
@@ -263,7 +264,7 @@ function buildRealtimeTools(profiles) {
     {
       type: 'function',
       name: 'read_text_file',
-      description: 'Read a small text file through the bounded read-only Hermes inspector. Secrets, credentials, binary files, and oversized output are denied or clipped.',
+      description: 'Read a small text file inside the approved phone-worker workspace. Secrets, credentials, binary files, and oversized output are denied or clipped.',
       parameters: {
         type: 'object',
         properties: { path: { type: 'string' }, max_bytes: { type: 'integer', minimum: 256, maximum: 12000 } },
@@ -274,7 +275,7 @@ function buildRealtimeTools(profiles) {
     {
       type: 'function',
       name: 'find_files',
-      description: 'Find filenames below an approved Hermes root without launching an agent.',
+      description: 'Find filenames below an approved phone-worker workspace root without launching an agent.',
       parameters: {
         type: 'object',
         properties: {
@@ -289,7 +290,7 @@ function buildRealtimeTools(profiles) {
     {
       type: 'function',
       name: 'git_status',
-      description: 'Read Git branch and working-tree status for a repository below an approved Hermes root.',
+      description: 'Read Git branch and working-tree status for a repository inside the approved phone-worker workspace.',
       parameters: {
         type: 'object', properties: { path: { type: 'string' } }, required: ['path'], additionalProperties: false,
       },
@@ -297,7 +298,7 @@ function buildRealtimeTools(profiles) {
     {
       type: 'function',
       name: 'list_tmux_sessions',
-      description: 'Quickly list a compact hierarchy: tmux sessions contain windows, and windows contain panes. Claude/Codex descendants are mapped to the owning pane, but current provider activity is intentionally omitted. Optionally restrict to one exact session.',
+      description: 'List dedicated phone-worker tmux sessions, windows, and panes, not owner Hermes sessions. Claude/Codex descendants map to an owning pane; current provider activity is omitted. Optionally restrict to one exact session.',
       parameters: {
         type: 'object',
         properties: { session: { type: 'string', description: 'Optional exact tmux session name, such as main.' } },
@@ -307,7 +308,7 @@ function buildRealtimeTools(profiles) {
     {
       type: 'function',
       name: 'inspect_tmux_pane',
-      description: 'Read a bounded, redacted tail of one tmux pane. This is visibility only and is not provider-native continuation.',
+      description: 'Read a bounded, redacted tail of one dedicated phone-worker tmux pane. Owner panes are outside this scope; this is visibility only, not provider-native continuation.',
       parameters: {
         type: 'object',
         properties: { target: { type: 'string' }, lines: { type: 'integer', minimum: 10, maximum: 120 } },
@@ -410,8 +411,9 @@ function buildRealtimeTools(profiles) {
   ];
 }
 
-function buildRealtimeRouterTool(profiles) {
-  const actions = ['respond', ...buildRealtimeTools(profiles).map((tool) => tool.name)];
+function buildRealtimeRouterTool(profiles, capabilities = UNAVAILABLE) {
+  const tools = buildRealtimeTools(profiles).filter((tool) => isToolAvailable(tool.name, capabilities));
+  const actions = ['respond', ...tools.map((tool) => tool.name)];
   return {
     type: 'function',
     name: 'route_turn',
@@ -419,9 +421,10 @@ function buildRealtimeRouterTool(profiles) {
       'Silently classify exactly one caller turn before any speech.',
       'Use respond for an ordinary conversational answer.',
       'Otherwise select exactly one bounded application action by name and put its JSON arguments in arguments_json.',
-      'Inspection actions read authoritative state; send_agent_message starts read-only managed Claude/Codex work; end_call ends the phone call.',
+      'Use only the available action contracts below. The JSON argument object must match the selected action schema.',
       'Never narrate, approve, cancel, or claim an action inside this routing response.',
-    ].join(' '),
+      ...tools.map(({ name, description, parameters }) => JSON.stringify({ action: name, description, parameters })),
+    ].join('\n'),
     parameters: {
       type: 'object',
       properties: {
@@ -484,6 +487,7 @@ class OpenAIRealtimeClient extends EventEmitter {
     noiseReductionType = 'near_field',
     instructions,
     profiles = [],
+    capabilities = UNAVAILABLE,
     safetyIdentifier = null,
     organization = null,
     project = null,
@@ -521,6 +525,7 @@ class OpenAIRealtimeClient extends EventEmitter {
       : null;
     this.instructions = instructions;
     this.profiles = profiles;
+    this.capabilities = Object.freeze({ ...capabilities });
     this.safetyIdentifier = safetyIdentifier;
     this.organization = organization;
     this.project = project;
@@ -804,7 +809,7 @@ class OpenAIRealtimeClient extends EventEmitter {
         // first classified silently, and any spoken response is then created
         // with tool selection disabled. This prevents tool preambles from
         // reaching the phone and keeps application state authoritative.
-        tools: [buildRealtimeRouterTool(this.profiles)],
+        tools: [buildRealtimeRouterTool(this.profiles, this.capabilities)],
         tool_choice: 'none',
       },
     });
@@ -852,7 +857,7 @@ class OpenAIRealtimeClient extends EventEmitter {
       conversation: 'none',
       metadata: { teleagent_stage: 'route_turn' },
       output_modalities: ['text'],
-      tools: [buildRealtimeRouterTool(this.profiles)],
+      tools: [buildRealtimeRouterTool(this.profiles, this.capabilities)],
       tool_choice: { type: 'function', name: 'route_turn' },
       instructions: [
         'Route the latest completed caller turn now.',
@@ -1229,7 +1234,8 @@ class OpenAIRealtimeClient extends EventEmitter {
     let output;
     if (toolName === 'route_turn' && !args._parse_error) {
       routed = true;
-      const allowedActions = new Set(['respond', ...buildRealtimeTools(this.profiles).map((tool) => tool.name)]);
+      const allowedActions = new Set(buildRealtimeRouterTool(this.profiles, this.capabilities)
+        .parameters.properties.action.enum);
       const action = String(args.action || '').trim();
       if (!allowedActions.has(action)) {
         output = {
@@ -1258,6 +1264,10 @@ class OpenAIRealtimeClient extends EventEmitter {
         code: 'INVALID_TOOL_ARGUMENTS',
         message: `The tool arguments were not valid JSON: ${args._parse_error}`,
       };
+    } else if (!isToolAvailable(toolName, this.capabilities)) {
+      // Defense in depth for direct calls to hidden/unknown functions, not
+      // just route_turn's enum. The application rechecks live readiness too.
+      output = unavailableResult(toolName, this.capabilities);
     } else if (typeof this.toolHandler !== 'function') {
       output = { success: false, code: 'TOOLS_UNAVAILABLE', message: 'Agent tools are unavailable.' };
     } else {
