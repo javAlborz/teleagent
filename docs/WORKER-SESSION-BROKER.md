@@ -126,6 +126,57 @@ admission reserve so existing cancellation and crash truth is not rewritten;
 the mount is the containment boundary, and no audit/panic truth is pruned
 automatically.
 
+## Global launch admission and uncertain cleanup
+
+The root-only `.global-provider-launch.lock` in
+`/run/teleagent-provider-capabilities` serializes both providers. It is a
+crash-atomically published **same-boot admission fence**, not a PID-lifetime
+mutex or proof of reboot recovery. A wrapper exit, dead PID, capability expiry,
+or empty unit enumeration cannot by itself authorize the next launch.
+
+The launcher marks capability uncertainty before the registration RPC and model
+uncertainty before submitting `systemd-run`. It releases admission only after a
+successful helper completion, explicit cgroup quiescence, durable/quiescent
+egress revocation, and successful credential-file cleanup. Nonzero or abnormal
+helper exits are conservatively treated as ambiguous submission, even if a
+later snapshot says the unit is absent. This can require global recovery after
+a genuinely failed task; it never silently assumes that task is still running
+or successfully stopped. Missing, malformed, duplicate, or unreadable
+`cgroup.events` population evidence is not proof of an empty cgroup. The kernel
+defines `populated 0` as no live process in the group or its descendants.
+[Kernel cgroup v2 documentation](https://docs.kernel.org/admin-guide/cgroup-v2.html#un-populated-notification).
+
+An interrupted registration still requires revocation: the egress broker writes
+a durable cancellation tombstone even for an unknown launch ID, so a late
+registration cannot reactivate it. Recovery retains the global panic, stops and
+masks both supervisors, and cancels the retained exact launch identity for both
+provider names before enumerating visible units. The version-1 lock deliberately
+does not name the provider. Termination always requires a successful exact-unit
+`stop --job-mode=replace` as well as empty cgroup and quiescent egress evidence;
+an inactive unit can still have a queued start job. Missing or failed stop proof
+keeps admission and readiness evidence fenced. Both exact cancellation masks
+remain for the boot;
+the global fence is removed only after both model/egress planes are quiescent,
+the recorded wrapper generation is dead, and the captured lock record is still
+identical. Single-provider recovery does not clear this global fence.
+
+Global panic alone may clean an exact absent readiness record after all three
+stop/cgroup/egress proofs succeed. This handles the other provider's never-owned
+record and repeated cleanup of already-removed records. The result marks history
+unavailable; it does not claim the provider never ran. Ordinary status and
+per-launch termination still reject missing history, and unsafe or malformed
+existing records are never treated as absent. The allowance has no CLI or
+environment switch.
+
+The delayed-submission protection uses the existing systemd cancellation-mask
+primitive. In upstream systemd v255, `StartTransientUnit` loads the named unit
+and requires it to be pristine; a masked unit is excluded by that check.
+[Transient creation](https://github.com/systemd/systemd/blob/v255/src/core/dbus-manager.c#L987),
+[pristine-unit check](https://github.com/systemd/systemd/blob/v255/src/core/unit.c#L5153).
+Hermetic tests exercise real temporary lock/mask files and the actual launch and
+recovery functions with mocked systemd/provider operations. This is not a live
+systemd cancellation canary or a Hermes activation approval.
+
 ## Session parity and deliberate limits
 
 Only sessions created on the broker-owned tmux socket are visible. Historical

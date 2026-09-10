@@ -1068,6 +1068,7 @@ function clearQuiescentGlobalLaunchTemps({
 
 function clearStaleGlobalLaunchLockAfterQuiescence({
   quiesced,
+  expectedRecord,
   directory = CAPABILITY_DIRECTORY,
   uid = 0,
   gid = 0,
@@ -1080,6 +1081,9 @@ function clearStaleGlobalLaunchLockAfterQuiescence({
   try { inspected = inspectGlobalLaunchLockState(filename, { directory, uid, gid }); }
   catch (error) {
     if (error?.code === 'ENOENT') {
+      if (expectedRecord !== undefined && expectedRecord !== null) {
+        fail('the global provider launch lock disappeared during recovery');
+      }
       const orphanCount = clearQuiescentGlobalLaunchTemps({ directory, uid, gid });
       if (orphanCount > 0) fsyncDirectory(directory);
       return { proved: true, removed: false, orphanCount };
@@ -1087,6 +1091,10 @@ function clearStaleGlobalLaunchLockAfterQuiescence({
     throw error;
   }
   const { record, companion } = inspected;
+  if (expectedRecord !== undefined &&
+      JSON.stringify(record) !== JSON.stringify(expectedRecord)) {
+    fail('the global provider launch lock changed during recovery');
+  }
   if (readStartTime(record.pid) === record.startTime) {
     fail('global provider launch lock owner remains live after quiescence');
   }
@@ -1220,7 +1228,13 @@ function inspectProviderReadiness(provider, launchId, unitStatus, {
   let metadata;
   try { metadata = fs.lstatSync(filename); }
   catch (error) {
-    if (error?.code === 'ENOENT') fail('provider readiness evidence is missing');
+    if (error?.code === 'ENOENT') {
+      // Distinguish one absent record from a missing/unsafe parent boundary.
+      secureRootDirectory(directory, 0o022, uid);
+      throw Object.assign(new Error('provider readiness evidence is missing'), {
+        code: 'PROVIDER_READINESS_MISSING', exitCode: 77,
+      });
+    }
     throw error;
   }
   if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.uid !== uid ||
@@ -1503,7 +1517,25 @@ function systemctl(args, { allowFailure = false } = {}) {
   return result;
 }
 
-function inspectUnit(unit, { runSystemctl = systemctl } = {}) {
+function parseCgroupPopulated(events) {
+  if (typeof events !== 'string' || Buffer.byteLength(events) > 4096 ||
+      !events.endsWith('\n')) fail('provider cgroup events are invalid');
+  const fields = new Map();
+  for (const line of events.slice(0, -1).split('\n')) {
+    const match = line.match(/^([a-z][a-z0-9_]*) ([0-9]+)$/u);
+    if (!match || fields.has(match[1])) fail('provider cgroup events are invalid');
+    fields.set(match[1], match[2]);
+  }
+  if (!['0', '1'].includes(fields.get('populated'))) {
+    fail('provider cgroup population is unavailable');
+  }
+  return fields.get('populated') === '1';
+}
+
+function inspectUnit(unit, {
+  runSystemctl = systemctl,
+  readCgroupEvents = (filename) => fs.readFileSync(filename, 'utf8'),
+} = {}) {
   const result = runSystemctl([
     'show', unit, '--no-pager',
     '--property=LoadState', '--property=ActiveState', '--property=SubState', '--property=ControlGroup',
@@ -1539,8 +1571,8 @@ function inspectUnit(unit, { runSystemctl = systemctl } = {}) {
   let populated = null;
   if (fields.ControlGroup) {
     try {
-      const events = fs.readFileSync(path.join('/sys/fs/cgroup', fields.ControlGroup, 'cgroup.events'), 'utf8');
-      populated = /^populated\s+1$/m.test(events);
+      const events = readCgroupEvents(path.join('/sys/fs/cgroup', fields.ControlGroup, 'cgroup.events'));
+      populated = parseCgroupPopulated(events);
     } catch { populated = true; }
   }
   const inactive = ['inactive', 'failed'].includes(fields.ActiveState);
@@ -1558,7 +1590,7 @@ async function waitQuiesced(unit, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const status = inspectUnit(unit);
-    if (status.quiesced) return status;
+    if (status.quiesced === true) return status;
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   return inspectUnit(unit);
@@ -1566,32 +1598,53 @@ async function waitQuiesced(unit, timeoutMs) {
 
 async function terminateUnit(provider, launchId, {
   control = providerControl,
+  allowMissingReadinessForGlobalRecovery = false,
+  persistTombstone = persistCancellationTombstone,
+  runSystemctl = systemctl,
+  awaitQuiescence = waitQuiesced,
+  inspectReadiness = inspectProviderReadiness,
+  removeReadiness = removeReadinessFile,
 } = {}) {
   const unit = unitName(provider, launchId);
   // The root-owned symlink is a boot-lifetime cancellation tombstone. Unlike
   // a best-effort `systemctl mask`, creation and fsync are checked before the
   // boundary reports acceptance, closing launch-before-unit-creation races.
-  persistCancellationTombstone(unit);
+  if (persistTombstone(unit) !== true) fail('provider cancellation tombstone was not persisted');
   let capabilityRevoked = false;
   try {
     const revoked = await control({ provider, action: 'revoke', launchId, reason: 'canceled' });
     capabilityRevoked = revoked?.persisted === true && revoked?.quiesced === true;
   } catch { capabilityRevoked = false; }
-  systemctl(['kill', '--kill-whom=all', '--signal=SIGTERM', unit], { allowFailure: true });
-  let status = await waitQuiesced(unit, 2000);
-  if (!status.quiesced) {
-    systemctl(['kill', '--kill-whom=all', '--signal=SIGKILL', unit], { allowFailure: true });
-    systemctl(['stop', unit], { allowFailure: true });
-    status = await waitQuiesced(unit, 5000);
+  runSystemctl(['kill', '--kill-whom=all', '--signal=SIGTERM', unit], { allowFailure: true });
+  // An inactive/empty unit can still have a queued start job. The mask fences
+  // future creation; a replacing, completed StopUnit also cancels existing
+  // jobs. Never infer that cancellation solely from an empty cgroup snapshot.
+  let stopped = runSystemctl(['stop', '--job-mode=replace', unit], { allowFailure: true });
+  let status = await awaitQuiescence(unit, 2000);
+  if (status?.quiesced !== true) {
+    runSystemctl(['kill', '--kill-whom=all', '--signal=SIGKILL', unit], { allowFailure: true });
+    stopped = runSystemctl(['stop', '--job-mode=replace', unit], { allowFailure: true });
+    status = await awaitQuiescence(unit, 5000);
   }
-  const readiness = inspectProviderReadiness(provider, launchId, status);
-  if (status.quiesced && capabilityRevoked) {
-    removeReadinessFile(readinessFilePath(provider, launchId));
+  const stopConfirmed = stopped?.status === 0 && !stopped.error && !stopped.signal;
+  const quiesced = stopConfirmed && status?.quiesced === true && capabilityRevoked;
+  let readiness;
+  try { readiness = inspectReadiness(provider, launchId, status); }
+  catch (error) {
+    if (allowMissingReadinessForGlobalRecovery !== true || !quiesced ||
+        error?.code !== 'PROVIDER_READINESS_MISSING') throw error;
+    // Only global panic uses this cleanup-only mode. Ordinary status/terminate
+    // must not turn missing history into PROVIDER_NOT_STARTED/retrySafe=true
+    // in the supervisor. This result makes no assertion about prior execution.
+    readiness = { providerHistoryUnavailable: true };
+  }
+  if (quiesced) {
+    removeReadiness(readinessFilePath(provider, launchId));
   }
   return {
     accepted: true,
     persisted: capabilityRevoked,
-    quiesced: status.quiesced && capabilityRevoked,
+    quiesced,
     status,
     ...readiness,
   };
@@ -1683,16 +1736,27 @@ function isLockedSupervisorHealth(provider, payload) {
     payload?.boundaryRecovered === true && payload?.active === 0;
 }
 
-async function panicAllProviderPlanes({ control = providerControl } = {}) {
-  const lock = persistGlobalProviderPanic();
+async function panicAllProviderPlanes({
+  control = providerControl,
+  persistPanic = persistGlobalProviderPanic,
+  runSystemctl = systemctl,
+  stopUnit = forceStopSystemdUnit,
+  enumerateUnits = listProviderUnits,
+  terminate = terminateUnit,
+  recoverEgress = recoverProviderEgress,
+  inspectLaunchLock = () => inspectGlobalLaunchLock(globalLaunchLockPath()),
+  clearLaunchLock = clearStaleGlobalLaunchLockAfterQuiescence,
+} = {}) {
+  const lock = persistPanic();
+  if (lock?.persisted !== true) fail('global provider panic was not persisted');
   for (const provider of Object.keys(PROVIDERS)) {
-    systemctl(['stop', `teleagent-provider-supervisor@${provider}.socket`], {
+    runSystemctl(['stop', `teleagent-provider-supervisor@${provider}.socket`], {
       allowFailure: true,
     });
   }
   const supervisorResults = {};
   for (const provider of Object.keys(PROVIDERS)) {
-    supervisorResults[provider] = await forceStopSystemdUnit(
+    supervisorResults[provider] = await stopUnit(
       `teleagent-provider-supervisor@${provider}.service`
     );
   }
@@ -1700,29 +1764,50 @@ async function panicAllProviderPlanes({ control = providerControl } = {}) {
     `teleagent-provider-supervisor@${provider}.socket`,
     `teleagent-provider-supervisor@${provider}.service`,
   ]);
-  const masked = systemctl(['mask', '--runtime', ...supervisorUnits], { allowFailure: true });
+  const masked = runSystemctl(['mask', '--runtime', ...supervisorUnits], { allowFailure: true });
   const launchResults = [];
+  const retainedLaunchResults = [];
+  let retainedLaunch = null;
+  try { retainedLaunch = inspectLaunchLock(); }
+  catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+  }
+  // A failed systemd-run submission may still be in flight when enumeration
+  // returns no units. Fence and quiesce the retained exact identity first.
+  // Version 1 locks omit the provider, so both exact unit names are canceled.
+  // terminateUnit persists the mask before inspecting cgroup/egress state.
+  if (retainedLaunch !== null) {
+    for (const provider of Object.keys(PROVIDERS)) {
+      retainedLaunchResults.push(await terminate(provider, retainedLaunch.launchId, {
+        control, allowMissingReadinessForGlobalRecovery: true,
+      }));
+    }
+  }
   for (const provider of Object.keys(PROVIDERS)) {
-    for (const unit of listProviderUnits(provider)) {
+    for (const unit of enumerateUnits(provider)) {
       const match = unit.match(
         /^teleagent-provider-launch-(?:claude|codex)-([a-f0-9]{32})\.service$/
       );
       if (!match) fail('provider panic unit identity is invalid');
-      launchResults.push(await terminateUnit(provider, `launch_${match[1]}`, { control }));
+      launchResults.push(await terminate(provider, `launch_${match[1]}`, {
+        control, allowMissingReadinessForGlobalRecovery: true,
+      }));
     }
   }
   const egress = {};
   for (const provider of Object.keys(PROVIDERS)) {
-    egress[provider] = await recoverProviderEgress(provider, control);
+    egress[provider] = await recoverEgress(provider, control);
   }
-  const providerPlaneQuiesced = Object.values(supervisorResults).every((status) => status.quiesced) &&
-    launchResults.every((result) => result.quiesced) &&
-    Object.values(egress).every((result) => result.persisted && result.quiesced) &&
+  const allLaunchResults = [...retainedLaunchResults, ...launchResults];
+  const providerPlaneQuiesced =
+    Object.values(supervisorResults).every((status) => status?.quiesced === true) &&
+    allLaunchResults.every((result) => result?.persisted === true && result?.quiesced === true) &&
+    Object.values(egress).every((result) => result?.persisted === true && result?.quiesced === true) &&
     !masked.error && !masked.signal && masked.status === 0;
   let launchLockRecovery = { proved: providerPlaneQuiesced, removed: false };
   if (providerPlaneQuiesced) {
     try {
-      launchLockRecovery = clearStaleGlobalLaunchLockAfterQuiescence({ quiesced: true });
+      launchLockRecovery = clearLaunchLock({ quiesced: true, expectedRecord: retainedLaunch });
     } catch (error) {
       launchLockRecovery = { proved: false, removed: false, error: error.message };
     }
@@ -1731,11 +1816,13 @@ async function panicAllProviderPlanes({ control = providerControl } = {}) {
   return {
     accepted: true,
     persisted: lock.persisted === true &&
-      Object.values(egress).every((result) => result.persisted),
+      allLaunchResults.every((result) => result?.persisted === true) &&
+      Object.values(egress).every((result) => result?.persisted === true),
     quiesced,
     alreadyLocked: lock.alreadyLocked === true,
     supervisorResults,
     launchCount: launchResults.length,
+    retainedLaunchCount: retainedLaunchResults.length,
     launchLockRecovery,
     egress,
   };
@@ -1836,6 +1923,24 @@ function listProviderUnits(provider, { runSystemctl = systemctl } = {}) {
   return units;
 }
 
+// Programmatic dependencies let the launch transaction be exercised without
+// root, systemd, live credentials, or provider traffic. No CLI/environment
+// setting can replace these production operations.
+const PROVIDER_LAUNCH_OPERATIONS = Object.freeze({
+  hasCancellationTombstone,
+  createGlobalLaunchLock,
+  validateProviderStorageIsolation,
+  assertGlobalProviderLaunchUnlocked,
+  validateWorkspaceAnchor,
+  validateProviderWorkspace,
+  createCapabilityFile,
+  createReadinessFile,
+  buildSystemdRunInvocation,
+  waitQuiesced,
+  removeCapabilityFile,
+  removeGlobalLaunchLock,
+});
+
 async function main(argv = process.argv.slice(2), environment = process.env, {
   control = providerControl,
   randomCapability = () => crypto.randomBytes(32).toString('hex'),
@@ -1844,6 +1949,7 @@ async function main(argv = process.argv.slice(2), environment = process.env, {
   requirePreflight = requireImmutablePreflight,
   parseInput = parseControl,
   attestWorkerStorage = attestWorkerStorageBoundary,
+  launchOperations = PROVIDER_LAUNCH_OPERATIONS,
 } = {}) {
   const input = parseInput(argv, environment);
   if (['assert-supervisor-start-admitted', 'attest-worker-storage'].includes(input.action)) {
@@ -1880,6 +1986,20 @@ async function main(argv = process.argv.slice(2), environment = process.env, {
     return result.success && result.quiesced ? 0 : 75;
   }
   if (input.action === 'launch') {
+    const {
+      hasCancellationTombstone,
+      createGlobalLaunchLock,
+      validateProviderStorageIsolation,
+      assertGlobalProviderLaunchUnlocked,
+      validateWorkspaceAnchor,
+      validateProviderWorkspace,
+      createCapabilityFile,
+      createReadinessFile,
+      buildSystemdRunInvocation,
+      waitQuiesced,
+      removeCapabilityFile,
+      removeGlobalLaunchLock,
+    } = launchOperations;
     const unit = unitName(input.provider, input.launchId);
     if (hasCancellationTombstone(unit)) fail('provider launch was canceled before submit', 75);
     const capability = randomCapability();
@@ -1887,7 +2007,8 @@ async function main(argv = process.argv.slice(2), environment = process.env, {
     const expiresAtMs = Date.now() + 60 * 60 * 1000;
     let credentialPath = null;
     let readinessPath = null;
-    let registered = false;
+    let capabilityQuiesced = true;
+    let modelQuiesced = true;
     let globalLaunchLock = null;
     try {
       globalLaunchLock = createGlobalLaunchLock(input.launchId);
@@ -1900,6 +2021,10 @@ async function main(argv = process.argv.slice(2), environment = process.env, {
       credentialPath = createCapabilityFile(input.launchId, capability);
       readinessPath = createReadinessFile(input.provider, input.launchId);
       assertGlobalProviderLaunchUnlocked();
+      // Even a lost/invalid reply can leave a durably registered capability.
+      // Revoke-before-late-register is safe because egress persists a canceled
+      // tombstone for unknown launch IDs and never re-registers that identity.
+      capabilityQuiesced = false;
       const registration = await control({
         provider: input.provider,
         action: 'register',
@@ -1912,11 +2037,14 @@ async function main(argv = process.argv.slice(2), environment = process.env, {
         mode: input.mode,
       });
       if (registration?.registered !== true) fail('provider launch capability was not registered');
-      registered = true;
       if (hasCancellationTombstone(unit)) fail('provider launch was canceled before start', 75);
       assertGlobalProviderLaunchUnlocked();
       const invocation = buildSystemdRunInvocation({ ...input, credentialPath, readinessPath });
       assertGlobalProviderLaunchUnlocked();
+      // Mark submission uncertainty before invoking the helper. Neither a
+      // spawn failure nor a nonzero/abnormal exit excludes a delayed systemd
+      // request, even if a later status snapshot says the unit is absent.
+      modelQuiesced = false;
       const child = spawnImpl(invocation.command, invocation.args, {
         stdio: 'inherit',
         env: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8' },
@@ -1927,7 +2055,8 @@ async function main(argv = process.argv.slice(2), environment = process.env, {
         child.once('exit', (code, signal) => resolve({ code, signal }));
       });
       const status = await waitQuiesced(invocation.unit, 5000);
-      if (!status.quiesced) fail('provider unit exited without cgroup quiescence');
+      modelQuiesced = result.code === 0 && result.signal === null && status?.quiesced === true;
+      if (!modelQuiesced) fail('provider unit completion or cgroup quiescence is unproved', 75);
       const revoked = await control({
         provider: input.provider,
         action: 'revoke',
@@ -1937,26 +2066,34 @@ async function main(argv = process.argv.slice(2), environment = process.env, {
       if (revoked?.persisted !== true || revoked?.quiesced !== true) {
         fail('provider launch capability revocation did not reach quiescence');
       }
-      registered = false;
-      if (result.signal) process.kill(process.pid, result.signal);
+      capabilityQuiesced = true;
       return Number.isInteger(result.code) ? result.code : 1;
     } finally {
-      removeCapabilityFile(credentialPath);
+      let credentialCleanupError = null;
+      try { removeCapabilityFile(credentialPath); }
+      catch (error) { credentialCleanupError = error; }
       // Spawn evidence intentionally outlives the transient wrapper. The
       // supervisor must distinguish a launch that never reached the model
       // from a model that spawned and exited between readiness polls. Exact
       // terminate/recover control removes it only after cgroup+egress zero.
-      if (registered) {
+      if (!capabilityQuiesced) {
         try {
-          await control({
+          const revoked = await control({
             provider: input.provider,
             action: 'revoke',
             launchId: input.launchId,
             reason: 'interrupted',
           });
-        } catch { /* expiry + supervisor panic remain fail-closed backstops */ }
+          capabilityQuiesced = revoked?.persisted === true && revoked?.quiesced === true;
+        } catch { /* retain the global lock; expiry is not proof of quiescence */ }
       }
-      if (globalLaunchLock) removeGlobalLaunchLock(globalLaunchLock, input.launchId);
+      // This root-only, crash-published lock is a same-boot global admission
+      // fence, not merely a wrapper-PID mutex. Only global panic recovery may
+      // clear a stranded lock after fencing and quiescing both providers.
+      if (globalLaunchLock && modelQuiesced && capabilityQuiesced && !credentialCleanupError) {
+        removeGlobalLaunchLock(globalLaunchLock, input.launchId);
+      }
+      if (credentialCleanupError) throw credentialCleanupError;
     }
   }
   if (input.action === 'status') {

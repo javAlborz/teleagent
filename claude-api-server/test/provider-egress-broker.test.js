@@ -215,6 +215,28 @@ test('capability registration is digest-only, timing-safe at use, and cancel-bef
   }), (error) => error.code === 'PROVIDER_CAPABILITY_CONFLICT');
 });
 
+test('revoke before a delayed register stays canceled across store reopen for both providers', async (t) => {
+  for (const provider of ['claude', 'codex']) {
+    await t.test(provider, (t) => {
+      const { directory, db, policy: selectedPolicy } = harness(t, provider);
+      assert.deepEqual(revokeCapability(db, { launchId: LAUNCH_ID }), {
+        persisted: true, alreadyRevoked: false, tombstone: true,
+      });
+      db.close();
+      const reopened = openBudgetStore(path.join(directory, 'budget.sqlite'), { uid: process.getuid() });
+      try {
+        assert.throws(() => register(reopened, selectedPolicy), { code: 'PROVIDER_CAPABILITY_CONFLICT' });
+        assert.deepEqual(reopened.prepare(
+          'SELECT state, capability_hash FROM provider_egress_capabilities WHERE launch_id = ?'
+        ).get(LAUNCH_ID), { state: 'canceled', capability_hash: null });
+        assert.equal(reopened.pragma('integrity_check', { simple: true }), 'ok');
+      } finally {
+        reopened.close();
+      }
+    });
+  }
+});
+
 test('credential broker refuses Node/TLS debug injection without echoing secret values', () => {
   for (const name of [
     'NODE_DEBUG', 'NODE_OPTIONS', 'NODE_PATH', 'NODE_EXTRA_CA_CERTS',
