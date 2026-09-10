@@ -7,6 +7,7 @@ const os = require('node:os');
 const path = require('node:path');
 const net = require('node:net');
 const { spawn } = require('node:child_process');
+const { ExecutorTaskStore } = require('../executor-task-store');
 const {
   hardenedWorkerTestEnvironment,
 } = require('./fixtures/hardened-worker-test-env');
@@ -54,8 +55,10 @@ function waitForExit(child, timeoutMs = 8000) {
   });
 }
 
-async function startServer(t, tokenOverrides = {}) {
+async function startServer(t, tokenOverrides = {}, prepareStore = null) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'teleagent-scoped-auth-'));
+  const dbPath = path.join(directory, 'executor.sqlite');
+  const prepared = prepareStore ? prepareStore(dbPath) : null;
   const port = await reservePort();
   const serverPath = path.join(__dirname, '..', 'server.js');
   const child = spawn(process.execPath, [serverPath], {
@@ -73,7 +76,7 @@ async function startServer(t, tokenOverrides = {}) {
       CLAUDE_API_TOKEN: TOKENS.legacy,
       PRIVILEGED_ACTION_PROXY_ENABLED: 'true',
       PRIVILEGED_ACTION_PROXY_SOCKET_PATH: '/run/teleagent-privileged-action/broker.sock',
-      EXECUTOR_TASK_DB_PATH: path.join(directory, 'executor.sqlite'),
+      EXECUTOR_TASK_DB_PATH: dbPath,
       VOICE_EXECUTION_LOCK_FILE: path.join(directory, 'voice.lock.json'),
       VOICE_APPROVAL_KEY_ID: '',
       VOICE_APPROVAL_PUBLIC_KEY_FILE: '',
@@ -102,7 +105,7 @@ async function startServer(t, tokenOverrides = {}) {
       return false;
     }
   });
-  return { baseUrl, output: () => output };
+  return { baseUrl, output: () => output, prepared };
 }
 
 async function assertStartupFails(t, environmentOverrides, expectedError) {
@@ -227,6 +230,65 @@ async function request(baseUrl, scope, token) {
     ...(scope.body ? { body: JSON.stringify(scope.body) } : {}),
   });
 }
+
+test('HTTP task cancellation stays on the exact turn and rejects widening input before effects', async (t) => {
+  const server = await startServer(t, {}, (dbPath) => {
+    const store = new ExecutorTaskStore({ dbPath, defaultLeaseMs: 60000 });
+    try {
+      const previous = store.submitTask({
+        idempotencyKey: 'previous-turn', callId: 'fixture-call', request: { prompt: 'previous' },
+      }).task;
+      const firstClaim = store.claimNext({ workerId: 'fixture-only' });
+      store.completeTask({
+        taskId: previous.id, workerId: 'fixture-only', leaseToken: firstClaim.leaseToken,
+        result: { success: true },
+      });
+      const next = store.submitTask({
+        idempotencyKey: 'next-turn', callId: 'fixture-call', request: { prompt: 'next' },
+      }).task;
+      // A live fixture-owned lease prevents server dispatch. No provider is
+      // ever launched and there is no actual process associated with this row.
+      store.claimNext({ workerId: 'fixture-only' });
+      return { previous, next };
+    } finally { store.close(); }
+  });
+  const readTask = async (id) => {
+    const response = await fetch(`${server.baseUrl}/executor/tasks/${id}`, { headers: headers(TOKENS.executor) });
+    assert.equal(response.status, 200);
+    return (await response.json()).task;
+  };
+  const cancel = (body) => fetch(`${server.baseUrl}/voice-control/session/cancel`, {
+    method: 'POST', headers: headers(TOKENS.voice), body: JSON.stringify(body),
+  });
+  assert.equal((await readTask(server.prepared.next.id)).state, 'running');
+  for (const input of [
+    { scope: 'task' },
+    { scope: 'task', idempotencyKey: '' },
+    { scope: 'task', idempotencyKey: ' next-turn' },
+    { scope: 'task', idempotencyKey: 'next-turn', resetSession: true },
+    { scope: 'task', idempotencyKey: 'next-turn', resetSession: 'false' },
+    { scope: 'everything', idempotencyKey: 'next-turn' },
+  ]) {
+    const response = await cancel({ callId: 'fixture-call', ...input });
+    assert.equal(response.status, 400);
+    assert.equal((await response.json()).code, 'INVALID_CANCELLATION_SCOPE');
+    assert.equal((await readTask(server.prepared.next.id)).state, 'running');
+  }
+  const stale = await cancel({
+    callId: 'fixture-call', idempotencyKey: 'previous-turn', scope: 'task',
+  });
+  assert.equal(stale.status, 200);
+  const staleResult = await stale.json();
+  assert.equal(staleResult.scope, 'task');
+  assert.deepEqual(staleResult.executorTasks.taskIds, []);
+  assert.deepEqual(staleResult.requestIds, []);
+  assert.equal((await readTask(server.prepared.previous.id)).state, 'completed');
+  assert.equal((await readTask(server.prepared.next.id)).state, 'running');
+  const exact = await cancel({ callId: 'fixture-call', idempotencyKey: 'next-turn', scope: 'task' });
+  assert.equal(exact.status, 200);
+  assert.deepEqual((await exact.json()).executorTasks.taskIds, [server.prepared.next.id]);
+  assert.equal((await readTask(server.prepared.next.id)).state, 'cancel_requested');
+});
 
 test('each private route family accepts only its dedicated bearer', async (t) => {
   const server = await startServer(t);

@@ -954,6 +954,41 @@ test('startup recovery resumes an existing durable task without minting a fresh 
   assert.equal(directQueries, 0);
 });
 
+test('a local executor wait abort keeps the voice job reconciling, not canceled or failed', { timeout: 5000 }, async (t) => {
+  let submissions = 0;
+  const { broker, realtime, stateStore, thread } = createFixture(t, {
+    async queryDetailed() {
+      submissions += 1;
+      return {
+        success: false,
+        code: 'EXECUTOR_WAIT_ABORTED',
+        agentCode: 'EXECUTOR_WAIT_ABORTED',
+        reconciliation_required: true,
+        executorTaskId: 'xtask_wait_abort',
+        error: 'The local observer stopped waiting.',
+      };
+    },
+  }, { reconciliationBaseDelayMs: 5000, reconciliationMaxDelayMs: 5000 });
+  const reconciliation = new Promise((resolve) => {
+    broker.on('job.updated', (job) => {
+      if (job.status === 'reconciling') resolve(job);
+    });
+  });
+  const accepted = await broker.startAgentTask({
+    voiceThreadId: thread.id,
+    realtimeSessionId: realtime.id,
+    toolCallId: 'local-wait-aborted',
+    profile: 'codex-luna',
+    request: 'Inspect the fixture repository.',
+  });
+  assert.equal(accepted.accepted, true);
+  const pending = await reconciliation;
+  assert.equal(pending.id, accepted.job_id);
+  assert.equal(submissions, 1);
+  assert.equal(stateStore.getJob(pending.id).status, 'reconciling');
+  assert.equal(stateStore.getJob(pending.id).completed_at, null);
+});
+
 test('startup lookup outage stays nonterminal and never resubmits interrupted work', async (t) => {
   let directQueries = 0;
   const bridge = {

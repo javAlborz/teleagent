@@ -4051,15 +4051,20 @@ app.post('/ask-structured', async (req, res) => {
  *   {
  *     "callId": "call-uuid",
  *     "sessionKey": "optional-stable-session-uuid",
+ *     "scope": "task",
+ *     "idempotencyKey": "exact-durable-turn-key",
  *     "resetSession": false,
  *     "reason": "dtmf_cancel"
  *   }
+ * Task scope requires an explicit key and cannot reset or cancel the whole
+ * session. Omitted scope retains the legacy whole-call cancellation contract.
  */
 function handleCancelSession(req, res) {
   const {
     callId,
     sessionKey,
     idempotencyKey = callId,
+    scope = 'call',
     resetSession = false,
     reason = 'cancel_session'
   } = req.body || {};
@@ -4073,7 +4078,20 @@ function handleCancelSession(req, res) {
     });
   }
 
-  const result = cancelActiveRequests(callId, {
+  const exactIdentifier = (value) => typeof value === 'string' && value.length > 0 &&
+    value.length <= 200 && value.trim() === value && !/[\u0000-\u001F\u007F]/u.test(value);
+  if (!['call', 'task'].includes(scope) || (scope === 'task' &&
+      (!exactIdentifier(callId) || !exactIdentifier(req.body?.idempotencyKey) || resetSession !== false))) {
+    return res.status(400).json({
+      success: false,
+      code: 'INVALID_CANCELLATION_SCOPE',
+      error: 'Task scope requires exact call and task keys and cannot reset the session.',
+    });
+  }
+
+  // The dispatcher interrupts only records selected by the durable task key.
+  // A late turn cancellation must never reach the whole-call request bucket.
+  let result = scope === 'task' ? null : cancelActiveRequests(callId, {
     sessionKey: resolvedSessionKey,
     resetSession: !!resetSession,
     reason
@@ -4081,9 +4099,18 @@ function handleCancelSession(req, res) {
   const executorTasks = executorTaskDispatcher.cancelCallTasks({
     callId,
     idempotencyKey,
+    scope,
     reason,
     source: 'cancel_session',
   });
+  if (scope === 'task') {
+    result = {
+      active: executorTasks.taskIds.length > 0,
+      canceledCount: executorTasks.taskIds.length,
+      requestIds: [],
+      resetSession: false,
+    };
+  }
 
   console.log(
     `[${timestamp}] SESSION CANCELED: callLinked=yes sessionKey=${valuePresence(resolvedSessionKey)} active=${result.active} canceled=${result.canceledCount} resetSession=${result.resetSession} reason=${reason}`
@@ -4093,6 +4120,7 @@ function handleCancelSession(req, res) {
     success: true,
     callId,
     sessionKey: resolvedSessionKey,
+    scope,
     ...result,
     executorTasks,
   });

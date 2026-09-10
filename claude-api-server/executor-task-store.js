@@ -1019,16 +1019,21 @@ class ExecutorTaskStore {
   cancelCallTasks({
     callId,
     idempotencyKey = null,
+    scope = 'call',
     reason = 'call_canceled',
     source = 'controller',
   }) {
+    if (!['call', 'task'].includes(scope) || (scope === 'task' && idempotencyKey == null)) {
+      throw new ExecutorTaskStoreError('INVALID_ARGUMENT', 'Task cancellation requires an exact key and valid scope');
+    }
     const normalizedCallId = normalizeBoundedString(callId, 'callId', { max: 200 });
     const normalizedIdempotencyKey = idempotencyKey === null || idempotencyKey === undefined
       ? null
       : normalizeBoundedString(idempotencyKey, 'idempotencyKey', { max: 200 });
     return this._cancelMatchingTasks({
-      whereSql: 'call_id = ?',
-      parameters: [normalizedCallId],
+      whereSql: scope === 'task' ? 'call_id = ? AND idempotency_key = ?' : 'call_id = ?',
+      parameters: scope === 'task'
+        ? [normalizedCallId, normalizedIdempotencyKey] : [normalizedCallId],
       cancellationReservation: normalizedIdempotencyKey ? {
         idempotencyKey: normalizedIdempotencyKey,
         callId: normalizedCallId,

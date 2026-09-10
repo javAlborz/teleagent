@@ -17,6 +17,7 @@
 const logger = require('./logger');
 const fs = require('fs');
 const path = require('path');
+const { createHash } = require('node:crypto');
 const { redactAudioForkSecrets } = require('./audio-fork');
 const {
   getAgentTimeoutSeconds,
@@ -36,6 +37,8 @@ const LOCAL_HTTP_PORT = Number.parseInt(process.env.HTTP_PORT || '3000', 10) || 
 const OUTBOUND_API_URL = `http://127.0.0.1:${LOCAL_HTTP_PORT}/api/outbound-call`;
 let nextHoldMusicFileIndex = 0;
 const CANCEL_ACKNOWLEDGEMENT = 'Stopped.';
+const CANCEL_UNCONFIRMED = 'Cancellation was requested, but I could not confirm it. Do not assume the task has stopped.';
+const CANCEL_OUTCOME_UNKNOWN = 'That task may have completed before cancellation. Its outcome is unknown, and I will not repeat it automatically.';
 const SPOKEN_CANCEL_ENABLED = true;
 const SPOKEN_CANCEL_LISTEN_TIMEOUT_MS = 1000;
 const SPOKEN_CANCEL_PHRASES = new Set([
@@ -479,7 +482,9 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
   let callActive = true;
   let dtmfHandler = null;
   let claudeInFlight = false;
+  let agentSubmissionStarted = false;
   let cancelRequested = false;
+  let activeTurnIdempotencyKey = null;
   let pendingCallbackRequest = null;
 
   // Track when call ends to prevent operations on dead endpoints
@@ -585,6 +590,8 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
       }
 
       cancelRequested = true;
+      const cancellationKey = activeTurnIdempotencyKey;
+      const submissionStarted = agentSubmissionStarted;
       logger.info('Cancel requested', {
         callUuid,
         sessionKey,
@@ -593,9 +600,31 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
         ...extra,
       });
 
+      // Send the media interruption now, never after a delayed HTTP response
+      // when result audio or a later turn may already be playing.
+      let audioBreak = Promise.resolve();
+      if (callActive) {
+        try {
+          audioBreak = Promise.resolve(endpoint.api('uuid_break', endpoint.uuid)).catch((error) => {
+            logger.warn('Cancel audio break failed', { callUuid, source, error: error.message });
+          });
+        } catch (error) {
+          logger.warn('Cancel audio break failed', { callUuid, source, error: error.message });
+        }
+      }
+
+      // During thinking feedback the turn is still entirely local. No remote
+      // task or reservation is needed; the submission check below skips it.
+      if (!submissionStarted) {
+        await audioBreak;
+        return true;
+      }
+
       try {
         const result = await claudeBridge.cancelSession(callUuid, {
           sessionKey,
+          idempotencyKey: cancellationKey,
+          scope: 'task',
           resetSession: false,
           reason,
         });
@@ -616,16 +645,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
         });
       }
 
-      try {
-        await endpoint.api('uuid_break', endpoint.uuid);
-      } catch (error) {
-        logger.warn('Cancel audio break failed', {
-          callUuid,
-          source,
-          error: error.message,
-        });
-      }
-
+      await audioBreak;
       return true;
     };
 
@@ -858,11 +878,28 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
       // Check if call still active before thinking feedback
       if (!callActive) break;
 
+      // A repeated question is a new observation, not a retry of the earlier
+      // turn. Transport retries and cancellation bind to this exact key.
+      activeTurnIdempotencyKey = `voice_turn_${createHash('sha256').update(JSON.stringify({
+        callUuid, sessionKey, sessionType, turn: turnCount,
+      })).digest('hex')}`;
+      claudeInFlight = true;
+      agentSubmissionStarted = false;
+      cancelRequested = false;
+
       // 1. Play random thinking phrase
       const thinkingPhrase = getRandomThinkingPhrase();
       logger.info('Playing thinking phrase', { callUuid, phrase: thinkingPhrase });
       const thinkingUrl = await ttsService.generateSpeech(thinkingPhrase, voiceId);
-      if (callActive) await endpoint.play(thinkingUrl);
+      if (callActive && !cancelRequested) await endpoint.play(thinkingUrl);
+      if (!callActive) break;
+      if (cancelRequested) {
+        claudeInFlight = false;
+        pendingCallbackRequest = null;
+        const canceledUrl = await ttsService.generateSpeech(CANCEL_ACKNOWLEDGEMENT, voiceId);
+        if (callActive) await endpoint.play(canceledUrl);
+        continue;
+      }
 
       // 2. Start hold music in background
       const holdMusicPlayback = startHoldMusic();
@@ -872,8 +909,6 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
       let claudeResult;
       let spokenCancelWatcher = null;
       const spokenCancelState = { stopped: false };
-      claudeInFlight = true;
-      cancelRequested = false;
       try {
         if (SPOKEN_CANCEL_ENABLED) {
           spokenCancelWatcher = watchForSpokenCancel({
@@ -896,11 +931,13 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
           });
         }
 
+        agentSubmissionStarted = true;
         claudeResult = await claudeBridge.queryDetailed(
           transcript,
           {
             callId: callUuid,
             sessionKey,
+            idempotencyKey: activeTurnIdempotencyKey,
             devicePrompt: devicePrompt,
             sessionType,
             timeout: agentTimeoutSeconds
@@ -918,14 +955,21 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
       // 4. Stop hold music
       await stopHoldMusic(holdMusicPlayback);
 
-      if (cancelRequested) {
+      if (cancelRequested && !claudeResult.success) {
         if (!callActive) {
           logger.info('Call ended after cancel during agent processing', { callUuid });
           break;
         }
 
-        logger.info('Agent work canceled', { callUuid, turn: turnCount });
-        const canceledUrl = await ttsService.generateSpeech(CANCEL_ACKNOWLEDGEMENT, voiceId);
+        const resultCode = claudeResult.agentCode || claudeResult.code;
+        const outcomeUnknown = claudeResult.execution_outcome_unknown === true ||
+          ['EXECUTION_OUTCOME_UNKNOWN', 'AGENT_EXECUTION_OUTCOME_UNKNOWN'].includes(resultCode);
+        const confirmed = !outcomeUnknown && claudeResult.reconciliation_required !== true &&
+          ['AGENT_CANCELED', 'CLAUDE_CANCELED'].includes(resultCode);
+        logger.info('Agent cancellation outcome', { callUuid, turn: turnCount, confirmed, outcomeUnknown });
+        const cancellationMessage = confirmed ? CANCEL_ACKNOWLEDGEMENT
+          : (outcomeUnknown ? CANCEL_OUTCOME_UNKNOWN : CANCEL_UNCONFIRMED);
+        const canceledUrl = await ttsService.generateSpeech(cancellationMessage, voiceId);
         if (callActive) await endpoint.play(canceledUrl);
         continue;
       }
@@ -1059,6 +1103,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
       // Ignore cleanup errors
     }
   } finally {
+    claudeInFlight = false;
     logger.info('Conversation loop cleanup', { callUuid, sessionKey });
 
     // Remove dialog listener

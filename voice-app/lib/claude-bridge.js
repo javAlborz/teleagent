@@ -209,6 +209,19 @@ function canceledExecutorResponse(task, code = 'CLAUDE_CANCELED') {
   };
 }
 
+function abortedExecutorWaitResponse(task, taskId) {
+  return {
+    success: false,
+    code: 'EXECUTOR_WAIT_ABORTED',
+    agentCode: 'EXECUTOR_WAIT_ABORTED',
+    error: 'The local wait ended without confirmation of remote task cancellation.',
+    userMessage: 'The wait ended, but the task may still be running. Its result needs reconciliation.',
+    reconciliation_required: true,
+    executorTaskId: task?.id || taskId,
+    idempotencyKey: task?.idempotencyKey || null,
+  };
+}
+
 function mapExecutorTaskResult(task) {
   if (!task || !task.terminal) return null;
   if (task.state === 'canceled') return canceledExecutorResponse(task);
@@ -311,8 +324,10 @@ async function waitForExecutorTask(existingTaskOrId, options = {}) {
   let lastError = null;
 
   while (Date.now() <= deadline) {
-    if (options.signal?.aborted) return canceledExecutorResponse(task);
     if (task?.terminal) return mapExecutorTaskResult(task);
+    // An AbortSignal belongs to this HTTP observer, not to the durable
+    // executor. Only a terminal executor record can establish cancellation.
+    if (options.signal?.aborted) return abortedExecutorWaitResponse(task, taskId);
 
     try {
       task = await getExecutorTask(taskId, {
@@ -339,6 +354,7 @@ async function waitForExecutorTask(existingTaskOrId, options = {}) {
     await wait(Math.min(pollIntervalMs, remaining), options.signal);
   }
 
+  if (options.signal?.aborted) return abortedExecutorWaitResponse(task, taskId);
   return {
     success: false,
     code: 'CLAUDE_TIMEOUT',
@@ -582,6 +598,7 @@ async function cancelSession(callId, options = {}) {
   const {
     sessionKey = callId,
     idempotencyKey = callId,
+    scope = 'call',
     resetSession = false,
     reason = 'cancel_session'
   } = options;
@@ -589,7 +606,7 @@ async function cancelSession(callId, options = {}) {
   try {
     const response = await axios.post(
       `${AGENT_API_URL}/voice-control/session/cancel`,
-      { callId, sessionKey, idempotencyKey, resetSession, reason },
+      { callId, sessionKey, idempotencyKey, scope, resetSession, reason },
       {
         timeout: 5000,
         headers: buildVoiceControlApiHeaders({ 'Content-Type': 'application/json' }),

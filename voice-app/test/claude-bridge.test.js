@@ -301,6 +301,51 @@ test('lookup returns null on 404 and wait maps existing failed and canceled task
   assert.equal(canceled.reason, 'caller_pressed_star');
 });
 
+test('aborting a local executor wait does not report that the durable task was canceled', async (t) => {
+  t.mock.method(axios, 'post', () => assert.fail('a wait abort must not submit or cancel work'));
+  t.mock.method(axios, 'get', () => assert.fail('an already aborted wait must not start another poll'));
+  const controller = new AbortController();
+  controller.abort();
+  const result = await bridge.waitForExecutorTask(executorTask({ state: 'running' }), {
+    signal: controller.signal,
+  });
+  assert.equal(result.success, false);
+  assert.equal(result.code, 'EXECUTOR_WAIT_ABORTED');
+  assert.equal(result.reconciliation_required, true);
+  assert.equal(result.executorTaskId, 'xtask_123');
+  assert.equal(result.idempotencyKey, 'job_voice123');
+  assert.doesNotMatch(result.userMessage, /I stopped|was canceled/i);
+});
+
+test('a known terminal executor result wins over a simultaneous local wait abort', async (t) => {
+  t.mock.method(axios, 'get', () => assert.fail('terminal results do not need another poll'));
+  const controller = new AbortController();
+  controller.abort();
+  const result = await bridge.waitForExecutorTask(executorTask({
+    state: 'completed', terminal: true,
+    result: { payload: { success: true, response: 'Verified result.', provider: 'codex' } },
+  }), { signal: controller.signal });
+  assert.equal(result.success, true);
+  assert.equal(result.response, 'Verified result.');
+});
+
+test('abort during an in-flight executor poll preserves pending reconciliation and never POSTs', async (t) => {
+  const controller = new AbortController();
+  let polls = 0;
+  t.mock.method(axios, 'post', () => assert.fail('wait abort is not remote cancellation'));
+  t.mock.method(axios, 'get', async () => {
+    polls += 1;
+    controller.abort();
+    return { data: { task: executorTask({ state: 'running' }) } };
+  });
+  const result = await bridge.waitForExecutorTask(executorTask(), {
+    signal: controller.signal, timeoutMs: 1000,
+  });
+  assert.equal(polls, 1);
+  assert.equal(result.code, 'EXECUTOR_WAIT_ABORTED');
+  assert.equal(result.reconciliation_required, true);
+});
+
 test('generic target-session executor task payload maps without managed-ask coercion', () => {
   const mapped = bridge.mapExecutorTaskResult(executorTask({
     taskType: 'target_session_message',
@@ -555,9 +600,25 @@ test('cancelSession reserves the exact durable idempotency key', async (t) => {
     callId: 'job_CancelReservation1',
     sessionKey: 'thread:codex-sol:one',
     idempotencyKey: 'job_CancelReservation1',
+    scope: 'call',
     resetSession: false,
     reason: 'caller_pressed_star',
   });
+});
+
+test('cancelSession carries explicit task scope without widening to the call', async (t) => {
+  let request;
+  t.mock.method(axios, 'post', async (url, body) => {
+    request = { url, body };
+    return { data: { success: true } };
+  });
+  await bridge.cancelSession('fixture-call', {
+    sessionKey: 'fixture-thread', idempotencyKey: 'fixture-turn', scope: 'task',
+  });
+  assert.equal(request.body.scope, 'task');
+  assert.equal(request.body.callId, 'fixture-call');
+  assert.equal(request.body.idempotencyKey, 'fixture-turn');
+  assert.equal(request.body.resetSession, false);
 });
 
 test('voice-control and operator clients never reuse the general agent bearer', async (t) => {

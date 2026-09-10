@@ -90,6 +90,16 @@ Do not collapse these identities, mount a private broker socket into
 `voice-app`, put a reusable bearer in an agent environment, share the owner's
 tmux socket with the worker, or grant the worker broad sudo/group membership.
 
+Legacy-call star cancellation uses explicit `scope: "task"` and the current
+turn's durable idempotency key. The controller must select only that exact
+call/key pair; the key is not merely a reservation alongside call-wide
+cancellation. Whole-call cancellation remains a separate explicit/default
+compatibility operation. Deploy the voice and controller changes as one
+reviewed release: an older controller ignores the new scope field. Cancellation
+acceptance or an aborted local wait never proves remote quiescence. Star during
+thinking feedback suppresses submission locally; delayed cancel responses must
+not issue media commands against result audio or a later turn.
+
 ## Authorization invariants
 
 Three active HTTP bearer tokens are mandatory, clean, pairwise distinct, and
@@ -143,8 +153,9 @@ close the PBX promotion blocker. See
 
 Any future call-start integration must durably invalidate an old approval arm
 before it starts a new call, then replay the exact prompt before re-arming. The
-current dormant store does not implement controller-driven supersession, so
-this remains part of the PBX adapter promotion blocker. Early, clipped, cleared,
+current dormant attester supports signed, same-request supersession with an
+atomic durable replacement claim, but production controller/call-start wiring
+and real PBX recovery proofs remain part of the promotion blocker. Early, clipped, cleared,
 backpressured, lost, mismatched, or timed-out audio never authorizes execution.
 
 Dial `9` is the independent emergency path. A STOPPED response is truthful only
