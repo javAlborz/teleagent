@@ -86,6 +86,50 @@ test('a post-probe inspection failure preserves the local answer and scrubs priv
   assert.doesNotMatch(JSON.stringify(result), /private-controller-secret/);
 });
 
+test('the directory call retains a specific unavailable result after a successful readiness probe', async (t) => {
+  const { controller } = createController(t);
+  controller.agentBridge.inspectOperator = async () => ({
+    success: false, code: 'VOICE_CONTROL_AUTH_NOT_CONFIGURED',
+    error: 'private-controller-secret and upstream diagnostics',
+  });
+  const result = await controller.handle('list_directory', { path: '.' });
+  assert.equal(result.success, false);
+  assert.equal(result.code, 'VOICE_CONTROL_AUTH_NOT_CONFIGURED');
+  assert.match(result.message, /Project tools are not connected/);
+  assert.doesNotMatch(JSON.stringify(result), /private-controller-secret|upstream diagnostics/);
+});
+
+test('a rejected inspection promise produces a bounded error without leaking transport diagnostics', async (t) => {
+  const { controller } = createController(t);
+  controller.agentBridge.inspectOperator = async () => {
+    throw new Error('private-controller-secret');
+  };
+  const result = await controller.handle('list_directory', { path: '.' });
+  assert.equal(result.code, 'OPERATOR_INSPECTION_FAILED');
+  assert.doesNotMatch(JSON.stringify(result), /private-controller-secret/);
+});
+
+test('directory inspection stays unavailable before dispatch when controller authentication is absent', async (t) => {
+  const { controller, inspections } = createController(t);
+  delete controller.agentBridge.getRuntimeCapabilities;
+  const result = await controller.handle('list_directory', { path: '.' });
+  assert.equal(result.success, false);
+  assert.equal(result.code, 'CONTROLLER_CAPABILITIES_UNAVAILABLE');
+  assert.equal(inspections.length, 0);
+});
+
+test('an asynchronous broker rejection preserves its truthful unknown-outcome code', async (t) => {
+  const { controller } = createController(t);
+  controller.jobBroker.startAgentTask = async () => {
+    throw Object.assign(new Error('The executor outcome must be reconciled.'), {
+      code: 'EXECUTION_OUTCOME_UNKNOWN',
+    });
+  };
+  const result = await controller.handle('start_agent_task', { request: 'Inspect the workspace.' });
+  assert.equal(result.success, false);
+  assert.equal(result.code, 'EXECUTION_OUTCOME_UNKNOWN');
+});
+
 test('remote work checks fresh readiness on every action; local tools do not depend on probes', async (t) => {
   const { controller, inspections } = createController(t);
   let probes = 0;

@@ -117,9 +117,22 @@ class VoiceToolController {
   }
 
   async _inspect(action, args = {}) {
-    const response = await this.agentBridge.inspectOperator(action, args);
-    if (!response.success) {
-      throw Object.assign(new Error(response.error || 'Operator inspection failed.'), { code: response.code });
+    let response;
+    try {
+      response = await this.agentBridge.inspectOperator(action, args);
+    } catch {
+      response = { success: false, code: 'OPERATOR_INSPECTION_FAILED' };
+    }
+    if (response?.success !== true) {
+      const explanations = {
+        VOICE_CONTROL_AUTH_NOT_CONFIGURED: 'Project tools are not connected on this phone yet. Conversation and saved phone records are still available.',
+        VOICE_CONTROL_UNAUTHORIZED: 'The phone cannot authenticate to project tools. The connection needs operator repair.',
+        VOICE_EXECUTION_LOCKED: 'Agent work is emergency-locked. Conversation and saved phone records are still available.',
+        OPERATOR_INSPECTION_FAILED: 'Workspace inspection did not return a verified result. Project tools are temporarily unavailable.',
+      };
+      const code = Object.hasOwn(explanations, response?.code)
+        ? response.code : 'OPERATOR_INSPECTION_FAILED';
+      throw Object.assign(new Error(explanations[code]), { code });
     }
     const result = { success: true, ...response.result };
     this._rememberTargetBindings(result, args.target || null);
@@ -197,6 +210,17 @@ class VoiceToolController {
   }
 
   async handle(name, args = {}, context = {}) {
+    // Await the entire dispatch so asynchronous failures from direct return
+    // branches reach the same error boundary as synchronous failures. Without
+    // this boundary, Realtime replaces the specific error with TOOL_ERROR.
+    try {
+      return await this._dispatch(name, args, context);
+    } catch (error) {
+      return safeToolError(error);
+    }
+  }
+
+  async _dispatch(name, args = {}, context = {}) {
     try {
       const capability = toolCapability(name);
       if (!['local', 'disabled'].includes(capability)) await this.refreshCapabilities();
