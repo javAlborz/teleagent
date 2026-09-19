@@ -399,7 +399,11 @@ source_check() {
       teleagent-provider-egress@.service) component='provider-egress-%i' ;;
       teleagent-provider-libexec-install.service) component=provider-libexec-install ;;
     esac
-    expected_start="ExecStart=/usr/bin/python3 -I /usr/local/libexec/verify-teleagent-release-closure --start-component $component \${CREDENTIALS_DIRECTORY}/teleagent-release-gate"
+    if [ "$component" = provider-libexec-install ]; then
+      expected_start="ExecStart=/usr/bin/python3 -I /usr/local/libexec/verify-teleagent-release-closure --start-component $component \${CREDENTIALS_DIRECTORY}/teleagent-release-gate"
+    else
+      expected_start="ExecStart=!/usr/bin/python3 -I /usr/local/libexec/verify-teleagent-release-closure --supervise-component $component \${CREDENTIALS_DIRECTORY}/teleagent-release-gate"
+    fi
     start_count=$(/usr/bin/grep -Fxc "$expected_start" "$filename" || true)
     [ "$start_count" -eq 1 ] || fail 'a release-consuming unit lost its immutable launcher'
     credential_count=$(/usr/bin/grep -Fxc "$release_credential" "$filename" || true)

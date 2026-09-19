@@ -40,9 +40,9 @@ const ACTIVATION_CHECK_COMMAND =
   'ExecStartPre=+/usr/bin/python3 -I /usr/local/libexec/verify-teleagent-release-closure ' +
   '--preflight-component realtime-sip-gateway ' +
   '${CREDENTIALS_DIRECTORY}/teleagent-release-gate';
-const RELEASE_START_COMMAND = 'ExecStart=/usr/bin/python3 -I ' +
+const RELEASE_START_COMMAND = 'ExecStart=!/usr/bin/python3 -I ' +
   '/usr/local/libexec/verify-teleagent-release-closure ' +
-  '--start-component realtime-sip-gateway ${CREDENTIALS_DIRECTORY}/teleagent-release-gate';
+  '--supervise-component realtime-sip-gateway ${CREDENTIALS_DIRECTORY}/teleagent-release-gate';
 const REVIEWED_CREDENTIAL_DIRECTIVES = Object.freeze([
   'LoadCredential=OPENAI_API_KEY:/etc/teleagent/credentials/openai-api-key',
   'LoadCredential=OPENAI_WEBHOOK_SECRET:/etc/teleagent/credentials/openai-webhook-secret',
@@ -53,7 +53,7 @@ const REVIEWED_CREDENTIAL_DIRECTIVES = Object.freeze([
 ]);
 const EXECUTION_DIRECTIVE = /^Exec(?:Condition|StartPre|Start|StartPost|Reload|Stop|StopPost)=/u;
 const CREDENTIAL_DIRECTIVE = /^(?:LoadCredential|LoadCredentialEncrypted|SetCredential|SetCredentialEncrypted|ImportCredential|ImportCredentialEx)=/u;
-const REVIEWED_SERVICE_SHA256 = '78d6b9408714a1c565d1667b927cabf299a59fc955c6a16fa92b60ec92a91177';
+const REVIEWED_SERVICE_SHA256 = 'c7c24790511a574b6fe94e93fddba77997b7cf2ac693e610f1544d5afe62d701';
 const GIB = 1024n * 1024n * 1024n;
 const MIB = 1024n * 1024n;
 const DURABLE_FILESYSTEMS = new Set([
@@ -267,7 +267,7 @@ export function validateServiceSource(source) {
       'trusted release start gate'],
     [/^ExecStartPre=\+\/usr\/bin\/python3 -I \/usr\/local\/libexec\/verify-teleagent-release-closure --preflight-component realtime-sip-gateway \$\{CREDENTIALS_DIRECTORY\}\/teleagent-release-gate$/gmu,
       'immutable activation preflight'],
-    [/^ExecStart=\/usr\/bin\/python3 -I \/usr\/local\/libexec\/verify-teleagent-release-closure --start-component realtime-sip-gateway \$\{CREDENTIALS_DIRECTORY\}\/teleagent-release-gate$/gmu,
+    [/^ExecStart=!\/usr\/bin\/python3 -I \/usr\/local\/libexec\/verify-teleagent-release-closure --supervise-component realtime-sip-gateway \$\{CREDENTIALS_DIRECTORY\}\/teleagent-release-gate$/gmu,
       'immutable release launcher'],
   ]) exactlyOnce(source, expression, label);
   const startCommands = String(source).split('\n')

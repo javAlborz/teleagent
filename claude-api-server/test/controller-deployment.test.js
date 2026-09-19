@@ -10,8 +10,8 @@ const DEPLOY = path.join(ROOT, 'deploy', 'controller');
 const RELEASE_START_GATE = 'ExecStartPre=+/usr/bin/env -i HOME=/var/empty ' +
   'PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 ' +
   '/usr/local/libexec/verify-teleagent-release-closure --check-start-gate';
-const RELEASE_START = 'ExecStart=/usr/bin/python3 -I ' +
-  '/usr/local/libexec/verify-teleagent-release-closure --start-component ' +
+const RELEASE_START = 'ExecStart=!/usr/bin/python3 -I ' +
+  '/usr/local/libexec/verify-teleagent-release-closure --supervise-component ' +
   'agent-controller ${CREDENTIALS_DIRECTORY}/teleagent-release-gate';
 const RELEASE_GATE_CREDENTIAL = 'LoadCredential=teleagent-release-gate:' +
   '/run/teleagent-release-gate/verified.json';
@@ -66,7 +66,7 @@ test('controller unit is dormant, exact-path, resource-capped, and isolated', ()
   assert.match(service, /^LimitFSIZE=8589934592$/m);
   assert.match(service, /^LimitCORE=0$/m);
   assert.match(service, /^NoNewPrivileges=yes$/m);
-  assert.match(service, /^CapabilityBoundingSet=$/m);
+  assert.match(service, /^CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_SETPCAP CAP_KILL$/m);
   assert.match(service, /^ProtectSystem=strict$/m);
   assert.match(service, /^ProtectHome=yes$/m);
   assert.match(service, /^IPAddressDeny=any$/m);

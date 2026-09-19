@@ -247,12 +247,18 @@ function normalizeConfig(environment = process.env, {
   }
   const credentialDirectory = path.resolve(String(environment.CREDENTIALS_DIRECTORY || ''));
   const credentialPath = path.join(credentialDirectory, 'provider-api-key');
-  if (!path.isAbsolute(credentialDirectory) || credentialDirectory === '/' ||
-      !credentialDirectory.startsWith('/run/credentials/')) {
+  if (credentialDirectory !== `/run/credentials/teleagent-provider-egress@${provider}.service`) {
     throw new Error('Provider egress credential directory is unavailable.');
   }
   const credentialMetadata = secureFile(credentialPath, { maxBytes: 4096 });
-  if (![0, uid].includes(credentialMetadata.uid) || (credentialMetadata.mode & 0o077) !== 0) {
+  // The infrastructure startup coordinator attests the exact one-service ACL
+  // on every start. For that projection, group-read is the ACL mask, not an
+  // additional group grant. Other credential locations remain forbidden.
+  const privateOwnerMode = [0, uid].includes(credentialMetadata.uid) &&
+    (credentialMetadata.mode & 0o7777) === 0o400;
+  const systemdAclMode = credentialMetadata.uid === 0 && credentialMetadata.gid === 0 &&
+    (credentialMetadata.mode & 0o7777) === 0o440;
+  if (!privateOwnerMode && !systemdAclMode) {
     throw new Error('Provider egress credential ownership is unsafe.');
   }
   // Do not trim: leading/trailing whitespace is malformed credential material,

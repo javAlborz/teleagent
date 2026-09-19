@@ -244,7 +244,7 @@ test('stack shutdown refuses persisted-but-unquiesced panic and forced exits', (
 });
 
 test('stop and recovery retain only the exact host handoff lock descriptor', () => {
-  const lockMetadata = directoryMetadata({ dev: 701, ino: 902 });
+  const lockMetadata = directoryMetadata({ dev: 701, ino: 902, mode: 0o700 });
   const filesystem = {
     fstatSync(descriptor) {
       assert.equal(descriptor, 17);
@@ -272,7 +272,7 @@ test('stop and recovery retain only the exact host handoff lock descriptor', () 
 });
 
 test('voice lifecycle lock validation rejects missing, forged, and unsafe descriptors', () => {
-  const safe = directoryMetadata({ dev: 701, ino: 902 });
+  const safe = directoryMetadata({ dev: 701, ino: 902, mode: 0o700 });
   const environment = (value) => value === undefined ? {} : {
     TELEAGENT_HANDOFF_LIFECYCLE_LOCK_FD: value,
   };
@@ -303,6 +303,7 @@ test('voice lifecycle lock validation rejects missing, forged, and unsafe descri
     [safe, directoryMetadata({ dev: 701, ino: 902, uid: 1 })],
     [safe, directoryMetadata({ dev: 701, ino: 902, gid: 1 })],
     [safe, directoryMetadata({ dev: 701, ino: 902, mode: 0o775 })],
+    [safe, directoryMetadata({ dev: 701, ino: 902, mode: 0o755 })],
   ]) {
     assert.throws(() => requireLifecycleLock('recover', {
       environment: environment('17'),

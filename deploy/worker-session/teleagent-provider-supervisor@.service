@@ -20,7 +20,7 @@ Environment=LC_ALL=C.UTF-8
 Environment=TELEAGENT_PROVIDER=%i
 ExecStartPre=+/usr/bin/env -i HOME=/var/empty PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 /usr/local/libexec/verify-teleagent-release-closure --check-start-gate
 ExecStartPre=+/usr/bin/python3 -I /usr/local/libexec/verify-teleagent-release-closure --preflight-component provider-supervisor-%i ${CREDENTIALS_DIRECTORY}/teleagent-release-gate
-ExecStart=/usr/bin/python3 -I /usr/local/libexec/verify-teleagent-release-closure --start-component provider-supervisor-%i ${CREDENTIALS_DIRECTORY}/teleagent-release-gate
+ExecStart=!/usr/bin/python3 -I /usr/local/libexec/verify-teleagent-release-closure --supervise-component provider-supervisor-%i ${CREDENTIALS_DIRECTORY}/teleagent-release-gate
 Restart=on-failure
 RestartSec=2s
 KillMode=control-group
@@ -54,7 +54,7 @@ ProtectKernelTunables=yes
 ProtectClock=yes
 ProtectHostname=yes
 ProtectProc=invisible
-ProcSubset=pid
+ProcSubset=all
 RestrictRealtime=yes
 RestrictNamespaces=yes
 RestrictSUIDSGID=no

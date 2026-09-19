@@ -20,7 +20,7 @@ function preflightFixture() {
     ino: 17,
     uid: 0,
     gid: 0,
-    mode: 0o40755,
+    mode: 0o40700,
     isDirectory: () => true,
   };
   const credential = {
@@ -68,6 +68,10 @@ test('provider credential preflight requires bundled Node and the retained exact
     (input) => { input.environment.TELEAGENT_HANDOFF_LIFECYCLE_LOCK_FD = '0'; },
     (input) => { input.environment.TELEAGENT_PREFLIGHT_PROVIDER_CREDENTIAL_FD = '23'; },
     (input) => { input.uid = 1000; },
+    (input) => {
+      const metadata = input.filesystem.lstatSync();
+      input.filesystem.lstatSync = () => ({ ...metadata, mode: 0o40755 });
+    },
     (input) => {
       input.filesystem = {
         ...input.filesystem,
@@ -118,6 +122,19 @@ test('projected provider credential read is descriptor-stable and bounded', () =
     credential,
   );
   assert.equal(fstatCalls, 2);
+
+  // The root verifier has already authenticated the exact named-user ACL on
+  // this inherited descriptor. Other group/owner/mode combinations fail.
+  metadata.uid = 0;
+  metadata.gid = 0;
+  metadata.mode = 0o100440;
+  assert.equal(credentialCheck.readStableProjectedCredential(24, filesystem), credential);
+  for (const invalid of [{ gid: 1001 }, { uid: 1001 }, { mode: 0o100444 }, { mode: 0o100640 }]) {
+    assert.throws(() => credentialCheck.readStableProjectedCredential(24, {
+      ...filesystem,
+      fstatSync: () => ({ ...metadata, ...invalid }),
+    }), /unsafe metadata/u);
+  }
 
   let changingCalls = 0;
   const changingFilesystem = {

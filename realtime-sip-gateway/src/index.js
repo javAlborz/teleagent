@@ -43,8 +43,10 @@ export async function main({
     }
   };
 
-  runtimeProcess.once('SIGTERM', () => void shutdown('SIGTERM'));
-  runtimeProcess.once('SIGINT', () => void shutdown('SIGINT'));
+  // The systemd cgroup stop and its startup supervisor may both deliver the
+  // signal. Keep handlers installed while the bounded close is in progress.
+  runtimeProcess.on('SIGTERM', () => void shutdown('SIGTERM'));
+  runtimeProcess.on('SIGINT', () => void shutdown('SIGINT'));
   await app.listen();
 }
 

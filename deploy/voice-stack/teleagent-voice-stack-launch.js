@@ -1547,7 +1547,7 @@ function requireLifecycleLock(operation, {
   }
   if (!descriptorMetadata.isDirectory() || !pathMetadata.isDirectory() ||
       descriptorMetadata.dev !== pathMetadata.dev || descriptorMetadata.ino !== pathMetadata.ino ||
-      pathMetadata.uid !== 0 || pathMetadata.gid !== 0 || (pathMetadata.mode & 0o7777) !== 0o755) {
+      pathMetadata.uid !== 0 || pathMetadata.gid !== 0 || (pathMetadata.mode & 0o7777) !== 0o700) {
     refuse('the voice lifecycle lock identity is unsafe');
   }
   delete environment[LIFECYCLE_LOCK_ENV];

@@ -277,7 +277,11 @@ assert_release_preflight() {
     '/usr/local/libexec/verify-teleagent-release-closure' "$service" || true)
   [ "$exact_count" -eq 1 ] && [ "$reference_count" -eq 2 ] ||
     fail 'a control-plane unit lost or weakened its exact release preflight'
-  expected_start="ExecStart=/usr/bin/python3 -I /usr/local/libexec/verify-teleagent-release-closure --start-component $component \${CREDENTIALS_DIRECTORY}/teleagent-release-gate"
+  if [ "$component" = agent-controller ]; then
+    expected_start="ExecStart=!/usr/bin/python3 -I /usr/local/libexec/verify-teleagent-release-closure --supervise-component $component \${CREDENTIALS_DIRECTORY}/teleagent-release-gate"
+  else
+    expected_start="ExecStart=/usr/bin/python3 -I /usr/local/libexec/verify-teleagent-release-closure --start-component $component \${CREDENTIALS_DIRECTORY}/teleagent-release-gate"
+  fi
   [ "$(/usr/bin/grep -Fxc "$expected_start" "$service" || true)" -eq 1 ] ||
     fail 'a control-plane unit lost its immutable release launcher'
   actual_execution=$(/usr/bin/grep -E "$execution_pattern" "$service" || true)

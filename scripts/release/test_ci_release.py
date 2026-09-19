@@ -142,10 +142,13 @@ EXPECTED_START_COMPONENTS = {
 
 
 def release_start_command(component: str) -> str:
+    supervised = component not in ('privileged-action', 'voice-stack-start', 'provider-libexec-install')
+    prefix = '!' if supervised else ''
+    operation = '--supervise-component' if supervised else '--start-component'
     return (
-        "ExecStart=/usr/bin/python3 -I "
+        f"ExecStart={prefix}/usr/bin/python3 -I "
         "/usr/local/libexec/verify-teleagent-release-closure "
-        f"--start-component {component} "
+        f"{operation} {component} "
         "${CREDENTIALS_DIRECTORY}/teleagent-release-gate"
     )
 
@@ -500,15 +503,13 @@ class CiReleaseTests(unittest.TestCase):
                 self.assertEqual(credential_lines.count(RELEASE_GATE_CREDENTIAL), 1, relative)
                 component = EXPECTED_START_COMPONENTS[relative]
                 self.assertIn(
-                    "ExecStart=/usr/bin/python3 -I "
-                    "/usr/local/libexec/verify-teleagent-release-closure "
-                    f"--start-component {component} "
-                    "${CREDENTIALS_DIRECTORY}/teleagent-release-gate",
+                    release_start_command(component),
                     execution_lines_tuple,
                     relative,
                 )
                 self.assertEqual(
-                    sum("--start-component" in line for line in execution_lines),
+                    sum('--start-component' in line or '--supervise-component' in line
+                        for line in execution_lines),
                     1,
                     relative,
                 )

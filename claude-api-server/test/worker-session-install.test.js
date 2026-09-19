@@ -247,7 +247,11 @@ test('worker-session installer source is dormant and the activation verifier is 
     assert.equal(executionLines.filter((line) => line === RELEASE_START_GATE).length, 1);
     assert.equal(executionLines[0], RELEASE_START_GATE);
     assert.equal(source.match(/^LoadCredential=teleagent-release-gate:/gm)?.length, 1);
-    assert.equal(executionLines.filter((line) => line.includes('--start-component')).length, 1);
+    const supervised = unit !== 'teleagent-provider-libexec-install.service';
+    const operation = supervised ? '--supervise-component' : '--start-component';
+    assert.equal(executionLines.filter((line) => line.includes(operation)).length, 1);
+    assert.match(executionLines.find((line) => line.includes(operation)),
+      supervised ? /^ExecStart=!\/usr\/bin\/python3 -I / : /^ExecStart=\/usr\/bin\/python3 -I /);
     assert.ok(executionLines.every((line) => !line.includes('/opt/teleagent/current')));
     assert.doesNotMatch(source,
       /^(?:[^\S\r\n]+(?:Exec(?:Condition|StartPre|Start|StartPost|Reload|Stop|StopPost)|(?:LoadCredential|LoadCredentialEncrypted|SetCredential|SetCredentialEncrypted|ImportCredential|ImportCredentialEx))[^\S\r\n]*=|(?:Exec(?:Condition|StartPre|Start|StartPost|Reload|Stop|StopPost)|(?:LoadCredential|LoadCredentialEncrypted|SetCredential|SetCredentialEncrypted|ImportCredential|ImportCredentialEx))[^\S\r\n]+=)/m);

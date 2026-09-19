@@ -356,7 +356,7 @@ test('root provider preflights require bundled Node and the retained exact lock'
       ino: 13,
       uid: 0,
       gid: 0,
-      mode: 0o40755,
+      mode: 0o40700,
       isDirectory: () => true,
     };
     return {
@@ -381,6 +381,10 @@ test('root provider preflights require bundled Node and the retained exact lock'
     (input) => { input.invokedScript = '/usr/local/libexec/teleagent-provider-boundary'; },
     (input) => { input.environment.TELEAGENT_HANDOFF_LIFECYCLE_LOCK_FD = '1'; },
     (input) => { input.uid = 1000; },
+    (input) => {
+      const metadata = input.filesystem.lstatSync();
+      input.filesystem.lstatSync = () => ({ ...metadata, mode: 0o40755 });
+    },
     (input) => {
       input.filesystem = {
         ...input.filesystem,
