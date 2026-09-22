@@ -159,6 +159,7 @@ BOUND_SOURCE_PATHS = (
     "lib/voice-app-runtime-env.js",
     "lib/voice-approval-capability.js",
     "lib/voice-authorization-plan.js",
+    "lib/voice-egress-runtime.js",
     "lib/voice-execution-control.js",
     "lib/voice-operation-risk.js",
     "lib/worker-inspection-contract.js",
@@ -196,6 +197,7 @@ BOUND_SOURCE_PATHS = (
     "realtime-sip-gateway/src/webhook-handler.js",
     "voice-app/lib/isolated-media-http.js",
     "voice-app/lib/media-playback-urls.js",
+    "voice-app/lib/voice-egress-transport.js",
     "voice-app/package.json",
 )
 

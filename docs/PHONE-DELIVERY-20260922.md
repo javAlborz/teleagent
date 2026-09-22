@@ -79,22 +79,27 @@ projection. Media responses retain and bound the checked file descriptor;
 legacy playback and Realtime acknowledgement tones use admitted private URLs.
 The root-protected runtime record must bind the current process and namespace,
 image and exact source closure. The independent record writer/start transaction,
-outbound speech/Realtime connections and live commissioning remain outstanding.
+socket authority and coordinated egress lifetime checks, and live commissioning
+remain outstanding. Reviewed Realtime and speech transports now use fixed
+protected Unix sockets, with admission repeated at actual connection/dispatch.
+TLS and hostname checks precede Realtime bearer transmission; speech queues
+refuse revoked socket identities. No runtime record writer or relay activation
+is provided by this change.
 
-The paired application/host source closure now binds 145 paths, including the
+The paired application/host source closure now binds 147 paths, including the
 observer, endpoint renderer, transitive SIP topology module and receiver
-consumers. Its sorted
+consumers and fixed voice egress transports. Its sorted
 path-list SHA-256 is
-`a26def1a35870642bf87f459ff02f76dff57625b6e535c81b501fbcd866bbf5d`.
+`f4bfae73a04ab3ad182a5cbd1bf74c73d81133d2ee39ee5e25b61fe44cd4ce2d`.
 The observer is installed root-owned mode 0555 and invoked through isolated
 `/usr/bin/python3 -I`; commissioning must independently bind that Python,
 standard-library, `_ctypes` and libc runtime as well as the helper source.
 
 ## Next executable delivery steps
 
-1. **Close source integration and review.** Finish outbound voice connections,
-   the admitted runtime-record writer and coordinated start/restart lifetime
-   checks, then repin the exact release closure. Keep application and
+1. **Close source integration and review.** Finish the independent egress
+   socket authority, admitted runtime-record writer and coordinated start/restart
+   lifetime checks, then repin the exact release closure. Keep application and
    infrastructure revisions paired.
 2. **Commission the shared-host profile.** Turn the reviewed numerical resource
    proposal's reviewed dormant slice/unit limits into commissioned capacity
@@ -170,9 +175,20 @@ Validation completed before the final application media-placement follow-up:
   passed. Peak full-run memory was 129,343,488 bytes.
 - The new receiver files also require `voice-app/package.json` in the bound
   source closure. The release regression caught that omission; adding its
-  package scope to both sides gives the exact 145-path set above. All 39
+  package scope to both sides produced the 145-path receiver set; the two
+  reviewed egress modules now extend that set to 147 paths. All 39
   release tests, three affected host closure tests, 12 resource-policy tests
   and full repository lint passed after the corresponding integration fixes.
+- Independent egress review reproduced a queued speech request using a revoked
+  socket. The correction repeats admission before new connection and direct
+  socket reuse; all 15 focused transport/runtime tests passed independently.
+  The 147-path integration then passed all 39 release tests, three host closure
+  tests and 12 resource-policy tests. An initial unsorted path insertion was
+  caught by both closure suites and corrected before acceptance.
+- The final integrated controller/voice suite passed **949/949** in 237.89
+  seconds with zero skipped or cancelled tests. Peak cgroup memory was
+  129,548,288 bytes. This includes the actual local Unix TLS/HTTP and speech
+  queue regressions, without a live provider request.
 
 Explicit test/probe runs use the shared serial Hermes envelope: 512 MiB memory,
 zero swap, 128 tasks and one CPU. Provider data acquisition peaked at 372.7 MB;
