@@ -1160,6 +1160,8 @@ test('user response debounce coalesces transcript tails and suppresses backchann
 });
 
 test('quiet-wait requests acknowledge with a tone and do not create a spoken response', async (t) => {
+  const admission = require('./helpers/media-runtime-fixture').runtimeFixture().load();
+  require('../lib/media-playback-urls').configureMediaPlayback(admission);
   const fixture = createCallFixture(t, {
     autoDestroyGreeting: false,
     activeJobs: [{ job_id: 'job-waiting', status: 'running' }],
@@ -1185,6 +1187,7 @@ test('quiet-wait requests acknowledge with a tone and do not create a spoken res
   assert.equal(realtime.discardedResponses, 1);
   assert.equal(realtime.queuedResponses.length, 0);
   assert.equal(fixture.endpoint.played.length, 1);
+  assert.equal(fixture.endpoint.played[0], 'http://10.254.0.14:3000/static/gotit-beep.wav');
   await fixture.dialog.destroy();
   await call;
 });

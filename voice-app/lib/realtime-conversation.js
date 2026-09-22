@@ -3,7 +3,7 @@
 const crypto = require('node:crypto');
 const logger = require('./logger');
 const { redactAudioForkSecrets } = require('./audio-fork');
-const { GOTIT_BEEP_URL } = require('./conversation-loop');
+const { playbackUrl } = require('./media-playback-urls');
 const { VoiceToolController } = require('./voice-tool-controller');
 const { UNAVAILABLE, readControllerCapabilities } = require('./controller-capabilities');
 const {
@@ -828,7 +828,7 @@ async function runRealtimeConversation(endpoint, dialog, callUuid, {
         for (const job of activeJobs) quietJobIds.add(job.job_id);
         discardModelTurn();
         interruptAssistantForSubstantiveTurn();
-        Promise.resolve(endpoint.play(GOTIT_BEEP_URL)).catch((error) => {
+        Promise.resolve(endpoint.play(playbackUrl('static', 'gotit-beep.wav'))).catch((error) => {
           logger.warn('Realtime quiet-wait acknowledgement failed', { callUuid, error: error.message });
         });
         return;
@@ -1116,7 +1116,7 @@ async function runRealtimeConversation(endpoint, dialog, callUuid, {
       });
       if (output?.response_behavior === 'earcon_then_quiet') {
         if (output.job_id) quietJobIds.add(output.job_id);
-        Promise.resolve(endpoint.play(GOTIT_BEEP_URL)).catch((error) => {
+        Promise.resolve(endpoint.play(playbackUrl('static', 'gotit-beep.wav'))).catch((error) => {
           logger.warn('Realtime job acknowledgement tone failed', { callUuid, error: error.message });
         });
       }
@@ -1217,7 +1217,7 @@ async function runRealtimeConversation(endpoint, dialog, callUuid, {
         });
         if (approval.approved) {
           quietJobIds.add(approval.job.job_id);
-          Promise.resolve(endpoint.play(GOTIT_BEEP_URL)).catch((error) => {
+          Promise.resolve(endpoint.play(playbackUrl('static', 'gotit-beep.wav'))).catch((error) => {
             logger.warn('Realtime approval tone failed', { callUuid, error: error.message });
           });
         } else if (approval.code !== 'APPROVAL_PROMPT_NOT_HEARD') {

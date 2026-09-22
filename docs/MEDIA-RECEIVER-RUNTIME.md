@@ -23,7 +23,7 @@ are validated in source:
   namespace device/inode of the consuming voice process.
 - `projection` and `projectionDigest`: the complete reviewed renderer output,
   still with `readyToLaunch: false`, matching the independently admitted topology.
-- `approvedRuntimeSources`: exact ten-path map named by `REQUIRED_SOURCES`,
+- `approvedRuntimeSources`: exact eleven-path map named by `REQUIRED_SOURCES`,
   including the actual pinned `drachtio-fsmrf` implementation. Every value is
   compared to bytes read from root-protected `/app` files before use.
 
