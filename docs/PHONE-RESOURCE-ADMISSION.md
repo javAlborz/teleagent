@@ -99,6 +99,9 @@ missing counters, new/removed groups, replacements, changed event fields and
 counter resets refuse admission. Enumeration streams at most 512 entries per
 directory, with at most 256 groups including the pool and 16 descendant levels.
 Exceeding any bound refuses new work; none can be changed through environment.
+Directory timestamps provide supporting evidence only: a transient cgroup can
+vanish without leaving a usable timestamp change. The independent topology
+observer described below is mandatory; timestamps never replace it.
 
 Bounded `/proc/self/mountinfo` evidence must identify one full-root cgroup-v2
 mount at `/sys/fs/cgroup`, with no subordinate mounts and only supported
@@ -140,6 +143,64 @@ candidate cannot claim installed recovery availability without those proofs.
 Kernel semantics are documented in the [cgroup v2 reference](https://docs.kernel.org/admin-guide/cgroup-v2.html)
 and [PSI reference](https://docs.kernel.org/accounting/psi.html).
 
+## Required topology observer
+
+New admission requires the fixed root-owned, single-link mode `0555` helper
+`/usr/local/libexec/teleagent-resource-topology-watch`, installed from
+`deploy/worker-session/teleagent-resource-topology-watch`. The provider invokes
+only `/usr/bin/python3 -I` with that fixed source path, a fixed working directory
+and a two-variable locale environment. Production accepts no caller paths,
+arguments or configurable scope. Missing or unsafe helper evidence refuses
+new work without a fallback. Panic, cancellation, status and cleanup do not
+start the observer.
+
+The isolated Python helper uses standard-library `ctypes` to retain one raw,
+nonblocking inotify descriptor and open directory descriptors for the complete
+fixed `/sys/fs/cgroup/teleagent.slice` subtree. Each directory is watched through
+its retained `/proc/self/fd` identity before it is enumerated. Unique watch and
+device/inode identities, safe permissions, a single device, 256 groups,
+16 descendant levels, 512 entries per directory, 1,024 bytes per relative path
+and a 128 KiB readiness frame are mandatory. Setup events poison the observation;
+the observer never adopts newly created directories or takes a new baseline.
+Readiness binds the boot ID and every relative path plus decimal-string
+device/inode identity to both admission snapshots.
+
+Any nonempty raw event read, EOF or read error refuses admission. This includes
+create/delete/move, self replacement, attribute changes, ignored watches,
+unmount and queue overflow. Following the second snapshot and final profile
+check, the parent sends one unpredictable nonce-bearing `CHECK` command. The
+helper synchronously drains the raw queue and emits exactly one matching
+receipt. The parent accepts it only after a clean, reaped helper exit; missing,
+partial, repeated or extra protocol output and helper death all refuse.
+Observation ends at that final drain. It is not an atomic reservation through
+the subsequent systemd start request.
+
+The helper has its own three-second deadline, and the parent enforces a
+2.5-second protocol deadline plus at most 500 ms to confirm cleanup. The
+existing two-second total resource-observation bound still applies. Every
+parent failure kills and awaits its exact child. The helper closes inherited
+descriptors beyond its pipes and installs `PR_SET_PDEATHSIG` with a parent-ID
+recheck to close the setup race. Cleanup uncertainty cannot grant admission.
+
+Installation must bind this helper's exact source digest and executable mode
+into the provider libexec manifest, both release source closures and independent
+host release authority. The trusted execution closure includes the selected
+`/usr/bin/python3`, standard library, `_ctypes`, libc and required shared
+libraries; these must be covered by host runtime integrity and startup checks.
+This introduces no generated binary and fabricates neither a binary artifact
+nor an approved installation. Existing root-owned mount and procfs integrity
+checks remain required. Inotify cannot prove that a transient mount overlay
+never occurred; accepted host authority must control the observer's mount
+namespace and replacement permissions.
+
+Ordinary-directory kernel tests prove raw create/delete/rename notifications,
+setup churn refusal, a vanished nested directory between identical snapshots,
+parent death and deadline cleanup. Overflow, ignored-watch, unmount, EOF and
+read-error refusal use injected raw-read fixtures, not induced kernel overflow
+or live cgroup operations. Exact Ubuntu-kernel cgroup notifications, the
+installed service's procfs/mount view and lifecycle control of the final
+observation-to-launch interval require separate acceptance before activation.
+
 ## Durable storage remains a separate gate
 
 Resource admission does not replace existing storage checks. The provider
@@ -159,6 +220,12 @@ is full. Preserve all existing FreeSWITCH volumes. No storage is allocated or
 migrated by this change.
 
 ## Validation and remaining acceptance
+
+The final resource-admission and topology-observer suites passed 70/70 focused
+tests on 2026-09-22 in 10.581 seconds. The serial `scripts/hermes-safe-test`
+runner asserted 512 MiB memory, zero swap, 128 tasks and one CPU; peak cgroup
+charge was 66,043,904 bytes. These tests used synthetic resource metadata and
+disposable ordinary directories, without creating or changing live cgroups.
 
 On 2026-09-22 the resource-admission and provider-boundary suites passed
 104/104 tests in 1.88 seconds, using the serial `scripts/hermes-safe-test`

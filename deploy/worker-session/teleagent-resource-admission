@@ -7,6 +7,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { setTimeout: delay } = require('node:timers/promises');
+const { spawn } = require('node:child_process');
 
 const PROFILE = '/etc/teleagent/resource-admission.json';
 const CGROUP_ROOT = '/sys/fs/cgroup';
@@ -20,6 +21,8 @@ const MAX_GROUPS = 256;
 const MAX_GROUP_DEPTH = 16;
 const MAX_DIRECTORY_ENTRIES = 512;
 const MOUNTINFO = '/proc/self/mountinfo';
+const TOPOLOGY_HELPER = '/usr/local/libexec/teleagent-resource-topology-watch';
+const MAX_WATCH_FRAME = 128 * 1024;
 const UINT64_MAX = (1n << 64n) - 1n;
 const REQUIRED_CHILDREN = Object.freeze([
   'teleagent-agent-controller.service', 'teleagent-provider.slice',
@@ -302,6 +305,132 @@ function assertStableInventory(before, after) {
   })) refuse('RESOURCE_BOUNDARY_CHANGED');
 }
 
+async function beginTopologyObservation({ launch = spawn, fileSystem = fs } = {}) {
+  for (const directory of ['/', '/usr', '/usr/local', '/usr/local/libexec']) {
+    const metadata = fileSystem.lstatSync(directory);
+    if (!metadata.isDirectory() || metadata.uid !== 0 || metadata.gid !== 0 ||
+        (metadata.mode & 0o7022) !== 0 || fileSystem.realpathSync(directory) !== directory) {
+      refuse('RESOURCE_TOPOLOGY_HELPER_UNSAFE');
+    }
+  }
+  const metadata = fileSystem.lstatSync(TOPOLOGY_HELPER);
+  if (!metadata.isFile() || metadata.uid !== 0 || metadata.gid !== 0 || metadata.nlink !== 1 ||
+      (metadata.mode & 0o7777) !== 0o555 || fileSystem.realpathSync(TOPOLOGY_HELPER) !== TOPOLOGY_HELPER) {
+    refuse('RESOURCE_TOPOLOGY_HELPER_UNSAFE');
+  }
+  const child = launch('/usr/bin/python3', ['-I', TOPOLOGY_HELPER], {
+    cwd: '/', env: { LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8' }, stdio: ['pipe', 'pipe', 'ignore'],
+  });
+  let phase = 'starting';
+  let failure;
+  let closed = false;
+  let ready;
+  let nonce;
+  let receipt = false;
+  let buffer = Buffer.alloc(0);
+  let outputBytes = 0;
+  let resolveReady;
+  let rejectReady;
+  let resolveCheck;
+  let rejectCheck;
+  let resolveClosed;
+  const readyPromise = new Promise((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
+  const closedPromise = new Promise((resolve) => { resolveClosed = resolve; });
+  const fail = () => {
+    if (!failure) {
+      try { refuse('RESOURCE_TOPOLOGY_UNCONFIRMED'); } catch (error) { failure = error; }
+    }
+    rejectReady(failure);
+    rejectCheck?.(failure);
+    if (!closed) child.kill('SIGKILL');
+  };
+  const deadline = setTimeout(fail, 2500);
+  const cleanup = async () => {
+    clearTimeout(deadline);
+    phase = 'closing';
+    child.stdin.destroy();
+    if (!closed) child.kill('SIGKILL');
+    let timer;
+    await Promise.race([closedPromise, new Promise((resolve) => { timer = setTimeout(resolve, 500); })]);
+    clearTimeout(timer);
+    if (!closed) refuse('RESOURCE_TOPOLOGY_CLEANUP_UNCONFIRMED');
+  };
+  child.on('error', fail);
+  child.stdin.on('error', fail);
+  child.stdout.on('error', fail);
+  child.stdout.on('data', (chunk) => {
+    if (phase === 'closing' || failure) return;
+    try {
+      outputBytes += chunk.length;
+      if (outputBytes > MAX_WATCH_FRAME + 80) throw new Error();
+      buffer = Buffer.concat([buffer, chunk]);
+      let end;
+      while ((end = buffer.indexOf(10)) !== -1) {
+        const bytes = buffer.subarray(0, end);
+        const line = bytes.toString('utf8');
+        buffer = buffer.subarray(end + 1);
+        if (!Buffer.from(line).equals(bytes)) throw new Error();
+        if (phase === 'starting') {
+          ready = JSON.parse(line);
+          exactKeys(ready, ['schema', 'boot', 'groups']);
+          if (JSON.stringify(ready) !== line || ready.schema !== 'teleagent.resource-topology-watch.v1' ||
+              !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}\n$/u.test(ready.boot) ||
+              !Array.isArray(ready.groups) || ready.groups.length < 1 || ready.groups.length > MAX_GROUPS) {
+            throw new Error();
+          }
+          const names = new Set();
+          const identities = new Set();
+          for (const group of ready.groups) {
+            if (!Array.isArray(group) || group.length !== 3 || typeof group[0] !== 'string' ||
+                group[0].length > 1024 || (group[0] !== '' &&
+                  !/^[A-Za-z0-9][A-Za-z0-9_.:@-]*(?:\/[A-Za-z0-9][A-Za-z0-9_.:@-]*)*$/u.test(group[0]))) {
+              throw new Error();
+            }
+            integer(group[1]); integer(group[2]);
+            const identity = `${group[1]}:${group[2]}`;
+            if (names.has(group[0]) || identities.has(identity)) throw new Error();
+            names.add(group[0]); identities.add(identity);
+          }
+          if (!names.has('')) throw new Error();
+          phase = 'ready';
+          resolveReady();
+        } else if (phase === 'checking' && !receipt && line === `CHECKED ${nonce}`) {
+          receipt = true;
+        } else throw new Error();
+      }
+    } catch { fail(); }
+  });
+  child.on('close', (code, signal) => {
+    closed = true;
+    resolveClosed();
+    if (phase === 'closing') return;
+    if (phase === 'checking' && receipt && code === 0 && signal === null && buffer.length === 0 && !failure) {
+      clearTimeout(deadline);
+      phase = 'finished';
+      resolveCheck();
+    } else fail();
+  });
+  try { await readyPromise; } catch (error) { await cleanup(); throw error; }
+  return {
+    assertSnapshot(snapshot) {
+      if (failure || closed || phase !== 'ready' || snapshot.boot !== ready.boot ||
+          snapshot.eventInventory.size !== ready.groups.length || ready.groups.some(([name, device, inode]) =>
+        snapshot.eventInventory.get(name)?.identity !== `${device}:${inode}`)) {
+        refuse('RESOURCE_TOPOLOGY_UNCONFIRMED');
+      }
+    },
+    async finish() {
+      if (failure || closed || phase !== 'ready') refuse('RESOURCE_TOPOLOGY_UNCONFIRMED');
+      phase = 'checking';
+      nonce = crypto.randomBytes(32).toString('hex');
+      const checked = new Promise((resolve, reject) => { resolveCheck = resolve; rejectCheck = reject; });
+      try { child.stdin.write(`CHECK ${nonce}\n`); } catch { fail(); }
+      await checked;
+    },
+    cleanup,
+  };
+}
+
 function collectSnapshot(policy) {
   if (process.getuid() !== 0 || process.geteuid() !== 0) refuse('RESOURCE_BOUNDARY_UNSAFE');
   if (fs.statfsSync(CGROUP_ROOT, { bigint: true }).type !== 0x63677270n ||
@@ -428,12 +557,16 @@ function assessInterval(policy, before, after, elapsedNs) {
 async function assertResourceAdmission({
   readProfile = readProductionProfile, snapshot = collectSnapshot,
   sleep = delay, monotonic = () => process.hrtime.bigint(),
+  watchTopology = beginTopologyObservation,
 } = {}) {
+  let watcher;
   try {
     const text = readProfile();
     const policy = validateProfile(text);
     const collectionStarted = monotonic();
+    watcher = await watchTopology();
     const before = snapshot(policy);
+    watcher.assertSnapshot(before);
     // Use only the wait between snapshots as the pressure denominator. Every
     // counter's actual observation interval contains that wait, so slow
     // evidence reads cannot dilute stalls. The ratio is conservative.
@@ -442,9 +575,11 @@ async function assertResourceAdmission({
     await sleep(250);
     const observationEnded = monotonic();
     const after = snapshot(policy);
+    watcher.assertSnapshot(after);
     assessSnapshot(policy, after);
     assessInterval(policy, before, after, observationEnded - started);
     if (readProfile() !== text) refuse('RESOURCE_BOUNDARY_CHANGED');
+    await watcher.finish();
     const finished = monotonic();
     if (finished - collectionStarted > 2000000000n || started < collectionStarted ||
         observationEnded > finished) refuse('RESOURCE_BOUNDARY_CHANGED');
@@ -453,9 +588,12 @@ async function assertResourceAdmission({
     if (error?.code?.startsWith('RESOURCE_')) throw error;
     // Never expose paths, kernel diagnostics or an accidental upstream error.
     refuse('RESOURCE_EVIDENCE_UNAVAILABLE');
+  } finally {
+    if (watcher) await watcher.cleanup();
   }
 }
 
 module.exports = { assertResourceAdmission, validateProfile, parsePressure, parseEvents,
   parseMeminfo, parseCgroupMount, assessSnapshot, assessInterval, collectSnapshot, readProductionProfile,
+  beginTopologyObservation,
   MODEL_MEMORY_MAX, MODEL_TASKS_MAX };

@@ -9,6 +9,8 @@ const MiB = 1024n ** 2n;
 const MOUNTINFO = '/proc/self/mountinfo';
 const mountLine = (options = 'rw,nsdelegate,memory_recursiveprot') =>
   `31 23 0:28 / /sys/fs/cgroup rw,nosuid,nodev,noexec,relatime - cgroup2 cgroup2 ${options}\n`;
+// Inventory/parser fixtures are separate from the real raw-inotify tests.
+const fixtureWatcher = async () => ({ assertSnapshot() {}, async finish() {}, async cleanup() {} });
 
 // Synthetic budgets are test inputs, never an installed Hermes allocation.
 function profile() {
@@ -66,6 +68,7 @@ function invoke({ definition = profile(), first, second, elapsed = 250000000n,
   let observations = 0;
   let ticks = 0;
   return admission.assertResourceAdmission({
+    watchTopology: fixtureWatcher,
     readProfile: () => {
       if (readError) throw readError;
       reads += 1;
@@ -188,6 +191,7 @@ test('slow evidence reads cannot dilute the measured pressure interval', async (
     let elapsed = 0n;
     let observations = 0;
     await assert.rejects(admission.assertResourceAdmission({
+      watchTopology: fixtureWatcher,
       readProfile: () => encode(profile()),
       snapshot: () => {
         observations += 1;
@@ -206,6 +210,7 @@ test('total collection freshness remains bounded even with a valid pressure inte
   let elapsed = 0n;
   let observations = 0;
   await assert.rejects(admission.assertResourceAdmission({
+    watchTopology: fixtureWatcher,
     readProfile: () => encode(profile()),
     snapshot: () => {
       observations += 1;
@@ -248,6 +253,45 @@ test('profile changes and unavailable evidence fail closed without leaking diagn
     await assert.rejects(invoke({ [field]: new Error('private diagnostics and filesystem path') }),
       (error) => error.code === 'RESOURCE_EVIDENCE_UNAVAILABLE' && error.exitCode === 75 &&
         !error.message.includes('private diagnostics'));
+  }
+});
+
+test('topology witness arms before counters and is finalized and reaped before successful admission', async () => {
+  const order = [];
+  let elapsed = 0n;
+  await admission.assertResourceAdmission({
+    readProfile: () => { order.push('profile'); return encode(profile()); },
+    snapshot: () => { order.push('snapshot'); return sample(); },
+    sleep: async () => { elapsed += 250000000n; }, monotonic: () => elapsed,
+    watchTopology: async () => {
+      order.push('watch');
+      return { assertSnapshot() { order.push('identity'); },
+        async finish() { order.push('drain-and-reap'); }, async cleanup() { order.push('cleanup'); } };
+    },
+  });
+  assert.deepEqual(order, ['profile', 'watch', 'snapshot', 'identity', 'snapshot', 'identity',
+    'profile', 'drain-and-reap', 'cleanup']);
+});
+
+test('missing witness or a failed final drain refuses without a timestamp-only fallback', async () => {
+  for (const failureAt of ['start', 'finish']) {
+    let observations = 0;
+    let cleanups = 0;
+    let elapsed = 0n;
+    const unavailable = () => { throw Object.assign(new Error('unconfirmed'),
+      { code: 'RESOURCE_TOPOLOGY_UNCONFIRMED', exitCode: 75 }); };
+    await assert.rejects(admission.assertResourceAdmission({
+      readProfile: () => encode(profile()),
+      snapshot: () => { observations += 1; return sample(); },
+      sleep: async () => { elapsed += 250000000n; }, monotonic: () => elapsed,
+      watchTopology: async () => {
+        if (failureAt === 'start') unavailable();
+        return { assertSnapshot() {}, async finish() { unavailable(); },
+          async cleanup() { cleanups += 1; } };
+      },
+    }), { code: 'RESOURCE_TOPOLOGY_UNCONFIRMED' });
+    assert.equal(observations, failureAt === 'start' ? 0 : 2);
+    assert.equal(cleanups, failureAt === 'start' ? 0 : 1);
   }
 });
 
@@ -386,6 +430,7 @@ function nestedGroups(fixture) {
 function observeKernel(mutate = () => {}) {
   let elapsed = 0n;
   return admission.assertResourceAdmission({
+    watchTopology: fixtureWatcher,
     sleep: async (ms) => { assert.equal(ms, 250); mutate(); elapsed += 250000000n; },
     monotonic: () => elapsed,
   });
@@ -524,6 +569,7 @@ test('production collector refuses unsafe ownership, hierarchy, namespace and mi
   await t.test('missing evidence becomes a bounded refusal', async (sub) => {
     const fixture = kernelFixture(sub);
     fixture.texts.delete(`${fixture.pool}/memory.current`);
-    await assert.rejects(admission.assertResourceAdmission(), { code: 'RESOURCE_EVIDENCE_UNAVAILABLE' });
+    await assert.rejects(admission.assertResourceAdmission({ watchTopology: fixtureWatcher }),
+      { code: 'RESOURCE_EVIDENCE_UNAVAILABLE' });
   });
 });
