@@ -167,8 +167,13 @@ function boundedRootRead(filename) {
   const descriptor = fs.openSync(filename, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
   try {
     const metadata = fs.fstatSync(descriptor, { bigint: true });
+    // The kernel exposes this one procfs file as 0666: writes install PSI
+    // triggers on the writer's descriptor; they cannot rewrite the counters.
+    // collectSnapshot verifies the procfs mount/ancestors before this read.
+    const kernelPsiTrigger = filename === '/proc/pressure/memory' &&
+      (metadata.mode & 0o7777n) === 0o666n;
     if (!metadata.isFile() || metadata.uid !== 0n || metadata.gid !== 0n ||
-        (metadata.mode & 0o7022n) !== 0n) refuse('RESOURCE_BOUNDARY_UNSAFE');
+        ((metadata.mode & 0o7022n) !== 0n && !kernelPsiTrigger)) refuse('RESOURCE_BOUNDARY_UNSAFE');
     const buffer = Buffer.alloc(MAX_BYTES + 1);
     let count = 0;
     for (;;) {
@@ -202,6 +207,11 @@ function collectSnapshot(policy) {
     refuse('RESOURCE_BOUNDARY_UNSAFE');
   }
   for (const directory of ['/sys', '/sys/fs', CGROUP_ROOT]) directoryIdentity(directory);
+  for (const directory of ['/proc', '/proc/pressure']) directoryIdentity(directory);
+  if (fs.statfsSync('/proc/pressure/memory', { bigint: true }).type !== 0x9fa0n ||
+      fs.realpathSync('/proc/pressure/memory') !== '/proc/pressure/memory') {
+    refuse('RESOURCE_BOUNDARY_UNSAFE');
+  }
   const boot = boundedRootRead('/proc/sys/kernel/random/boot_id');
   if (!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}\n$/u.test(boot) ||
       boundedRootRead('/proc/sys/kernel/hostname') !== `${policy.profile.hostname}\n`) {

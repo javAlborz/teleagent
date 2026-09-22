@@ -90,6 +90,12 @@ cgroups. It strictly parses memory/task counters, pressure lines and
 - no new aggregate memory-limit/OOM/task-limit event, boot change, cgroup
   replacement or profile change appears during observation.
 
+The kernel's `/proc/pressure/memory` is intentionally mode `0666`: writes
+register per-descriptor PSI triggers, without modifying the observed pressure
+counters. This exact root-owned path is accepted only after checking the
+procfs filesystem type and canonical root-owned ancestors. The exception does
+not apply to profiles or cgroup files, which remain non-writable by other UIDs.
+
 Cumulative old limit events do not permanently disable admission. A newly
 increased or reset event counter does refuse it. Samples outside the bounded
 200 ms–2 s interval refuse as stale/invalid. Successful admission returns only
@@ -126,11 +132,17 @@ migrated by this change.
 ## Validation and remaining acceptance
 
 On 2026-09-22 the resource-admission and provider-boundary suites passed
-100/100 tests in 1.90 seconds, using the serial `scripts/hermes-safe-test`
+102/102 tests in 1.89 seconds, using the serial `scripts/hermes-safe-test`
 wrapper. The runner asserted 512 MiB memory, zero swap, 128 tasks and one CPU;
-peak cgroup charge was 50,077,696 bytes. Runtime syntax and diff checks passed.
+peak cgroup charge was 50,876,416 bytes. Runtime syntax and diff checks passed.
 The new helper and changed tests passed strict lint; provider-boundary runtime
 lint retained its two previously documented warnings and had no errors.
+
+Separate read-only checks confirmed the actual Hermes procfs/cgroup2 magic
+values, root ownership and permissions of system.slice controller files, and
+successful parsing of current host/pool PSI, memory/task events and meminfo.
+These checks found the legitimate procfs PSI mode exception described above.
+They do not prove the absent aggregate profile or service assignments.
 
 Focused tests cover malformed and missing evidence, ownership and namespace
 failures, finite child caps, recovery budgeting, pressure/event deltas,

@@ -211,7 +211,8 @@ test('profile changes and unavailable evidence fail closed without leaking diagn
 function kernelFixture(t) {
   const policy = admission.validateProfile(encode(profile()));
   const pool = '/sys/fs/cgroup/teleagent.slice';
-  const directories = new Set(['/etc', '/etc/teleagent', '/sys', '/sys/fs', '/sys/fs/cgroup', pool]);
+  const directories = new Set(['/etc', '/etc/teleagent', '/proc', '/proc/pressure',
+    '/sys', '/sys/fs', '/sys/fs/cgroup', pool]);
   const texts = new Map([
     ['/etc/teleagent/resource-admission.json', encode(profile())],
     ['/proc/sys/kernel/hostname', 'hermes\n'],
@@ -236,6 +237,7 @@ function kernelFixture(t) {
     'memory.events': 'low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\n', 'pids.events': 'max 0\n',
   })) texts.set(`${pool}/${name}`, text);
   const metadataOverrides = new Map();
+  metadataOverrides.set('/proc/pressure/memory', { mode: 0o100666n });
   const metadata = (filename, directory) => ({
     isDirectory: () => directory, isFile: () => !directory,
     uid: 0n, gid: 0n, mode: directory ? 0o40755n : 0o100644n,
@@ -243,10 +245,12 @@ function kernelFixture(t) {
     ...metadataOverrides.get(filename),
   });
   const descriptors = new Map();
-  const state = { fsType: 0x63677270n, namespace: 'cgroup:[123]', extraChild: false };
+  const state = { fsType: 0x63677270n, procType: 0x9fa0n, namespace: 'cgroup:[123]', extraChild: false };
   t.mock.method(process, 'getuid', () => 0);
   t.mock.method(process, 'geteuid', () => 0);
-  t.mock.method(fs, 'statfsSync', () => ({ type: state.fsType }));
+  t.mock.method(fs, 'statfsSync', (filename) => ({
+    type: filename === '/proc/pressure/memory' ? state.procType : state.fsType,
+  }));
   t.mock.method(fs, 'readlinkSync', (filename) => filename === '/proc/1/ns/cgroup'
     ? state.namespace : 'cgroup:[123]');
   t.mock.method(fs, 'realpathSync', (filename) => filename);
@@ -291,11 +295,13 @@ test('production collector verifies canonical root-owned cgroup evidence through
 test('production collector refuses unsafe ownership, hierarchy, namespace and missing kernel evidence', async (t) => {
   const cases = [
     ['wrong filesystem', (f) => { f.state.fsType = 0xef53n; }, 'RESOURCE_BOUNDARY_UNSAFE'],
+    ['PSI is not procfs', (f) => { f.state.procType = 0xef53n; }, 'RESOURCE_BOUNDARY_UNSAFE'],
     ['cgroup namespace differs', (f) => { f.state.namespace = 'cgroup:[other]'; }, 'RESOURCE_BOUNDARY_UNSAFE'],
     ['pool ancestor replaceable', (f) => { f.metadataOverrides.set('/sys/fs', { mode: 0o40777n }); }, 'RESOURCE_BOUNDARY_UNSAFE'],
     ['child delegated to user', (f) => { f.metadataOverrides.set(`${f.pool}/teleagent-provider.slice`, { uid: 1000n }); }, 'RESOURCE_BOUNDARY_UNSAFE'],
     ['symlink child', (f) => { f.metadataOverrides.set(`${f.pool}/teleagent-provider.slice`, { isDirectory: () => false }); }, 'RESOURCE_BOUNDARY_UNSAFE'],
     ['user-owned evidence', (f) => { f.metadataOverrides.set(`${f.pool}/memory.current`, { uid: 1000n }); }, 'RESOURCE_BOUNDARY_UNSAFE'],
+    ['writable cgroup evidence', (f) => { f.metadataOverrides.set(`${f.pool}/memory.current`, { mode: 0o100666n }); }, 'RESOURCE_BOUNDARY_UNSAFE'],
     ['unknown child', (f) => { f.state.extraChild = true; }, 'RESOURCE_POOL_TOPOLOGY_MISMATCH'],
     ['pool has direct processes', (f) => { f.texts.set(`${f.pool}/cgroup.procs`, '42\n'); }, 'RESOURCE_POOL_TOPOLOGY_MISMATCH'],
     ['unbounded CPU quota', (f) => { f.texts.set(`${f.pool}/cpu.max`, 'max 100000\n'); }, 'RESOURCE_POOL_TOPOLOGY_MISMATCH'],
