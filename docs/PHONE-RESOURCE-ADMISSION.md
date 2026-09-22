@@ -70,9 +70,9 @@ operational proof.
 
 The allocation and exact profile digest belong in the independent host release
 approval and startup verification. Root ownership alone does not establish
-external approval. Installation must add this helper to the provider libexec
-manifest and both release source closures, then repin the changed boundary.
-No manifest or authority pins are changed in this candidate.
+external approval. The integrated delivery candidate binds this helper and the
+topology observer in the provider libexec manifest and both release source
+closures. Independent installed runtime/profile acceptance remains required.
 
 ## Kernel evidence and limits of the observation
 

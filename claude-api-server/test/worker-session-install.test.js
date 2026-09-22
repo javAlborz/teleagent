@@ -29,6 +29,7 @@ const EXECUTABLE_SOURCES = new Set([
   'teleagent-provider-libexec-install',
   'teleagent-provider-runtime',
   'teleagent-provider-supervisor-client',
+  'teleagent-resource-topology-watch',
   'teleagent-session-pane-entry',
   'teleagent-worker-session-create',
   'teleagent-worker-session-install',
