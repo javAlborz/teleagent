@@ -7,6 +7,7 @@ const path = require('node:path');
 const tls = require('node:tls');
 const https = require('node:https');
 const http = require('node:http');
+const net = require('node:net');
 const { once } = require('node:events');
 const { spawnSync } = require('node:child_process');
 const { WebSocketServer } = require('ws');
@@ -67,6 +68,16 @@ function mapTls(t, target, onSecure) {
   return calls;
 }
 function client() { return new OpenAIRealtimeClient({ apiKey: 'local-test-bearer-only', instructions: 'Local fixture.' }); }
+function mapSpeech(t, target) {
+  const original = net.createConnection, connections = [];
+  t.mock.method(net, 'createConnection', (options) => {
+    assert.deepEqual(Object.keys(options), ['path']);
+    assert.ok([SOCKETS.tts, SOCKETS.stt].includes(options.path));
+    connections.push(options.path);
+    return original({ path: target });
+  });
+  return connections;
+}
 
 test('actual pinned ws factory uses Unix TLS with exact SNI/CA before sending bearer and expected upgrade', async (t) => {
   const endpoint = await server(t, 'realtime', certificates.good);
@@ -144,12 +155,7 @@ test('native Axios TTS/STT use exact separate Unix receivers, bounded methods an
       else { res.writeHead(302, { Location: 'http://127.0.0.1:9/steal' }); res.end(); }
     });
   });
-  const original = http.request, connections = [];
-  t.mock.method(http, 'request', (options, callback) => {
-    assert.ok([SOCKETS.tts, SOCKETS.stt].includes(options.socketPath));
-    connections.push(options.socketPath);
-    return original({ ...options, socketPath: endpoint.socketPath }, callback);
-  });
+  const connections = mapSpeech(t, endpoint.socketPath);
   const previous = { ...process.env };
   process.env.LEGACY_SPEECH_SERVICES_ENABLED = 'true'; process.env.HTTP_PROXY = 'http://127.0.0.1:9';
   process.env.HTTPS_PROXY = 'http://127.0.0.1:9'; process.env.ALL_PROXY = 'http://127.0.0.1:9';
@@ -173,6 +179,41 @@ test('native Axios TTS/STT use exact separate Unix receivers, bounded methods an
   assert.equal(connections.length, 4);
 });
 
+for (const revoke of [false, true]) for (const close of [false, true]) {
+test(`ninth queued speech request ${revoke ? 'refuses revoked' : 'completes admitted'} dispatch with ${close ? 'closed' : 'reusable'} original socket`, { timeout: 10000 }, async (t) => {
+  const responses = [];
+  let acceptedEight;
+  const eight = new Promise((resolve) => { acceptedEight = resolve; });
+  const endpoint = await server(t, `queued-speech-${revoke}-${close}`, null, (req, res) => {
+    req.resume(); responses.push(res); if (responses.length === 8) acceptedEight();
+    if (responses.length === 9) res.end('queued request completed');
+  });
+  const connections = mapSpeech(t, endpoint.socketPath);
+  const axios = require('axios');
+  const cancellation = new AbortController();
+  const requests = Array.from({ length: 9 }, () => axios({ method: 'POST', url: 'http://127.0.0.1:18001/v1/audio/transcriptions',
+    data: 'local-test-body', timeout: 3000, ...transport.speechRequestOptions('stt', cancellation.signal) }));
+  const settled = Promise.allSettled(requests);
+  const originalGeneration = fixture.record.generation;
+  try {
+    await eight;
+    assert.equal(connections.length, 8); assert.equal(responses.length, 8);
+    if (revoke) { fixture.record.generation = 'd'.repeat(64); fixture.publish(); }
+    if (close) responses[0].setHeader('Connection', 'close');
+    responses[0].end('slot released');
+    if (revoke) await assert.rejects(requests[8], { code: 'VOICE_EGRESS_ADMISSION_REFUSED' });
+    else assert.equal((await requests[8]).data, 'queued request completed');
+    assert.equal(connections.length, !revoke && close ? 9 : 8);
+    assert.equal(responses.length, revoke ? 8 : 9);
+    for (const res of responses.slice(1)) res.end('finish');
+    await Promise.all(requests.slice(0, 8));
+  } finally {
+    cancellation.abort(); await settled;
+    fixture.record.generation = originalGeneration; fixture.publish();
+  }
+});
+}
+
 test('shutdown closes active Unix TLS and speech requests and fences new provider work', async (t) => {
   const endpoint = await server(t, 'shutdown-tls', certificates.good);
   const websocket = new WebSocketServer({ noServer: true });
@@ -186,11 +227,7 @@ test('shutdown closes active Unix TLS and speech requests and fences new provide
   let sawRequest;
   const started = new Promise((resolve) => { sawRequest = resolve; });
   const pending = await server(t, 'shutdown-speech', null, (req) => { req.resume(); sawRequest(); });
-  const original = http.request;
-  t.mock.method(http, 'request', (options, callback) => {
-    assert.equal(options.socketPath, SOCKETS.stt);
-    return original({ ...options, socketPath: pending.socketPath }, callback);
-  });
+  mapSpeech(t, pending.socketPath);
   const previous = process.env.LEGACY_SPEECH_SERVICES_ENABLED;
   process.env.LEGACY_SPEECH_SERVICES_ENABLED = 'true';
   t.after(() => {

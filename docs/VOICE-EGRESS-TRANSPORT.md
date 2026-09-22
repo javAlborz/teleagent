@@ -54,7 +54,13 @@ with the already pinned Axios Node transport over its separate Unix socket;
 it retains the same multipart WAV/model/language/response fields,30-second
 timeout and10MiB audio/64KiB response bounds. Multipart overhead is bounded at
 64KiB beyond the existing audio maximum. Both use a private HTTP agent capped at
-eight sockets with keepalive disabled, which shutdown destroys. Test-only injected fetch behavior
+eight sockets with keepalive disabled, which shutdown destroys. Its actual
+connection factory rechecks admission and the exact Unix path when a queued
+request finally receives a slot. Node can also dispatch queued work directly
+on a freed socket despite keepalive being disabled; a prepended free handler
+rechecks admission before Node's dispatch handler and destroys a refused socket.
+Both new-connection and reused-connection queue paths therefore recheck admission.
+Test-only injected fetch behavior
 remains available to existing source tests; the entrypoint never injects it.
 No speech bearer is introduced. Plain speech HTTP still depends on the
 authenticated SSH transit and admitted private backend ownership.

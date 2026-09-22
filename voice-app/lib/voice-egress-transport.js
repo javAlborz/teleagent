@@ -1,11 +1,33 @@
 'use strict';
 const tls = require('node:tls');
 const http = require('node:http');
-const { assertVoiceEgressRuntime } = require('../../lib/voice-egress-runtime');
+const net = require('node:net');
+const { SOCKETS, assertVoiceEgressRuntime } = require('../../lib/voice-egress-runtime');
 let runtime = null;
 const shutdown = new AbortController();
 const sockets = new Set();
 const speechAgent = new http.Agent({ keepAlive: false, maxSockets: 8, maxTotalSockets: 8, maxFreeSockets: 0 });
+function speechEndpoint(options) {
+  const name = ['tts', 'stt'].find((service) => SOCKETS[service] === options.socketPath);
+  if (!name) throw new Error('speech agent receiver differs from its fixed Unix path');
+  return current().endpoint(name);
+}
+// Node can assign a freed socket directly to a queued request even with
+// keepAlive disabled. Re-admit before its built-in free handler can dispatch.
+speechAgent.prependListener('free', (socket, options) => {
+  try { speechEndpoint(options); }
+  catch { socket.destroy(); }
+});
+speechAgent.createConnection = (options, callback) => {
+  try {
+    // Agent capacity may defer this until long after request construction.
+    // Re-admit here, and never inherit host/port/proxy options into the socket.
+    return net.createConnection({ path: speechEndpoint(options) });
+  } catch (error) {
+    process.nextTick(callback, error);
+    return undefined;
+  }
+};
 function configureVoiceEgress(value) {
   assertVoiceEgressRuntime(value);
   if (shutdown.signal.aborted || (runtime && runtime !== value)) throw new Error('voice egress generation cannot be replaced');
