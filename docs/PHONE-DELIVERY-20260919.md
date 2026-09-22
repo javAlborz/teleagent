@@ -1,6 +1,9 @@
 # Phone delivery work — 2026-09-19
 
 The owner requested fast-tracked delivery of a fully functional phone setup.
+September 22 continuation and the current delivery order are recorded in
+[PHONE-DELIVERY-20260922.md](PHONE-DELIVERY-20260922.md). The validation counts
+below remain the historical September 19 results.
 This work continues from `37d3353` in a clean application worktree and from
 current homelab main plus the missing `69637fd5` worker-contract change in a
 separate infrastructure worktree. The live dirty application tree is preserved.
@@ -23,10 +26,11 @@ workspace, completing a scoped provider task, and hearing its verified result.
 | Work | Source | Independent review | Installed | Real acceptance |
 | --- | --- | --- | --- | --- |
 | Existing cancellation/global-admission corrections | September 10 checkpoint | Historical exact-source review | No | No |
-| Privileged lifecycle coordination | Candidate implemented; cross-repository integration under validation | Pending | No | Disposable systemd identity/credential probe passed; full release commissioning pending |
-| Specific truthful inspection failure | Candidate implemented | Pending | No | Latest real call retained as acceptance case |
-| Receiver-safe media/controller transport | Remaining | Pending | No | No |
-| Aggregate resource and bounded storage profile | Remaining | Pending | No | No |
+| Privileged lifecycle coordination | Candidate implemented; cross-repository integration validated | Reviewed September 22 | No | Disposable systemd identity/credential probe passed; full release commissioning pending |
+| Specific truthful inspection failure | Candidate implemented | Reviewed September 22 | No | Latest real call retained as acceptance case |
+| Protected controller transport | Implemented with separate PBX stop listener | Reviewed September 22; URL-scope follow-up added | No | No |
+| Receiver-safe media transport | Host network manager and Docker anchors implemented; application integration ongoing | Review fixes ongoing | No | Disconnected kernel policy and routing probes passed; Docker/phone commissioning pending |
+| Aggregate resource and bounded storage profile | Admission and persistent nested event correction implemented; transient lifecycle observation and allocation/storage commissioning remain | Persistent-descendant correction reviewed September 22 | No | No |
 | Real PBX adapter and approval/first-effect integration | Remaining | Pending | No | No |
 | Trusted release, crash-safe activation and fresh rollback | Remaining | Pending | No | No |
 | Attended feature matrix and final five-hour trial | After commissioning | Pending | No | No |
@@ -37,9 +41,10 @@ units, installers, root helper metadata checks, and release assertions move
 together. Updated candidate pins are build inputs; they are not independent
 host activation approval.
 
-Pending owner input: exact useful workspace/session scope, Anthropic/OpenAI
-project selection and daily spending limits, and permission to start a separate
-independent review agent. These questions do not block ordinary implementation.
+The owner approved proceeding with all work, including independent review, on
+September 22. Pending inputs are the exact useful workspace/session scope and
+Anthropic/OpenAI project selection and daily spending limits. These questions
+do not block ordinary implementation.
 Hermes reboot remains deferred, and the live execution lock remains set until
 an actual reviewed activation procedure is ready.
 

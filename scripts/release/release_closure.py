@@ -92,6 +92,7 @@ BOUND_SOURCE_PATHS = (
     "deploy/privileged-action/teleagent-privileged-action.tmpfiles",
     "deploy/voice-stack/drachtio.conf.xml.template",
     "deploy/voice-stack/freeswitch-event-socket.conf.xml.template",
+    "deploy/voice-stack/media-application-boundary.js",
     "deploy/voice-stack/teleagent-sip-local-peer-fence",
     "deploy/voice-stack/teleagent-sip-local-peer-fence-install",
     "deploy/voice-stack/teleagent-sip-local-peer-fence.bundle",
