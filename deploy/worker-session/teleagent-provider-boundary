@@ -7,6 +7,7 @@ const http = require('node:http');
 const net = require('node:net');
 const path = require('node:path');
 const { spawn, spawnSync } = require('node:child_process');
+const { assertResourceAdmission } = require('./teleagent-resource-admission');
 
 const SYSTEMD_RUN = '/usr/bin/systemd-run';
 const SYSTEMCTL = '/usr/bin/systemctl';
@@ -1929,6 +1930,7 @@ function listProviderUnits(provider, { runSystemctl = systemctl } = {}) {
 const PROVIDER_LAUNCH_OPERATIONS = Object.freeze({
   hasCancellationTombstone,
   createGlobalLaunchLock,
+  assertResourceAdmission,
   validateProviderStorageIsolation,
   assertGlobalProviderLaunchUnlocked,
   validateWorkspaceAnchor,
@@ -1989,6 +1991,7 @@ async function main(argv = process.argv.slice(2), environment = process.env, {
     const {
       hasCancellationTombstone,
       createGlobalLaunchLock,
+      assertResourceAdmission,
       validateProviderStorageIsolation,
       assertGlobalProviderLaunchUnlocked,
       validateWorkspaceAnchor,
@@ -2017,6 +2020,9 @@ async function main(argv = process.argv.slice(2), environment = process.env, {
       checkProviderCli(input.provider);
       validateWorkspaceAnchor(input.workspace);
       validateProviderWorkspace(input.workspace);
+      // Only new work is gated. Panic, cancellation and cleanup must remain
+      // usable when the pool is full or its evidence cannot be inspected.
+      await assertResourceAdmission();
       assertGlobalProviderLaunchUnlocked();
       credentialPath = createCapabilityFile(input.launchId, capability);
       readinessPath = createReadinessFile(input.provider, input.launchId);
@@ -2037,6 +2043,10 @@ async function main(argv = process.argv.slice(2), environment = process.env, {
         mode: input.mode,
       });
       if (registration?.registered !== true) fail('provider launch capability was not registered');
+      if (hasCancellationTombstone(unit)) fail('provider launch was canceled before start', 75);
+      // Registration can await another process. Resample immediately before
+      // the first model-start effect while the same global fence is held.
+      await assertResourceAdmission();
       if (hasCancellationTombstone(unit)) fail('provider launch was canceled before start', 75);
       assertGlobalProviderLaunchUnlocked();
       const invocation = buildSystemdRunInvocation({ ...input, credentialPath, readinessPath });

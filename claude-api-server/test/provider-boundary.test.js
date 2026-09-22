@@ -643,6 +643,7 @@ function launchTransactionFixture(t) {
       launchOperations: {
         hasCancellationTombstone: () => false,
         createGlobalLaunchLock: (id) => boundary.createGlobalLaunchLock(id, options),
+        assertResourceAdmission: async () => {},
         validateProviderStorageIsolation: () => {},
         assertGlobalProviderLaunchUnlocked: () => {},
         validateWorkspaceAnchor: () => {},
@@ -679,6 +680,63 @@ function launchTransactionFixture(t) {
   };
   return { directory, options, lockPath, calls, launchIds, run, defaultControl };
 }
+
+test('resource refusal releases a never-started fence without registering a capability', async (t) => {
+  const fixture = launchTransactionFixture(t);
+  await assert.rejects(fixture.run('claude', {
+    operations: { assertResourceAdmission: async () => { throw new Error('RESOURCE_HOST_HEADROOM'); } },
+  }), /RESOURCE_HOST_HEADROOM/);
+  assert.deepEqual(fixture.calls.map((call) => call.action), ['release-lock']);
+  assert.equal(fs.existsSync(fixture.lockPath), false);
+});
+
+test('pressure appearing during registration revokes before releasing the global fence', async (t) => {
+  const fixture = launchTransactionFixture(t);
+  let observations = 0;
+  await assert.rejects(fixture.run('claude', {
+    operations: { assertResourceAdmission: async () => {
+      assert.equal(fs.existsSync(fixture.lockPath), true);
+      observations += 1;
+      if (observations === 2) throw new Error('RESOURCE_MEMORY_PRESSURE');
+    } },
+  }), /RESOURCE_MEMORY_PRESSURE/);
+  assert.equal(observations, 2);
+  assert.deepEqual(fixture.calls.map((call) => call.action), ['register', 'revoke', 'release-lock']);
+  assert.equal(fs.existsSync(fixture.lockPath), false);
+});
+
+test('resource refusal with ambiguous capability cleanup keeps both providers fenced', async (t) => {
+  const fixture = launchTransactionFixture(t);
+  let observations = 0;
+  await assert.rejects(fixture.run('claude', {
+    control: async (frame) => frame.action === 'register'
+      ? { registered: true } : { persisted: true, quiesced: false },
+    operations: { assertResourceAdmission: async () => {
+      observations += 1;
+      if (observations === 2) throw new Error('RESOURCE_MEMORY_PRESSURE');
+    } },
+  }), /RESOURCE_MEMORY_PRESSURE/);
+  assert.equal(fs.existsSync(fixture.lockPath), true);
+  await assert.rejects(fixture.run('codex'), /global workspace lock/);
+  assert.deepEqual(fixture.calls.map((call) => call.action), ['register', 'revoke']);
+});
+
+test('cancellation during the final resource observation refuses model start', async (t) => {
+  const fixture = launchTransactionFixture(t);
+  let observations = 0;
+  let canceled = false;
+  await assert.rejects(fixture.run('claude', {
+    operations: {
+      assertResourceAdmission: async () => {
+        observations += 1;
+        if (observations === 2) canceled = true;
+      },
+      hasCancellationTombstone: () => canceled,
+    },
+  }), /canceled before start/);
+  assert.deepEqual(fixture.calls.map((call) => call.action), ['register', 'revoke', 'release-lock']);
+  assert.equal(fs.existsSync(fixture.lockPath), false);
+});
 
 test('uncertain model or egress cleanup retains the fence against a different provider', async (t) => {
   const cases = [

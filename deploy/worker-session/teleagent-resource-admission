@@ -1,0 +1,332 @@
+#!/usr/local/libexec/teleagent-node
+'use strict';
+
+// Host-owned admission policy. This helper neither creates cgroups nor changes
+// limits. Call it only while holding the root global provider-launch fence.
+const fs = require('node:fs');
+const path = require('node:path');
+const crypto = require('node:crypto');
+const { setTimeout: delay } = require('node:timers/promises');
+
+const PROFILE = '/etc/teleagent/resource-admission.json';
+const CGROUP_ROOT = '/sys/fs/cgroup';
+const POOL = `${CGROUP_ROOT}/teleagent.slice`;
+const RECOVERY = 'teleagent-recovery.slice';
+const PROVIDER = 'teleagent-provider.slice';
+const MODEL_MEMORY_MAX = 3n * 1024n ** 3n;
+const MODEL_TASKS_MAX = 384n;
+const MAX_BYTES = 16384;
+const UINT64_MAX = (1n << 64n) - 1n;
+const REQUIRED_CHILDREN = Object.freeze([
+  'teleagent-agent-controller.service', 'teleagent-provider.slice',
+  'teleagent-voice.slice', 'teleagent-worker-session.service',
+]);
+
+function refuse(code) {
+  const error = new Error(`New provider work refused: ${code}`);
+  error.code = code;
+  error.exitCode = 75;
+  throw error;
+}
+
+function exactKeys(value, keys) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) ||
+      Object.keys(value).sort().join('\n') !== [...keys].sort().join('\n')) {
+    refuse('RESOURCE_PROFILE_INVALID');
+  }
+}
+
+function integer(value, code = 'RESOURCE_EVIDENCE_INVALID') {
+  if (typeof value !== 'string' || !/^(?:0|[1-9][0-9]{0,19})$/u.test(value)) refuse(code);
+  const number = BigInt(value);
+  if (number > UINT64_MAX) refuse(code);
+  return number;
+}
+
+function scalar(text) {
+  if (typeof text !== 'string' || !text.endsWith('\n')) refuse('RESOURCE_EVIDENCE_INVALID');
+  return integer(text.slice(0, -1));
+}
+
+function validateProfile(text) {
+  let profile;
+  try { profile = JSON.parse(text); } catch { refuse('RESOURCE_PROFILE_INVALID'); }
+  // One canonical encoding rejects duplicate keys, trailing values and hidden
+  // noncanonical number forms. No caller/environment-selected policy exists.
+  if (`${JSON.stringify(profile)}\n` !== text) refuse('RESOURCE_PROFILE_INVALID');
+  exactKeys(profile, [
+    'schema', 'hostname', 'pool', 'normalChildren', 'recovery',
+    'hostReserveBytes', 'launchMemoryHeadroomBytes', 'launchTasksHeadroom',
+    'maxSomePressureBasisPoints', 'maxFullPressureBasisPoints',
+  ]);
+  if (profile.schema !== 'teleagent.resource-admission.v1' || profile.hostname !== 'hermes') {
+    refuse('RESOURCE_PROFILE_INVALID');
+  }
+  exactKeys(profile.pool, ['memoryHighBytes', 'memoryMaxBytes', 'tasksMax',
+    'cpuQuotaMicros', 'cpuPeriodMicros']);
+  exactKeys(profile.recovery, ['memoryMaxBytes', 'tasksMax']);
+  const numeric = (value) => integer(value, 'RESOURCE_PROFILE_INVALID');
+  const pool = Object.fromEntries(Object.entries(profile.pool).map(([key, value]) => [key, numeric(value)]));
+  const recovery = Object.fromEntries(Object.entries(profile.recovery).map(([key, value]) => [key, numeric(value)]));
+  const hostReserve = numeric(profile.hostReserveBytes);
+  const launchMemory = numeric(profile.launchMemoryHeadroomBytes);
+  const launchTasks = numeric(profile.launchTasksHeadroom);
+  if (Object.values(pool).some((value) => value === 0n) ||
+      Object.values(recovery).some((value) => value === 0n) ||
+      pool.memoryHighBytes >= pool.memoryMaxBytes ||
+      pool.cpuPeriodMicros < 1000n || pool.cpuPeriodMicros > 1000000n ||
+      launchMemory < MODEL_MEMORY_MAX || launchTasks < MODEL_TASKS_MAX ||
+      hostReserve < recovery.memoryMaxBytes) refuse('RESOURCE_PROFILE_INVALID');
+  const some = profile.maxSomePressureBasisPoints;
+  const full = profile.maxFullPressureBasisPoints;
+  if (![some, full].every((value) => Number.isSafeInteger(value) && value >= 0 && value < 10000) ||
+      full > some) refuse('RESOURCE_PROFILE_INVALID');
+  if (!Array.isArray(profile.normalChildren) || profile.normalChildren.length < 4 ||
+      profile.normalChildren.length > 16) refuse('RESOURCE_PROFILE_INVALID');
+  const children = new Map();
+  let memorySum = recovery.memoryMaxBytes;
+  let tasksSum = recovery.tasksMax;
+  for (const child of profile.normalChildren) {
+    exactKeys(child, ['name', 'memoryMaxBytes', 'tasksMax']);
+    // A direct child slice has exactly one dash after teleagent; systemd puts
+    // additional dash-separated slice components in deeper ancestors.
+    if (typeof child.name !== 'string' || child.name === RECOVERY ||
+        !/^(?:teleagent-[a-z0-9]+\.slice|teleagent-[a-z0-9-]+\.service)$/u.test(child.name) ||
+        children.has(child.name)) refuse('RESOURCE_PROFILE_INVALID');
+    const memory = numeric(child.memoryMaxBytes);
+    const tasks = numeric(child.tasksMax);
+    if (memory === 0n || tasks === 0n) refuse('RESOURCE_PROFILE_INVALID');
+    children.set(child.name, { memory, tasks });
+    memorySum += memory;
+    tasksSum += tasks;
+  }
+  if (REQUIRED_CHILDREN.some((name) => !children.has(name)) ||
+      memorySum > pool.memoryMaxBytes || tasksSum > pool.tasksMax ||
+      children.get(PROVIDER).memory < launchMemory || children.get(PROVIDER).tasks < launchTasks) {
+    refuse('RESOURCE_PROFILE_INVALID');
+  }
+  return { profile, pool, recovery, children, hostReserve, launchMemory, launchTasks,
+    digest: crypto.createHash('sha256').update(text).digest('hex') };
+}
+
+function parsePressure(text) {
+  if (typeof text !== 'string') refuse('RESOURCE_EVIDENCE_INVALID');
+  const lines = text.split('\n');
+  if (lines.length !== 3 || lines[2] !== '') refuse('RESOURCE_EVIDENCE_INVALID');
+  const result = Object.fromEntries(['some', 'full'].map((kind, index) => {
+    const match = lines[index].match(new RegExp(
+      `^${kind} avg10=(0|[1-9][0-9]{0,2})\\.([0-9]{2}) avg60=(0|[1-9][0-9]{0,2})\\.([0-9]{2}) avg300=(0|[1-9][0-9]{0,2})\\.([0-9]{2}) total=(0|[1-9][0-9]{0,19})$`, 'u'
+    ));
+    if (!match) refuse('RESOURCE_EVIDENCE_INVALID');
+    const averages = [1, 3, 5].map((offset) => Number(match[offset]) * 100 + Number(match[offset + 1]));
+    if (averages.some((value) => value > 10000)) refuse('RESOURCE_EVIDENCE_INVALID');
+    return [kind, { averages, total: integer(match[7]) }];
+  }));
+  if (result.full.total > result.some.total || result.full.averages.some((value, index) =>
+    value > result.some.averages[index])) refuse('RESOURCE_EVIDENCE_INVALID');
+  return result;
+}
+
+function parseEvents(text, required) {
+  if (typeof text !== 'string' || !text.endsWith('\n')) refuse('RESOURCE_EVIDENCE_INVALID');
+  const fields = new Map();
+  for (const line of text.slice(0, -1).split('\n')) {
+    const match = line.match(/^([a-z_]+) (0|[1-9][0-9]{0,19})$/u);
+    if (!match || fields.has(match[1])) refuse('RESOURCE_EVIDENCE_INVALID');
+    fields.set(match[1], integer(match[2]));
+  }
+  if (required.some((key) => !fields.has(key))) refuse('RESOURCE_EVIDENCE_INVALID');
+  return fields;
+}
+
+function parseMeminfo(text) {
+  if (typeof text !== 'string' || !text.endsWith('\n')) refuse('RESOURCE_EVIDENCE_INVALID');
+  const fields = new Map();
+  for (const line of text.slice(0, -1).split('\n')) {
+    const match = line.match(/^([A-Za-z_()][A-Za-z_()0-9]*): +([0-9]+)( kB)?$/u);
+    if (!match || fields.has(match[1])) refuse('RESOURCE_EVIDENCE_INVALID');
+    fields.set(match[1], { value: integer(match[2]), unit: match[3] });
+  }
+  const total = fields.get('MemTotal');
+  const available = fields.get('MemAvailable');
+  if (!total || !available || total.unit !== ' kB' || available.unit !== ' kB' ||
+      total.value === 0n || available.value > total.value) refuse('RESOURCE_EVIDENCE_INVALID');
+  return { total: total.value * 1024n, available: available.value * 1024n };
+}
+
+function directoryIdentity(directory) {
+  const metadata = fs.lstatSync(directory, { bigint: true });
+  if (!metadata.isDirectory() || metadata.uid !== 0n || metadata.gid !== 0n ||
+      (metadata.mode & 0o7022n) !== 0n || fs.realpathSync(directory) !== directory) {
+    refuse('RESOURCE_BOUNDARY_UNSAFE');
+  }
+  return `${metadata.dev}:${metadata.ino}`;
+}
+
+function boundedRootRead(filename) {
+  const descriptor = fs.openSync(filename, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+  try {
+    const metadata = fs.fstatSync(descriptor, { bigint: true });
+    if (!metadata.isFile() || metadata.uid !== 0n || metadata.gid !== 0n ||
+        (metadata.mode & 0o7022n) !== 0n) refuse('RESOURCE_BOUNDARY_UNSAFE');
+    const buffer = Buffer.alloc(MAX_BYTES + 1);
+    let count = 0;
+    for (;;) {
+      const amount = fs.readSync(descriptor, buffer, count, buffer.length - count, null);
+      count += amount;
+      if (count > MAX_BYTES) refuse('RESOURCE_EVIDENCE_INVALID');
+      if (amount === 0) break;
+    }
+    const after = fs.fstatSync(descriptor, { bigint: true });
+    if (metadata.dev !== after.dev || metadata.ino !== after.ino || metadata.mode !== after.mode ||
+        metadata.uid !== after.uid || metadata.gid !== after.gid ||
+        metadata.mtimeNs !== after.mtimeNs || metadata.ctimeNs !== after.ctimeNs) {
+      refuse('RESOURCE_BOUNDARY_CHANGED');
+    }
+    const bytes = buffer.subarray(0, count);
+    const text = bytes.toString('utf8');
+    if (!Buffer.from(text).equals(bytes)) refuse('RESOURCE_EVIDENCE_INVALID');
+    return text;
+  } finally { fs.closeSync(descriptor); }
+}
+
+function readProductionProfile() {
+  for (const directory of ['/etc', '/etc/teleagent']) directoryIdentity(directory);
+  return boundedRootRead(PROFILE);
+}
+
+function collectSnapshot(policy) {
+  if (process.getuid() !== 0 || process.geteuid() !== 0) refuse('RESOURCE_BOUNDARY_UNSAFE');
+  if (fs.statfsSync(CGROUP_ROOT, { bigint: true }).type !== 0x63677270n ||
+      fs.readlinkSync('/proc/self/ns/cgroup') !== fs.readlinkSync('/proc/1/ns/cgroup')) {
+    refuse('RESOURCE_BOUNDARY_UNSAFE');
+  }
+  for (const directory of ['/sys', '/sys/fs', CGROUP_ROOT]) directoryIdentity(directory);
+  const boot = boundedRootRead('/proc/sys/kernel/random/boot_id');
+  if (!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}\n$/u.test(boot) ||
+      boundedRootRead('/proc/sys/kernel/hostname') !== `${policy.profile.hostname}\n`) {
+    refuse('RESOURCE_HOST_MISMATCH');
+  }
+  const poolIdentity = directoryIdentity(POOL);
+  const expected = [...policy.children.keys(), RECOVERY].sort();
+  const entries = fs.readdirSync(POOL, { withFileTypes: true });
+  if (entries.some((entry) => entry.isSymbolicLink()) ||
+      entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort().join('\n') !== expected.join('\n')) {
+    refuse('RESOURCE_POOL_TOPOLOGY_MISMATCH');
+  }
+  const readGroup = (directory) => {
+    const identity = directoryIdentity(directory);
+    const read = (name) => boundedRootRead(path.join(directory, name));
+    if (read('cgroup.type') !== 'domain\n') refuse('RESOURCE_EVIDENCE_INVALID');
+    const result = {
+      identity, memory: scalar(read('memory.current')), high: scalar(read('memory.high')),
+      max: scalar(read('memory.max')), swap: scalar(read('memory.swap.current')),
+      swapMax: scalar(read('memory.swap.max')), tasks: scalar(read('pids.current')),
+      tasksMax: scalar(read('pids.max')),
+      memoryEvents: parseEvents(read('memory.events'), ['high', 'max', 'oom', 'oom_kill']),
+      tasksEvents: parseEvents(read('pids.events'), ['max']), pressure: parsePressure(read('memory.pressure')),
+    };
+    if (identity !== directoryIdentity(directory)) refuse('RESOURCE_BOUNDARY_CHANGED');
+    return result;
+  };
+  // Child MemoryHigh can legitimately be unbounded. Only the commissioned
+  // pool's admission threshold is authoritative, so normalize it separately.
+  const children = new Map();
+  for (const name of expected) {
+    const directory = path.join(POOL, name);
+    const identity = directoryIdentity(directory);
+    const read = (field) => boundedRootRead(path.join(directory, field));
+    if (read('cgroup.type') !== 'domain\n') refuse('RESOURCE_EVIDENCE_INVALID');
+    children.set(name, { identity, memory: scalar(read('memory.current')), max: scalar(read('memory.max')),
+      swap: scalar(read('memory.swap.current')), swapMax: scalar(read('memory.swap.max')),
+      tasks: scalar(read('pids.current')), tasksMax: scalar(read('pids.max')) });
+    if (identity !== directoryIdentity(directory)) refuse('RESOURCE_BOUNDARY_CHANGED');
+  }
+  const pool = readGroup(POOL);
+  const cpu = boundedRootRead(path.join(POOL, 'cpu.max'));
+  if (cpu !== `${policy.pool.cpuQuotaMicros} ${policy.pool.cpuPeriodMicros}\n` ||
+      boundedRootRead(path.join(POOL, 'cgroup.procs')) !== '' ||
+      poolIdentity !== directoryIdentity(POOL)) refuse('RESOURCE_POOL_TOPOLOGY_MISMATCH');
+  return { boot, pool, children, meminfo: parseMeminfo(boundedRootRead('/proc/meminfo')),
+    hostPressure: parsePressure(boundedRootRead('/proc/pressure/memory')) };
+}
+
+function assessSnapshot(policy, sample) {
+  const pool = sample.pool;
+  if (pool.high !== policy.pool.memoryHighBytes || pool.max !== policy.pool.memoryMaxBytes ||
+      pool.tasksMax !== policy.pool.tasksMax || pool.swapMax !== 0n || pool.swap !== 0n) {
+    refuse('RESOURCE_POOL_LIMIT_MISMATCH');
+  }
+  for (const [name, limits] of [...policy.children, [RECOVERY,
+    { memory: policy.recovery.memoryMaxBytes, tasks: policy.recovery.tasksMax }]]) {
+    const child = sample.children.get(name);
+    if (!child || child.max !== limits.memory || child.tasksMax !== limits.tasks ||
+        child.swapMax !== 0n || child.swap !== 0n) refuse('RESOURCE_CHILD_LIMIT_MISMATCH');
+  }
+  const provider = sample.children.get(PROVIDER);
+  if (sample.meminfo.total < policy.pool.memoryMaxBytes + policy.hostReserve ||
+      sample.meminfo.available < policy.launchMemory + policy.hostReserve) refuse('RESOURCE_HOST_HEADROOM');
+  if (pool.memory + policy.launchMemory > pool.high ||
+      pool.memory + policy.launchMemory + policy.recovery.memoryMaxBytes > pool.max ||
+      pool.tasks + policy.launchTasks + policy.recovery.tasksMax > pool.tasksMax ||
+      provider.memory + policy.launchMemory > provider.max ||
+      provider.tasks + policy.launchTasks > provider.tasksMax) refuse('RESOURCE_POOL_HEADROOM');
+  for (const pressure of [sample.hostPressure, pool.pressure]) {
+    for (const [kind, threshold] of [['some', policy.profile.maxSomePressureBasisPoints],
+      ['full', policy.profile.maxFullPressureBasisPoints]]) {
+      if (pressure[kind].averages.some((average) => average > threshold)) refuse('RESOURCE_MEMORY_PRESSURE');
+    }
+  }
+}
+
+function assessInterval(policy, before, after, elapsedNs) {
+  if (elapsedNs < 200000000n || elapsedNs > 2000000000n || before.boot !== after.boot ||
+      before.pool.identity !== after.pool.identity ||
+      [...before.children].some(([name, value]) => value.identity !== after.children.get(name)?.identity)) {
+    refuse('RESOURCE_BOUNDARY_CHANGED');
+  }
+  for (const events of ['memoryEvents', 'tasksEvents']) {
+    const first = before.pool[events];
+    const second = after.pool[events];
+    if (first.size !== second.size || [...first].some(([name, value]) => second.get(name) !== value)) {
+      refuse('RESOURCE_RECENT_LIMIT_EVENT');
+    }
+  }
+  for (const pair of [[before.hostPressure, after.hostPressure], [before.pool.pressure, after.pool.pressure]]) {
+    for (const [kind, threshold] of [['some', policy.profile.maxSomePressureBasisPoints],
+      ['full', policy.profile.maxFullPressureBasisPoints]]) {
+      const delta = pair[1][kind].total - pair[0][kind].total;
+      if (delta < 0n || delta * 1000n * 10000n > elapsedNs * BigInt(threshold)) {
+        refuse('RESOURCE_MEMORY_PRESSURE');
+      }
+    }
+  }
+}
+
+async function assertResourceAdmission({
+  readProfile = readProductionProfile, snapshot = collectSnapshot,
+  sleep = delay, monotonic = () => process.hrtime.bigint(),
+} = {}) {
+  try {
+    const text = readProfile();
+    const policy = validateProfile(text);
+    const started = monotonic();
+    const before = snapshot(policy);
+    assessSnapshot(policy, before);
+    await sleep(250);
+    const after = snapshot(policy);
+    const finished = monotonic();
+    assessSnapshot(policy, after);
+    assessInterval(policy, before, after, finished - started);
+    if (readProfile() !== text) refuse('RESOURCE_BOUNDARY_CHANGED');
+    return Object.freeze({ admitted: true, profileSha256: policy.digest, globallyAdmittedJobs: 1 });
+  } catch (error) {
+    if (error?.code?.startsWith('RESOURCE_')) throw error;
+    // Never expose paths, kernel diagnostics or an accidental upstream error.
+    refuse('RESOURCE_EVIDENCE_UNAVAILABLE');
+  }
+}
+
+module.exports = { assertResourceAdmission, validateProfile, parsePressure, parseEvents,
+  parseMeminfo, assessSnapshot, assessInterval, collectSnapshot, readProductionProfile,
+  MODEL_MEMORY_MAX, MODEL_TASKS_MAX };
