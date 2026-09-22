@@ -56,6 +56,24 @@ jobs:
           }, sort_keys=True))
           PY
 
+      - name: Test inert hosted kernel probe guards
+        shell: /usr/bin/bash --noprofile --norc -euo pipefail {0}
+        run: /usr/bin/python3 -I -B -m unittest discover -s scripts/ci -p 'test_hosted_kernel_probe.py'
+
+      - name: Observe isolated hosted kernel primitives
+        timeout-minutes: 2
+        shell: /usr/bin/bash --noprofile --norc -euo pipefail {0}
+        env:
+          CI_PROBE_REVISION: ${{ github.sha }}
+        run: |
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = Linux
+          sudo -n -- /usr/bin/env -i \
+            PATH=/usr/bin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 \
+            GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted RUNNER_OS=Linux \
+            CI_PROBE_REVISION="$CI_PROBE_REVISION" \
+            /usr/bin/python3 -I -B scripts/ci/hosted-kernel-probe.py --run-hosted
+
       - name: Install Node 24
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
