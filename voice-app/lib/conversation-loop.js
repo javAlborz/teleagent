@@ -19,6 +19,7 @@ const fs = require('fs');
 const path = require('path');
 const { createHash } = require('node:crypto');
 const { redactAudioForkSecrets } = require('./audio-fork');
+const { playbackUrl } = require('./media-playback-urls');
 const {
   getAgentTimeoutSeconds,
   getHoldMusicEnabled,
@@ -30,9 +31,7 @@ const READY_BEEP_URL = 'http://127.0.0.1:3000/static/ready-beep.wav';
 const GOTIT_BEEP_URL = 'http://127.0.0.1:3000/static/gotit-beep.wav';
 const STATIC_AUDIO_DIR = path.join(__dirname, '..', 'static');
 const HOLD_MUSIC_DIR = path.join(STATIC_AUDIO_DIR, 'hold-music');
-const HOLD_MUSIC_URL_PREFIX = 'http://127.0.0.1:3000/static/hold-music';
 const HOLD_MUSIC_FALLBACK_FILE = path.join(STATIC_AUDIO_DIR, 'hold-music.mp3');
-const HOLD_MUSIC_FALLBACK_URL = 'http://127.0.0.1:3000/static/hold-music.mp3';
 const LOCAL_HTTP_PORT = Number.parseInt(process.env.HTTP_PORT || '3000', 10) || 3000;
 const OUTBOUND_API_URL = `http://127.0.0.1:${LOCAL_HTTP_PORT}/api/outbound-call`;
 let nextHoldMusicFileIndex = 0;
@@ -85,7 +84,7 @@ function getNextHoldMusicUrl() {
       const selectedIndex = nextHoldMusicFileIndex % files.length;
       nextHoldMusicFileIndex = (selectedIndex + 1) % files.length;
       const selected = files[selectedIndex];
-      return `${HOLD_MUSIC_URL_PREFIX}/${encodeURIComponent(selected)}`;
+      return playbackUrl('static', `hold-music/${selected}`);
     }
   } catch (error) {
     if (error.code !== 'ENOENT') {
@@ -97,7 +96,7 @@ function getNextHoldMusicUrl() {
   }
 
   if (fs.existsSync(HOLD_MUSIC_FALLBACK_FILE)) {
-    return HOLD_MUSIC_FALLBACK_URL;
+    return playbackUrl('static', 'hold-music.mp3');
   }
 
   return null;
@@ -781,7 +780,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
       // READY BEEP: Signal "your turn to speak"
       // ============================================
       try {
-        if (callActive) await endpoint.play(READY_BEEP_URL);
+        if (callActive) await endpoint.play(playbackUrl('static', 'ready-beep.wav'));
       } catch (e) {
         if (!callActive) break;
         logger.warn('Ready beep failed', { callUuid, error: e.message });
@@ -822,7 +821,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
       // GOT-IT BEEP: Signal "I heard you, processing"
       // ============================================
       try {
-        if (callActive) await endpoint.play(GOTIT_BEEP_URL);
+        if (callActive) await endpoint.play(playbackUrl('static', 'gotit-beep.wav'));
       } catch (e) {
         if (!callActive) break;
         logger.warn('Got-it beep failed', { callUuid, error: e.message });

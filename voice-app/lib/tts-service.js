@@ -165,10 +165,8 @@ async function generateSpeech(text, voiceId = DEFAULT_VOICE_ID) {
       textLength: text.length
     });
 
-    // Return HTTP URL (assumes audio-temp is served via HTTP)
-    // Format: http://localhost:PORT/audio/filename.mp3
-    // The HTTP server setup is handled elsewhere
-    const audioUrl = `http://127.0.0.1:3000/audio-files/${filename}`;
+    // FreeSWITCH fetches generated media from the admitted private receiver.
+    const audioUrl = require('./media-playback-urls').playbackUrl('audio-files', filename);
 
     return audioUrl;
 

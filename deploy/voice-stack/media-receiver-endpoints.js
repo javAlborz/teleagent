@@ -168,7 +168,7 @@ function renderReceiverEndpoints(networkConfig, applicationContract) {
     };
     projection.privateHttpAudio = {
       host: http.address, port: http.ports.start, baseUrl: `http://${http.address}:${http.ports.start}`,
-      allowedPeer: fsSip.address, methods: ['GET'], routes: ['/audio-files/:filename', '/static/*'],
+      allowedPeer: fsSip.address, methods: ['GET', 'HEAD'], routes: ['/audio-files/:filename', '/static/*'],
       controlRoutesPermitted: false, listenWildcardPermitted: false,
     };
     projection.controlHttp = { host: '127.0.0.1', port: 3000 };

@@ -74,7 +74,7 @@ runtime. Two concrete missing connections were found while mapping callers:
    voice HTTP3000. `http-server.js`, `tts-service.js` and
    `conversation-loop.js` contain loopback/localhost URL assumptions. The
    proposed v2 receiver is the **voice service address, TCP3000**, exposing only
-   media GET routes to the exact FreeSWITCH peer. Simply rebinding today's
+   media GET/HEAD routes to the exact FreeSWITCH peer. Simply rebinding today's
    mixed HTTP API listener would be insufficient: media routes currently deny
    non-loopback clients, and control/outbound routes must not be exposed to the
    media peer. Use a dedicated media receiver or an explicitly separated route
@@ -95,12 +95,16 @@ v1 evidence cannot be reused.
 
 For v1, the renderer keeps `reverseEsl` and `privateHttpAudio` null. For v2 it
 emits explicit reverse ESL bind/advertisement options and media-only HTTP
-metadata. The media HTTP receiver is GET-only on the exact voice service IP;
+metadata. The media HTTP receiver permits GET/HEAD on the exact voice service IP;
 its control counterpart remains a separate `127.0.0.1:3000` bind. Wildcard binds,
-control/API dispatch and redirects are prohibited. Actual listeners must verify
-accepted socket source and local destination against the admitted generation.
-These consumer implementations remain required; `readyToLaunch` stays false
-and the launcher's unconditional gate stays intact for both versions.
+control/API dispatch and redirects are prohibited. HTTP verifies accepted socket
+source and local destination against the admitted generation. The native reverse
+ESL listener relies on independently verified v2 kernel policy for cross-namespace
+FreeSWITCH admission. The same-authority voice workload can connect locally via
+loopback and already holds the ESL control credential; media receipt is never
+independent handset approval. See [the dormant runtime consumers](MEDIA-RECEIVER-RUNTIME.md).
+`readyToLaunch` stays false and the launcher's unconditional gate stays intact
+for both versions.
 
 The remaining work also includes Realtime WSS and legacy STT/TTS egress,
 protected runtime/credential consumers, readiness and panic transport, exact
