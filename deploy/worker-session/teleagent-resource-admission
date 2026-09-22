@@ -320,15 +320,22 @@ async function assertResourceAdmission({
   try {
     const text = readProfile();
     const policy = validateProfile(text);
-    const started = monotonic();
+    const collectionStarted = monotonic();
     const before = snapshot(policy);
+    // Use only the wait between snapshots as the pressure denominator. Every
+    // counter's actual observation interval contains that wait, so slow
+    // evidence reads cannot dilute stalls. The ratio is conservative.
+    const started = monotonic();
     assessSnapshot(policy, before);
     await sleep(250);
+    const observationEnded = monotonic();
     const after = snapshot(policy);
-    const finished = monotonic();
     assessSnapshot(policy, after);
-    assessInterval(policy, before, after, finished - started);
+    assessInterval(policy, before, after, observationEnded - started);
     if (readProfile() !== text) refuse('RESOURCE_BOUNDARY_CHANGED');
+    const finished = monotonic();
+    if (finished - collectionStarted > 2000000000n || started < collectionStarted ||
+        observationEnded > finished) refuse('RESOURCE_BOUNDARY_CHANGED');
     return Object.freeze({ admitted: true, profileSha256: policy.digest, globallyAdmittedJobs: 1 });
   } catch (error) {
     if (error?.code?.startsWith('RESOURCE_')) throw error;

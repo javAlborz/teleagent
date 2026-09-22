@@ -70,7 +70,7 @@ function invoke({ definition = profile(), first, second, elapsed = 250000000n,
       return observations === 1 ? (first || sample(policy)) : (second || sample(policy));
     },
     sleep: async (ms) => assert.equal(ms, 250),
-    monotonic: () => { ticks += 1; return ticks === 1 ? 0n : elapsed; },
+    monotonic: () => { ticks += 1; return ticks < 3 ? 0n : elapsed; },
   });
 }
 
@@ -174,6 +174,40 @@ test('pressure averages or new stalls refuse even when memory is otherwise avail
     current.full.total += 501n; // > 0.20% of 250ms, despite still-zero averages.
     await assert.rejects(invoke({ second }), { code: 'RESOURCE_MEMORY_PRESSURE' });
   }
+});
+
+test('slow evidence reads cannot dilute the measured pressure interval', async () => {
+  for (const slowSnapshot of [1, 2]) {
+    let elapsed = 0n;
+    let observations = 0;
+    await assert.rejects(admission.assertResourceAdmission({
+      readProfile: () => encode(profile()),
+      snapshot: () => {
+        observations += 1;
+        const value = sample();
+        if (observations === slowSnapshot) elapsed += 1500000000n;
+        if (observations === 2) value.hostPressure.some.total += 2501n; // > 1% of the 250ms wait.
+        return value;
+      },
+      sleep: async () => { elapsed += 250000000n; },
+      monotonic: () => elapsed,
+    }), { code: 'RESOURCE_MEMORY_PRESSURE' });
+  }
+});
+
+test('total collection freshness remains bounded even with a valid pressure interval', async () => {
+  let elapsed = 0n;
+  let observations = 0;
+  await assert.rejects(admission.assertResourceAdmission({
+    readProfile: () => encode(profile()),
+    snapshot: () => {
+      observations += 1;
+      if (observations === 1) elapsed += 1800000000n;
+      return sample();
+    },
+    sleep: async () => { elapsed += 250000000n; },
+    monotonic: () => elapsed,
+  }), { code: 'RESOURCE_BOUNDARY_CHANGED' });
 });
 
 test('throttling, OOM, counter reset, cgroup replacement and stale observations refuse', async () => {

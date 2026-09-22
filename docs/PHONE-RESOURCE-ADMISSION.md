@@ -101,6 +101,12 @@ increased or reset event counter does refuse it. Samples outside the bounded
 200 ms–2 s interval refuse as stale/invalid. Successful admission returns only
 a profile digest and bounded decision metadata.
 
+The PSI stall denominator covers only the timed wait between snapshots; the
+actual counter observation interval contains that entire wait. This gives a
+conservative fraction and prevents slow evidence reads from diluting observed
+pressure. Total collection, including final profile revalidation, must still
+finish within two seconds.
+
 An admission sample is not a host-wide reservation. Other host services can
 grow after admission. The normal-child cap accounting protects the recovery
 allowance **inside Teleagent's pool**; it does not grant memory protection
@@ -132,9 +138,9 @@ migrated by this change.
 ## Validation and remaining acceptance
 
 On 2026-09-22 the resource-admission and provider-boundary suites passed
-102/102 tests in 1.89 seconds, using the serial `scripts/hermes-safe-test`
+104/104 tests in 1.88 seconds, using the serial `scripts/hermes-safe-test`
 wrapper. The runner asserted 512 MiB memory, zero swap, 128 tasks and one CPU;
-peak cgroup charge was 50,876,416 bytes. Runtime syntax and diff checks passed.
+peak cgroup charge was 50,733,056 bytes. Runtime syntax and diff checks passed.
 The new helper and changed tests passed strict lint; provider-boundary runtime
 lint retained its two previously documented warnings and had no errors.
 
