@@ -101,6 +101,12 @@ const IMMUTABLE_RELEASE_ROOT = /^\/opt\/teleagent\/releases\/sha256-[a-f0-9]{64}
 const IMMUTABLE_PREFLIGHT_RELATIVE = 'deploy/worker-session/teleagent-provider-boundary';
 const HANDOFF_LOCK = '/run/teleagent-staging-handoff.lock';
 const LIFECYCLE_LOCK_ENV = 'TELEAGENT_HANDOFF_LIFECYCLE_LOCK_FD';
+const ROOT_STOP_ENVIRONMENT = Object.freeze({
+  HOME: '/var/empty',
+  PATH: '/usr/sbin:/usr/bin:/sbin:/bin',
+  LANG: 'C.UTF-8',
+  LC_ALL: 'C.UTF-8',
+});
 
 function fail(message, code = 77) {
   const error = Object.assign(new Error(message), { exitCode: code });
@@ -650,13 +656,17 @@ function assertSupervisorStartAdmitted({
   }
 }
 
-function parseControl(argv, environment = process.env, { uid = process.getuid() } = {}) {
+function parseControl(argv, environment = process.env, {
+  uid = process.getuid(),
+  euid = process.geteuid(),
+  execArguments = process.execArgv,
+} = {}) {
   const separator = argv.indexOf('--');
   const options = separator >= 0 ? argv.slice(0, separator) : [...argv];
   const providerArgs = separator >= 0 ? argv.slice(separator + 1) : [];
   const action = take(options, '--action');
   const globalAction = [
-    'panic-all', 'recover-root-panic', 'assert-global-unlocked',
+    'panic-all', 'root-stop-all', 'recover-root-panic', 'assert-global-unlocked',
     'assert-supervisor-start-admitted', 'attest-workspace-storage',
     'attest-provider-plane-storage', 'attest-worker-storage',
   ].includes(action);
@@ -669,6 +679,15 @@ function parseControl(argv, environment = process.env, { uid = process.getuid() 
   const sessionId = take(options, '--session-id', false);
   const spec = PROVIDERS[provider];
   if (globalAction) {
+    if (action === 'root-stop-all' && (
+      uid !== 0 || euid !== 0 || argv.length !== 2 ||
+      argv[0] !== '--action' || argv[1] !== 'root-stop-all' ||
+      !Array.isArray(execArguments) || execArguments.length !== 0 ||
+      Object.keys(environment).sort().join('\n') !== Object.keys(ROOT_STOP_ENVIRONMENT).sort().join('\n') ||
+      Object.entries(ROOT_STOP_ENVIRONMENT).some(([key, value]) => environment[key] !== value)
+    )) {
+      fail('root provider stop requires genuine root, exact argv and the fixed clean environment');
+    }
     const validIdentity = action === 'panic-all'
       ? environment.SUDO_USER === 'teleagent-session-broker'
       : action === 'recover-root-panic'
@@ -1952,6 +1971,7 @@ async function main(argv = process.argv.slice(2), environment = process.env, {
   parseInput = parseControl,
   attestWorkerStorage = attestWorkerStorageBoundary,
   launchOperations = PROVIDER_LAUNCH_OPERATIONS,
+  panicAll = panicAllProviderPlanes,
 } = {}) {
   const input = parseInput(argv, environment);
   if (['assert-supervisor-start-admitted', 'attest-worker-storage'].includes(input.action)) {
@@ -1977,8 +1997,11 @@ async function main(argv = process.argv.slice(2), environment = process.env, {
     assertSupervisorStartAdmitted();
     return 0;
   }
-  if (input.action === 'panic-all') {
-    const result = await panicAllProviderPlanes({ control });
+  if (input.action === 'panic-all' || input.action === 'root-stop-all') {
+    // Root recovery has the same stop transaction, never the unlock path. Its
+    // independently pinned dispatcher/installation supplies host authority;
+    // no caller-selected target, retained start lock or ENABLE gate is used.
+    const result = await panicAll({ control });
     process.stdout.write(`${JSON.stringify(result)}\n`);
     return result.persisted && result.quiesced ? 0 : 75;
   }
