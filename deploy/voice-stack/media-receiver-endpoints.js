@@ -5,6 +5,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const {
+  TOPOLOGY_SCHEMA_V2,
   validateReceiverSafeSipMediaTopology,
 } = require('../../lib/sip-media-boundary-contract');
 const boundary = require('./media-application-boundary');
@@ -157,6 +158,26 @@ function renderReceiverEndpoints(networkConfig, applicationContract) {
     reverseEsl: null, privateHttpAudio: null,
     readyToLaunch: false, remainingGates: [...REMAINING_GATES],
   };
+  if (topology.schema === TOPOLOGY_SCHEMA_V2) {
+    const reverse = endpoints['voice-reverse-esl'];
+    const http = endpoints['voice-media-http'];
+    projection.reverseEsl = {
+      listenAddress: reverse.address, listenPort: reverse.ports.start,
+      advertisedAddress: reverse.address, advertisedPort: reverse.ports.start,
+      allowedPeer: fsSip.address,
+    };
+    projection.privateHttpAudio = {
+      host: http.address, port: http.ports.start, baseUrl: `http://${http.address}:${http.ports.start}`,
+      allowedPeer: fsSip.address, methods: ['GET'], routes: ['/audio-files/:filename', '/static/*'],
+      controlRoutesPermitted: false, listenWildcardPermitted: false,
+    };
+    projection.controlHttp = { host: '127.0.0.1', port: 3000 };
+    projection.remainingGates = [
+      'fixed-reverse-esl-consumer-and-peer-restriction',
+      'dedicated-private-http-consumer-and-playback-urls',
+      ...REMAINING_GATES.slice(2),
+    ];
+  }
   return freeze({ ...projection, projectionDigest: boundary.digest(boundary.canonical(projection)) });
 }
 

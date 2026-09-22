@@ -1,7 +1,7 @@
 # Receiver endpoint projection
 
 `deploy/voice-stack/media-receiver-endpoints.js` renders the existing reviewed
-`teleagent.receiver-safe-sip-media-topology.v1` into deterministic configuration
+`teleagent.receiver-safe-sip-media-topology.v1` (and its explicit v2 extension) into deterministic configuration
 templates and voice client/listener settings. It changes no Compose file,
 running service, volume, firewall, route, credential or activation gate. Output
 always says `readyToLaunch: false`.
@@ -81,13 +81,26 @@ runtime. Two concrete missing connections were found while mapping callers:
    policy, preserve confined/no-follow file serving and private caching, and
    derive every playback URL from the admitted receiver.
 
-Both proposed flows are FreeSWITCH→voice only: exact FreeSWITCH UID, ingress
+Both v2 flows are FreeSWITCH→voice only: exact FreeSWITCH UID, ingress
 veth and source address; TCP source ports49152–65535; exact voice destination
 interface/address and destination3000 or3002. Only conntrack-established replies
 return. No listener can select a dynamic port, wildcard address, hostname or
-arbitrary peer. These additions need a separately reviewed v2 application and
-infra rule revision; this v1 renderer keeps `reverseEsl` and `privateHttpAudio`
-null and never emits those rules.
+arbitrary peer. The separately versioned
+`teleagent.receiver-safe-sip-media-topology.v2` contains exactly ten listeners
+and eleven initiating flows. Its matching infra rules retain default-drop,
+source-UID and exact interface/address/port filtering. A v1 record cannot
+acquire v2 permissions, and a v2 record missing either addition is refused.
+The topology digest and independent Asterisk evidence must explicitly bind v2;
+v1 evidence cannot be reused.
+
+For v1, the renderer keeps `reverseEsl` and `privateHttpAudio` null. For v2 it
+emits explicit reverse ESL bind/advertisement options and media-only HTTP
+metadata. The media HTTP receiver is GET-only on the exact voice service IP;
+its control counterpart remains a separate `127.0.0.1:3000` bind. Wildcard binds,
+control/API dispatch and redirects are prohibited. Actual listeners must verify
+accepted socket source and local destination against the admitted generation.
+These consumer implementations remain required; `readyToLaunch` stays false
+and the launcher's unconditional gate stays intact for both versions.
 
 The remaining work also includes Realtime WSS and legacy STT/TTS egress,
 protected runtime/credential consumers, readiness and panic transport, exact

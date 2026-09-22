@@ -10,17 +10,20 @@ const boundary = require('../../deploy/voice-stack/media-application-boundary');
 const renderer = require('../../deploy/voice-stack/media-receiver-endpoints');
 const { VOICE_APP_FIXED_ENV, assertVoiceAppRuntimeEnvironment } = require('../../lib/voice-app-runtime-env');
 
-function fixture() {
+function fixture(version = 'v1') {
   const range = (value) => typeof value === 'number' ? { start: value, end: value } : structuredClone(value);
-  const listeners = topologyContract.LISTENER_DEFINITIONS.map((value) => ({ ...value,
+  const definitions = version === 'v2' ? topologyContract.LISTENER_DEFINITIONS_V2 : topologyContract.LISTENER_DEFINITIONS;
+  const flows = version === 'v2' ? topologyContract.FLOW_DEFINITIONS_V2 : topologyContract.FLOW_DEFINITIONS;
+  const listeners = definitions.map((value) => ({ ...value,
     ports: range(value.ports || { start: 20000, end: 20099 }) }));
   const listenerRanges = Object.fromEntries(listeners.map((value) => [value.id, value.ports]));
   const resolveRange = (value) => typeof value === 'string' ? structuredClone(listenerRanges[value]) : range(value);
-  const topology = { schema: topologyContract.TOPOLOGY_SCHEMA, topologyId: 'receiver-projection-test', policyNamespace: 'tm-policy',
+  const topology = { schema: version === 'v2' ? topologyContract.TOPOLOGY_SCHEMA_V2 : topologyContract.TOPOLOGY_SCHEMA,
+    topologyId: 'receiver-projection-test', policyNamespace: 'tm-policy',
     services: topologyContract.SERVICE_IDS.map((service, index) => ({ id: service, namespace: `tm-${service}`, uid: 980 + index,
       link: { serviceVeth: `tm${index}s`, policyVeth: `tm${index}p`, prefixLength: 30,
         serviceAddress: `10.254.0.${index * 4 + 2}`, policyAddress: `10.254.0.${index * 4 + 1}` } })),
-    listeners, flows: topologyContract.FLOW_DEFINITIONS.map((flow) => ({ ...flow,
+    listeners, flows: flows.map((flow) => ({ ...flow,
       sourcePorts: resolveRange(flow.sourcePorts), destinationPorts: resolveRange(flow.destinationPorts) })) };
   const imageId = `sha256:${'a'.repeat(64)}`;
   const anchor = { imageId, sourceDigest: boundary.SOURCE_DIGEST, buildEvidenceDigest: `sha256:${'b'.repeat(64)}`,
@@ -217,5 +220,65 @@ test('protected entrypoint binds the fixed configuration to independent bootstra
   } finally {
     boundary.protectedFile = originalRead;
     boundary.loadAdmission = originalAdmission;
+  }
+});
+
+test('v2 adds only fixed reverse ESL and separate media HTTP with explicit consumer gates', () => {
+  const { config, contract } = fixture('v2');
+  const output = renderer.renderReceiverEndpoints(config, contract);
+  assert.equal(config.network.topology.listeners.length, 10);
+  assert.equal(config.network.topology.flows.length, 11);
+  assert.deepEqual(output.reverseEsl, { listenAddress: '10.254.0.14', listenPort: 3002,
+    advertisedAddress: '10.254.0.14', advertisedPort: 3002, allowedPeer: '10.254.0.10' });
+  assert.deepEqual(output.privateHttpAudio, { host: '10.254.0.14', port: 3000, baseUrl: 'http://10.254.0.14:3000',
+    allowedPeer: '10.254.0.10', methods: ['GET'], routes: ['/audio-files/:filename', '/static/*'],
+    controlRoutesPermitted: false, listenWildcardPermitted: false });
+  assert.deepEqual(output.controlHttp, { host: '127.0.0.1', port: 3000 });
+  assert.equal(output.readyToLaunch, false);
+  assert.ok(output.remainingGates.includes('fixed-reverse-esl-consumer-and-peer-restriction'));
+  assert.ok(output.remainingGates.includes('dedicated-private-http-consumer-and-playback-urls'));
+  assert.throws(() => boundary.requireRuntimeIntegration());
+});
+
+test('v1 never acquires v2 permissions and v2 forbids omissions, dynamic ports or broad tuples', () => {
+  const value = fixture('v2');
+  const topology = value.config.network.topology;
+  const validate = topologyContract.validateReceiverSafeSipMediaTopology;
+  validate(topology);
+  for (const change of [
+    (x) => { x.schema = topologyContract.TOPOLOGY_SCHEMA; },
+    (x) => { x.listeners.pop(); },
+    (x) => { x.flows.pop(); },
+    (x) => { x.listeners[9].ports = { start: 0, end: 0 }; },
+    (x) => { x.listeners[9].ports = { start: 3002, end: 65535 }; },
+    (x) => { x.flows[9].source = 'drachtio'; },
+    (x) => { x.flows[10].sourcePorts.start = 1024; },
+    (x) => { x.flows[10].destinationPorts.end = 3003; },
+  ]) {
+    const copy = structuredClone(topology); change(copy);
+    assert.throws(() => validate(copy));
+  }
+  const v1 = fixture().config.network.topology;
+  v1.schema = topologyContract.TOPOLOGY_SCHEMA_V2;
+  assert.throws(() => validate(v1));
+});
+
+test('v2 receiver directions reject spoofing, wrong peers, ports, and unsolicited reverse connections', () => {
+  const v2 = fixture('v2').config.network.topology;
+  const v1 = fixture().config.network.topology;
+  const allowed = topologyContract.isSipMediaPacketAllowed;
+  for (const port of [3000, 3002]) {
+    const original = { ingressVeth: 'tm2p', sourceAddress: '10.254.0.10', destinationAddress: '10.254.0.14',
+      protocol: 'tcp', sourcePort: 49152, destinationPort: port, connectionState: 'new' };
+    assert.equal(allowed(v2, original), true);
+    assert.equal(allowed(v1, original), false);
+    for (const change of [{ ingressVeth: 'tm1p' }, { sourceAddress: '10.254.0.6' }, { destinationAddress: '10.254.0.10' },
+      { sourcePort: 49151 }, { destinationPort: 3003 }, { protocol: 'udp', connectionState: 'stateless' }]) {
+      assert.equal(allowed(v2, { ...original, ...change }), false);
+    }
+    const reply = { ingressVeth: 'tm3p', sourceAddress: '10.254.0.14', destinationAddress: '10.254.0.10',
+      protocol: 'tcp', sourcePort: port, destinationPort: 49152, connectionState: 'established' };
+    assert.equal(allowed(v2, reply), true);
+    assert.equal(allowed(v2, { ...reply, connectionState: 'new' }), false);
   }
 });
