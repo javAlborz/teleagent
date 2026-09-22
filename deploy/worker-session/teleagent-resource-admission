@@ -16,6 +16,10 @@ const PROVIDER = 'teleagent-provider.slice';
 const MODEL_MEMORY_MAX = 3n * 1024n ** 3n;
 const MODEL_TASKS_MAX = 384n;
 const MAX_BYTES = 16384;
+const MAX_GROUPS = 256;
+const MAX_GROUP_DEPTH = 16;
+const MAX_DIRECTORY_ENTRIES = 512;
+const MOUNTINFO = '/proc/self/mountinfo';
 const UINT64_MAX = (1n << 64n) - 1n;
 const REQUIRED_CHILDREN = Object.freeze([
   'teleagent-agent-controller.service', 'teleagent-provider.slice',
@@ -154,12 +158,17 @@ function parseMeminfo(text) {
   return { total: total.value * 1024n, available: available.value * 1024n };
 }
 
-function directoryIdentity(directory) {
+function directoryMetadata(directory) {
   const metadata = fs.lstatSync(directory, { bigint: true });
   if (!metadata.isDirectory() || metadata.uid !== 0n || metadata.gid !== 0n ||
       (metadata.mode & 0o7022n) !== 0n || fs.realpathSync(directory) !== directory) {
     refuse('RESOURCE_BOUNDARY_UNSAFE');
   }
+  return metadata;
+}
+
+function directoryIdentity(directory) {
+  const metadata = directoryMetadata(directory);
   return `${metadata.dev}:${metadata.ino}`;
 }
 
@@ -174,12 +183,13 @@ function boundedRootRead(filename) {
       (metadata.mode & 0o7777n) === 0o666n;
     if (!metadata.isFile() || metadata.uid !== 0n || metadata.gid !== 0n ||
         ((metadata.mode & 0o7022n) !== 0n && !kernelPsiTrigger)) refuse('RESOURCE_BOUNDARY_UNSAFE');
-    const buffer = Buffer.alloc(MAX_BYTES + 1);
+    const maximum = filename === MOUNTINFO ? 128 * 1024 : MAX_BYTES;
+    const buffer = Buffer.alloc(maximum + 1);
     let count = 0;
     for (;;) {
       const amount = fs.readSync(descriptor, buffer, count, buffer.length - count, null);
       count += amount;
-      if (count > MAX_BYTES) refuse('RESOURCE_EVIDENCE_INVALID');
+      if (count > maximum) refuse('RESOURCE_EVIDENCE_INVALID');
       if (amount === 0) break;
     }
     const after = fs.fstatSync(descriptor, { bigint: true });
@@ -200,6 +210,98 @@ function readProductionProfile() {
   return boundedRootRead(PROFILE);
 }
 
+function parseCgroupMount(text) {
+  if (typeof text !== 'string' || !text.endsWith('\n')) refuse('RESOURCE_EVIDENCE_INVALID');
+  let selected;
+  for (const line of text.slice(0, -1).split('\n')) {
+    const halves = line.split(' - ');
+    const left = halves[0].split(' ');
+    const right = halves[1]?.split(' ');
+    if (halves.length !== 2 || left.length < 6 || right.length !== 3 ||
+        !/^[1-9][0-9]*$/u.test(left[0]) || !/^[1-9][0-9]*$/u.test(left[1]) ||
+        !/^[0-9]+:[0-9]+$/u.test(left[2])) refuse('RESOURCE_EVIDENCE_INVALID');
+    // A mount anywhere below the canonical root could replace a descendant's
+    // evidence, even if its final file still looked root-owned.
+    if (left[4].startsWith(`${CGROUP_ROOT}/`)) refuse('RESOURCE_BOUNDARY_UNSAFE');
+    if (left[4] !== CGROUP_ROOT) continue;
+    if (selected || left[3] !== '/' || right[0] !== 'cgroup2') refuse('RESOURCE_BOUNDARY_UNSAFE');
+    const flags = right[2].split(',');
+    const supported = new Set(['rw', 'ro', 'nsdelegate', 'favordynmods', 'memory_localevents',
+      'memory_recursiveprot', 'memory_hugetlb_accounting', 'pids_localevents']);
+    const accessFlags = (options) => options.filter((flag) => flag === 'rw' || flag === 'ro').length;
+    // ProtectControlGroups may expose a read-only full-root view. Observation
+    // does not need write access and must not weaken that service sandbox.
+    if (accessFlags(left[5].split(',')) !== 1 || accessFlags(flags) !== 1 ||
+        new Set(flags).size !== flags.length || flags.some((flag) => !supported.has(flag))) {
+      refuse('RESOURCE_MOUNT_UNSUPPORTED');
+    }
+    selected = { identity: line,
+      memoryEvents: flags.includes('memory_localevents') ? 'local' : 'subtree',
+      // Default PID event propagation differs between kernel generations.
+      // Every group is sampled, so neither default is assumed to aggregate.
+      tasksEvents: flags.includes('pids_localevents') ? 'local' : 'kernel-default' };
+  }
+  if (!selected) refuse('RESOURCE_BOUNDARY_UNSAFE');
+  return selected;
+}
+
+function collectEventInventory(withCounters) {
+  const inventory = new Map();
+  const pending = [{ relative: '', depth: 0 }];
+  let rootDevice;
+  while (pending.length > 0) {
+    if (inventory.size >= MAX_GROUPS) refuse('RESOURCE_INVENTORY_LIMIT');
+    const { relative, depth } = pending.pop();
+    if (depth > MAX_GROUP_DEPTH) refuse('RESOURCE_INVENTORY_LIMIT');
+    const directory = relative ? path.join(POOL, relative) : POOL;
+    const metadata = directoryMetadata(directory);
+    rootDevice ??= metadata.dev;
+    if (metadata.dev !== rootDevice) refuse('RESOURCE_BOUNDARY_UNSAFE');
+    const identity = `${metadata.dev}:${metadata.ino}`;
+    const generation = `${metadata.mtimeNs}:${metadata.ctimeNs}`;
+    const children = [];
+    const stream = fs.opendirSync(directory, { bufferSize: 16 });
+    try {
+      let count = 0;
+      for (let entry = stream.readSync(); entry !== null; entry = stream.readSync()) {
+        if (++count > MAX_DIRECTORY_ENTRIES) refuse('RESOURCE_INVENTORY_LIMIT');
+        if (entry.isSymbolicLink()) refuse('RESOURCE_BOUNDARY_UNSAFE');
+        if (!entry.isDirectory()) continue;
+        if (!/^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,254}$/u.test(entry.name)) {
+          refuse('RESOURCE_BOUNDARY_UNSAFE');
+        }
+        if (inventory.size + pending.length + children.length + 1 >= MAX_GROUPS) {
+          refuse('RESOURCE_INVENTORY_LIMIT');
+        }
+        children.push(entry.name);
+      }
+    } finally { stream.closeSync(); }
+    const read = (name) => boundedRootRead(path.join(directory, name));
+    if (read('cgroup.type') !== 'domain\n') refuse('RESOURCE_EVIDENCE_INVALID');
+    const record = { identity, generation, children: children.sort().join('\n') };
+    if (withCounters) {
+      record.memoryEvents = parseEvents(read('memory.events'), ['high', 'max', 'oom', 'oom_kill']);
+      record.tasksEvents = parseEvents(read('pids.events'), ['max']);
+    }
+    const after = directoryMetadata(directory);
+    if (identity !== `${after.dev}:${after.ino}` ||
+        generation !== `${after.mtimeNs}:${after.ctimeNs}`) refuse('RESOURCE_BOUNDARY_CHANGED');
+    inventory.set(relative, record);
+    for (const child of children) pending.push({
+      relative: relative ? `${relative}/${child}` : child, depth: depth + 1,
+    });
+  }
+  return inventory;
+}
+
+function assertStableInventory(before, after) {
+  if (before.size !== after.size || [...before].some(([name, first]) => {
+    const second = after.get(name);
+    return !second || first.identity !== second.identity ||
+      first.generation !== second.generation || first.children !== second.children;
+  })) refuse('RESOURCE_BOUNDARY_CHANGED');
+}
+
 function collectSnapshot(policy) {
   if (process.getuid() !== 0 || process.geteuid() !== 0) refuse('RESOURCE_BOUNDARY_UNSAFE');
   if (fs.statfsSync(CGROUP_ROOT, { bigint: true }).type !== 0x63677270n ||
@@ -209,19 +311,20 @@ function collectSnapshot(policy) {
   for (const directory of ['/sys', '/sys/fs', CGROUP_ROOT]) directoryIdentity(directory);
   for (const directory of ['/proc', '/proc/pressure']) directoryIdentity(directory);
   if (fs.statfsSync('/proc/pressure/memory', { bigint: true }).type !== 0x9fa0n ||
+      fs.statfsSync(MOUNTINFO, { bigint: true }).type !== 0x9fa0n ||
       fs.realpathSync('/proc/pressure/memory') !== '/proc/pressure/memory') {
     refuse('RESOURCE_BOUNDARY_UNSAFE');
   }
+  const mount = parseCgroupMount(boundedRootRead(MOUNTINFO));
   const boot = boundedRootRead('/proc/sys/kernel/random/boot_id');
   if (!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}\n$/u.test(boot) ||
       boundedRootRead('/proc/sys/kernel/hostname') !== `${policy.profile.hostname}\n`) {
     refuse('RESOURCE_HOST_MISMATCH');
   }
-  const poolIdentity = directoryIdentity(POOL);
+  const eventInventory = collectEventInventory(true);
+  const poolIdentity = eventInventory.get('').identity;
   const expected = [...policy.children.keys(), RECOVERY].sort();
-  const entries = fs.readdirSync(POOL, { withFileTypes: true });
-  if (entries.some((entry) => entry.isSymbolicLink()) ||
-      entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort().join('\n') !== expected.join('\n')) {
+  if (eventInventory.get('').children !== expected.join('\n')) {
     refuse('RESOURCE_POOL_TOPOLOGY_MISMATCH');
   }
   const readGroup = (directory) => {
@@ -233,8 +336,7 @@ function collectSnapshot(policy) {
       max: scalar(read('memory.max')), swap: scalar(read('memory.swap.current')),
       swapMax: scalar(read('memory.swap.max')), tasks: scalar(read('pids.current')),
       tasksMax: scalar(read('pids.max')),
-      memoryEvents: parseEvents(read('memory.events'), ['high', 'max', 'oom', 'oom_kill']),
-      tasksEvents: parseEvents(read('pids.events'), ['max']), pressure: parsePressure(read('memory.pressure')),
+      pressure: parsePressure(read('memory.pressure')),
     };
     if (identity !== directoryIdentity(directory)) refuse('RESOURCE_BOUNDARY_CHANGED');
     return result;
@@ -245,6 +347,7 @@ function collectSnapshot(policy) {
   for (const name of expected) {
     const directory = path.join(POOL, name);
     const identity = directoryIdentity(directory);
+    if (identity !== eventInventory.get(name)?.identity) refuse('RESOURCE_BOUNDARY_CHANGED');
     const read = (field) => boundedRootRead(path.join(directory, field));
     if (read('cgroup.type') !== 'domain\n') refuse('RESOURCE_EVIDENCE_INVALID');
     children.set(name, { identity, memory: scalar(read('memory.current')), max: scalar(read('memory.max')),
@@ -257,8 +360,13 @@ function collectSnapshot(policy) {
   if (cpu !== `${policy.pool.cpuQuotaMicros} ${policy.pool.cpuPeriodMicros}\n` ||
       boundedRootRead(path.join(POOL, 'cgroup.procs')) !== '' ||
       poolIdentity !== directoryIdentity(POOL)) refuse('RESOURCE_POOL_TOPOLOGY_MISMATCH');
-  return { boot, pool, children, meminfo: parseMeminfo(boundedRootRead('/proc/meminfo')),
-    hostPressure: parsePressure(boundedRootRead('/proc/pressure/memory')) };
+  const meminfo = parseMeminfo(boundedRootRead('/proc/meminfo'));
+  const hostPressure = parsePressure(boundedRootRead('/proc/pressure/memory'));
+  assertStableInventory(eventInventory, collectEventInventory(false));
+  if (parseCgroupMount(boundedRootRead(MOUNTINFO)).identity !== mount.identity) {
+    refuse('RESOURCE_BOUNDARY_CHANGED');
+  }
+  return { boot, pool, children, meminfo, hostPressure, mount, eventInventory };
 }
 
 function assessSnapshot(policy, sample) {
@@ -292,14 +400,18 @@ function assessSnapshot(policy, sample) {
 function assessInterval(policy, before, after, elapsedNs) {
   if (elapsedNs < 200000000n || elapsedNs > 2000000000n || before.boot !== after.boot ||
       before.pool.identity !== after.pool.identity ||
+      before.mount.identity !== after.mount.identity ||
       [...before.children].some(([name, value]) => value.identity !== after.children.get(name)?.identity)) {
     refuse('RESOURCE_BOUNDARY_CHANGED');
   }
-  for (const events of ['memoryEvents', 'tasksEvents']) {
-    const first = before.pool[events];
-    const second = after.pool[events];
-    if (first.size !== second.size || [...first].some(([name, value]) => second.get(name) !== value)) {
-      refuse('RESOURCE_RECENT_LIMIT_EVENT');
+  assertStableInventory(before.eventInventory, after.eventInventory);
+  for (const [group, record] of before.eventInventory) {
+    for (const events of ['memoryEvents', 'tasksEvents']) {
+      const first = record[events];
+      const second = after.eventInventory.get(group)[events];
+      if (first.size !== second.size || [...first].some(([name, value]) => second.get(name) !== value)) {
+        refuse('RESOURCE_RECENT_LIMIT_EVENT');
+      }
     }
   }
   for (const pair of [[before.hostPressure, after.hostPressure], [before.pool.pressure, after.pool.pressure]]) {
@@ -345,5 +457,5 @@ async function assertResourceAdmission({
 }
 
 module.exports = { assertResourceAdmission, validateProfile, parsePressure, parseEvents,
-  parseMeminfo, assessSnapshot, assessInterval, collectSnapshot, readProductionProfile,
+  parseMeminfo, parseCgroupMount, assessSnapshot, assessInterval, collectSnapshot, readProductionProfile,
   MODEL_MEMORY_MAX, MODEL_TASKS_MAX };

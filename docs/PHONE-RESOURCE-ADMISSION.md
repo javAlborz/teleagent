@@ -23,7 +23,7 @@ turns uncertainty about prior effects into a retry-safe result.
 The fixed path is `/etc/teleagent/resource-admission.json`. The file and its
 ancestors must be root-owned, not writable by other identities, and free of
 symlink substitution. Files are read with `O_NOFOLLOW` and `O_NONBLOCK`, bounded
-to 16 KiB, and checked for metadata changes. JSON uses exactly
+to 16 KiB (128 KiB only for kernel mount metadata), and checked for metadata changes. JSON uses exactly
 `JSON.stringify(profile) + '\n'`; duplicate keys, extra fields and alternative
 numeric forms are refused. Byte/count/quota quantities are decimal **strings**;
 pressure thresholds are integer basis points (100 means 1%).
@@ -87,8 +87,31 @@ cgroups. It strictly parses memory/task counters, pressure lines and
 - the provider slice has enough headroom of its own;
 - host and aggregate memory PSI averages and new stall totals remain below the
   exact profile thresholds;
-- no new aggregate memory-limit/OOM/task-limit event, boot change, cgroup
+- no new memory-limit/OOM/task-limit event in the pool or any descendant, boot change, cgroup
   replacement or profile change appears during observation.
+
+The event inventory includes every nested service/container cgroup, not only
+the profile's direct children. Each snapshot enumerates the complete tree twice
+and matches group paths, device/inode identities, directory modification/change
+times and child names. The two observation snapshots must retain that same
+inventory. Every group must expose valid `memory.events` and `pids.events`;
+missing counters, new/removed groups, replacements, changed event fields and
+counter resets refuse admission. Enumeration streams at most 512 entries per
+directory, with at most 256 groups including the pool and 16 descendant levels.
+Exceeding any bound refuses new work; none can be changed through environment.
+
+Bounded `/proc/self/mountinfo` evidence must identify one full-root cgroup-v2
+mount at `/sys/fs/cgroup`, with no subordinate mounts and only supported
+superblock options. Its exact identity/options must stay unchanged throughout
+the observation. A read-only canonical view, such as `ProtectControlGroups`
+provides, is sufficient; resource observation never requires weakening it.
+`memory_localevents` and `pids_localevents` are explicitly
+recognized and supported by sampling each group. Default PID-event propagation
+is deliberately not inferred from absent mount flags: Linux 6.8 records fork
+limit failures locally, while newer kernels can aggregate them. This collector
+therefore requires no `pids.events.local` file or kernel upgrade. See the
+[kernel mount-option contract](https://docs.kernel.org/admin-guide/cgroup-v2.html#mounting)
+and [Linux 6.8 PID controller implementation](https://github.com/torvalds/linux/blob/v6.8/kernel/cgroup/pids.c).
 
 The kernel's `/proc/pressure/memory` is intentionally mode `0666`: writes
 register per-descriptor PSI triggers, without modifying the observed pressure
