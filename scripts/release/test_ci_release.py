@@ -68,6 +68,7 @@ PACKAGE_SCOPE_PATHS = (
     "package.json",
     "privileged-action-broker/package.json",
     "realtime-sip-gateway/package.json",
+    "voice-app/package.json",
 )
 
 VOICE_AND_HOST_SOURCE_PATHS = (
@@ -91,8 +92,11 @@ VOICE_AND_HOST_SOURCE_PATHS = (
     "freeswitch/entrypoint.sh",
     "freeswitch/mrf.xml",
     "freeswitch/switch.conf.xml",
+    "lib/media-receiver-runtime.js",
     "lib/voice-app-runtime-env.js",
     "lib/sip-media-boundary-contract.js",
+    "voice-app/lib/isolated-media-http.js",
+    "voice-app/lib/media-playback-urls.js",
 )
 
 EXPECTED_PROMOTION_BLOCKERS = (
@@ -430,7 +434,7 @@ class CiReleaseTests(unittest.TestCase):
             | sip_sources
         )
         self.assertEqual(BOUND_SOURCE_PATHS, tuple(sorted(expected)))
-        self.assertEqual(len(BOUND_SOURCE_PATHS), 141)
+        self.assertEqual(len(BOUND_SOURCE_PATHS), 145)
         self.assertIn("deploy/voice-stack/media-application-boundary.js", BOUND_SOURCE_PATHS)
         self.assertIn("lib/worker-inspection-contract.js", BOUND_SOURCE_PATHS)
         self.assertEqual(len(BOUND_SOURCE_PATHS), len(set(BOUND_SOURCE_PATHS)))

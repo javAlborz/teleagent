@@ -148,6 +148,7 @@ BOUND_SOURCE_PATHS = (
     "freeswitch/switch.conf.xml",
     "lib/agent-execution-environment.js",
     "lib/durable-state-storage-boundary.js",
+    "lib/media-receiver-runtime.js",
     "lib/phone-deploy-intent.js",
     "lib/privileged-action-plan.js",
     "lib/provider-model-contract.js",
@@ -193,6 +194,9 @@ BOUND_SOURCE_PATHS = (
     "realtime-sip-gateway/src/sip-event.js",
     "realtime-sip-gateway/src/state-storage-boundary.js",
     "realtime-sip-gateway/src/webhook-handler.js",
+    "voice-app/lib/isolated-media-http.js",
+    "voice-app/lib/media-playback-urls.js",
+    "voice-app/package.json",
 )
 
 API_LOCK_PATH = "claude-api-server/package-lock.json"

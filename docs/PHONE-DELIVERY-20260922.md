@@ -64,37 +64,48 @@ The next correction adds a mandatory retained raw-inotify observer before the
 first sample. It refuses every topology/attribute event, overflow, lost watch,
 helper failure or ambiguous protocol outcome, with no timestamp fallback.
 Its 70 focused tests passed and the frozen source received independent review.
-Actual cgroup notification delivery, the installed read-only mount view and
-observation-to-launch policy still require acceptance; fixture tests alone do
-not supply that proof.
+A separately reviewed, bounded probe on the actual Linux 6.8 kernel confirmed
+create/delete events between equal inventories and attribute changes both
+invalidate the production observer. It retained no probe directories and
+changed no controller settings or process placement. The installed read-only
+mount view and observation-to-launch policy still require acceptance.
 
 The receiver renderer and explicit v2 topology now include both required
 FreeSWITCH-to-voice connections: media-only HTTP on TCP 3000 and reverse ESL on
 TCP 3002. Control HTTP remains loopback-only. The exact v1 contract remains
-separate and cannot authorize v2 evidence. These source changes were reviewed;
-actual receiver consumers and live commissioning remain outstanding.
+separate and cannot authorize v2 evidence. Reviewed receiver consumers now bind
+the private media HTTP listener and native reverse ESL endpoint to that admitted
+projection. Media responses retain and bound the checked file descriptor;
+legacy playback and Realtime acknowledgement tones use admitted private URLs.
+The root-protected runtime record must bind the current process and namespace,
+image and exact source closure. The independent record writer/start transaction,
+outbound speech/Realtime connections and live commissioning remain outstanding.
 
-The paired application/host source closure now binds 141 paths, including the
-observer, endpoint renderer and its transitive SIP topology module. Its sorted
+The paired application/host source closure now binds 145 paths, including the
+observer, endpoint renderer, transitive SIP topology module and receiver
+consumers. Its sorted
 path-list SHA-256 is
-`cd22db290cd062ab94798bf7fc09a05522dd6a14cb333150612256d88d1301e9`.
+`a26def1a35870642bf87f459ff02f76dff57625b6e535c81b501fbcd866bbf5d`.
 The observer is installed root-owned mode 0555 and invoked through isolated
 `/usr/bin/python3 -I`; commissioning must independently bind that Python,
 standard-library, `_ctypes` and libc runtime as well as the helper source.
 
 ## Next executable delivery steps
 
-1. **Close source integration and review.** Finish nested resource events and
-   Docker application placement/restart checks, then repin the exact release
-   closure. Keep application and infrastructure revisions paired.
+1. **Close source integration and review.** Finish outbound voice connections,
+   the admitted runtime-record writer and coordinated start/restart lifetime
+   checks, then repin the exact release closure. Keep application and
+   infrastructure revisions paired.
 2. **Commission the shared-host profile.** Turn the reviewed numerical resource
-   proposal into finite slice/unit limits with real recovery capacity. Provision
+   proposal's reviewed dormant slice/unit limits into commissioned capacity
+   with an independent recovery path. Provision
    bounded durable state/workspace filesystems and perform WAL-safe migration
    rehearsal. Measure actual caps with the selected workload. Preserve owner
    session resources and all three FreeSWITCH volumes.
 3. **Produce an independently accepted release.** Designate the narrow release
-   authority repository; complete npm/Alpine/OCI/tool material acquisition and
-   the networkless build/rebuild; bind actual signer/source/artifact identities.
+   authority repository; complete scanner database/builder inputs and the
+   networkless build/rebuild using the verified npm/Alpine/OCI/provider/tool
+   materials; bind actual signer/source/artifact identities.
    Existing persistent CI and dormant fixture signatures cannot approve it.
    Implement the reviewed Hermes read-only environment without changing the
    dedicated-staging installer's deliberate Hermes refusal.
@@ -152,6 +163,16 @@ Validation completed before the final application media-placement follow-up:
 - After observer/renderer closure integration, 150 affected application tests,
   all 39 release tests and all 14 aggregate disabled-installer tests passed.
   The installer run took 107.93 seconds and peaked at 40,271,872 bytes.
+- The receiver-consumer integration ran 934 controller/voice tests in 239.35
+  seconds: 933 passed, and the source metadata check correctly refused
+  group-writable files created by the checkout umask. Restoring Git's expected
+  file modes changed no source bytes; all 11 affected deployment tests then
+  passed. Peak full-run memory was 129,343,488 bytes.
+- The new receiver files also require `voice-app/package.json` in the bound
+  source closure. The release regression caught that omission; adding its
+  package scope to both sides gives the exact 145-path set above. All 39
+  release tests, three affected host closure tests, 12 resource-policy tests
+  and full repository lint passed after the corresponding integration fixes.
 
 Explicit test/probe runs use the shared serial Hermes envelope: 512 MiB memory,
 zero swap, 128 tasks and one CPU. Provider data acquisition peaked at 372.7 MB;
