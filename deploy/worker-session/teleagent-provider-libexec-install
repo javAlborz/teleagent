@@ -144,6 +144,7 @@ trap cleanup EXIT INT TERM
 
 while IFS=' ' read -r digest source target mode extra; do
   case "$digest:$source:$target:$mode:$extra" in
+    [0-9a-f][0-9a-f]*:deploy/worker-session/teleagent-resource-admission:teleagent-resource-admission:0444: | \
     [0-9a-f][0-9a-f]*:deploy/*:teleagent-provider-*:0755: | \
     [0-9a-f][0-9a-f]*:deploy/*:teleagent-provider-*:0444: | \
     [0-9a-f][0-9a-f]*:claude-api-server/*:teleagent-provider-*:0755: ) ;;

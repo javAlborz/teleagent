@@ -1,0 +1,17 @@
+[Unit]
+Description=Teleagent protected controller HTTP listener
+ConditionPathExists=/etc/teleagent/controller/ENABLE
+ConditionPathExists=/etc/teleagent/worker-session/ENABLE
+
+[Socket]
+ListenStream=/run/teleagent-controller/controller.sock
+SocketUser=root
+SocketGroup=teleagent-voice
+SocketMode=0660
+DirectoryMode=0755
+FileDescriptorName=agent-controller
+Accept=no
+Service=teleagent-agent-controller.service
+RemoveOnStop=yes
+
+# Dormant until the reviewed host activation explicitly starts this socket.

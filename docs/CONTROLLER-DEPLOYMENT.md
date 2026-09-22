@@ -5,6 +5,32 @@ separate bounded filesystems. Source deployment is deliberately dormant: both
 units are static, both activation sentinels are absent by default, and the
 installer never starts, enables, or restarts a unit.
 
+## Protected controller transport
+
+The production service uses `AGENT_API_TRANSPORT=systemd-unix` and inherits two
+named systemd listeners. `/run/teleagent-controller/controller.sock` is
+`root:teleagent-voice` mode `0660`; its parent is `root:root` mode `0755`.
+The controller verifies the PID, descriptor count/names, actual listening Unix
+descriptor, socket owner/group/mode and non-writable root-owned parents before
+accepting requests. Its service allows only `AF_UNIX`. Voice mounts the socket
+directory read-only and uses its existing distinct executor/control bearers.
+Missing sockets, proxies and redirects cannot cause TCP fallback. The legacy
+`AGENT_API_URL` is an HTTP origin string only, not a TCP routing option.
+
+The separate `/run/teleagent-pbx-panic/panic.sock` is reserved for the
+`teleagent-asterisk` group and accepts only the exact emergency stop request.
+It grants no read, submit, unlock or general controller authority. PBX dial-9
+wiring and real failure/recovery call tests remain required before activation.
+Both socket units are dormant, sentinel-gated and included in disabled
+installation, release policy and quiescence checks. A stopped service with a
+running socket may be activated by a request; stop both sockets when proving
+quiescence for installation or release changes.
+
+Direct development starts retain loopback HTTP. Production state enforcement
+refuses that mode. See Node's [inherited-listener API](https://nodejs.org/docs/latest-v24.x/api/net.html#serverlistenhandle-backlog-callback)
+and Axios's [request options](https://axios-http.com/docs/req_config) for the
+transport primitives; repository checks bind the production destination.
+
 ## Durable-state contract
 
 Provision both exact mountpoints before installing this plane:
@@ -62,7 +88,7 @@ installer only through that release's canonical
 is check-only; it refuses both `--source-check` and `--install-disabled`.
 Never use `/opt/teleagent/current` as an installer entrypoint.
 
-The digest-pinned installer transactionally installs only the two units,
+The digest-pinned installer transactionally installs the service/socket units,
 tmpfiles/sysusers declarations, manifest, installer, and verifier. It proves
 exact `LoadState=loaded`, `UnitFileState=static`, `ActiveState=inactive`, and
 `SubState=dead` after `daemon-reload`. Every loaded controller, broker, and

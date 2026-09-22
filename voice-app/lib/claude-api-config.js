@@ -1,5 +1,7 @@
 const { getRuntimeSecret } = require('./runtime-secrets');
 
+// Compatibility HTTP origin only. controller-http-client always selects the
+// root-owned Unix listener; this value never chooses a TCP destination.
 const AGENT_API_URL = 'http://127.0.0.1:3333';
 
 class AgentApiConfigError extends Error {
@@ -13,7 +15,7 @@ class AgentApiConfigError extends Error {
 function loadAgentApiConfig(settings = process.env) {
   if (typeof settings.CLAUDE_API_URL === 'string' && settings.CLAUDE_API_URL.length > 0) {
     throw new AgentApiConfigError(
-      'CLAUDE_API_URL is retired; the controller is fixed to http://127.0.0.1:3333'
+      'CLAUDE_API_URL is retired; the controller uses its fixed protected Unix socket'
     );
   }
   if (
@@ -22,7 +24,7 @@ function loadAgentApiConfig(settings = process.env) {
     settings.AGENT_API_URL !== AGENT_API_URL
   ) {
     throw new AgentApiConfigError(
-      'AGENT_API_URL must be the reviewed loopback controller http://127.0.0.1:3333'
+      'AGENT_API_URL must retain the compatibility HTTP origin; transport uses the fixed Unix socket'
     );
   }
   return Object.freeze({ agentApiUrl: AGENT_API_URL });

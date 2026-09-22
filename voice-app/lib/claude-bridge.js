@@ -3,7 +3,7 @@
  * HTTP client for fresh Claude/Codex jobs with Teleagent-owned correlation
  */
 
-const axios = require('axios');
+const axios = require('./controller-http-client');
 const crypto = require('node:crypto');
 const {
   AGENT_API_URL,

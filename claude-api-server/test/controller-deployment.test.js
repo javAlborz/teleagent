@@ -70,7 +70,10 @@ test('controller unit is dormant, exact-path, resource-capped, and isolated', ()
   assert.match(service, /^ProtectSystem=strict$/m);
   assert.match(service, /^ProtectHome=yes$/m);
   assert.match(service, /^IPAddressDeny=any$/m);
-  assert.match(service, /^IPAddressAllow=localhost$/m);
+  assert.doesNotMatch(service, /^IPAddressAllow=/m);
+  assert.match(service, /^RestrictAddressFamilies=AF_UNIX$/m);
+  assert.match(service, /^Environment=AGENT_API_TRANSPORT=systemd-unix$/m);
+  assert.match(service, /^Requires=.*teleagent-agent-controller\.socket/m);
   assert.match(service, /^ReadWritePaths=\/var\/lib\/teleagent-control$/m);
   for (const inaccessible of [
     '/var/lib/teleagent-worker-state',

@@ -51,7 +51,7 @@ Asterisk private PBX
              |          |
              |          +--> outbound WSS to OpenAI Realtime for 7/77
              |
-             +--> authenticated loopback controller on :3333
+             +--> authenticated root-owned controller Unix socket
                        |
                        +--> durable task executor
                        |       +--> fixed launcher -> teleagent-worker
@@ -117,8 +117,13 @@ environment settings after `EnvironmentFile` processing and cannot access the
 broker socket.
 
 Committed example, placeholder, `changeme`, or `replace-with` values are
-invalid. The controller defaults to `127.0.0.1`; a non-loopback bind requires
-`AGENT_API_NON_LOOPBACK_ENABLED=true` plus reviewed network controls. Docker
+invalid. The production controller accepts only systemd's root-owned listener
+at `/run/teleagent-controller/controller.sock`. Voice mounts its root-owned
+directory read-only and retains the two scoped bearers; it cannot replace the
+listener. This dedicated HTTP socket is separate from private worker/root
+broker sockets. Voice clients never fall back to TCP, proxies, or redirects.
+Direct development starts retain loopback binding; production state enforcement
+requires `AGENT_API_TRANSPORT=systemd-unix`. Docker
 Compose explicitly blanks the general and legacy Claude bearer inside
 `voice-app`.
 
@@ -273,7 +278,7 @@ Useful local checks:
 
 ```bash
 curl -fsS http://127.0.0.1:3000/api/realtime-health
-curl -fsS http://127.0.0.1:3333/health
+sudo curl --unix-socket /run/teleagent-controller/controller.sock http://localhost/health
 npm run voice-history -- --limit 500
 npm run voice-control -- status
 ```

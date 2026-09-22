@@ -110,9 +110,8 @@ async function socketServer(t, handler) {
 
 test('real Unix HTTP grants only exact panic POSTs and clears request identity after completion', async (t) => {
   const requests = [];
-  let gate;
   const foreign = createPbxPanicRequestGate(() => {});
-  gate = createPbxPanicRequestGate(async (request, response) => {
+  const gate = createPbxPanicRequestGate(async (request, response) => {
     assert.equal(gate.isPbxPanicRequest(request), true);
     assert.equal(foreign.isPbxPanicRequest(request), false);
     request.originalUrl = request.url; // Express preserves this across middleware.

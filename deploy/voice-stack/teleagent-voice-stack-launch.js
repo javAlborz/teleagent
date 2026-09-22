@@ -18,6 +18,7 @@ const VOICE_IMAGE_MANIFEST = '/etc/teleagent-voice/voice-image.manifest.json';
 const CREDENTIAL_ROOT = '/etc/teleagent-voice/credentials';
 const RUNTIME_ROOT = '/run/teleagent-voice-stack';
 const RUNTIME_SECRET_ROOT = `${RUNTIME_ROOT}/voice-secrets`;
+const CONTROLLER_SOCKET = '/run/teleagent-controller/controller.sock';
 const ACTIVATION_ROOT = '/var/lib/teleagent-voice-stack';
 const ACTIVATION_STATE = `${ACTIVATION_ROOT}/activation-state.json`;
 const WRAPPER = `${APP_ROOT}/deploy/voice-stack/teleagent-voice-stack-launch.js`;
@@ -919,7 +920,7 @@ function requireProviderInstallClosure() {
   for (const line of installed.toString('utf8').trim().split('\n')) {
     const [digest, _sourcePath, target, mode, extra] = line.split(' ');
     if (extra !== undefined || !/^[a-f0-9]{64}$/u.test(digest || '') ||
-        !/^teleagent-provider-[A-Za-z0-9.-]+$/u.test(target || '') ||
+        !(target === 'teleagent-resource-admission' || /^teleagent-provider-[A-Za-z0-9.-]+$/u.test(target || '')) ||
         !['0755', '0444'].includes(mode) || targets.has(target)) {
       refuse('the installed provider manifest is invalid');
     }
@@ -951,7 +952,7 @@ async function requireControllerReady(controlToken, { request = requestJson } = 
       method: 'GET',
       pathname: '/operator/health',
       token: controlToken.toString('utf8'),
-      port: 3333,
+      socketPath: CONTROLLER_SOCKET,
       timeoutMs: 2000,
     });
     const body = response.body;
@@ -985,7 +986,7 @@ async function requireExecutorReady(executorToken, { request = requestJson } = {
       method: 'GET',
       pathname: '/executor/health',
       token: executorToken.toString('utf8'),
-      port: 3333,
+      socketPath: CONTROLLER_SOCKET,
       timeoutMs: 2000,
     });
     if (response.status !== 200 || response.body?.ready !== true ||
@@ -1271,6 +1272,7 @@ async function start() {
   verifyVoiceImage(imageManifest);
   requireActiveUnit('teleagent-sip-local-peer-fence.service');
   requireActiveUnit('teleagent-agent-controller.service');
+  requireActiveUnit('teleagent-agent-controller.socket');
   run(SIP_FENCE, ['check'], {
     environment: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8' },
   });
@@ -1500,7 +1502,7 @@ async function runOfflineRecovery(priorState, {
       token: tokenBuffer.toString('utf8'),
       body: { source: 'teleagent_voice_stack', reason: 'offline_activation_recovery' },
       timeoutMs: 15000,
-      port: 3333,
+      socketPath: CONTROLLER_SOCKET,
     });
     assertPanicQuiesced(panic);
   } catch (error) {

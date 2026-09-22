@@ -89,6 +89,8 @@ dormant_units=(
   teleagent-provider-egress@codex.socket
   teleagent-provider-egress-control@codex.socket
   teleagent-agent-controller.service
+  teleagent-agent-controller.socket
+  teleagent-pbx-panic.socket
   teleagent-privileged-action.service
   teleagent-realtime-sip-gateway.service
   teleagent-voice-stack.service

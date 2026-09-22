@@ -409,7 +409,8 @@ test('voice activation authenticates exact authority-disabled controller health 
     request: async (options) => {
       assert.equal(options.method, 'GET');
       assert.equal(options.pathname, '/operator/health');
-      assert.equal(options.port, 3333);
+      assert.equal(options.socketPath, '/run/teleagent-controller/controller.sock');
+      assert.equal(options.port, undefined);
       assert.equal(options.token, 'controller-readiness-token-32-bytes');
       return { status: 200, body: exactHealth };
     },
@@ -442,7 +443,8 @@ test('voice activation authenticates executor readiness and erases its token', a
     request: async (options) => {
       assert.equal(options.method, 'GET');
       assert.equal(options.pathname, '/executor/health');
-      assert.equal(options.port, 3333);
+      assert.equal(options.socketPath, '/run/teleagent-controller/controller.sock');
+      assert.equal(options.port, undefined);
       assert.equal(options.token, 'executor-readiness-token-32-bytes--');
       return {
         status: 200,
@@ -832,7 +834,8 @@ test('offline recovery initializes missing state and retains partial or unavaila
       successEvents.push('controller-panic');
       assert.equal(options.method, 'POST');
       assert.equal(options.pathname, '/voice-control/stop');
-      assert.equal(options.port, 3333);
+      assert.equal(options.socketPath, '/run/teleagent-controller/controller.sock');
+      assert.equal(options.port, undefined);
       assert.equal(successEvents.indexOf('containers-zero') <
         successEvents.indexOf('controller-panic'), true);
       return { status: 200, body: { success: true } };

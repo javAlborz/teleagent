@@ -1,8 +1,8 @@
 [Unit]
 Description=Teleagent private durable agent controller
 Documentation=file:/opt/teleagent/current/docs/CONTROLLER-DEPLOYMENT.md
-Requires=teleagent-worker-session.service teleagent-provider-model-apparmor.service teleagent-provider-supervisor@claude.socket teleagent-provider-supervisor@codex.socket
-After=local-fs.target network-online.target teleagent-worker-session.service teleagent-provider-model-apparmor.service teleagent-provider-supervisor@claude.socket teleagent-provider-supervisor@codex.socket
+Requires=teleagent-agent-controller.socket teleagent-pbx-panic.socket teleagent-worker-session.service teleagent-provider-model-apparmor.service teleagent-provider-supervisor@claude.socket teleagent-provider-supervisor@codex.socket
+After=local-fs.target network-online.target teleagent-agent-controller.socket teleagent-pbx-panic.socket teleagent-worker-session.service teleagent-provider-model-apparmor.service teleagent-provider-supervisor@claude.socket teleagent-provider-supervisor@codex.socket
 Wants=network-online.target
 ConditionPathExists=/etc/teleagent/controller/ENABLE
 ConditionPathExists=/etc/teleagent/worker-session/ENABLE
@@ -10,6 +10,7 @@ ConditionPathIsMountPoint=/var/lib/teleagent-control
 
 [Service]
 Type=simple
+Sockets=teleagent-agent-controller.socket teleagent-pbx-panic.socket
 User=teleagent-control
 Group=teleagent-control
 UMask=0077
@@ -19,8 +20,7 @@ Environment=HOME=/var/lib/teleagent-control
 Environment=PATH=/opt/teleagent/agent-tools:/usr/bin:/bin
 Environment=LANG=C.UTF-8
 Environment=LC_ALL=C.UTF-8
-Environment=PORT=3333
-Environment=AGENT_API_BIND_HOST=127.0.0.1
+Environment=AGENT_API_TRANSPORT=systemd-unix
 Environment=AGENT_API_NON_LOOPBACK_ENABLED=false
 Environment=TELEAGENT_CONTROLLER_STATE_BOUNDARY=required
 Environment=EXECUTOR_TASK_DB_PATH=/var/lib/teleagent-control/executor-tasks.sqlite
@@ -72,9 +72,8 @@ RestrictNamespaces=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes
 RestrictRealtime=yes
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictAddressFamilies=AF_UNIX
 IPAddressDeny=any
-IPAddressAllow=localhost
 SystemCallArchitectures=native
 ReadOnlyPaths=/opt/teleagent/releases /opt/teleagent/agent-tools /usr/local/libexec /etc/teleagent/controller
 ReadWritePaths=/var/lib/teleagent-control

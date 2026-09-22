@@ -1,6 +1,6 @@
 'use strict';
 
-const axios = require('axios');
+const axios = require('./controller-http-client');
 const { isDeepStrictEqual } = require('node:util');
 const { AGENT_API_URL } = require('./claude-api-config');
 const { getRuntimeSecret } = require('./runtime-secrets');

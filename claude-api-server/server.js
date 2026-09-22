@@ -15,6 +15,9 @@
  */
 
 const express = require('express');
+const http = require('node:http');
+const { controllerListenOptions, CONTROLLER_SOCKET } = require('./controller-listener');
+const { pbxPanicListenOptions, createPbxPanicRequestGate } = require('./pbx-panic-listener');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
 const fs = require('fs');
@@ -281,6 +284,8 @@ let executorTaskDispatcher = null;
 let serverReady = false;
 let shutdownRequested = false;
 let httpServer = null;
+let pbxPanicServer = null;
+let pbxPanicGate = null;
 let shutdownPromise = null;
 let executorStoreClosed = false;
 let workerSessionHealthTimer = null;
@@ -1827,7 +1832,7 @@ function isOperatorPath(requestPath) {
 app.use((req, res, next) => {
   const localPanicStop = req.method === 'POST' &&
     req.path === '/voice-control/stop' &&
-    isLoopbackRequest(req);
+    (isLoopbackRequest(req) || pbxPanicGate?.isPbxPanicRequest(req) === true);
 
   if (req.path === '/' || req.path === '/health' || localPanicStop) {
     return next();
@@ -4135,7 +4140,8 @@ app.post('/voice-control/session/cancel', handleCancelSession);
  * POST /voice-control/stop
  *
  * Fail-closed emergency stop for every phone-originated agent request. Asterisk
- * may call this endpoint without the bearer token only over loopback. The stop
+ * uses a separate root-owned, stop-only Unix listener in production. Direct
+ * development starts also accept loopback panic without a bearer. The stop
  * is persistent and idempotent; it does not affect ordinary terminal/API work.
  */
 app.post('/voice-control/stop', async (req, res) => {
@@ -4405,10 +4411,8 @@ app.get('/', (req, res) => {
   });
 });
 
-function listenForRequests() {
+function listenOn(candidate, options) {
   return new Promise((resolve, reject) => {
-    const candidate = app.listen(PORT, BIND_HOST);
-    httpServer = candidate;
     const onError = (error) => {
       candidate.removeListener('listening', onListening);
       reject(error);
@@ -4419,11 +4423,25 @@ function listenForRequests() {
     };
     candidate.once('error', onError);
     candidate.once('listening', onListening);
+    candidate.listen(options);
   });
 }
 
-function beginHttpShutdown() {
-  if (!httpServer) return Promise.resolve({ closed: true, error: null });
+async function listenForRequests() {
+  const options = controllerListenOptions({ port: PORT, host: BIND_HOST });
+  const panicOptions = process.env.AGENT_API_TRANSPORT === 'systemd-unix' ? pbxPanicListenOptions() : null;
+  if (panicOptions) {
+    pbxPanicGate = createPbxPanicRequestGate(app);
+    pbxPanicServer = http.createServer(pbxPanicGate.dispatch);
+    await listenOn(pbxPanicServer, panicOptions);
+  }
+  if (shutdownRequested) return;
+  httpServer = http.createServer(app);
+  await listenOn(httpServer, options);
+}
+
+function closeHttpListener(server) {
+  if (!server) return Promise.resolve({ closed: true, error: null });
   return new Promise((resolve) => {
     let settled = false;
     const finish = (error = null) => {
@@ -4433,11 +4451,16 @@ function beginHttpShutdown() {
       resolve({ closed: !error, error });
     };
     try {
-      httpServer.close(finish);
+      server.close(finish);
     } catch (error) {
       finish(error);
     }
   });
+}
+
+async function beginHttpShutdown() {
+  const results = await Promise.all([closeHttpListener(httpServer), closeHttpListener(pbxPanicServer)]);
+  return { closed: results.every((result) => result.closed), error: results.find((result) => result.error)?.error || null };
 }
 
 function settleWithin(promise, timeoutMs) {
@@ -4494,8 +4517,8 @@ async function startServer() {
     console.log('='.repeat(64));
     console.log('Teleagent HTTP Agent Bridge');
     console.log('='.repeat(64));
-    console.log(`\nListening on: http://${BIND_HOST}:${PORT}`);
-    console.log(`Health check: http://localhost:${PORT}/health`);
+    console.log(`\nListening on: ${process.env.AGENT_API_TRANSPORT === 'systemd-unix' ?
+      CONTROLLER_SOCKET : `http://${BIND_HOST}:${PORT}`}`);
     console.log(`Agent API auth: ${AGENT_API_TOKEN ? 'enabled' : 'unavailable'}`);
     console.log(`Executor API auth: ${EXECUTOR_API_TOKEN ? 'enabled' : 'unavailable'}`);
     console.log(`Voice control API auth: ${VOICE_CONTROL_TOKEN ? 'enabled' : 'unavailable'}`);
@@ -4580,6 +4603,7 @@ function shutdown(signal, { exitCode = 0 } = {}) {
     let http = await settleWithin(httpDrain, 2500);
     if (!http.settled) {
       httpServer?.closeAllConnections?.();
+      pbxPanicServer?.closeAllConnections?.();
       http = await settleWithin(httpDrain, 500);
     }
     if (!http.settled || !http.value?.closed) {

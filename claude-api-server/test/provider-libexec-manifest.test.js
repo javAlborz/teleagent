@@ -25,6 +25,7 @@ test('provider libexec manifest pins the complete reviewed install closure', () 
     'teleagent-provider-cli.manifest.json',
     'teleagent-provider-codex-cli-wrapper',
     'teleagent-provider-egress-credential-check',
+    'teleagent-resource-admission',
   ]);
 
   for (const line of lines) {
@@ -33,7 +34,7 @@ test('provider libexec manifest pins the complete reviewed install closure', () 
     const [expectedDigest, source, target, mode] = fields;
     assert.match(expectedDigest, /^[a-f0-9]{64}$/);
     assert.match(source, /^(?:deploy\/worker-session|claude-api-server)\//);
-    assert.match(target, /^teleagent-provider-[A-Za-z0-9.-]+$/);
+    assert.match(target, /^(?:teleagent-provider-[A-Za-z0-9.-]+|teleagent-resource-admission)$/);
     assert.match(mode, /^(?:0755|0444)$/);
     assert.equal(targets.has(target), false, `duplicate target: ${target}`);
     targets.add(target);
@@ -46,6 +47,10 @@ test('provider libexec manifest pins the complete reviewed install closure', () 
     if (target === 'teleagent-provider-model.apparmor') {
       hasModelProfile = true;
       assert.equal(source, 'deploy/worker-session/teleagent-provider-model.apparmor');
+      assert.equal(mode, '0444');
+    }
+    if (target === 'teleagent-resource-admission') {
+      assert.equal(source, 'deploy/worker-session/teleagent-resource-admission');
       assert.equal(mode, '0444');
     }
   }

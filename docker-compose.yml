@@ -156,7 +156,7 @@ services:
         max-size: "10m"
         max-file: "3"
     environment:
-      # Fixed security boundary; never inherited from the host .env.
+      # HTTP origin only: controller requests always use the protected Unix socket.
       AGENT_API_URL: "http://127.0.0.1:3333"
       AGENT_API_TOKEN: ""
       CLAUDE_API_TOKEN: ""
@@ -239,6 +239,7 @@ services:
       # file is root:teleagent-voice 0440; the projection is ephemeral and the
       # agent/controller processes receive only their own public/verifier data.
       - /run/teleagent-voice-stack/voice-secrets:/run/secrets:ro
+      - /run/teleagent-controller:/run/teleagent-controller:ro
     depends_on:
       - drachtio
       - freeswitch
