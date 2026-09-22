@@ -1,4 +1,5 @@
 const assert = require('node:assert/strict');
+require('./helpers/voice-egress-fixture').installEgressFixture();
 const { installTestRuntimeSecrets } = require('./runtime-secrets-fixture');
 installTestRuntimeSecrets();
 const fs = require('node:fs');

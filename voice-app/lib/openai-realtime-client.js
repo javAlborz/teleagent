@@ -3,6 +3,7 @@
 const { EventEmitter } = require('node:events');
 const { URL } = require('node:url');
 const WebSocket = require('ws');
+const { realtimeWebSocketOptions } = require('./voice-egress-transport');
 const { getRuntimeSecret } = require('./runtime-secrets');
 const { UNAVAILABLE, isToolAvailable, unavailableResult } = require('./controller-capabilities');
 
@@ -695,6 +696,7 @@ class OpenAIRealtimeClient extends EventEmitter {
     this.closedByClient = false;
 
     return new Promise((resolve, reject) => {
+      const connectionOptions = realtimeWebSocketOptions();
       let settled = false;
       const timer = setTimeout(() => {
         if (settled) return;
@@ -703,7 +705,9 @@ class OpenAIRealtimeClient extends EventEmitter {
         reject(new Error(`Timed out connecting to OpenAI Realtime after ${this.connectTimeoutMs}ms`));
       }, this.connectTimeoutMs);
 
-      const ws = new this.WebSocketImpl(this._buildUrl(), { headers: this._buildHeaders() });
+      let ws;
+      try { ws = new this.WebSocketImpl(this._buildUrl(), { ...connectionOptions, headers: this._buildHeaders() }); }
+      catch (error) { clearTimeout(timer); reject(error); return; }
       this.ws = ws;
 
       const settleError = (error) => {

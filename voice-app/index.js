@@ -10,6 +10,8 @@ var fixedRuntimeEnvironment = null;
 try {
   fixedRuntimeEnvironment = voiceAppRuntimeContract.assertVoiceAppRuntimeEnvironment(process.env);
   mediaReceiverRuntime = require("../lib/media-receiver-runtime").loadMediaReceiverRuntime();
+  var voiceEgressRuntime = require("../lib/voice-egress-runtime").loadVoiceEgressRuntime(mediaReceiverRuntime);
+  require("./lib/voice-egress-transport").configureVoiceEgress(voiceEgressRuntime);
   require("./lib/media-playback-urls").configureMediaPlayback(mediaReceiverRuntime);
 } catch (error) {
   console.error("[CONFIG] Voice state/listener boundary failed: " + error.message);
@@ -125,6 +127,9 @@ try {
   config.ws_non_loopback_enabled = receiverProjection.audioForkOptions.allowNonLoopback;
   config.ws_allowed_peers = receiverProjection.audioForkOptions.allowedPeers;
   config.legacy_speech = loadLegacySpeechConfig(process.env);
+  if (config.legacy_speech.enabled !== voiceEgressRuntime.speechEnabled) {
+    throw new Error("Legacy speech differs from independent egress admission");
+  }
   config.realtime_endpoint = loadRealtimeEndpointConfig(process.env);
   config.drachtio.host = config.media_endpoints.drachtio.host;
   config.drachtio.port = config.media_endpoints.drachtio.port;
@@ -471,6 +476,7 @@ async function checkReadyState() {
 var shutdownPromise = null;
 function shutdown(signal) {
   mediaStartupFence.stop();
+  require("./lib/voice-egress-transport").stopVoiceEgress();
   if (shutdownPromise) return shutdownPromise;
   shutdownPromise = (async function() {
     console.log("\n[" + new Date().toISOString() + "] Received " + signal + ", shutting down...");
