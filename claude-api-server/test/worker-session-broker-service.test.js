@@ -6,6 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { fork, spawn } = require('node:child_process');
 const test = require('node:test');
+const Database = require('better-sqlite3');
 const {
   FIXED_BROKER_HOME,
   FIXED_BROKER_USER,
@@ -218,6 +219,40 @@ test('kernel-backed lifetime lock excludes a second broker until release', () =>
   const replacement = acquireWorkerSessionSingletonLock(lockPath, options);
   replacement.release();
   fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test('short independent SQLite initialization contention is not mistaken for a lifetime owner', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'worker-session-lock-reader-'));
+  const lockPath = path.join(directory, 'lifetime.sqlite');
+  const seed = new Database(lockPath);
+  seed.exec('CREATE TABLE initialization_fixture (value INTEGER);');
+  seed.close();
+  fs.chmodSync(lockPath, 0o600);
+  const reader = fork(path.join(__dirname, 'fixtures', 'worker-session-lock-reader-child.js'), [lockPath], {
+    stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+  });
+  const exited = new Promise((resolve) => reader.once('exit', resolve));
+  let lock;
+  try {
+    assert.equal((await nextMessage(reader)).status, 'reader-held');
+    const scheduled = nextMessage(reader);
+    reader.send('release-soon');
+    assert.equal((await scheduled).status, 'release-scheduled');
+    const released = nextMessage(reader);
+    lock = acquireWorkerSessionSingletonLock(lockPath, {
+      expectedUid: process.getuid(), allowTestPath: true,
+    });
+    assert.equal((await released).status, 'reader-released');
+    assert.equal(await exited, 0);
+    assert.throws(() => acquireWorkerSessionSingletonLock(lockPath, {
+      expectedUid: process.getuid(), allowTestPath: true,
+    }), /holds the lifetime lock/);
+  } finally {
+    lock?.release();
+    if (reader.exitCode === null && reader.signalCode === null) reader.kill('SIGKILL');
+    await exited;
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test('a lifetime-lock loser performs no store open, recovery, tmux, or listen work', async () => {
