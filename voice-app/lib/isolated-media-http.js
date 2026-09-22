@@ -47,8 +47,8 @@ function createMediaRequestHandler(runtime, { audioDir, staticDir }) {
       if (!exactSocket(req, endpoint)) { await opened.handle.close(); failure(res, 403); return; }
       res.writeHead(200, { 'Content-Type': opened.contentType, 'Content-Length': String(opened.metadata.size),
         'Cache-Control': requested.kind === 'audio' ? 'no-store' : 'private, max-age=300', 'X-Content-Type-Options': 'nosniff' });
-      if (req.method === 'HEAD') { await opened.handle.close(); res.end(); return; }
-      const stream = opened.handle.createReadStream({ autoClose: true });
+      if (req.method === 'HEAD' || opened.metadata.size === 0) { await opened.handle.close(); res.end(); return; }
+      const stream = opened.handle.createReadStream({ start: 0, end: opened.metadata.size - 1, autoClose: true });
       stream.once('error', () => res.destroy());
       res.once('close', () => stream.destroy());
       stream.pipe(res);

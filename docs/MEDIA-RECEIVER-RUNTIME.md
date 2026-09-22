@@ -66,7 +66,8 @@ Host and forwarding headers are never identity. Only GET/HEAD of
 Express control/API dispatch, upload, proxying or redirect. Queries, fragments,
 absolute URLs, percent encoding, traversal, unknown extensions, bodies, protocol
 upgrades and other methods are refused. Files use no-follow, nonblocking opens,
-regular-file/size checks and confinement of the already-open descriptor. Generated
+regular-file/size checks and confinement of the already-open descriptor. Each
+stream ends at its checked size, so later file growth cannot extend a response. Generated
 media is `no-store`; static media caching is private.
 
 The listener bounds connections32, backlog32, headers8KiB, requests/socket16,

@@ -91,6 +91,19 @@ test('admission is checked per request and again after async file open', async (
   assert.equal((await exchange(handler, request())).status, 503);
 });
 
+test('concurrent file growth cannot exceed the checked size and empty media closes cleanly', async (t) => {
+  const { f, handler, directories } = media(t);
+  f.onRead((count) => {
+    if (count === 2) fs.appendFileSync(path.join(directories.audioDir, 'response.wav'), 'must not follow size check');
+  });
+  const response = await exchange(handler, request());
+  assert.equal(response.status, 200); assert.equal(response.headers['Content-Length'], '16');
+  assert.equal(response.body, 'private response');
+  fs.writeFileSync(path.join(directories.audioDir, 'empty.wav'), '');
+  const empty = await exchange(handler, request({ url: '/audio-files/empty.wav' }));
+  assert.equal(empty.status, 200); assert.equal(empty.headers['Content-Length'], '0'); assert.equal(empty.body, '');
+});
+
 function fakeFactory({ actual, listenError, syncError } = {}) {
   let server;
   const createServer = (options, handler) => {
