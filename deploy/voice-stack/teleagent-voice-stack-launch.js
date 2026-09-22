@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const http = require('node:http');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
+const { requireRuntimeIntegration } = require('./media-application-boundary');
 
 const IMMUTABLE_RELEASE_ROOT = /^\/opt\/teleagent\/releases\/sha256-[a-f0-9]{64}$/u;
 // Unit starts receive this from the infrastructure-owned release launcher.
@@ -1252,6 +1253,9 @@ function rollbackStartedStack(environment) {
 }
 
 async function start() {
+  // Receiver namespaces require coordinated endpoint/health/PBX integration.
+  // Source candidates cannot fall back to the old shared host-network plane.
+  requireRuntimeIntegration();
   for (const filename of [APP_ROOT, COMPOSE_FILE, `${APP_ROOT}/lib/voice-app-runtime-env.js`]) {
     inspectRootPath(filename, { directory: filename === APP_ROOT });
   }
