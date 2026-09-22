@@ -160,6 +160,11 @@ loadEnvFile(path.join(__dirname, '..', '.env'));
 
 const HOME = process.env.HOME || os.homedir() || '/root';
 const app = express();
+// Scope selection below uses exact path spelling. Configure the router before
+// its first middleware so case or a trailing slash cannot select a handler
+// under a different credential scope.
+app.enable('case sensitive routing');
+app.enable('strict routing');
 const PORT = process.env.PORT || 3333;
 const BIND_HOST = String(
   process.env.AGENT_API_BIND_HOST || process.env.CLAUDE_API_BIND_HOST || '127.0.0.1'

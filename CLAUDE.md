@@ -111,6 +111,10 @@ scoped:
 | `EXECUTOR_API_TOKEN` | durable `/executor/**` routes |
 | `VOICE_CONTROL_TOKEN` | `/voice-control/**`, operator, and unlock routes |
 
+Controller route matching is case sensitive and rejects trailing slashes.
+Keep those settings ahead of all middleware so handler matching and credential
+scope classification agree, including the operator-only executor unlock route.
+
 The privileged-action bearer and proxy implementation remain only as
 unit-tested future substrate. The production controller service removes their
 environment settings after `EnvironmentFile` processing and cannot access the

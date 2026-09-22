@@ -354,6 +354,49 @@ test('each private route family accepts only its dedicated bearer', async (t) =>
   assert.equal(emergencyBody.privilegedActions.quiesced, false);
 });
 
+test('alternate route spelling cannot cross token scopes or unlock stopped work', async (t) => {
+  const server = await startServer(t);
+  const stop = await fetch(`${server.baseUrl}/voice-control/stop`, {
+    method: 'POST', headers: headers(), body: JSON.stringify({ source: 'route_scope_test' }),
+  });
+  // The unavailable fixture root broker leaves an honest PARTIAL result, with
+  // the local execution lock durably set. No real work or credentials exist.
+  assert.equal(stop.status, 503);
+  assert.equal((await stop.json()).voiceExecution.locked, true);
+
+  for (const [route, token] of [
+    ['/VOICE-CONTROL/UNLOCK', TOKENS.agent],
+    ['/Voice-Control/unlock', TOKENS.agent],
+    ['/EXECUTOR/PANIC/UNLOCK', TOKENS.agent],
+    ['/executor/panic/unlock/', TOKENS.executor],
+    ['/executor/panic/UNLOCK', TOKENS.executor],
+    ['/OPERATOR/INSPECT', TOKENS.agent],
+    ['/PRIVILEGED-ACTIONS', TOKENS.agent],
+    ['/%76oice-control/unlock', TOKENS.agent],
+    ['/voice-control/unlock/', TOKENS.voice],
+    ['/operator/inspect/', TOKENS.voice],
+    ['/privileged-actions/', TOKENS.privileged],
+  ]) {
+    const response = await fetch(`${server.baseUrl}${route}`, {
+      method: 'POST', headers: headers(token), body: '{}',
+    });
+    assert.equal(response.status, 404, `noncanonical route reached a handler: ${route}`);
+  }
+  for (const route of ['/voice-control/unlock', '/executor/panic/unlock']) {
+    for (const token of [TOKENS.agent, TOKENS.executor]) {
+      const response = await fetch(`${server.baseUrl}${route}`, {
+        method: 'POST', headers: headers(token), body: '{}',
+      });
+      assert.equal(response.status, 401, `unlock accepted a non-operator token: ${route}`);
+    }
+  }
+  const status = await fetch(`${server.baseUrl}/voice-control/status`, {
+    headers: headers(TOKENS.voice),
+  });
+  assert.equal(status.status, 200);
+  assert.equal((await status.json()).voiceExecution.locked, true);
+});
+
 for (const [label, invalidToken] of [
   ['missing', ''],
   ['malformed', 'short'],
