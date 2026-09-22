@@ -51,6 +51,10 @@ independent release workflow. Generic approval does not supply these values.
   The real independent adapter and end-to-end stop aggregation remain open;
   see [PBX listener](PBX-PANIC-LISTENER.md) and
   [adapter feasibility](PBX-ADAPTER-FEASIBILITY-20260922.md).
+- A fixed root-only provider-stop operation now reuses the existing durable
+  global panic transaction without impersonating the session broker or holding
+  a normal start lock. It is one prerequisite for the independent recovery
+  daemon, which is still absent; see [root stop](PROVIDER-ROOT-STOP.md).
 - Both exact pinned provider binaries were acquired from public upstreams and
   verified as data. Claude's manifest signature was verified using its
   documented signing fingerprint. Neither provider was executed or installed.
@@ -189,6 +193,10 @@ Validation completed before the final application media-placement follow-up:
   seconds with zero skipped or cancelled tests. Peak cgroup memory was
   129,548,288 bytes. This includes the actual local Unix TLS/HTTP and speech
   queue regressions, without a live provider request.
+- The later root-stop source passed 83 existing/new boundary tests independently.
+  After integration, all 39 release tests, nine manifest/dispatch tests and
+  repository lint passed. The exact provider helper manifest was refreshed;
+  the 147-path source set and existing unit policy were unchanged.
 
 Explicit test/probe runs use the shared serial Hermes envelope: 512 MiB memory,
 zero swap, 128 tasks and one CPU. Provider data acquisition peaked at 372.7 MB;
