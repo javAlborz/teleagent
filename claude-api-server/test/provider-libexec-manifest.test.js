@@ -26,6 +26,7 @@ test('provider libexec manifest pins the complete reviewed install closure', () 
     'teleagent-provider-codex-cli-wrapper',
     'teleagent-provider-egress-credential-check',
     'teleagent-resource-admission',
+    'teleagent-resource-topology-watch',
   ]);
 
   for (const line of lines) {
@@ -34,8 +35,8 @@ test('provider libexec manifest pins the complete reviewed install closure', () 
     const [expectedDigest, source, target, mode] = fields;
     assert.match(expectedDigest, /^[a-f0-9]{64}$/);
     assert.match(source, /^(?:deploy\/worker-session|claude-api-server)\//);
-    assert.match(target, /^(?:teleagent-provider-[A-Za-z0-9.-]+|teleagent-resource-admission)$/);
-    assert.match(mode, /^(?:0755|0444)$/);
+    assert.match(target, /^(?:teleagent-provider-[A-Za-z0-9.-]+|teleagent-resource-(?:admission|topology-watch))$/);
+    assert.match(mode, /^(?:0755|0555|0444)$/);
     assert.equal(targets.has(target), false, `duplicate target: ${target}`);
     targets.add(target);
     requiredTargets.delete(target);
@@ -52,6 +53,10 @@ test('provider libexec manifest pins the complete reviewed install closure', () 
     if (target === 'teleagent-resource-admission') {
       assert.equal(source, 'deploy/worker-session/teleagent-resource-admission');
       assert.equal(mode, '0444');
+    }
+    if (target === 'teleagent-resource-topology-watch') {
+      assert.equal(source, 'deploy/worker-session/teleagent-resource-topology-watch');
+      assert.equal(mode, '0555');
     }
   }
 

@@ -60,10 +60,27 @@ Independent review identified Linux 6.8 nested PID-event accounting as another
 required resource correction. Commit `af24d5a` replaces the aggregate-only
 assumption with bounded stable descendant inventories; all 58 focused resource
 tests passed and the persistent-descendant correction was independently reviewed.
-Directories created and removed wholly between snapshots remain a distinct
-limitation: kernel timestamps are not a complete lifecycle history. Activation
-still requires a bounded kernel topology observer or enforced lifecycle
-serialization. Passing fixture tests does not supply that proof.
+The next correction adds a mandatory retained raw-inotify observer before the
+first sample. It refuses every topology/attribute event, overflow, lost watch,
+helper failure or ambiguous protocol outcome, with no timestamp fallback.
+Its 70 focused tests passed and the frozen source received independent review.
+Actual cgroup notification delivery, the installed read-only mount view and
+observation-to-launch policy still require acceptance; fixture tests alone do
+not supply that proof.
+
+The receiver renderer and explicit v2 topology now include both required
+FreeSWITCH-to-voice connections: media-only HTTP on TCP 3000 and reverse ESL on
+TCP 3002. Control HTTP remains loopback-only. The exact v1 contract remains
+separate and cannot authorize v2 evidence. These source changes were reviewed;
+actual receiver consumers and live commissioning remain outstanding.
+
+The paired application/host source closure now binds 141 paths, including the
+observer, endpoint renderer and its transitive SIP topology module. Its sorted
+path-list SHA-256 is
+`cd22db290cd062ab94798bf7fc09a05522dd6a14cb333150612256d88d1301e9`.
+The observer is installed root-owned mode 0555 and invoked through isolated
+`/usr/bin/python3 -I`; commissioning must independently bind that Python,
+standard-library, `_ctypes` and libc runtime as well as the helper source.
 
 ## Next executable delivery steps
 
@@ -132,6 +149,9 @@ Validation completed before the final application media-placement follow-up:
   and 24 existing launcher tests, plus focused lint. Its independent review
   accepted the dormant preparation/observation scope and explicit activation
   refusal; it does not establish live creation or restart lifetime proofs.
+- After observer/renderer closure integration, 150 affected application tests,
+  all 39 release tests and all 14 aggregate disabled-installer tests passed.
+  The installer run took 107.93 seconds and peaked at 40,271,872 bytes.
 
 Explicit test/probe runs use the shared serial Hermes envelope: 512 MiB memory,
 zero swap, 128 tasks and one CPU. Provider data acquisition peaked at 372.7 MB;

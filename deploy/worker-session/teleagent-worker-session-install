@@ -242,7 +242,7 @@ load_assets() {
       *) fail 'a provider libexec source escaped the release root' ;;
     esac
     case "$target:$mode" in
-      teleagent-provider-*:0755|teleagent-provider-*:0444|teleagent-resource-admission:0444) ;;
+      teleagent-provider-*:0755|teleagent-provider-*:0444|teleagent-resource-admission:0444|teleagent-resource-topology-watch:0555) ;;
       *) fail 'a provider libexec target is invalid' ;;
     esac
     [ "$(/usr/bin/basename -- "$target")" = "$target" ] ||
@@ -270,7 +270,8 @@ teleagent-provider-egress-shim
 teleagent-provider-libexec-install
 teleagent-provider-model.apparmor
 teleagent-provider-runtime
-teleagent-resource-admission'
+teleagent-resource-admission
+teleagent-resource-topology-watch'
   [ "$(printf '%b' "$provider_targets" | LC_ALL=C /usr/bin/sort)" = \
     "$expected_provider_targets" ] || fail 'the provider libexec closure is incomplete'
 }

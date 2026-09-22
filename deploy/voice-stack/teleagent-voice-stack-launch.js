@@ -921,8 +921,8 @@ function requireProviderInstallClosure() {
   for (const line of installed.toString('utf8').trim().split('\n')) {
     const [digest, _sourcePath, target, mode, extra] = line.split(' ');
     if (extra !== undefined || !/^[a-f0-9]{64}$/u.test(digest || '') ||
-        !(target === 'teleagent-resource-admission' || /^teleagent-provider-[A-Za-z0-9.-]+$/u.test(target || '')) ||
-        !['0755', '0444'].includes(mode) || targets.has(target)) {
+        !(['teleagent-resource-admission', 'teleagent-resource-topology-watch'].includes(target) || /^teleagent-provider-[A-Za-z0-9.-]+$/u.test(target || '')) ||
+        !(target === 'teleagent-resource-topology-watch' ? mode === '0555' : ['0755', '0444'].includes(mode)) || targets.has(target)) {
       refuse('the installed provider manifest is invalid');
     }
     targets.add(target);
