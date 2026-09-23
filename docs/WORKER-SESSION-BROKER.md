@@ -309,4 +309,8 @@ provider at 200,000 reserved tokens per UTC day. No local ledger guarantees a
 provider invoice ceiling: verify current model rates, project/workspace
 credential binding, and provider-side monthly hard limits before activating
 either credential. Recheck these fixed rates if the allowed models or provider
-prices change.
+prices change. The September 23, 2026 rate review used the providers'
+[Claude pricing](https://platform.claude.com/docs/en/about-claude/pricing)
+and [OpenAI API pricing](https://developers.openai.com/api/docs/pricing);
+the fixed allowances deliberately exceed standard text-token rates for the
+allowed models at that review.
