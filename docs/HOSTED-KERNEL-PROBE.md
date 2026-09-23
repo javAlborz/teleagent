@@ -39,6 +39,8 @@ The fixed inert fixture proves:
 - the network namespace has only loopback and no IPv4 routes;
 - an owned bind rejects writes with EROFS while its source remains writable,
   then the private tmpfs root also becomes read-only;
+- an inert overlay mount on that private tmpfs reads a lower file, copies a
+  changed file into its upper directory, and unmounts before privilege drop;
 - a separate small writable tmpfs remains usable after dropping to UID/GID 10001;
 - every capability set, including bounding and ambient, is empty, supplementary
   groups are empty, NNP is set and seccomp mode 2 is active;
@@ -73,6 +75,11 @@ operations on **that runner generation**, not stable runner identity, release
 authority, trusted source selection, complete build confinement or artifact
 reproducibility. A failed probe keeps its exact unmet dependency visible and must
 not disable host security settings or weaken any production gate.
+
+The overlay check proves only this private tmpfs-backed mount and copy-up. It
+does not prove BuildKit's overlay snapshotter on a dedicated bounded disk,
+aggregate byte/inode quotas, native package execution, or complete cleanup of
+an actual builder.
 
 ## Existing runner constraints
 

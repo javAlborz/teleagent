@@ -166,6 +166,32 @@ def expect_readonly(path):
         raise Refused('readonly mount allowed a new file')
 
 
+def probe_overlay(root):
+    """Exercise only an inert overlay copy-up on the child's private tmpfs."""
+    base = root + '/overlay'
+    os.mkdir(base, 0o700)
+    for name in ('lower', 'upper', 'work', 'merged'):
+        os.mkdir(base + '/' + name, 0o700)
+    lower = base + '/lower/probe'
+    upper = base + '/upper/probe'
+    merged = base + '/merged/probe'
+    with open(lower, 'xb') as stream:
+        stream.write(b'lower\n')
+    mount('overlay', base + '/merged', 'overlay', MS_NOSUID | MS_NODEV | MS_NOEXEC,
+          'lowerdir=' + base + '/lower,upperdir=' + base + '/upper,workdir=' + base + '/work')
+    try:
+        need(Path(merged).read_bytes() == b'lower\n', 'overlay lower read differs')
+        with open(merged, 'wb') as stream:
+            stream.write(b'upper\n')
+        need(Path(merged).read_bytes() == b'upper\n' and
+             Path(lower).read_bytes() == b'lower\n' and
+             Path(upper).read_bytes() == b'upper\n', 'overlay copy-up differs')
+    finally:
+        syscall('umount2', (base + '/merged').encode('ascii'), 0)
+    need(os.stat(base + '/merged').st_dev == os.stat(base).st_dev,
+         'overlay mount remains after private unmount')
+
+
 def child_probe(root, host_namespaces, last_cap, parent_pidfd):
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     resource.setrlimit(resource.RLIMIT_CPU, (5, 5))
@@ -173,6 +199,7 @@ def child_probe(root, host_namespaces, last_cap, parent_pidfd):
     syscall('unshare', OTHER_NAMESPACES)
     mount(None, '/', flags=MS_REC | MS_PRIVATE)
     mount('tmpfs', root, 'tmpfs', MS_NOSUID | MS_NODEV, 'size=1048576,mode=0755')
+    probe_overlay(root)
     for name in ('proc', 'sys', 'sys/fs', 'sys/fs/cgroup', 'input', 'readonly', 'rw'):
         os.mkdir(root + '/' + name, 0o755)
     os.chmod(root + '/input', 0o777)
@@ -224,7 +251,8 @@ def child_probe(root, host_namespaces, last_cap, parent_pidfd):
     return {'passed': True, 'pid': 1, 'uid': 10001, 'gid': 10001, 'capabilitiesEmpty': True,
             'noNewPrivileges': True, 'seccompGetppidDenied': True, 'privateNamespaces': list(NAMESPACES),
             'leafLimits': actual_caps, 'soleLeafPid': 1, 'loopbackOnly': True,
-            'readonlyRootAndBind': True, 'privateWritableTmpfs': True}
+            'readonlyRootAndBind': True, 'privateWritableTmpfs': True,
+            'privateTmpfsOverlayCopyUp': True}
 
 
 def interrupted(_signal, _frame):
