@@ -65,6 +65,7 @@ const COST_RATE_MICRO_USD_PER_TOKEN = Object.freeze({ claude: 30, codex: 45 });
 const MAX_DAILY_RESERVED_TOKENS = 200_000;
 const MAX_DAILY_RESERVED_COST_MICRO_USD = 5_000_000;
 const SAFE_MODEL = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const OPENAI_PROJECT_ID = /^proj_[A-Za-z0-9_-]{3,128}$/;
 const PROVIDER_ROUTE_KINDS = Object.freeze({
   claude: Object.freeze(['inference', 'count_tokens']),
   codex: Object.freeze(['inference']),
@@ -186,6 +187,12 @@ function normalizePolicy(input, provider) {
     throw new Error('Provider egress maxDailyReservedCostMicroUsd exceeds its hard bound or is missing.');
   }
   const expectedModels = provider === 'claude' ? CLAUDE_MODELS : CODEX_MODELS;
+  const openaiProjectId = input.openaiProjectId ?? null;
+  if ((provider === 'codex' && openaiProjectId !== null &&
+       (typeof openaiProjectId !== 'string' || !OPENAI_PROJECT_ID.test(openaiProjectId))) ||
+      (provider === 'claude' && openaiProjectId !== null)) {
+    throw new Error('Provider egress OpenAI project identity is invalid.');
+  }
   if (input.version !== 1 || input.provider !== provider ||
       allowedModels.length !== expectedModels.length ||
       allowedModels.some((model, index) => (
@@ -195,6 +202,7 @@ function normalizePolicy(input, provider) {
   }
   return Object.freeze({
     provider,
+    openaiProjectId,
     allowedModels: Object.freeze(allowedModels),
     allowedAnthropicBetaByModel: Object.freeze(allowedAnthropicBetaByModel),
     maxRequestBytes: positive('maxRequestBytes', 2 * 1024 * 1024, 4 * 1024 * 1024),
@@ -1302,7 +1310,20 @@ function sanitizedHeaders(
   if (provider === 'claude') {
     headers['x-api-key'] = credential;
     Object.assign(headers, normalizedAnthropicHeaders(incoming, policy, routeKind, model));
-  } else headers.authorization = `Bearer ${credential}`;
+  } else {
+    if (incoming['openai-project'] !== undefined ||
+        incoming['openai-organization'] !== undefined) {
+      throw codedError('PROVIDER_PROJECT_HEADER_DENIED',
+        'Caller-selected provider project is outside policy.', 403);
+    }
+    if (typeof policy.openaiProjectId !== 'string' ||
+        !OPENAI_PROJECT_ID.test(policy.openaiProjectId)) {
+      throw codedError('PROVIDER_PROJECT_UNBOUND',
+        'OpenAI project binding is unavailable.', 503);
+    }
+    headers.authorization = `Bearer ${credential}`;
+    headers['openai-project'] = policy.openaiProjectId;
+  }
   return headers;
 }
 

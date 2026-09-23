@@ -54,6 +54,7 @@ function capturedCodexClientMetadata() {
 function policy(provider = 'codex') {
   return {
     provider,
+    openaiProjectId: provider === 'codex' ? 'proj_teleagenttest0001' : null,
     allowedModels: provider === 'codex' ? ['gpt-5.6-sol'] : ['claude-sonnet-5'],
     allowedAnthropicBetaByModel: provider === 'claude'
       ? ANTHROPIC_COUNT_BETAS_BY_MODEL
@@ -78,6 +79,15 @@ test('pilot egress policies require bounded token and cost allowances', () => {
     const source = JSON.parse(fs.readFileSync(filename, 'utf8'));
     assert.equal(normalizePolicy(source, provider).maxDailyReservedTokens, 200_000);
     assert.equal(normalizePolicy(source, provider).maxDailyReservedCostMicroUsd, 5_000_000);
+    if (provider === 'codex') {
+      assert.equal(normalizePolicy(source, provider).openaiProjectId, null);
+      assert.equal(normalizePolicy({ ...source, openaiProjectId: 'proj_teleagenttest0001' },
+        provider).openaiProjectId, 'proj_teleagenttest0001');
+      for (const invalid of ['default', 'proj_x\nInjected: yes', 123]) {
+        assert.throws(() => normalizePolicy({ ...source, openaiProjectId: invalid }, provider),
+          /OpenAI project identity is invalid/);
+      }
+    }
     assert.throws(() => normalizePolicy({ ...source, maxDailyReservedTokens: 200_001 }, provider),
       /maxDailyReservedTokens exceeds its hard bound/);
     for (const invalid of [0, '100000', null, undefined]) {
@@ -1075,6 +1085,7 @@ test('Codex exact responses inject the bearer while uncaptured compaction stays 
   for (const call of calls) {
     assert.equal(call.options.hostname, 'api.openai.com');
     assert.equal(call.options.headers.authorization, 'Bearer upstream-secret-that-never-returns');
+    assert.equal(call.options.headers['openai-project'], selectedPolicy.openaiProjectId);
     assert.equal(call.options.headers['x-teleagent-launch-capability'], undefined);
   }
   assert.doesNotMatch(inference.body + compact.body, /upstream-secret|ab{10}/);
@@ -1094,6 +1105,42 @@ test('Codex exact responses inject the bearer while uncaptured compaction stays 
     reservations: db.prepare('SELECT * FROM provider_egress_reservations').all(),
   });
   assert.doesNotMatch(serializedRows, /upstream-secret|not persisted|untrusted-client|abababab/);
+});
+
+test('Codex refuses an unbound or caller-selected OpenAI project before spend', async (t) => {
+  const { db, policy: initialPolicy } = harness(t);
+  const selectedPolicy = { ...initialPolicy, openaiProjectId: null };
+  register(db, selectedPolicy);
+  const calls = [];
+  const broker = createProviderEgressBroker({
+    config: {
+      provider: 'codex', spec: PROVIDERS.codex, policy: selectedPolicy,
+      credential: 'upstream-secret-that-never-returns',
+    },
+    db, httpsRequest: fakeHttps(calls),
+  });
+  t.after(() => broker.close());
+  await new Promise((resolve) => broker.dataServer.listen(0, '127.0.0.1', resolve));
+  const headers = {
+    'x-teleagent-launch-id': LAUNCH_ID,
+    'x-teleagent-launch-capability': CAPABILITY,
+  };
+  const body = {
+    model: 'gpt-5.6-sol', reasoning: { effort: 'high' },
+    max_output_tokens: 200, input: 'bounded local input',
+  };
+  const unbound = await request(broker.dataServer, {
+    route: '/v1/responses', headers, body,
+  });
+  assert.equal(unbound.status, 503);
+  assert.equal(JSON.parse(unbound.body).code, 'PROVIDER_PROJECT_UNBOUND');
+  const override = await request(broker.dataServer, {
+    route: '/v1/responses', headers: { ...headers, 'openai-project': 'proj_other0001' }, body,
+  });
+  assert.equal(override.status, 403);
+  assert.equal(JSON.parse(override.body).code, 'PROVIDER_PROJECT_HEADER_DENIED');
+  assert.equal(calls.length, 0);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM provider_egress_reservations').get().count, 0);
 });
 
 test('Claude messages and count_tokens are exact while revocation and recovery deny reuse', async (t) => {

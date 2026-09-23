@@ -1,6 +1,7 @@
 {
   "version": 1,
   "provider": "codex",
+  "openaiProjectId": null,
   "allowedModels": ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"],
   "maxRequestBytes": 2097152,
   "maxResponseBytes": 8388608,

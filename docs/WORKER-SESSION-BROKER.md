@@ -323,6 +323,15 @@ monthly spending limit. Turn on OpenAI's enforced hard project limit; allow
 only standard processing on that project. Set the Claude workspace's monthly
 spend limit in its own Spend limits tab. Bind each API key only to that
 project/workspace and install it through the protected host credential path.
+The Codex policy example has `openaiProjectId: null`, which makes Codex
+requests fail before budget reservation. After account verification, set the
+exact `proj_...` ID in the root-owned policy; the broker then sends the fixed
+`OpenAI-Project` header and rejects caller-selected project or organization
+headers. This guards against accidentally billing an account default. The
+real provider canary must confirm that the dedicated project accepts the
+service-account key and header together. OpenAI documents that this header
+selects a project when a key otherwise resolves an account default in its
+[Terraform provider guide](https://developers.openai.com/api/docs/guides/terraform).
 The repository contains no account IDs or keys, so neither account binding
 nor vendor limit is asserted by this source policy. OpenAI's
 [spend-limit instructions](https://developers.openai.com/api/docs/guides/spend-limits)
