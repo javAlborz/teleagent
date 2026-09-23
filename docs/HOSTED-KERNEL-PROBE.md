@@ -4,8 +4,8 @@ The existing public pull-request validation workflow has a source candidate for
 a small kernel probe before dependency installation. It uses the standard
 `ubuntu-24.04` runner's installed `/usr/bin/python3` and libc. It downloads,
 compiles and executes no provider, container engine or acquired dependency code.
-The storage extension invokes only the runner's installed `mkfs.ext4`, `mount`,
-`umount` and `losetup` on one fresh owned 32 MiB image.
+The storage extension invokes only the runner's installed `mkfs.ext4`, `mount`
+and `umount` on one fresh owned 32 MiB image.
 No credentials, OIDC permission, private infrastructure configuration, artifact
 publication or release admission is involved. Its output always records
 `releaseAuthority=false`, `runtimeAccepted=false` and `buildExecuted=false`.
@@ -70,7 +70,8 @@ It waits at most 45 seconds for the child. Cleanup signals the exact pidfd and
 writes `cgroup.kill` only through the retained, revalidated owned leaf. It requires
 the child reaped, the leaf unpopulated, both process/thread lists empty and the
 temporary directory empty before nonrecursive removal. It also rechecks the
-retained image inode, requires no loop association for its exact path, then
+retained image inode, checks kernel loop backing identities without forking,
+requires no loop association for its exact path, then
 unlinks that one file. Cleanup waits are bounded;
 ambiguous identity or leftover objects report failure, not successful cleanup.
 The workflow has a two-minute outer step timeout. The disposable hosted VM is the
@@ -87,7 +88,9 @@ The overlay check proves only this private tmpfs-backed mount and copy-up. The
 loopback check proves finite byte/inode behavior on a disposable ext4 image,
 using util-linux's automatic loop setup and detach behavior
 ([mount](https://github.com/util-linux/util-linux/blob/master/sys-utils/mount.8.adoc),
-[umount](https://github.com/util-linux/util-linux/blob/master/sys-utils/umount.8.adoc)).
+[umount](https://github.com/util-linux/util-linux/blob/master/sys-utils/umount.8.adoc))
+and the kernel's `backing_file` sysfs attribute
+([Linux loop driver](https://github.com/torvalds/linux/blob/master/drivers/block/loop.c)).
 Neither proves BuildKit's overlay snapshotter on a larger dedicated bounded
 disk, native package execution, or complete cleanup of an actual builder.
 

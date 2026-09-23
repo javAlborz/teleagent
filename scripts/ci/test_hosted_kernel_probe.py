@@ -3,6 +3,7 @@
 import errno
 import os
 from pathlib import Path
+import tempfile
 import types
 import unittest
 from unittest.mock import patch
@@ -114,6 +115,15 @@ class ProbeTests(unittest.TestCase):
             with self.assertRaises(probe.Refused):
                 probe.fixed_tool(['/bin/sh', '-c', 'true'])
             spawned.assert_not_called()
+
+    def test_loop_cleanup_reads_only_exact_kernel_backing_path(self):
+        with tempfile.TemporaryDirectory(prefix='teleagent-loop-sysfs-fixture-') as temporary:
+            backing = Path(temporary) / 'loop7/loop/backing_file'
+            backing.parent.mkdir(parents=True)
+            backing.write_bytes(b'/tmp/other-quota.img\n')
+            self.assertFalse(probe.loop_backing_present('/tmp/owned-quota.img', temporary))
+            backing.write_bytes(b'/tmp/owned-quota.img\n')
+            self.assertTrue(probe.loop_backing_present('/tmp/owned-quota.img', temporary))
 
     def test_empty_or_header_only_ipv4_route_table(self):
         header = 'Iface\tDestination\tGateway\tFlags'

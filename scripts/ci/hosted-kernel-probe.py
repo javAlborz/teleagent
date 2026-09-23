@@ -197,7 +197,7 @@ def probe_overlay(root):
 def fixed_tool(argv, timeout=5):
     """Run only an explicit stock hosted-VM tool under the sterile probe env."""
     need(argv and argv[0] in ('/usr/sbin/mkfs.ext4', '/usr/bin/mount',
-                                  '/usr/bin/umount', '/usr/sbin/losetup'),
+                                  '/usr/bin/umount'),
          'unexpected hosted storage tool')
     result = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, timeout=timeout, check=False,
@@ -206,6 +206,37 @@ def fixed_tool(argv, timeout=5):
     need(len(result.stdout) <= 4096 and len(result.stderr) <= 4096 and result.returncode == 0,
          'hosted storage tool refused: ' + argv[0].rsplit('/', 1)[-1])
     return result.stdout
+
+
+def loop_backing_present(image, sysroot='/sys/block'):
+    """Read kernel loop backing identities without forking after PID 1 exits."""
+    root_fd = os.open(sysroot, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        with os.scandir(root_fd) as entries:
+            names = [entry.name for entry in entries if re.fullmatch(r'loop[0-9]{1,4}', entry.name)]
+        need(len(names) <= 256, 'loop device inventory exceeds bound')
+        for name in names:
+            device_fd = member_fd = backing_fd = None
+            try:
+                device_fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC, dir_fd=root_fd)
+                member_fd = os.open('loop', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                    dir_fd=device_fd)
+                backing_fd = os.open('backing_file', os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                     dir_fd=member_fd)
+                data = os.read(backing_fd, 4097)
+                need(len(data) <= 4096, 'loop backing identity exceeds bound')
+                if data.rstrip(b'\n') == image.encode('ascii'):
+                    return True
+            except FileNotFoundError:
+                # Autoclear can remove a loop's sysfs members during this scan.
+                pass
+            finally:
+                for fd in (backing_fd, member_fd, device_fd):
+                    if fd is not None:
+                        os.close(fd)
+        return False
+    finally:
+        os.close(root_fd)
 
 
 def probe_bounded_disk(root, image):
@@ -502,7 +533,7 @@ def run():
                      (retained.st_dev, retained.st_ino, retained.st_uid, retained.st_gid,
                       retained.st_mode, retained.st_nlink, retained.st_size),
                      'owned quota image changed before cleanup')
-                need(fixed_tool(['/usr/sbin/losetup', '-j', image_path]) == b'',
+                need(not loop_backing_present(image_path),
                      'owned quota loop remains attached')
                 os.unlink(image_name, dir_fd=tmproot)
             need(namespaces() == host_namespaces and Path('/proc/self/cgroup').read_text() == host_cgroup and
