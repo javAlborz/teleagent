@@ -195,7 +195,10 @@ def child_probe(root, host_namespaces, last_cap, parent_pidfd):
         os.close(cg)
     need(sorted(name for name in os.listdir('/proc') if name.isdigit()) == ['1'], 'extra PID visible in private proc')
     interfaces = [line.split(':')[0].strip() for line in Path('/proc/net/dev').read_text().splitlines()[2:]]
-    need(interfaces == ['lo'] and len(Path('/proc/net/route').read_text().splitlines()) == 1, 'network namespace has external links/routes')
+    route_lines = Path('/proc/net/route').read_text().splitlines()
+    need(interfaces == ['lo'] and len(route_lines) == 1,
+         'network namespace links/routes differ: interfaces=' + str(len(interfaces)) +
+         ', loopback=' + str('lo' in interfaces) + ', routeLines=' + str(len(route_lines)))
     expect_readonly('/readonly/blocked-root')
     drop_identity(last_cap)
     # Credential changes clear PDEATHSIG. Re-arm and check the retained parent
