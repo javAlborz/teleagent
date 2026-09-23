@@ -16,13 +16,16 @@ const {
   cleanupEvidenceDisposition,
   cleanupExactProject,
   cleanupRequiresPanicRecovery,
+  captureCreatedContainerOwnership,
   normalizeActivationState,
+  normalizeContainerOwnership,
   normalizeVoiceImageManifest,
   parseDockerCgroupInfo,
   parseProcessIdentityStatus,
   parseVoiceContainerBoundary,
   parseVoiceEnvironmentFile,
   parseExactProjectContainerIds,
+  parseCreatedContainerOwnership,
   requestJson,
   requireLifecycleLock,
   renderTemplateContents,
@@ -667,6 +670,70 @@ test('activation state is canonical, image-bound, generation-monotonic, and miss
   assert.equal(cleanupRequiresPanicRecovery(normalizedLegacy), true);
   assert.equal(activationRequiresRecovery(null), true);
   assert.equal(cleanupRequiresPanicRecovery(null), true);
+});
+
+test('created container ownership binds all four full IDs before voice startup', () => {
+  const generation = 9;
+  const services = ['voice-runtime-preflight', 'drachtio', 'freeswitch', 'voice-app'];
+  const ids = ['a', 'b', 'c', 'd'].map((character) => character.repeat(64));
+  const imageIds = [
+    `sha256:${'1'.repeat(64)}`, `sha256:${'2'.repeat(64)}`,
+    `sha256:${'3'.repeat(64)}`, IMAGE_MANIFEST.configDigest,
+  ];
+  const inspection = services.map((service, index) =>
+    `${ids[index]}\t${service}\t${generation}\t${imageIds[index]}`
+  ).join('\n') + '\n';
+  const expected = parseCreatedContainerOwnership(
+    inspection, ids, generation, IMAGE_MANIFEST.configDigest
+  );
+  assert.deepEqual(expected.services.map((row) => row.service), [...services].sort());
+  assert.deepEqual(expected.services.map((row) => row.containerId).sort(), [...ids].sort());
+  assert.deepEqual(normalizeContainerOwnership(
+    expected, generation, IMAGE_MANIFEST.configDigest
+  ), expected);
+  const calls = [];
+  assert.deepEqual(captureCreatedContainerOwnership(generation, IMAGE_MANIFEST.configDigest, {
+    environment: {},
+    runCommand: (_filename, args) => {
+      calls.push(args);
+      return args[1] === 'ls'
+        ? { status: 0, stdout: `${ids.join('\n')}\n` }
+        : { status: 0, stdout: inspection };
+    },
+  }), expected);
+  assert.deepEqual(calls[1].slice(-4), ids);
+  for (const invalid of [
+    inspection.replace(`\t${generation}\t`, '\t8\t'),
+    inspection.replace(`${ids[0]}\t`, `${ids[1]}\t`),
+    inspection.replace(`\tvoice-app\t${generation}\t${IMAGE_MANIFEST.configDigest}`,
+      `\tvoice-app\t${generation}\tsha256:${'4'.repeat(64)}`),
+    inspection.replace('voice-runtime-preflight', 'voice-app'),
+    inspection.trimEnd(),
+    inspection + '\n',
+  ]) {
+    assert.throws(() => parseCreatedContainerOwnership(
+      invalid, ids, generation, IMAGE_MANIFEST.configDigest
+    ), /ownership|generation/);
+  }
+  const active = {
+    version: 3, project: 'teleagent-voice', activationGeneration: generation,
+    phase: 'active', previousPhase: 'starting', panic: 'not_requested', cleanup: 'required',
+    imageManifest: IMAGE_MANIFEST, panicOutcomeUnknownAt: null,
+    interruptedStartRecoveredAt: null, updatedAt: '2026-08-26T12:34:56.789Z',
+    containerOwnership: expected,
+  };
+  assert.deepEqual(normalizeActivationState(`${JSON.stringify(active)}\n`), active);
+  assert.equal(activationRequiresRecovery({ ...active, phase: 'inactive', cleanup: 'proved' }), false);
+  assert.throws(() => normalizeActivationState(`${JSON.stringify({
+    ...active, containerOwnership: null,
+  })}\n`), /lack retained ownership/);
+  const source = fs.readFileSync(
+    path.join(__dirname, '..', '..', 'deploy', 'voice-stack', 'teleagent-voice-stack-launch.js'), 'utf8'
+  );
+  assert.ok(source.indexOf('persistCreatedContainerOwnership(ownership);') >
+    source.indexOf("composeArgs('create'"));
+  assert.ok(source.indexOf('persistCreatedContainerOwnership(ownership);') <
+    source.indexOf("composeArgs('up'"));
 });
 
 test('activation state replacement is file-synced, renamed, then directory-synced', () => {

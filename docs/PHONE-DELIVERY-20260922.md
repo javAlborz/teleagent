@@ -46,6 +46,14 @@ independent release workflow. Generic approval does not supply these values.
   refuses activation before cleanup or credentials until the remaining endpoint,
   readiness, egress and coordinated lifetime wiring is complete; see
   [media placement](MEDIA-APPLICATION-PLACEMENT.md).
+- The voice launcher now records the four full Compose container IDs, service
+  names, image IDs and activation generation in a root-owned fsynced version-3
+  activation record after create and before up. It rechecks exact identities
+  before and after up, refusing Compose replacement. A crash before the record
+  is committed leaves activation in the starting/recovery-required state; the
+  future independent recovery daemon must still validate image, PID, cgroup and
+  namespace identities before stopping any recorded ID. Source tests do not
+  constitute live Docker or recovery acceptance.
 - A separate PBX stop-only listener is implemented. Installed Asterisk source
   shows that ordinary DTMF events alone cannot attest handset RFC4733 input.
   The real independent adapter and end-to-end stop aggregation remain open;
