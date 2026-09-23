@@ -18,16 +18,21 @@ server, including through a container or altered hostname.
 
 ## What a hosted run tests
 
-The clean-environment sudo coordinator creates one exclusive empty cgroup at the
-existing cgroup2 root and applies 512 MiB memory, zero swap, 128 tasks and one CPU.
+The clean-environment sudo coordinator creates one exclusive empty outer cgroup at the
+existing cgroup2 root and applies 768 MiB memory, zero swap, 256 tasks and two CPUs.
 The `cpu`, `memory` and `pids` controllers must already be enabled at that root.
+It enables those three controllers only within its own empty outer cgroup,
+then creates separate child leaves for control (64 MiB/16 tasks/quarter CPU),
+engine (128 MiB/64 tasks/half CPU), and workload
+(512 MiB/128 tasks/one CPU). The children fit under the outer caps. The control
+and engine leaves stay empty in this inert test; no BuildKit process runs.
 It never writes an ancestor's controllers or limits, moves an existing host
 process, creates a systemd unit, changes a host service/socket/sysctl, or uses a
 fallback if those conditions fail. It creates one random exclusive temporary
 directory and one exact root-owned image file under `/tmp`.
 
 The coordinator creates a PID namespace for its next child only, forks once,
-opens a pidfd and moves that unreaped owned child into the exact retained leaf.
+opens a pidfd and moves that unreaped owned child into the exact retained workload leaf.
 A pipe holds the child until limit and membership readback passes. The coordinator
 stays outside that leaf and in its original PID namespace. The child becomes PID 1,
 then creates fresh mount, network, IPC, UTS and cgroup namespaces. It makes mount
@@ -67,8 +72,9 @@ uses an unowned process ID or a broad process-name match.
 The child has a 40-second wall deadline and ten CPU seconds. The coordinator has
 a 55-second wall deadline, 256 MiB virtual-address bound and 128 descriptor bound.
 It waits at most 45 seconds for the child. Cleanup signals the exact pidfd and
-writes `cgroup.kill` only through the retained, revalidated owned leaf. It requires
-the child reaped, the leaf unpopulated, both process/thread lists empty and the
+writes `cgroup.kill` only through the retained, revalidated owned outer cgroup.
+It requires the child reaped, all three child leaves and the outer cgroup
+unpopulated, all process/thread lists empty and the
 temporary directory empty before nonrecursive removal. It also rechecks the
 retained image inode, checks kernel loop backing identities without forking,
 requires no loop association for its exact path, then

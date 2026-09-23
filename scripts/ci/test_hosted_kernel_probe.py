@@ -60,9 +60,24 @@ class ProbeTests(unittest.TestCase):
             with patch.object(probe.os, 'open') as opened, self.assertRaises(probe.Refused):
                 probe.still_owned(9, name, 10)
             opened.assert_not_called()
+        for name in ('../engine', 'other', 'teleagent-ci-kernel-' + 'a' * 32):
+            with patch.object(probe.os, 'open') as opened, self.assertRaises(probe.Refused):
+                probe.still_owned_child(9, name, 10)
+            opened.assert_not_called()
         for name in ('cgroup.subtree_control', '../cgroup.procs', 'memory.high'):
             with patch.object(probe.os, 'open') as opened, self.assertRaises(probe.Refused):
                 probe.write_at(9, name, '1')
+            opened.assert_not_called()
+
+    def test_nested_cgroup_limits_fit_and_parent_must_be_empty(self):
+        for key in ('memory.max', 'pids.max'):
+            self.assertLessEqual(sum(int(row[key]) for row in probe.CHILD_CAPS.values()),
+                                 int(probe.PARENT_CAPS[key]))
+        self.assertLessEqual(sum(int(row['cpu.max'].split()[0]) for row in probe.CHILD_CAPS.values()),
+                             int(probe.PARENT_CAPS['cpu.max'].split()[0]))
+        with patch.object(probe, 'read_at', side_effect=['cpu memory pids', '222\n']):
+            with patch.object(probe.os, 'open') as opened, self.assertRaises(probe.Refused):
+                probe.enable_owned_subtree(9)
             opened.assert_not_called()
 
     def test_retained_read_consumes_eof_and_refuses_overflow(self):

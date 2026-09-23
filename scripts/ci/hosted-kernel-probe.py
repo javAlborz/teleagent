@@ -17,6 +17,15 @@ import uuid
 
 CAPS = {'memory.max': '536870912', 'memory.swap.max': '0',
         'pids.max': '128', 'cpu.max': '100000 100000'}
+PARENT_CAPS = {'memory.max': '805306368', 'memory.swap.max': '0',
+               'pids.max': '256', 'cpu.max': '200000 100000'}
+CHILD_CAPS = {
+    'control': {'memory.max': '67108864', 'memory.swap.max': '0',
+                'pids.max': '16', 'cpu.max': '25000 100000'},
+    'engine': {'memory.max': '134217728', 'memory.swap.max': '0',
+               'pids.max': '64', 'cpu.max': '50000 100000'},
+    'workload': CAPS,
+}
 NAMESPACES = ('mnt', 'net', 'ipc', 'uts', 'pid', 'cgroup')
 NEWPID = 0x20000000
 OTHER_NAMESPACES = 0x00020000 | 0x40000000 | 0x08000000 | 0x04000000 | 0x02000000
@@ -111,6 +120,31 @@ def still_owned(parent, name, fd):
         need(identity(other) == identity(fd), 'owned directory identity changed')
     finally:
         os.close(other)
+
+
+def still_owned_child(parent, name, fd):
+    need(name in CHILD_CAPS, 'invalid owned child cgroup name')
+    other = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                    dir_fd=parent)
+    try:
+        need(identity(other) == identity(fd), 'owned child cgroup identity changed')
+    finally:
+        os.close(other)
+
+
+def enable_owned_subtree(fd):
+    """Delegate only the three already available controllers on an empty owned parent."""
+    need({'cpu', 'memory', 'pids'} <= set(read_at(fd, 'cgroup.controllers').split()) and
+         not read_at(fd, 'cgroup.procs').strip(), 'owned parent cannot delegate controllers')
+    control = os.open('cgroup.subtree_control', os.O_WRONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                      dir_fd=fd)
+    try:
+        data = b'+cpu +memory +pids\n'
+        need(os.write(control, data) == len(data), 'short owned subtree control write')
+    finally:
+        os.close(control)
+    need({'cpu', 'memory', 'pids'} <= set(read_at(fd, 'cgroup.subtree_control').split()),
+         'owned subtree controllers did not enable')
 
 
 def mount(source, target, kind=None, flags=0, data=None):
@@ -386,6 +420,8 @@ def run():
     image_name = name + '-quota.img'
     image_path = '/tmp/' + image_name
     cg = temporary = image_fd = pidfd = None
+    children = {}
+    created_children = []
     cg_created = temporary_created = image_created = False
     child = None
     descriptors = []
@@ -403,9 +439,24 @@ def run():
         cg_created = True
         cg = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=cgroot)
         still_owned(cgroot, name, cg)
-        for key, value in CAPS.items():
+        for key, value in PARENT_CAPS.items():
             write_at(cg, key, value)
-        need({key: read_at(cg, key).strip() for key in CAPS} == CAPS, 'parent leaf limit readback failed')
+        need({key: read_at(cg, key).strip() for key in PARENT_CAPS} == PARENT_CAPS,
+             'outer limit readback failed')
+        enable_owned_subtree(cg)
+        for child_name, limits in CHILD_CAPS.items():
+            os.mkdir(child_name, 0o700, dir_fd=cg)
+            created_children.append(child_name)
+            child_fd = os.open(child_name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                               dir_fd=cg)
+            children[child_name] = child_fd
+            still_owned_child(cg, child_name, child_fd)
+            for key, value in limits.items():
+                write_at(child_fd, key, value)
+            need({key: read_at(child_fd, key).strip() for key in limits} == limits and
+                 not read_at(child_fd, 'cgroup.procs').strip() and
+                 not read_at(child_fd, 'cgroup.threads').strip(),
+                 'child limit readback failed: ' + child_name)
         os.mkdir(name, 0o700, dir_fd=tmproot)
         temporary_created = True
         temporary = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=tmproot)
@@ -460,8 +511,11 @@ def run():
         os.close(output_write)
         descriptors.remove(output_write)
         still_owned(cgroot, name, cg)
-        write_at(cg, 'cgroup.procs', str(child))
-        need(read_at(cg, 'cgroup.procs').split() == [str(child)], 'child did not enter exact owned leaf')
+        workload = children['workload']
+        still_owned_child(cg, 'workload', workload)
+        write_at(workload, 'cgroup.procs', str(child))
+        need(read_at(workload, 'cgroup.procs').split() == [str(child)] and
+             not read_at(cg, 'cgroup.procs').strip(), 'child did not enter exact owned leaf')
         need(os.write(ready_write, b'G') == 1, 'child admission pipe failed')
         os.close(ready_write)
         descriptors.remove(ready_write)
@@ -474,10 +528,12 @@ def run():
         need(os.waitstatus_to_exitcode(status) == 0 and answer.get('passed') is True,
              'inert child refused: ' + str(answer.get('error', 'nonzero exit')))
         result['primitiveEvidence'] = answer
-        result['leafMemoryPeakBytes'] = int(read_at(cg, 'memory.peak'))
+        result['leafMemoryPeakBytes'] = int(read_at(workload, 'memory.peak'))
         result['leafMemoryEvents'] = dict((key, int(value)) for key, value in
-                                          (line.split() for line in read_at(cg, 'memory.events').splitlines()))
+                                          (line.split() for line in read_at(workload, 'memory.events').splitlines()))
         need(all(value == 0 for value in result['leafMemoryEvents'].values()), 'unexpected probe memory events')
+        result['ownedCgroupTree'] = {'outerLimits': PARENT_CAPS, 'childLimits': CHILD_CAPS,
+                                     'controllers': ['cpu', 'memory', 'pids']}
         result['passed'] = True
     except Exception as error:
         failure = type(error).__name__ + ': ' + str(error)[:400]
@@ -516,6 +572,15 @@ def run():
                     time.sleep(0.02)
                 need('populated 0' in read_at(cg, 'cgroup.events') and not read_at(cg, 'cgroup.procs').strip() and
                      not read_at(cg, 'cgroup.threads').strip(), 'owned cgroup is not empty')
+                need(set(created_children) == set(children), 'created child lacks retained cleanup identity')
+                for child_name in reversed(created_children):
+                    child_fd = children[child_name]
+                    still_owned_child(cg, child_name, child_fd)
+                    need('populated 0' in read_at(child_fd, 'cgroup.events') and
+                         not read_at(child_fd, 'cgroup.procs').strip() and
+                         not read_at(child_fd, 'cgroup.threads').strip(),
+                         'owned child cgroup is not empty: ' + child_name)
+                    os.rmdir(child_name, dir_fd=cg)
                 still_owned(cgroot, name, cg)
                 os.rmdir(name, dir_fd=cgroot)
             if temporary is not None:
@@ -542,7 +607,7 @@ def run():
         except Exception as error:
             result['cleanupError'] = type(error).__name__ + ': ' + str(error)[:400]
             result['passed'] = False
-        for fd in [*descriptors, pidfd, cg, temporary, image_fd, cgroot, tmproot]:
+        for fd in [*descriptors, pidfd, *children.values(), cg, temporary, image_fd, cgroot, tmproot]:
             if fd is not None:
                 os.close(fd)
     result['elapsedSeconds'] = round(time.monotonic() - started, 6)
