@@ -316,3 +316,15 @@ prices change. The September 23, 2026 rate review used the providers'
 and [OpenAI API pricing](https://developers.openai.com/api/docs/pricing);
 the fixed allowances deliberately exceed standard text-token rates for the
 allowed models at that review.
+
+For the first account-bound pilot, use a dedicated OpenAI project and a
+non-default Claude workspace named `teleagent-phone-pilot`, each with a $150
+monthly spending limit. Turn on OpenAI's enforced hard project limit; allow
+only standard processing on that project. Set the Claude workspace's monthly
+spend limit in its own Spend limits tab. Bind each API key only to that
+project/workspace and install it through the protected host credential path.
+The repository contains no account IDs or keys, so neither account binding
+nor vendor limit is asserted by this source policy. OpenAI's
+[spend-limit instructions](https://developers.openai.com/api/docs/guides/spend-limits)
+and Claude's [workspace limits](https://platform.claude.com/docs/en/manage-claude/workspaces)
+describe those account controls.
