@@ -3,7 +3,9 @@
 The existing public pull-request validation workflow has a source candidate for
 a small kernel probe before dependency installation. It uses the standard
 `ubuntu-24.04` runner's installed `/usr/bin/python3` and libc. It downloads,
-compiles and executes no provider, package, container engine or acquired tool.
+compiles and executes no provider, container engine or acquired dependency code.
+The storage extension invokes only the runner's installed `mkfs.ext4`, `mount`,
+`umount` and `losetup` on one fresh owned 32 MiB image.
 No credentials, OIDC permission, private infrastructure configuration, artifact
 publication or release admission is involved. Its output always records
 `releaseAuthority=false`, `runtimeAccepted=false` and `buildExecuted=false`.
@@ -21,8 +23,8 @@ existing cgroup2 root and applies 512 MiB memory, zero swap, 128 tasks and one C
 The `cpu`, `memory` and `pids` controllers must already be enabled at that root.
 It never writes an ancestor's controllers or limits, moves an existing host
 process, creates a systemd unit, changes a host service/socket/sysctl, or uses a
-fallback if those conditions fail. A random exclusive temporary directory is
-the only ordinary host filesystem object it creates.
+fallback if those conditions fail. It creates one random exclusive temporary
+directory and one exact root-owned image file under `/tmp`.
 
 The coordinator creates a PID namespace for its next child only, forks once,
 opens a pidfd and moves that unreaped owned child into the exact retained leaf.
@@ -41,15 +43,18 @@ The fixed inert fixture proves:
   then the private tmpfs root also becomes read-only;
 - an inert overlay mount on that private tmpfs reads a lower file, copies a
   changed file into its upper directory, and unmounts before privilege drop;
+- a private loopback ext4 mount on that image has at most 32 MiB and 256
+  inodes, returns ENOSPC under both bounded byte and inode writes, and unmounts
+  with loop detachment before privilege drop;
 - a separate small writable tmpfs remains usable after dropping to UID/GID 10001;
 - every capability set, including bounding and ambient, is empty, supplementary
   groups are empty, NNP is set and seccomp mode 2 is active;
 - the tiny fixture filter actually returns EPERM for the x86_64 `getppid` syscall.
 
 The filter permits other syscalls; it tests the seccomp primitive and is explicitly
-**not a production confinement profile**. No dependency or arbitrary command runs
-inside it. The fixture does not exercise overlayfs, an OCI runtime, device BPF,
-native compilation, BuildKit's mount shape, final image export or any provider.
+**not a production confinement profile**. No acquired dependency or arbitrary command runs
+inside it. The fixture does not exercise an OCI runtime, device BPF, native
+compilation, BuildKit's mount shape, final image export or any provider.
 
 ## Lifetime and cleanup
 
@@ -59,12 +64,14 @@ arms parent-death SIGKILL, checks that retained parent handle, and repeats that
 step after the credential drop clears the setting. Neither signaling nor cleanup
 uses an unowned process ID or a broad process-name match.
 
-The child has a 15-second wall deadline and five CPU seconds. The coordinator has
-a 25-second wall deadline, 256 MiB virtual-address bound and 128 descriptor bound.
-It waits at most 20 seconds for the child. Cleanup signals the exact pidfd and
+The child has a 40-second wall deadline and ten CPU seconds. The coordinator has
+a 55-second wall deadline, 256 MiB virtual-address bound and 128 descriptor bound.
+It waits at most 45 seconds for the child. Cleanup signals the exact pidfd and
 writes `cgroup.kill` only through the retained, revalidated owned leaf. It requires
 the child reaped, the leaf unpopulated, both process/thread lists empty and the
-temporary directory empty before nonrecursive removal. Cleanup waits are bounded;
+temporary directory empty before nonrecursive removal. It also rechecks the
+retained image inode, requires no loop association for its exact path, then
+unlinks that one file. Cleanup waits are bounded;
 ambiguous identity or leftover objects report failure, not successful cleanup.
 The workflow has a two-minute outer step timeout. The disposable hosted VM is the
 last boundary if the job is forcibly cancelled before cleanup can complete.
@@ -76,10 +83,13 @@ authority, trusted source selection, complete build confinement or artifact
 reproducibility. A failed probe keeps its exact unmet dependency visible and must
 not disable host security settings or weaken any production gate.
 
-The overlay check proves only this private tmpfs-backed mount and copy-up. It
-does not prove BuildKit's overlay snapshotter on a dedicated bounded disk,
-aggregate byte/inode quotas, native package execution, or complete cleanup of
-an actual builder.
+The overlay check proves only this private tmpfs-backed mount and copy-up. The
+loopback check proves finite byte/inode behavior on a disposable ext4 image,
+using util-linux's automatic loop setup and detach behavior
+([mount](https://github.com/util-linux/util-linux/blob/master/sys-utils/mount.8.adoc),
+[umount](https://github.com/util-linux/util-linux/blob/master/sys-utils/umount.8.adoc)).
+Neither proves BuildKit's overlay snapshotter on a larger dedicated bounded
+disk, native package execution, or complete cleanup of an actual builder.
 
 ## Existing runner constraints
 

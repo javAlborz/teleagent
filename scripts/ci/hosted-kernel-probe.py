@@ -10,6 +10,7 @@ import resource
 import select
 import signal
 import stat
+import subprocess
 import sys
 import time
 import uuid
@@ -22,6 +23,7 @@ OTHER_NAMESPACES = 0x00020000 | 0x40000000 | 0x08000000 | 0x04000000 | 0x0200000
 MS_RDONLY, MS_NOSUID, MS_NODEV, MS_NOEXEC = 1, 2, 4, 8
 MS_REMOUNT, MS_BIND, MS_REC, MS_PRIVATE = 32, 4096, 16384, 1 << 18
 LIBC = ctypes.CDLL(None, use_errno=True)
+QUOTA_IMAGE_BYTES = 32 * 1024 * 1024
 
 
 class Refused(RuntimeError):
@@ -192,14 +194,87 @@ def probe_overlay(root):
          'overlay mount remains after private unmount')
 
 
-def child_probe(root, host_namespaces, last_cap, parent_pidfd):
+def fixed_tool(argv, timeout=5):
+    """Run only an explicit stock hosted-VM tool under the sterile probe env."""
+    need(argv and argv[0] in ('/usr/sbin/mkfs.ext4', '/usr/bin/mount',
+                                  '/usr/bin/umount', '/usr/sbin/losetup'),
+         'unexpected hosted storage tool')
+    result = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, timeout=timeout, check=False,
+                            cwd='/',
+                            env={'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'LANG': 'C.UTF-8', 'LC_ALL': 'C.UTF-8'})
+    need(len(result.stdout) <= 4096 and len(result.stderr) <= 4096 and result.returncode == 0,
+         'hosted storage tool refused: ' + argv[0].rsplit('/', 1)[-1])
+    return result.stdout
+
+
+def probe_bounded_disk(root, image):
+    """Exercise byte and inode exhaustion on one owned loopback ext4 image."""
+    mountpoint = root + '/quota'
+    os.mkdir(mountpoint, 0o700)
+    fixed_tool(['/usr/sbin/mkfs.ext4', '-q', '-F', '-m', '0', '-N', '128', image])
+    fixed_tool(['/usr/bin/mount', '--no-mtab', '-t', 'ext4', '-o',
+                'loop,nosuid,nodev,noexec', image, mountpoint])
+    try:
+        need(os.stat(mountpoint).st_dev != os.stat(root).st_dev,
+             'bounded disk did not mount on a separate filesystem')
+        before = os.statvfs(mountpoint)
+        need(0 < before.f_blocks * before.f_frsize <= QUOTA_IMAGE_BYTES and
+             0 < before.f_files <= 256, 'bounded disk byte/inode geometry differs')
+        datafile = mountpoint + '/bytes'
+        block = b'B' * (1024 * 1024)
+        exhausted, written = False, 0
+        fd = os.open(datafile, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600)
+        try:
+            for _ in range(64):
+                try:
+                    written += os.write(fd, block)
+                    os.fsync(fd)
+                except OSError as error:
+                    if error.errno != errno.ENOSPC:
+                        raise
+                    exhausted = True
+                    break
+        finally:
+            os.close(fd)
+        need(exhausted and written <= QUOTA_IMAGE_BYTES,
+             'bounded disk did not enforce its byte limit')
+        os.unlink(datafile)
+        names = []
+        for index in range(256):
+            filename = mountpoint + '/inode-' + str(index)
+            try:
+                fd = os.open(filename, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600)
+            except OSError as error:
+                if error.errno != errno.ENOSPC:
+                    raise
+                break
+            os.close(fd)
+            names.append(filename)
+        else:
+            raise Refused('bounded disk did not enforce its inode limit')
+        need(0 < len(names) < 256, 'bounded disk inode count differs')
+        for filename in names:
+            os.unlink(filename)
+        return {'privateLoopExt4ByteLimit': True, 'privateLoopExt4InodeLimit': True,
+                'imageBytes': QUOTA_IMAGE_BYTES, 'filesystemBytes': before.f_blocks * before.f_frsize,
+                'filesystemInodes': before.f_files, 'bytesWrittenBeforeENOSPC': written,
+                'filesCreatedBeforeENOSPC': len(names)}
+    finally:
+        fixed_tool(['/usr/bin/umount', '--no-mtab', '--detach-loop', mountpoint])
+        need(os.stat(mountpoint).st_dev == os.stat(root).st_dev,
+             'bounded disk mount remains after private unmount')
+
+
+def child_probe(root, image, host_namespaces, last_cap, parent_pidfd):
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-    resource.setrlimit(resource.RLIMIT_CPU, (5, 5))
+    resource.setrlimit(resource.RLIMIT_CPU, (10, 10))
     need(os.getpid() == 1, 'fixture is not PID 1')
     syscall('unshare', OTHER_NAMESPACES)
     mount(None, '/', flags=MS_REC | MS_PRIVATE)
     mount('tmpfs', root, 'tmpfs', MS_NOSUID | MS_NODEV, 'size=1048576,mode=0755')
     probe_overlay(root)
+    storage = probe_bounded_disk(root, image)
     for name in ('proc', 'sys', 'sys/fs', 'sys/fs/cgroup', 'input', 'readonly', 'rw'):
         os.mkdir(root + '/' + name, 0o755)
     os.chmod(root + '/input', 0o777)
@@ -252,7 +327,7 @@ def child_probe(root, host_namespaces, last_cap, parent_pidfd):
             'noNewPrivileges': True, 'seccompGetppidDenied': True, 'privateNamespaces': list(NAMESPACES),
             'leafLimits': actual_caps, 'soleLeafPid': 1, 'loopbackOnly': True,
             'readonlyRootAndBind': True, 'privateWritableTmpfs': True,
-            'privateTmpfsOverlayCopyUp': True}
+            'privateTmpfsOverlayCopyUp': True, **storage}
 
 
 def interrupted(_signal, _frame):
@@ -277,8 +352,10 @@ def run():
     need({'cpu', 'memory', 'pids'} <= set(read_at(cgroot, 'cgroup.subtree_control').split()),
          'required controllers are not already enabled at cgroup root; no fallback')
     name = 'teleagent-ci-kernel-' + uuid.uuid4().hex
-    cg = temporary = pidfd = None
-    cg_created = temporary_created = False
+    image_name = name + '-quota.img'
+    image_path = '/tmp/' + image_name
+    cg = temporary = image_fd = pidfd = None
+    cg_created = temporary_created = image_created = False
     child = None
     descriptors = []
     result = {'purpose': 'inert-kernel-primitives-not-release-admission', 'revision': os.environ['CI_PROBE_REVISION'],
@@ -289,7 +366,7 @@ def run():
     signal.signal(signal.SIGTERM, interrupted)
     signal.signal(signal.SIGINT, interrupted)
     signal.signal(signal.SIGALRM, interrupted)
-    signal.alarm(25)
+    signal.alarm(55)
     try:
         os.mkdir(name, 0o700, dir_fd=cgroot)
         cg_created = True
@@ -302,6 +379,14 @@ def run():
         temporary_created = True
         temporary = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=tmproot)
         still_owned(tmproot, name, temporary)
+        image_fd = os.open(image_name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                           0o600, dir_fd=tmproot)
+        image_created = True
+        os.ftruncate(image_fd, QUOTA_IMAGE_BYTES)
+        image_info = os.fstat(image_fd)
+        need(stat.S_ISREG(image_info.st_mode) and image_info.st_uid == 0 and image_info.st_gid == 0 and
+             stat.S_IMODE(image_info.st_mode) == 0o600 and image_info.st_nlink == 1 and
+             image_info.st_size == QUOTA_IMAGE_BYTES, 'owned quota image metadata differs')
         ready_read, ready_write = os.pipe2(os.O_CLOEXEC)
         output_read, output_write = os.pipe2(os.O_CLOEXEC)
         descriptors.extend((ready_read, ready_write, output_read, output_write))
@@ -321,12 +406,12 @@ def run():
                         except OSError as error:
                             if error.errno != errno.EBADF:
                                 raise
-                signal.alarm(15)
+                signal.alarm(40)
                 syscall('prctl', 1, signal.SIGKILL, 0, 0, 0)
                 need(select.select([parent_pidfd], [], [], 0)[0] == [], 'coordinator already died')
                 need(os.read(ready_read, 1) == b'G', 'parent did not admit own child')
                 os.close(ready_read)
-                answer = child_probe('/tmp/' + name, host_namespaces, last_cap, parent_pidfd)
+                answer = child_probe('/tmp/' + name, image_path, host_namespaces, last_cap, parent_pidfd)
                 data = (json.dumps(answer, sort_keys=True) + '\n').encode('ascii')
                 need(len(data) < 8192 and os.write(output_write, data) == len(data), 'short child result')
                 os._exit(0)
@@ -349,7 +434,7 @@ def run():
         need(os.write(ready_write, b'G') == 1, 'child admission pipe failed')
         os.close(ready_write)
         descriptors.remove(ready_write)
-        readable, _, _ = select.select([pidfd], [], [], 20)
+        readable, _, _ = select.select([pidfd], [], [], 45)
         need(readable == [pidfd], 'child exceeded bounded deadline')
         observed, status = os.waitpid(child, 0)
         need(observed == child, 'unexpected child reap')
@@ -393,6 +478,7 @@ def run():
                     time.sleep(0.02)
             need(not cg_created or cg is not None, 'created cgroup has no retained cleanup identity')
             need(not temporary_created or temporary is not None, 'created directory has no retained cleanup identity')
+            need(not image_created or image_fd is not None, 'created quota image has no retained cleanup identity')
             if cg is not None:
                 deadline = time.monotonic() + 3
                 while 'populated 1' in read_at(cg, 'cgroup.events') and time.monotonic() < deadline:
@@ -405,13 +491,27 @@ def run():
                 still_owned(tmproot, name, temporary)
                 need(os.listdir(temporary) == [], 'private mounts or unexpected temporary files remain')
                 os.rmdir(name, dir_fd=tmproot)
+            if image_fd is not None:
+                retained = os.fstat(image_fd)
+                after = os.stat(image_name, dir_fd=tmproot, follow_symlinks=False)
+                need(stat.S_ISREG(retained.st_mode) and retained.st_uid == 0 and retained.st_gid == 0 and
+                     stat.S_IMODE(retained.st_mode) == 0o600 and retained.st_nlink == 1 and
+                     0 <= retained.st_size <= QUOTA_IMAGE_BYTES and
+                     (after.st_dev, after.st_ino, after.st_uid, after.st_gid, after.st_mode,
+                      after.st_nlink, after.st_size) ==
+                     (retained.st_dev, retained.st_ino, retained.st_uid, retained.st_gid,
+                      retained.st_mode, retained.st_nlink, retained.st_size),
+                     'owned quota image changed before cleanup')
+                need(fixed_tool(['/usr/sbin/losetup', '-j', image_path]) == b'',
+                     'owned quota loop remains attached')
+                os.unlink(image_name, dir_fd=tmproot)
             need(namespaces() == host_namespaces and Path('/proc/self/cgroup').read_text() == host_cgroup and
                  os.uname().nodename == host_hostname, 'coordinator namespace/cgroup/hostname changed')
             result['cleanupVerified'] = True
         except Exception as error:
             result['cleanupError'] = type(error).__name__ + ': ' + str(error)[:400]
             result['passed'] = False
-        for fd in [*descriptors, pidfd, cg, temporary, cgroot, tmproot]:
+        for fd in [*descriptors, pidfd, cg, temporary, image_fd, cgroot, tmproot]:
             if fd is not None:
                 os.close(fd)
     result['elapsedSeconds'] = round(time.monotonic() - started, 6)
