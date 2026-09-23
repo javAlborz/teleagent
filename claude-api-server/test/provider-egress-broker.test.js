@@ -20,6 +20,7 @@ const {
   capabilityHash,
   createProviderEgressBroker,
   normalizeAllowedAnthropicBeta,
+  normalizePolicy,
   openBudgetStore,
   parseRequestBody,
   pruneBudgetHistory,
@@ -68,6 +69,21 @@ function policy(provider = 'codex') {
     maxLaunchSeconds: 3600,
   };
 }
+
+test('pilot egress policies refuse a daily token allowance above the reviewed ceiling', () => {
+  for (const provider of ['claude', 'codex']) {
+    const filename = path.join(__dirname, '..', '..', 'deploy', 'worker-session',
+      `provider-egress-${provider}.policy.example.json`);
+    const source = JSON.parse(fs.readFileSync(filename, 'utf8'));
+    assert.equal(normalizePolicy(source, provider).maxDailyReservedTokens, 100_000);
+    assert.throws(() => normalizePolicy({ ...source, maxDailyReservedTokens: 100_001 }, provider),
+      /maxDailyReservedTokens exceeds its hard bound/);
+    for (const invalid of [0, '100000', null, undefined]) {
+      assert.throws(() => normalizePolicy({ ...source, maxDailyReservedTokens: invalid }, provider),
+        /maxDailyReservedTokens exceeds its hard bound or is missing/);
+    }
+  }
+});
 
 function harness(t, provider = 'codex') {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'provider-egress-'));

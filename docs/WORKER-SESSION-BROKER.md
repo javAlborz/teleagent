@@ -299,3 +299,8 @@ The local allowance is not actual token usage, dollar spend, or remaining
 OpenAI/Anthropic project balance. Provider billing dashboards remain
 authoritative; Teleagent reports only bounded local request and conservative
 reserved-token counters.
+The initial policy examples and source parser cap each provider at 100,000
+reserved tokens per UTC day. This is a deliberately smaller pilot allowance,
+not proof of the selected $5/provider/UTC-day target: current model prices,
+provider project/workspace binding, provider-side monthly hard limits and a
+durable local daily cost gate must be reviewed before credential activation.

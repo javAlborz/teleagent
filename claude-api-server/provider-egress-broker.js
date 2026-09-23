@@ -58,6 +58,9 @@ const PROVIDERS = Object.freeze({
 // input tokens. Reserve additional fixed protocol/tool framing so enforcement
 // never relies on the unsafe average-case bytes-per-token heuristic.
 const TOKEN_RESERVATION_ENVELOPE = 1024;
+// Pilot ceiling only. This is a conservative token allowance, not USD usage:
+// provider-side spend controls and a reviewed price/cost gate are still required.
+const MAX_DAILY_RESERVED_TOKENS = 100_000;
 const SAFE_MODEL = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const PROVIDER_ROUTE_KINDS = Object.freeze({
   claude: Object.freeze(['inference', 'count_tokens']),
@@ -149,6 +152,13 @@ function readPolicy(filename, provider) {
   let input;
   try { input = JSON.parse(fs.readFileSync(filename, 'utf8')); }
   catch { throw new Error('Provider egress policy is invalid JSON.'); }
+  return normalizePolicy(input, provider);
+}
+
+function normalizePolicy(input, provider) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new Error('Provider egress policy is invalid.');
+  }
   const allowedModels = Array.isArray(input.allowedModels)
     ? [...new Set(input.allowedModels.map(String))]
     : [];
@@ -162,6 +172,11 @@ function readPolicy(filename, provider) {
     if (normalized > max) throw new Error(`Provider egress ${name} exceeds its hard bound.`);
     return normalized;
   };
+  if (!Number.isSafeInteger(input.maxDailyReservedTokens) ||
+      input.maxDailyReservedTokens <= 0 ||
+      input.maxDailyReservedTokens > MAX_DAILY_RESERVED_TOKENS) {
+    throw new Error('Provider egress maxDailyReservedTokens exceeds its hard bound or is missing.');
+  }
   const expectedModels = provider === 'claude' ? CLAUDE_MODELS : CODEX_MODELS;
   if (input.version !== 1 || input.provider !== provider ||
       allowedModels.length !== expectedModels.length ||
@@ -178,7 +193,7 @@ function readPolicy(filename, provider) {
     maxResponseBytes: positive('maxResponseBytes', 8 * 1024 * 1024, 32 * 1024 * 1024),
     maxConcurrent: positive('maxConcurrent', 2, 8),
     maxDailyRequests: positive('maxDailyRequests', 100, 1000),
-    maxDailyReservedTokens: positive('maxDailyReservedTokens', 2_000_000, 20_000_000),
+    maxDailyReservedTokens: input.maxDailyReservedTokens,
     maxOutputTokens: positive('maxOutputTokens', provider === 'claude' ? 64000 : 32768, 131072),
     maxLaunchRequests: positive('maxLaunchRequests', 16, 128),
     maxLaunchReservedTokens: positive('maxLaunchReservedTokens', 250_000, 2_000_000),
@@ -1621,6 +1636,7 @@ module.exports = {
   groupGid,
   normalizeConfig,
   normalizeAllowedAnthropicBeta,
+  normalizePolicy,
   openBudgetStore,
   parseRequestBody,
   readPolicy,
