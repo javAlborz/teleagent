@@ -89,6 +89,10 @@ available only through a separate, locally reviewed operator workflow.
   nonzero exit, broker shutdown, or restart without a verified postcondition is
   terminal `outcome_unknown`. The action is never resent.
 - Observation failure after an exit-zero action is also `outcome_unknown`.
+- The broker takes a SQLite `BEGIN IMMEDIATE` writer lock before recovery and
+  retains it for its process lifetime. A second broker waits at most 250 ms
+  before refusing; this also lets one owner win a simultaneous stale-database
+  startup without two shared readers deadlocking on an exclusive upgrade.
 - Before every spawn the broker durably records a one-use process-marker hash;
   after spawn it also records the exact Linux PID, `/proc` start time, and
   process group. On restart, a persistent recovery panic is established before
