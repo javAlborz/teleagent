@@ -648,6 +648,8 @@ test('pinned client envelopes accept current CLI controls and strip cross-job co
     Buffer.from(JSON.stringify(codexBody)), 'codex', codexPolicy, 'inference'
   );
   assert.equal(parsedCodex.reasoningEffort, 'high');
+  assert.equal(parsedCodex.body.service_tier, 'default');
+  assert.equal(JSON.parse(parsedCodex.canonicalBuffer).service_tier, 'default');
   assert.equal(Object.hasOwn(parsedCodex.body, 'client_metadata'), false);
   assert.equal(Object.hasOwn(parsedCodex.body, 'prompt_cache_key'), false);
   assert.doesNotMatch(parsedCodex.canonicalBuffer.toString('utf8'), /thread_id|prompt_cache_key/);
@@ -744,6 +746,7 @@ test('provider persistence, premium tier selection, and remote content reference
     { store: true },
     { previous_response_id: 'resp_prior' },
     { conversation: 'conversation_prior' },
+    { service_tier: 'default' },
     { service_tier: 'priority' },
   ]) {
     assert.throws(
@@ -1068,6 +1071,7 @@ test('Codex exact responses inject the bearer while uncaptured compaction stays 
   });
   assert.equal(compact.status, 403);
   assert.deepEqual(calls.map((call) => call.options.path), ['/v1/responses']);
+  assert.equal(JSON.parse(calls[0].body).service_tier, 'default');
   for (const call of calls) {
     assert.equal(call.options.hostname, 'api.openai.com');
     assert.equal(call.options.headers.authorization, 'Bearer upstream-secret-that-never-returns');

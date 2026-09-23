@@ -303,7 +303,9 @@ failed upstream requests. It charges those reserved tokens at a fixed
 conservative ceiling of $30 per million for Claude and $45 per million for
 Codex, with a hard policy ceiling of $5 in reserved cost per provider per UTC
 day. The gate rejects multimodal content, hosted tools, and caller-selected
-premium service tiers so those rates cover the admitted text traffic. A
+premium service tiers. Codex requests explicitly use the OpenAI `default`
+service tier so a project-wide Fast setting cannot silently change their
+price. Those rates cover the admitted standard text traffic. A
 missing legacy cost row fails closed. The policy examples also cap each
 provider at 200,000 reserved tokens per UTC day. No local ledger guarantees a
 provider invoice ceiling: verify current model rates, project/workspace

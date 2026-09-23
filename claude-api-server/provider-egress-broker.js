@@ -1125,6 +1125,10 @@ function parseRequestBody(buffer, provider, policy, routeKind) {
   if (!Number.isSafeInteger(outputTokens) || outputTokens <= 0 || outputTokens > policy.maxOutputTokens) {
     throw codedError('PROVIDER_EGRESS_OUTPUT_DENIED', 'Provider output token bound is invalid.', 403);
   }
+  // An omitted tier can inherit Fast mode from the OpenAI project. The caller
+  // cannot select a tier, and the broker pins standard processing explicitly
+  // before reserving its standard text-token cost allowance.
+  if (provider === 'codex') body.service_tier = 'default';
   // Never forward the ambiguous raw JSON bytes. Upstreams may apply a
   // different first/last-wins rule to duplicate object members than V8 did
   // during validation. Serialize the one validated object and reserve using
