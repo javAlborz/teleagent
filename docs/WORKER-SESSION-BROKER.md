@@ -271,7 +271,7 @@ delete an orphan automatically.
 
 Activation is a later, explicit root operation. It requires a root review,
 provider-specific credentials with project-side billing limits plus local
-conservative request/reserved-token allowances, the activation sentinel, and a
+conservative request, reserved-token, and reserved-cost allowances, the activation sentinel, and a
 clean run of
 `/usr/local/libexec/verify-worker-session-boundary --installed-check`. The
 verifier repeats both storage attestations after verifying the installed
@@ -295,12 +295,18 @@ supervisor's established client-loss path reserves provider termination and
 checks the launch cgroup. A canary failure never claims that recovery or cgroup
 quiescence has completed.
 
-The local allowance is not actual token usage, dollar spend, or remaining
-OpenAI/Anthropic project balance. Provider billing dashboards remain
-authoritative; Teleagent reports only bounded local request and conservative
-reserved-token counters.
-The initial policy examples and source parser cap each provider at 100,000
-reserved tokens per UTC day. This is a deliberately smaller pilot allowance,
-not proof of the selected $5/provider/UTC-day target: current model prices,
-provider project/workspace binding, provider-side monthly hard limits and a
-durable local daily cost gate must be reviewed before credential activation.
+The local allowance is an estimate, not actual token usage, dollar spend, or
+remaining OpenAI/Anthropic project balance. Provider billing dashboards remain
+authoritative. The durable SQLite ledger reserves request bytes plus the
+maximum output tokens and an envelope for every admitted request, including
+failed upstream requests. It charges those reserved tokens at a fixed
+conservative ceiling of $30 per million for Claude and $45 per million for
+Codex, with a hard policy ceiling of $5 in reserved cost per provider per UTC
+day. The gate rejects multimodal content, hosted tools, and caller-selected
+premium service tiers so those rates cover the admitted text traffic. A
+missing legacy cost row fails closed. The policy examples also cap each
+provider at 200,000 reserved tokens per UTC day. No local ledger guarantees a
+provider invoice ceiling: verify current model rates, project/workspace
+credential binding, and provider-side monthly hard limits before activating
+either credential. Recheck these fixed rates if the allowed models or provider
+prices change.

@@ -62,7 +62,8 @@ function policy(provider = 'codex') {
     maxResponseBytes: 1024 * 1024,
     maxConcurrent: 2,
     maxDailyRequests: 10,
-    maxDailyReservedTokens: 100_000,
+    maxDailyReservedTokens: 200_000,
+    maxDailyReservedCostMicroUsd: 5_000_000,
     maxOutputTokens: provider === 'claude' ? 64000 : 4096,
     maxLaunchRequests: 3,
     maxLaunchReservedTokens: provider === 'claude' ? 500_000 : 20_000,
@@ -70,18 +71,23 @@ function policy(provider = 'codex') {
   };
 }
 
-test('pilot egress policies refuse a daily token allowance above the reviewed ceiling', () => {
+test('pilot egress policies require bounded token and cost allowances', () => {
   for (const provider of ['claude', 'codex']) {
     const filename = path.join(__dirname, '..', '..', 'deploy', 'worker-session',
       `provider-egress-${provider}.policy.example.json`);
     const source = JSON.parse(fs.readFileSync(filename, 'utf8'));
-    assert.equal(normalizePolicy(source, provider).maxDailyReservedTokens, 100_000);
-    assert.throws(() => normalizePolicy({ ...source, maxDailyReservedTokens: 100_001 }, provider),
+    assert.equal(normalizePolicy(source, provider).maxDailyReservedTokens, 200_000);
+    assert.equal(normalizePolicy(source, provider).maxDailyReservedCostMicroUsd, 5_000_000);
+    assert.throws(() => normalizePolicy({ ...source, maxDailyReservedTokens: 200_001 }, provider),
       /maxDailyReservedTokens exceeds its hard bound/);
     for (const invalid of [0, '100000', null, undefined]) {
       assert.throws(() => normalizePolicy({ ...source, maxDailyReservedTokens: invalid }, provider),
         /maxDailyReservedTokens exceeds its hard bound or is missing/);
+      assert.throws(() => normalizePolicy({ ...source, maxDailyReservedCostMicroUsd: invalid }, provider),
+        /maxDailyReservedCostMicroUsd exceeds its hard bound or is missing/);
     }
+    assert.throws(() => normalizePolicy({ ...source, maxDailyReservedCostMicroUsd: 5_000_001 }, provider),
+      /maxDailyReservedCostMicroUsd exceeds its hard bound/);
   }
 });
 
@@ -315,8 +321,58 @@ test('per-launch and daily reservations are atomic and expose only sanitized bud
   const status = budgetStatus(db, selectedPolicy);
   assert.equal(status.usedRequests, 2);
   assert.equal(status.usedReservedTokens, 800);
+  assert.equal(status.costRateMicroUsdPerToken, 45);
+  assert.equal(status.usedReservedCostMicroUsd, 36_000);
+  assert.equal(status.remainingReservedCostMicroUsd, 4_964_000);
   assert.deepEqual(status.models, [{ model: 'gpt-5.6-sol', requests: 2, reservedTokens: 800 }]);
   assert.doesNotMatch(JSON.stringify(status), /capability|credential|prompt|path/i);
+});
+
+test('cost reservation refuses overspend atomically and resets only at the UTC day', (t) => {
+  const { db, policy: selectedPolicy } = harness(t, 'codex');
+  selectedPolicy.maxDailyReservedCostMicroUsd = 22_500;
+  const beforeMidnight = new Date('2026-09-23T23:59:59.000Z');
+  const afterMidnight = new Date('2026-09-24T00:00:00.000Z');
+  register(db, selectedPolicy, {
+    now: beforeMidnight,
+    expiresAtMs: beforeMidnight.getTime() + 60_000,
+    maxRequests: 3,
+    maxReservedTokens: 1000,
+  });
+  const reserve = (id, tokens, now) => reserveBudget(db, selectedPolicy, {
+    reservationId: id, launchId: LAUNCH_ID,
+    capability: CAPABILITY, model: 'gpt-5.6-sol', routeKind: 'inference',
+    reasoningEffort: 'high', requestBytes: 100, reservedTokens: tokens, now,
+  });
+  reserve('reservation_before_midnight', 400, beforeMidnight);
+  assert.throws(() => reserve('reservation_denied', 101, beforeMidnight),
+    { code: 'PROVIDER_EGRESS_COST_BUDGET_EXHAUSTED' });
+  assert.equal(budgetStatus(db, selectedPolicy, beforeMidnight).usedReservedCostMicroUsd, 18_000);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM provider_egress_reservations').get().count, 1);
+  reserve('reservation_after_midnight', 101, afterMidnight);
+  assert.equal(budgetStatus(db, selectedPolicy, afterMidnight).usedReservedCostMicroUsd, 4_545);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM provider_egress_cost_reservations').get().count, 2);
+});
+
+test('legacy reservation without a cost row blocks new spend and budget status', (t) => {
+  const { db, policy: selectedPolicy } = harness(t, 'claude');
+  register(db, selectedPolicy);
+  const day = new Date().toISOString().slice(0, 10);
+  db.prepare(`
+    INSERT INTO provider_egress_reservations (
+      reservation_id, launch_id, budget_day, model, route_kind,
+      reserved_tokens, request_bytes, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run('reservation_legacy', LAUNCH_ID, day, 'claude-sonnet-5',
+    'inference', 100, 100, new Date().toISOString());
+  assert.throws(() => budgetStatus(db, selectedPolicy),
+    { code: 'PROVIDER_COST_LEDGER_INCOMPLETE' });
+  assert.throws(() => reserveBudget(db, selectedPolicy, {
+    reservationId: 'reservation_after_legacy', launchId: LAUNCH_ID,
+    capability: CAPABILITY, model: 'claude-sonnet-5', routeKind: 'inference',
+    reasoningEffort: 'high', requestBytes: 100, reservedTokens: 200,
+  }), { code: 'PROVIDER_COST_LEDGER_INCOMPLETE' });
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM provider_egress_cost_reservations').get().count, 0);
 });
 
 test('provider state reserve blocks new capabilities and reservations but not revocation', (t) => {
@@ -412,6 +468,12 @@ test('provider state retention prunes only old revoked accounting history', (t) 
   ]);
   assert.deepEqual(db.prepare(
     'SELECT reservation_id FROM provider_egress_reservations ORDER BY reservation_id'
+  ).all(), [
+    { reservation_id: 'reservation_old_active' },
+    { reservation_id: 'reservation_recent' },
+  ]);
+  assert.deepEqual(db.prepare(
+    'SELECT reservation_id FROM provider_egress_cost_reservations ORDER BY reservation_id'
   ).all(), [
     { reservation_id: 'reservation_old_active' },
     { reservation_id: 'reservation_recent' },
@@ -793,7 +855,12 @@ test('provider persistence, premium tier selection, and remote content reference
   };
   for (const block of [
     { type: 'image', source: { type: 'url', url: 'https://attacker.invalid/a.png' } },
+    { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'YWJj' } },
     { type: 'document', source: { type: 'file_id', file_id: 'file-prior' } },
+    { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: 'YWJj' } },
+    { type: 'tool_result', tool_use_id: 'tool_1', content: [
+      { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'YWJj' } },
+    ] },
     { type: 'input_image', image_url: 'https://attacker.invalid/a.png' },
   ]) {
     assert.throws(
