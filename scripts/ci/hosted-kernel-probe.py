@@ -73,6 +73,10 @@ def namespaces():
     return {name: os.stat('/proc/self/ns/' + name).st_ino for name in NAMESPACES}
 
 
+def no_ipv4_routes(lines):
+    return not lines or (len(lines) == 1 and lines[0].startswith('Iface\tDestination\t'))
+
+
 def guard(environment, hostname, uid, machine, argv):
     need(hostname.split('.')[0].lower() != 'hermes', 'this probe must never execute on Hermes')
     need(argv == ['--run-hosted'] and uid == 0 and machine == 'x86_64', 'root x86_64 hosted invocation required')
@@ -196,7 +200,7 @@ def child_probe(root, host_namespaces, last_cap, parent_pidfd):
     need(sorted(name for name in os.listdir('/proc') if name.isdigit()) == ['1'], 'extra PID visible in private proc')
     interfaces = [line.split(':')[0].strip() for line in Path('/proc/net/dev').read_text().splitlines()[2:]]
     route_lines = Path('/proc/net/route').read_text().splitlines()
-    need(interfaces == ['lo'] and len(route_lines) == 1,
+    need(interfaces == ['lo'] and no_ipv4_routes(route_lines),
          'network namespace links/routes differ: interfaces=' + str(len(interfaces)) +
          ', loopback=' + str('lo' in interfaces) + ', routeLines=' + str(len(route_lines)))
     expect_readonly('/readonly/blocked-root')

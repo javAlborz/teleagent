@@ -109,6 +109,13 @@ class ProbeTests(unittest.TestCase):
                 with self.assertRaises(probe.Refused):
                     probe.expect_readonly('/fixture')
 
+    def test_empty_or_header_only_ipv4_route_table(self):
+        header = 'Iface\tDestination\tGateway\tFlags'
+        self.assertTrue(probe.no_ipv4_routes([]))
+        self.assertTrue(probe.no_ipv4_routes([header]))
+        self.assertFalse(probe.no_ipv4_routes(['lo\t00000000\t00000000']))
+        self.assertFalse(probe.no_ipv4_routes([header, 'lo\t00000000\t00000000']))
+
 
 if __name__ == '__main__':
     unittest.main()
