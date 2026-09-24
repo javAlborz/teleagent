@@ -492,6 +492,13 @@ function readEnvironmentFile(identities) {
   return parseVoiceEnvironmentFile(source, identities, runtimeContract);
 }
 
+function selectedProviderChecks(settings) {
+  if (!settings || !['codex', 'claude,codex'].includes(settings.AGENT_PROVIDERS)) {
+    refuse('the voice provider selection is invalid');
+  }
+  return settings.AGENT_PROVIDERS.split(',');
+}
+
 function readCredentialSet(identity) {
   inspectRootPath(CREDENTIAL_ROOT, { directory: true });
   const credentials = new Map();
@@ -1382,16 +1389,16 @@ async function start() {
   run(SIP_FENCE, ['check'], {
     environment: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8' },
   });
-  requireProviderInstallClosure();
-  for (const provider of ['claude', 'codex']) {
-    run(PROVIDER_CLI_CHECK, ['--provider', provider], {
-      environment: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8' },
-    });
-  }
   const identities = resolveVoiceIdentities();
   const identity = identities.voice;
   verifyBoundedHostStateFilesystem(identity);
   const settings = readEnvironmentFile(identities);
+  requireProviderInstallClosure();
+  for (const provider of selectedProviderChecks(settings)) {
+    run(PROVIDER_CLI_CHECK, ['--provider', provider], {
+      environment: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8' },
+    });
+  }
   const controllerControlToken = openCredential(
     path.join(CREDENTIAL_ROOT, 'voice-control-token'),
     { gid: identity.gid, kind: 'token' }
@@ -1720,6 +1727,7 @@ module.exports = {
   normalizeVoiceImageManifest,
   parseDockerCgroupInfo,
   parseVoiceEnvironmentFile,
+  selectedProviderChecks,
   parseExactProjectContainerIds,
   parseCreatedContainerOwnership,
   parseProcessIdentityStatus,

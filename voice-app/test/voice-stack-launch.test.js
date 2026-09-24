@@ -24,6 +24,7 @@ const {
   parseProcessIdentityStatus,
   parseVoiceContainerBoundary,
   parseVoiceEnvironmentFile,
+  selectedProviderChecks,
   parseExactProjectContainerIds,
   parseCreatedContainerOwnership,
   requestJson,
@@ -44,6 +45,12 @@ const {
   MAX_CONTROL_RESPONSE_BYTES,
 } = require('../../deploy/voice-stack/teleagent-voice-stack-launch');
 const voiceAppRuntimeContract = require('../../lib/voice-app-runtime-env');
+
+test('voice startup checks only the configured agent providers', () => {
+  assert.deepEqual(selectedProviderChecks({ AGENT_PROVIDERS: 'codex' }), ['codex']);
+  assert.deepEqual(selectedProviderChecks({ AGENT_PROVIDERS: 'claude,codex' }), ['claude', 'codex']);
+  assert.throws(() => selectedProviderChecks({ AGENT_PROVIDERS: 'claude' }), /provider selection is invalid/);
+});
 
 const IMAGE_MANIFEST = Object.freeze({
   version: 2,
