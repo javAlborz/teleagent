@@ -200,6 +200,21 @@ test('v2 adds only fixed reverse ESL and separate media HTTP with explicit consu
   assert.throws(() => boundary.requireRuntimeIntegration());
 });
 
+test('single-owner Tailnet v3 source-port policy preserves the exact receiver projection', () => {
+  const { config, contract } = fixture('v2');
+  const baseline = renderer.renderReceiverEndpoints(config, contract);
+  config.network.schema = 'teleagent.media-network-install.v3';
+  config.network.boundary.peers = [{ address: '100.101.120.26', sourcePorts: { start: 1024, end: 65535 } }];
+  contract.bootstrap.configurationDigest = boundary.digest(boundary.canonical(config));
+  const v3 = renderer.renderReceiverEndpoints(config, contract);
+  assert.deepEqual(v3.endpoints, baseline.endpoints);
+  assert.deepEqual(v3.voiceEnvironment, baseline.voiceEnvironment);
+  assert.equal(v3.readyToLaunch, false);
+  config.network.schema = 'teleagent.media-network-install.v4';
+  contract.bootstrap.configurationDigest = boundary.digest(boundary.canonical(config));
+  assert.throws(() => renderer.renderReceiverEndpoints(config, contract));
+});
+
 test('v1 never acquires v2 permissions and v2 forbids omissions, dynamic ports or broad tuples', () => {
   const value = fixture('v2');
   const topology = value.config.network.topology;

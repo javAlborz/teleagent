@@ -93,6 +93,16 @@ acquire v2 permissions, and a v2 record missing either addition is refused.
 The topology digest and independent Asterisk evidence must explicitly bind v2;
 v1 evidence cannot be reused.
 
+The separate infrastructure `teleagent.media-network-install.v3` policy pins
+one iPhone Air Tailnet peer and admits its changing high UDP source ports only
+to Asterisk's fixed SIP and narrow RTP destination ports. The receiver
+projection now recognizes this version when the same exact application v2
+topology and independent whole-configuration digest are admitted. Its service
+endpoints and voice environment are identical to the v2 projection; the
+external handset source-port policy grants no extra internal listener or flow.
+Unknown network schema versions still refuse, and `readyToLaunch` remains
+false. This source compatibility is not media commissioning.
+
 For v1, the renderer keeps `reverseEsl` and `privateHttpAudio` null. For v2 it
 emits explicit reverse ESL bind/advertisement options and media-only HTTP
 metadata. The media HTTP receiver permits GET/HEAD on the exact voice service IP;

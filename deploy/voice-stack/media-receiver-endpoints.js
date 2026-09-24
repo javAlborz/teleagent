@@ -65,7 +65,8 @@ function renderReceiverEndpoints(networkConfig, applicationContract) {
   exactKeys(networkConfig, 'schema network anchor');
   refuse(networkConfig.schema === 'teleagent.media-docker-install.v1');
   exactKeys(networkConfig.network, 'schema topology boundary');
-  refuse(networkConfig.network.schema === 'teleagent.media-network-install.v1');
+  refuse(['teleagent.media-network-install.v1', 'teleagent.media-network-install.v2',
+    'teleagent.media-network-install.v3'].includes(networkConfig.network.schema));
   const validated = validateReceiverSafeSipMediaTopology(networkConfig.network.topology);
   const topology = validated.topology;
   const contract = boundary.validateContract(applicationContract, applicationContract?.bootstrap?.bootId);
