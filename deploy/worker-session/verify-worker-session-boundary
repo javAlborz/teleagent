@@ -90,6 +90,46 @@ voice_env=/etc/teleagent-voice/voice-app.env
   echo "voice provider selection differs from activation mode" >&2
   exit 77
 }
+# Both OpenAI entrypoints must select the same reviewed project. Read the policy
+# as root-owned data through a no-follow descriptor and never print either file.
+codex_policy=/etc/teleagent/provider-egress/codex.json
+/usr/local/libexec/teleagent-node -e '
+const fs = require("node:fs");
+function readStable(filename, exactMode) {
+  if (fs.realpathSync(filename) !== filename) throw new Error("project path is replaceable");
+  const fd = fs.openSync(filename, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  try {
+    const before = fs.fstatSync(fd);
+    if (!before.isFile() || before.uid !== 0 ||
+        (exactMode !== null && before.gid !== 0) || before.nlink !== 1 ||
+        before.size < 1 || before.size > 65536 ||
+        (exactMode === null ? (before.mode & 0o7133) !== 0 :
+          (before.mode & 0o7777) !== exactMode)) {
+      throw new Error("project file metadata is unsafe");
+    }
+    const bytes = fs.readFileSync(fd);
+    const after = fs.fstatSync(fd);
+    if (bytes.length !== before.size) throw new Error("project file read was incomplete");
+    for (const name of ["dev", "ino", "mode", "uid", "gid", "nlink", "size", "mtimeMs", "ctimeMs"]) {
+      if (before[name] !== after[name]) throw new Error("project file changed during read");
+    }
+    return bytes.toString("utf8");
+  } finally { fs.closeSync(fd); }
+}
+const environment = readStable(process.argv[1], 0o600);
+const assignments = environment.split("\n").filter((line) => line.startsWith("OPENAI_PROJECT="));
+if (assignments.length !== 1) throw new Error("voice project binding is missing or repeated");
+const project = assignments[0].slice("OPENAI_PROJECT=".length);
+if (!/^proj_[A-Za-z0-9_-]{3,128}$/.test(project)) throw new Error("voice project binding is invalid");
+const policy = JSON.parse(readStable(process.argv[2], null));
+if (policy.version !== 1 || policy.provider !== "codex" || policy.openaiProjectId !== project) {
+  throw new Error("voice and Codex project bindings differ");
+}
+process.stdout.write("OPENAI_PROJECT_BINDING_OK\n");
+' "$voice_env" "$codex_policy" | /usr/bin/grep -qx OPENAI_PROJECT_BINDING_OK || {
+  echo "voice and Codex project bindings differ or are unsafe" >&2
+  exit 77
+}
 if [ "$provider_mode" = codex ]; then
   for disabled_socket in \
     /run/teleagent-provider-launch/claude.sock \

@@ -282,7 +282,9 @@ or `claude,codex`, followed by one newline. The controller's root-owned
 `/etc/teleagent-voice/voice-app.env` must also contain the same
 `AGENT_PROVIDERS=` assignment and a valid `OPENAI_PROJECT=proj_...` assignment.
 The voice launcher checks both before starting Compose, and Compose passes them
-to the voice app. In `codex` mode, the verifier
+to the voice app. The worker activation verifier also checks that the voice
+`OPENAI_PROJECT` exactly matches Codex's root-owned egress policy project ID.
+In `codex` mode, the verifier
 requires Claude's key, policy, sockets, and units to be absent or inactive;
 the Codex credential preflight does not require a dummy Claude key. In the
 full two-provider mode, start the Claude supervisor socket explicitly before
