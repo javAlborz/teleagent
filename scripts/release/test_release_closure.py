@@ -23,6 +23,8 @@ from release_closure import (
     FILE_LIST_NAME,
     INTERPRETER_TARGETS,
     MANIFEST_NAME,
+    MAX_MANIFEST_BYTES,
+    MAX_SBOM_BYTES,
     PRIVILEGED_BROKER_LOCK_PATH,
     PRIVILEGED_BROKER_NATIVE_MODULE_PATHS,
     PRIVILEGED_BROKER_NODE_MODULES_PATH,
@@ -32,6 +34,7 @@ from release_closure import (
     canonical_json_bytes,
     generate_release,
     package_release,
+    parse_json_bytes,
     verify_release,
 )
 
@@ -290,6 +293,26 @@ class ReleaseClosureTests(unittest.TestCase):
                 ),
                 0o555,
             )
+
+    def test_realistic_sbom_size_has_a_separate_bounded_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = self.fixture(Path(temporary))
+            sbom = {
+                "bomFormat": "CycloneDX", "specVersion": "1.6", "version": 1,
+                "components": [{"name": "fixture", "description": "x" * 450_000}],
+            }
+            payload = canonical_json_bytes(sbom)
+            self.assertGreater(len(payload), MAX_MANIFEST_BYTES)
+            for relative in fixture.config["sbom"].values():
+                if relative.endswith(".json"):
+                    fixture.write(relative, payload)
+            fixture.generate()
+            verify_release(fixture.root)
+            with self.assertRaisesRegex(ClosureError, "invalid size"):
+                parse_json_bytes(
+                    b" " * MAX_SBOM_BYTES + payload,
+                    label="oversized SBOM", canonical=False, maximum=MAX_SBOM_BYTES,
+                )
 
     def test_manifest_requires_exact_canonical_bytes_and_key_order(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

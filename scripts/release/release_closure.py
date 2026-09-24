@@ -25,6 +25,7 @@ FILE_LIST_NAME = "teleagent-release.files.tsv"
 FORMAT_VERSION = 2
 BUILD_INPUT_VERSION = 1
 MAX_MANIFEST_BYTES = 128 * 1024
+MAX_SBOM_BYTES = 8 * 1024 * 1024
 MAX_FILE_LIST_BYTES = 64 * 1024 * 1024
 MAX_ENTRIES = 1_000_000
 
@@ -572,9 +573,10 @@ def _read_release_json(
     *,
     label: str,
     canonical: bool,
+    maximum: int = MAX_MANIFEST_BYTES,
 ) -> tuple[dict[str, Any], Entry]:
     entry = _required_file(entries, relative, label)
-    document = read_json_file(root / entry.path, label=label, canonical=canonical)
+    document = read_json_file(root / entry.path, label=label, canonical=canonical, maximum=maximum)
     return document, entry
 
 
@@ -793,7 +795,9 @@ def _validate_voice_manifest(
 
 
 def _validate_sbom(root: Path, entries: Mapping[str, Entry], relative: str, label: str) -> Entry:
-    document, entry = _read_release_json(root, entries, relative, label=label, canonical=False)
+    document, entry = _read_release_json(
+        root, entries, relative, label=label, canonical=False, maximum=MAX_SBOM_BYTES
+    )
     if document.get("bomFormat") != "CycloneDX" or document.get("specVersion") != "1.6":
         raise _error(f"{label} is not a CycloneDX 1.6 document")
     return entry
