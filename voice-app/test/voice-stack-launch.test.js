@@ -168,6 +168,8 @@ test('root launcher closes fixed voice state/listener values against host overri
     'FREESWITCH_GID=987',
     'DEVICE_CONFIG_DIR=/etc/teleagent-voice/config',
     'VOICE_STATE_DIR=/var/lib/teleagent-voice',
+    'AGENT_PROVIDERS=claude,codex',
+    'OPENAI_PROJECT=proj_fixture0001',
     '',
   ].join('\n');
   assert.deepEqual(parseVoiceEnvironmentFile(base, RUNTIME_IDENTITIES, voiceAppRuntimeContract), {
@@ -179,7 +181,17 @@ test('root launcher closes fixed voice state/listener values against host overri
     FREESWITCH_GID: '987',
     DEVICE_CONFIG_DIR: '/etc/teleagent-voice/config',
     VOICE_STATE_DIR: '/var/lib/teleagent-voice',
+    AGENT_PROVIDERS: 'claude,codex',
+    OPENAI_PROJECT: 'proj_fixture0001',
   });
+  assert.throws(() => parseVoiceEnvironmentFile(
+    base.replace('AGENT_PROVIDERS=claude,codex', 'AGENT_PROVIDERS=claude'),
+    RUNTIME_IDENTITIES, voiceAppRuntimeContract,
+  ), /provider selection is invalid/);
+  assert.throws(() => parseVoiceEnvironmentFile(
+    base.replace('OPENAI_PROJECT=proj_fixture0001', 'OPENAI_PROJECT='),
+    RUNTIME_IDENTITIES, voiceAppRuntimeContract,
+  ), /OpenAI project binding is invalid/);
   for (const [name, values] of Object.entries({
     VOICE_STATE_DB_PATH: ['', '/app/state/voice-state.sqlite', '/tmp/voice-state.sqlite'],
     VOICE_APP_EXECUTION_LOCK_FILE: ['', '/app/state/voice-execution.lock.json', '/tmp/voice.lock'],

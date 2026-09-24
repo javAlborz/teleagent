@@ -476,6 +476,12 @@ function parseVoiceEnvironmentFile(source, identities, runtimeContract) {
       settings.VOICE_STATE_DIR !== '/var/lib/teleagent-voice') {
     refuse('the voice environment identity or path contract drifted');
   }
+  if (!['codex', 'claude,codex'].includes(settings.AGENT_PROVIDERS)) {
+    refuse('the voice provider selection is invalid');
+  }
+  if (!/^proj_[A-Za-z0-9_-]{3,128}$/u.test(settings.OPENAI_PROJECT || '')) {
+    refuse('the voice OpenAI project binding is invalid');
+  }
   return settings;
 }
 

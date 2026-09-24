@@ -70,6 +70,7 @@ function transaction(t, overrides = {}) {
       events.push(['terminate', provider, launchId]); return { persisted: true, quiesced: true };
     },
     recoverEgress: async (provider, operation) => operation({ provider, action: 'recover' }),
+    readProviders: () => ['claude', 'codex'],
     clearLaunchLock: (proof) => {
       assert.deepEqual(proof, { quiesced: true, expectedRecord: retained });
       events.push(['clear-stale-launch-lock']); return { proved: true, removed: true };
