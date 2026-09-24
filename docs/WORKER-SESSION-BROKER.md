@@ -278,8 +278,11 @@ root-owned single-link mode-`0444` file
 `/etc/teleagent/provider-runtime/enabled-providers` selects exactly `codex`
 or `claude,codex`, followed by one newline. The controller's root-owned
 `/etc/teleagent/controller/runtime.env` must contain exactly the matching
-`AGENT_PROVIDERS=` assignment. The voice app receives the same setting through
-its reviewed Compose runtime environment. In `codex` mode, the verifier
+`AGENT_PROVIDERS=` assignment. The root-owned
+`/etc/teleagent-voice/voice-app.env` must also contain the same
+`AGENT_PROVIDERS=` assignment and a valid `OPENAI_PROJECT=proj_...` assignment.
+The voice launcher checks both before starting Compose, and Compose passes them
+to the voice app. In `codex` mode, the verifier
 requires Claude's key, policy, sockets, and units to be absent or inactive;
 the Codex credential preflight does not require a dummy Claude key. In the
 full two-provider mode, start the Claude supervisor socket explicitly before
@@ -330,7 +333,11 @@ the fixed allowances deliberately exceed standard text-token rates for the
 allowed models at that review.
 
 For the first account-bound, Codex-only pilot, use a dedicated OpenAI project
-with a $150 monthly hard spending limit and standard processing. Bind its
+with a $150 monthly hard spending limit and standard processing. In the
+[OpenAI project settings](https://developers.openai.com/api/docs/guides/spend-limits),
+open Limits > Spend, set the monthly amount, turn on **Enforce a hard limit**,
+and verify the saved setting. A spend alert alone does not stop traffic, and
+hard-limit enforcement can lag enough for a small amount of extra usage. Bind its
 project-scoped API key through the protected host credential path. A Claude
 workspace and key are only needed when activating the later six-profile,
 two-provider release; give that workspace its own spend limit before use.
