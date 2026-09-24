@@ -67,6 +67,7 @@ function createFixture(t, bridge = null, options = {}) {
     executionControl: options.executionControl,
     privilegedActionBridge: options.privilegedActionBridge,
     outboundControl: options.outboundControl,
+    enabledProviders: options.enabledProviders,
     reconciliationBaseDelayMs: options.reconciliationBaseDelayMs,
     reconciliationMaxDelayMs: options.reconciliationMaxDelayMs,
     reconciliationPollWindowMs: options.reconciliationPollWindowMs,
@@ -706,6 +707,27 @@ test('all six profiles are visible and explicit underscoped profiles are rejecte
   assert.equal(denied.accepted, false);
   assert.equal(denied.code, 'AGENT_PROFILE_CAPABILITY_REQUIRED');
   assert.equal(denied.suggested_profile, 'codex-sol');
+});
+
+test('Codex-only phone offers and queues only Codex profiles', async (t) => {
+  const { broker, calls, realtime, stateStore, thread } = createFixture(t, null, {
+    enabledProviders: 'codex',
+  });
+  assert.deepEqual(broker.listProfiles(), ['codex-luna', 'codex-terra', 'codex-sol']);
+  assert.deepEqual(broker.listProfileDetails().map(({ provider }) => provider),
+    ['codex', 'codex', 'codex']);
+
+  const unavailable = await broker.startAgentTask({
+    voiceThreadId: thread.id,
+    realtimeSessionId: realtime.id,
+    toolCallId: 'disabled-claude',
+    profile: 'claude-haiku',
+    request: 'Read the current status.',
+  });
+  assert.equal(unavailable.accepted, false);
+  assert.equal(unavailable.code, 'AGENT_PROVIDER_DISABLED');
+  assert.equal(stateStore.listJobs(thread.id).length, 0);
+  assert.equal(calls.length, 0);
 });
 
 test('only one mutating operation can hold the focused pound approval', async (t) => {

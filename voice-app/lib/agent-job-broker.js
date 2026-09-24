@@ -81,6 +81,19 @@ const PROFILE_ALIASES = Object.freeze({
   'phone-codex-sol': 'codex-sol',
 });
 
+const KNOWN_PROVIDERS = Object.freeze(['claude', 'codex']);
+
+function enabledProviderSet(value) {
+  if (value === undefined || value === null || String(value).trim() === '') {
+    return new Set(KNOWN_PROVIDERS);
+  }
+  const providers = String(value).toLowerCase().split(/[,\s]+/).filter(Boolean);
+  if (providers.some((provider) => !KNOWN_PROVIDERS.includes(provider))) {
+    throw new Error('AGENT_PROVIDERS contains an unknown provider');
+  }
+  return new Set(providers);
+}
+
 const CAPABILITY_RANK = Object.freeze({ read: 1, write: 2, admin: 3 });
 const TARGETED_SESSION_REQUEST = /(?:\b(?:send|deliver|type|paste|forward)\b.{0,100}\b(?:message|prompt|request)\b.{0,140}\b(?:tmux|pane|window|existing\s+(?:codex|claude)|same\s+(?:session|thread))\b|\b(?:tell|ask|direct|instruct)\b.{0,80}\b(?:existing|current|running|tmux-attached)\s+(?:codex|claude|agent|session|pane)\b|\b(?:continue|resume)\b.{0,80}\b(?:same|existing|current|tmux)\s+(?:session|thread|pane)\b)/i;
 
@@ -261,6 +274,7 @@ class AgentJobBroker extends EventEmitter {
     approvalCapabilityIssuer = null,
     privilegedActionBridge = null,
     outboundControl = null,
+    enabledProviders = process.env.AGENT_PROVIDERS,
     approvalTtlSeconds = 300,
     reconciliationBaseDelayMs = process.env.VOICE_JOB_RECONCILIATION_BASE_MS || 250,
     reconciliationMaxDelayMs = process.env.VOICE_JOB_RECONCILIATION_MAX_MS || 30000,
@@ -279,6 +293,7 @@ class AgentJobBroker extends EventEmitter {
     this.approvalCapabilityIssuer = approvalCapabilityIssuer;
     this.privilegedActionBridge = privilegedActionBridge;
     this.outboundControl = outboundControl;
+    this.enabledProviders = enabledProviderSet(enabledProviders);
     this.workspaceMutex = new AsyncMutex();
     this.activeExecutions = new Map();
     this.executionImmediates = new Map();
@@ -390,17 +405,20 @@ class AgentJobBroker extends EventEmitter {
   }
 
   listProfiles() {
-    return Object.keys(PROFILE_DEFINITIONS);
+    return Object.keys(PROFILE_DEFINITIONS)
+      .filter((profile) => this.enabledProviders.has(PROFILE_DEFINITIONS[profile].provider));
   }
 
   listProfileDetails() {
-    return Object.entries(PROFILE_DEFINITIONS).map(([profile, definition]) => ({
-      profile,
-      provider: definition.provider,
-      capability: 'read_only',
-      authority: 'read_only',
-      timeout_seconds: definition.timeoutSeconds,
-    }));
+    return Object.entries(PROFILE_DEFINITIONS)
+      .filter(([, definition]) => this.enabledProviders.has(definition.provider))
+      .map(([profile, definition]) => ({
+        profile,
+        provider: definition.provider,
+        capability: 'read_only',
+        authority: 'read_only',
+        timeout_seconds: definition.timeoutSeconds,
+      }));
   }
 
   _expireApprovals(voiceThreadId) {
@@ -463,6 +481,14 @@ class AgentJobBroker extends EventEmitter {
         accepted: false,
         code: 'UNKNOWN_AGENT_PROFILE',
         message: `Choose one of: ${this.listProfiles().join(', ')}.`,
+      };
+    }
+
+    if (!this.enabledProviders.has(PROFILE_DEFINITIONS[normalizedProfile].provider)) {
+      return {
+        accepted: false,
+        code: 'AGENT_PROVIDER_DISABLED',
+        message: `${PROFILE_DEFINITIONS[normalizedProfile].provider} is unavailable on this phone. Choose one of: ${this.listProfiles().join(', ')}.`,
       };
     }
 
