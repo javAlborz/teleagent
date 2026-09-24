@@ -58,7 +58,14 @@ const PROVIDERS = Object.freeze({
 // input tokens. Reserve additional fixed protocol/tool framing so enforcement
 // never relies on the unsafe average-case bytes-per-token heuristic.
 const TOKEN_RESERVATION_ENVELOPE = 1024;
+// Conservative pilot rates in micro-USD per reserved token. These exceed the
+// currently reviewed text-token rates for the exact allowed models and modes.
+// Account billing remains authoritative; re-review these rates before release.
+const COST_RATE_MICRO_USD_PER_TOKEN = Object.freeze({ claude: 30, codex: 45 });
+const MAX_DAILY_RESERVED_TOKENS = 200_000;
+const MAX_DAILY_RESERVED_COST_MICRO_USD = 5_000_000;
 const SAFE_MODEL = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const OPENAI_PROJECT_ID = /^proj_[A-Za-z0-9_-]{3,128}$/;
 const PROVIDER_ROUTE_KINDS = Object.freeze({
   claude: Object.freeze(['inference', 'count_tokens']),
   codex: Object.freeze(['inference']),
@@ -149,6 +156,13 @@ function readPolicy(filename, provider) {
   let input;
   try { input = JSON.parse(fs.readFileSync(filename, 'utf8')); }
   catch { throw new Error('Provider egress policy is invalid JSON.'); }
+  return normalizePolicy(input, provider);
+}
+
+function normalizePolicy(input, provider) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new Error('Provider egress policy is invalid.');
+  }
   const allowedModels = Array.isArray(input.allowedModels)
     ? [...new Set(input.allowedModels.map(String))]
     : [];
@@ -162,7 +176,23 @@ function readPolicy(filename, provider) {
     if (normalized > max) throw new Error(`Provider egress ${name} exceeds its hard bound.`);
     return normalized;
   };
+  if (!Number.isSafeInteger(input.maxDailyReservedTokens) ||
+      input.maxDailyReservedTokens <= 0 ||
+      input.maxDailyReservedTokens > MAX_DAILY_RESERVED_TOKENS) {
+    throw new Error('Provider egress maxDailyReservedTokens exceeds its hard bound or is missing.');
+  }
+  if (!Number.isSafeInteger(input.maxDailyReservedCostMicroUsd) ||
+      input.maxDailyReservedCostMicroUsd <= 0 ||
+      input.maxDailyReservedCostMicroUsd > MAX_DAILY_RESERVED_COST_MICRO_USD) {
+    throw new Error('Provider egress maxDailyReservedCostMicroUsd exceeds its hard bound or is missing.');
+  }
   const expectedModels = provider === 'claude' ? CLAUDE_MODELS : CODEX_MODELS;
+  const openaiProjectId = input.openaiProjectId ?? null;
+  if ((provider === 'codex' && openaiProjectId !== null &&
+       (typeof openaiProjectId !== 'string' || !OPENAI_PROJECT_ID.test(openaiProjectId))) ||
+      (provider === 'claude' && openaiProjectId !== null)) {
+    throw new Error('Provider egress OpenAI project identity is invalid.');
+  }
   if (input.version !== 1 || input.provider !== provider ||
       allowedModels.length !== expectedModels.length ||
       allowedModels.some((model, index) => (
@@ -172,13 +202,15 @@ function readPolicy(filename, provider) {
   }
   return Object.freeze({
     provider,
+    openaiProjectId,
     allowedModels: Object.freeze(allowedModels),
     allowedAnthropicBetaByModel: Object.freeze(allowedAnthropicBetaByModel),
     maxRequestBytes: positive('maxRequestBytes', 2 * 1024 * 1024, 4 * 1024 * 1024),
     maxResponseBytes: positive('maxResponseBytes', 8 * 1024 * 1024, 32 * 1024 * 1024),
     maxConcurrent: positive('maxConcurrent', 2, 8),
     maxDailyRequests: positive('maxDailyRequests', 100, 1000),
-    maxDailyReservedTokens: positive('maxDailyReservedTokens', 2_000_000, 20_000_000),
+    maxDailyReservedTokens: input.maxDailyReservedTokens,
+    maxDailyReservedCostMicroUsd: input.maxDailyReservedCostMicroUsd,
     maxOutputTokens: positive('maxOutputTokens', provider === 'claude' ? 64000 : 32768, 131072),
     maxLaunchRequests: positive('maxLaunchRequests', 16, 128),
     maxLaunchReservedTokens: positive('maxLaunchReservedTokens', 250_000, 2_000_000),
@@ -247,12 +279,18 @@ function normalizeConfig(environment = process.env, {
   }
   const credentialDirectory = path.resolve(String(environment.CREDENTIALS_DIRECTORY || ''));
   const credentialPath = path.join(credentialDirectory, 'provider-api-key');
-  if (!path.isAbsolute(credentialDirectory) || credentialDirectory === '/' ||
-      !credentialDirectory.startsWith('/run/credentials/')) {
+  if (credentialDirectory !== `/run/credentials/teleagent-provider-egress@${provider}.service`) {
     throw new Error('Provider egress credential directory is unavailable.');
   }
   const credentialMetadata = secureFile(credentialPath, { maxBytes: 4096 });
-  if (![0, uid].includes(credentialMetadata.uid) || (credentialMetadata.mode & 0o077) !== 0) {
+  // The infrastructure startup coordinator attests the exact one-service ACL
+  // on every start. For that projection, group-read is the ACL mask, not an
+  // additional group grant. Other credential locations remain forbidden.
+  const privateOwnerMode = [0, uid].includes(credentialMetadata.uid) &&
+    (credentialMetadata.mode & 0o7777) === 0o400;
+  const systemdAclMode = credentialMetadata.uid === 0 && credentialMetadata.gid === 0 &&
+    (credentialMetadata.mode & 0o7777) === 0o440;
+  if (!privateOwnerMode && !systemdAclMode) {
     throw new Error('Provider egress credential ownership is unsafe.');
   }
   // Do not trim: leading/trailing whitespace is malformed credential material,
@@ -306,6 +344,11 @@ function openBudgetStore(filename, {
     ) STRICT;
     CREATE INDEX IF NOT EXISTS provider_egress_reservations_day
       ON provider_egress_reservations(budget_day, model);
+    CREATE TABLE IF NOT EXISTS provider_egress_cost_reservations (
+      reservation_id TEXT PRIMARY KEY REFERENCES provider_egress_reservations(reservation_id)
+        ON DELETE CASCADE,
+      reserved_cost_micro_usd INTEGER NOT NULL CHECK (reserved_cost_micro_usd > 0)
+    ) STRICT;
   `);
   const capabilityColumns = new Set(db.prepare(
     'PRAGMA table_info(provider_egress_capabilities)'
@@ -358,6 +401,37 @@ function hashesEqual(left, right) {
 
 function budgetDay(now = new Date()) {
   return now.toISOString().slice(0, 10);
+}
+
+function costRateFor(policy) {
+  const rate = COST_RATE_MICRO_USD_PER_TOKEN[policy.provider];
+  if (!Number.isSafeInteger(rate) || rate <= 0 ||
+      !Number.isSafeInteger(policy.maxDailyReservedCostMicroUsd) ||
+      policy.maxDailyReservedCostMicroUsd <= 0 ||
+      policy.maxDailyReservedCostMicroUsd > MAX_DAILY_RESERVED_COST_MICRO_USD) {
+    throw codedError('PROVIDER_COST_POLICY_INVALID', 'Provider cost policy is unavailable.', 503);
+  }
+  return rate;
+}
+
+function dailyReservations(db, day) {
+  const totals = db.prepare(`
+    SELECT COUNT(*) AS requests, COALESCE(SUM(r.reserved_tokens), 0) AS tokens,
+           COUNT(c.reservation_id) AS costRows,
+           COALESCE(SUM(c.reserved_cost_micro_usd), 0) AS reservedCostMicroUsd
+    FROM provider_egress_reservations AS r
+    LEFT JOIN provider_egress_cost_reservations AS c ON c.reservation_id = r.reservation_id
+    WHERE r.budget_day = ?
+  `).get(day);
+  if (totals.requests !== totals.costRows ||
+      !Number.isSafeInteger(totals.requests) || totals.requests < 0 ||
+      !Number.isSafeInteger(totals.tokens) || totals.tokens < 0 ||
+      !Number.isSafeInteger(totals.reservedCostMicroUsd) ||
+      totals.reservedCostMicroUsd < 0) {
+    throw codedError('PROVIDER_COST_LEDGER_INCOMPLETE',
+      'Provider cost reservations are incomplete.', 503);
+  }
+  return totals;
 }
 
 function registerCapability(db, policy, {
@@ -858,19 +932,24 @@ function assertNoProviderFetchedContent(body, provider) {
   for (const message of Array.isArray(body?.messages) ? body.messages : []) {
     if (Array.isArray(message?.content)) blocks.push(...message.content);
   }
-  for (const block of blocks) {
-    if (!block || typeof block !== 'object' || Array.isArray(block)) continue;
-    const type = String(block.type || '').toLowerCase();
-    if (['input_image', 'image_url', 'input_file', 'file_id'].includes(type) ||
-        block.image_url !== undefined || block.file_id !== undefined) providerContentDenied();
-    if (['image', 'document'].includes(type) && block.source &&
-        typeof block.source === 'object') {
-      const sourceType = String(block.source.type || '').toLowerCase();
-      if (['url', 'file', 'file_id'].includes(sourceType) ||
-          block.source.url !== undefined || block.source.file_id !== undefined) {
-        providerContentDenied();
-      }
+  let visited = 0;
+  while (blocks.length > 0) {
+    const block = blocks.pop();
+    if (!block || typeof block !== 'object') continue;
+    if ((visited += 1) > 1024) providerContentDenied();
+    if (Array.isArray(block)) {
+      blocks.push(...block);
+      continue;
     }
+    const type = String(block.type || '').toLowerCase();
+    if (['image', 'document', 'audio', 'video', 'input_image', 'image_url',
+      'input_file', 'file_id'].includes(type) ||
+        block.image_url !== undefined || block.file_id !== undefined ||
+        (block.source && typeof block.source === 'object' &&
+          ['base64', 'url', 'file', 'file_id'].includes(String(block.source.type || '').toLowerCase()))) {
+      providerContentDenied();
+    }
+    blocks.push(...Object.values(block));
   }
 }
 
@@ -1054,6 +1133,10 @@ function parseRequestBody(buffer, provider, policy, routeKind) {
   if (!Number.isSafeInteger(outputTokens) || outputTokens <= 0 || outputTokens > policy.maxOutputTokens) {
     throw codedError('PROVIDER_EGRESS_OUTPUT_DENIED', 'Provider output token bound is invalid.', 403);
   }
+  // An omitted tier can inherit Fast mode from the OpenAI project. The caller
+  // cannot select a tier, and the broker pins standard processing explicitly
+  // before reserving its standard text-token cost allowance.
+  if (provider === 'codex') body.service_tier = 'default';
   // Never forward the ambiguous raw JSON bytes. Upstreams may apply a
   // different first/last-wins rule to duplicate object members than V8 did
   // during validation. Serialize the one validated object and reserve using
@@ -1084,6 +1167,12 @@ function reserveBudget(db, policy, {
   now = new Date(),
 }) {
   const day = budgetDay(now);
+  const costRate = costRateFor(policy);
+  const reservedCostMicroUsd = reservedTokens * costRate;
+  if (!Number.isSafeInteger(reservedTokens) || reservedTokens <= 0 ||
+      !Number.isSafeInteger(reservedCostMicroUsd)) {
+    throw codedError('PROVIDER_COST_RESERVATION_INVALID', 'Provider cost reservation is invalid.', 403);
+  }
   const digest = capabilityHash(capability);
   const transaction = db.transaction(() => {
     const launch = db.prepare(
@@ -1102,13 +1191,15 @@ function reserveBudget(db, policy, {
         launch.used_reserved_tokens + reservedTokens > launch.max_reserved_tokens) {
       throw codedError('PROVIDER_LAUNCH_BUDGET_EXHAUSTED', 'Provider launch budget is exhausted.', 429);
     }
-    const totals = db.prepare(`
-      SELECT COUNT(*) AS requests, COALESCE(SUM(reserved_tokens), 0) AS tokens
-      FROM provider_egress_reservations WHERE budget_day = ?
-    `).get(day);
+    const totals = dailyReservations(db, day);
     if (totals.requests >= policy.maxDailyRequests ||
         totals.tokens + reservedTokens > policy.maxDailyReservedTokens) {
       throw codedError('PROVIDER_EGRESS_BUDGET_EXHAUSTED', 'Provider daily budget is exhausted.', 429);
+    }
+    if (totals.reservedCostMicroUsd + reservedCostMicroUsd >
+        policy.maxDailyReservedCostMicroUsd) {
+      throw codedError('PROVIDER_EGRESS_COST_BUDGET_EXHAUSTED',
+        'Provider daily cost allowance is exhausted.', 429);
     }
     assertNewProviderStateAdmission(db);
     db.prepare(`
@@ -1121,6 +1212,11 @@ function reserveBudget(db, policy, {
       reservedTokens, requestBytes, now.toISOString()
     );
     db.prepare(`
+      INSERT INTO provider_egress_cost_reservations (
+        reservation_id, reserved_cost_micro_usd
+      ) VALUES (?, ?)
+    `).run(reservationId, reservedCostMicroUsd);
+    db.prepare(`
       UPDATE provider_egress_capabilities
       SET used_requests = used_requests + 1,
           used_reserved_tokens = used_reserved_tokens + ?
@@ -1132,10 +1228,8 @@ function reserveBudget(db, policy, {
 
 function budgetStatus(db, policy, now = new Date()) {
   const day = budgetDay(now);
-  const total = db.prepare(`
-    SELECT COUNT(*) AS requests, COALESCE(SUM(reserved_tokens), 0) AS reservedTokens
-    FROM provider_egress_reservations WHERE budget_day = ?
-  `).get(day);
+  const total = dailyReservations(db, day);
+  const costRateMicroUsdPerToken = costRateFor(policy);
   const models = db.prepare(`
     SELECT model, COUNT(*) AS requests, COALESCE(SUM(reserved_tokens), 0) AS reservedTokens
     FROM provider_egress_reservations WHERE budget_day = ?
@@ -1145,8 +1239,13 @@ function budgetStatus(db, policy, now = new Date()) {
     budgetDay: day,
     usedRequests: total.requests,
     remainingRequests: Math.max(0, policy.maxDailyRequests - total.requests),
-    usedReservedTokens: total.reservedTokens,
-    remainingReservedTokens: Math.max(0, policy.maxDailyReservedTokens - total.reservedTokens),
+    usedReservedTokens: total.tokens,
+    remainingReservedTokens: Math.max(0, policy.maxDailyReservedTokens - total.tokens),
+    costRateMicroUsdPerToken,
+    usedReservedCostMicroUsd: total.reservedCostMicroUsd,
+    remainingReservedCostMicroUsd: Math.max(
+      0, policy.maxDailyReservedCostMicroUsd - total.reservedCostMicroUsd
+    ),
     models,
   };
 }
@@ -1211,7 +1310,20 @@ function sanitizedHeaders(
   if (provider === 'claude') {
     headers['x-api-key'] = credential;
     Object.assign(headers, normalizedAnthropicHeaders(incoming, policy, routeKind, model));
-  } else headers.authorization = `Bearer ${credential}`;
+  } else {
+    if (incoming['openai-project'] !== undefined ||
+        incoming['openai-organization'] !== undefined) {
+      throw codedError('PROVIDER_PROJECT_HEADER_DENIED',
+        'Caller-selected provider project is outside policy.', 403);
+    }
+    if (typeof policy.openaiProjectId !== 'string' ||
+        !OPENAI_PROJECT_ID.test(policy.openaiProjectId)) {
+      throw codedError('PROVIDER_PROJECT_UNBOUND',
+        'OpenAI project binding is unavailable.', 503);
+    }
+    headers.authorization = `Bearer ${credential}`;
+    headers['openai-project'] = policy.openaiProjectId;
+  }
   return headers;
 }
 
@@ -1615,6 +1727,7 @@ module.exports = {
   groupGid,
   normalizeConfig,
   normalizeAllowedAnthropicBeta,
+  normalizePolicy,
   openBudgetStore,
   parseRequestBody,
   readPolicy,

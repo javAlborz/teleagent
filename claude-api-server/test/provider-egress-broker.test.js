@@ -20,6 +20,7 @@ const {
   capabilityHash,
   createProviderEgressBroker,
   normalizeAllowedAnthropicBeta,
+  normalizePolicy,
   openBudgetStore,
   parseRequestBody,
   pruneBudgetHistory,
@@ -53,6 +54,7 @@ function capturedCodexClientMetadata() {
 function policy(provider = 'codex') {
   return {
     provider,
+    openaiProjectId: provider === 'codex' ? 'proj_teleagenttest0001' : null,
     allowedModels: provider === 'codex' ? ['gpt-5.6-sol'] : ['claude-sonnet-5'],
     allowedAnthropicBetaByModel: provider === 'claude'
       ? ANTHROPIC_COUNT_BETAS_BY_MODEL
@@ -61,13 +63,43 @@ function policy(provider = 'codex') {
     maxResponseBytes: 1024 * 1024,
     maxConcurrent: 2,
     maxDailyRequests: 10,
-    maxDailyReservedTokens: 100_000,
+    maxDailyReservedTokens: 200_000,
+    maxDailyReservedCostMicroUsd: 5_000_000,
     maxOutputTokens: provider === 'claude' ? 64000 : 4096,
     maxLaunchRequests: 3,
     maxLaunchReservedTokens: provider === 'claude' ? 500_000 : 20_000,
     maxLaunchSeconds: 3600,
   };
 }
+
+test('pilot egress policies require bounded token and cost allowances', () => {
+  for (const provider of ['claude', 'codex']) {
+    const filename = path.join(__dirname, '..', '..', 'deploy', 'worker-session',
+      `provider-egress-${provider}.policy.example.json`);
+    const source = JSON.parse(fs.readFileSync(filename, 'utf8'));
+    assert.equal(normalizePolicy(source, provider).maxDailyReservedTokens, 200_000);
+    assert.equal(normalizePolicy(source, provider).maxDailyReservedCostMicroUsd, 5_000_000);
+    if (provider === 'codex') {
+      assert.equal(normalizePolicy(source, provider).openaiProjectId, null);
+      assert.equal(normalizePolicy({ ...source, openaiProjectId: 'proj_teleagenttest0001' },
+        provider).openaiProjectId, 'proj_teleagenttest0001');
+      for (const invalid of ['default', 'proj_x\nInjected: yes', 123]) {
+        assert.throws(() => normalizePolicy({ ...source, openaiProjectId: invalid }, provider),
+          /OpenAI project identity is invalid/);
+      }
+    }
+    assert.throws(() => normalizePolicy({ ...source, maxDailyReservedTokens: 200_001 }, provider),
+      /maxDailyReservedTokens exceeds its hard bound/);
+    for (const invalid of [0, '100000', null, undefined]) {
+      assert.throws(() => normalizePolicy({ ...source, maxDailyReservedTokens: invalid }, provider),
+        /maxDailyReservedTokens exceeds its hard bound or is missing/);
+      assert.throws(() => normalizePolicy({ ...source, maxDailyReservedCostMicroUsd: invalid }, provider),
+        /maxDailyReservedCostMicroUsd exceeds its hard bound or is missing/);
+    }
+    assert.throws(() => normalizePolicy({ ...source, maxDailyReservedCostMicroUsd: 5_000_001 }, provider),
+      /maxDailyReservedCostMicroUsd exceeds its hard bound/);
+  }
+});
 
 function harness(t, provider = 'codex') {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'provider-egress-'));
@@ -215,6 +247,28 @@ test('capability registration is digest-only, timing-safe at use, and cancel-bef
   }), (error) => error.code === 'PROVIDER_CAPABILITY_CONFLICT');
 });
 
+test('revoke before a delayed register stays canceled across store reopen for both providers', async (t) => {
+  for (const provider of ['claude', 'codex']) {
+    await t.test(provider, (t) => {
+      const { directory, db, policy: selectedPolicy } = harness(t, provider);
+      assert.deepEqual(revokeCapability(db, { launchId: LAUNCH_ID }), {
+        persisted: true, alreadyRevoked: false, tombstone: true,
+      });
+      db.close();
+      const reopened = openBudgetStore(path.join(directory, 'budget.sqlite'), { uid: process.getuid() });
+      try {
+        assert.throws(() => register(reopened, selectedPolicy), { code: 'PROVIDER_CAPABILITY_CONFLICT' });
+        assert.deepEqual(reopened.prepare(
+          'SELECT state, capability_hash FROM provider_egress_capabilities WHERE launch_id = ?'
+        ).get(LAUNCH_ID), { state: 'canceled', capability_hash: null });
+        assert.equal(reopened.pragma('integrity_check', { simple: true }), 'ok');
+      } finally {
+        reopened.close();
+      }
+    });
+  }
+});
+
 test('credential broker refuses Node/TLS debug injection without echoing secret values', () => {
   for (const name of [
     'NODE_DEBUG', 'NODE_OPTIONS', 'NODE_PATH', 'NODE_EXTRA_CA_CERTS',
@@ -277,8 +331,58 @@ test('per-launch and daily reservations are atomic and expose only sanitized bud
   const status = budgetStatus(db, selectedPolicy);
   assert.equal(status.usedRequests, 2);
   assert.equal(status.usedReservedTokens, 800);
+  assert.equal(status.costRateMicroUsdPerToken, 45);
+  assert.equal(status.usedReservedCostMicroUsd, 36_000);
+  assert.equal(status.remainingReservedCostMicroUsd, 4_964_000);
   assert.deepEqual(status.models, [{ model: 'gpt-5.6-sol', requests: 2, reservedTokens: 800 }]);
   assert.doesNotMatch(JSON.stringify(status), /capability|credential|prompt|path/i);
+});
+
+test('cost reservation refuses overspend atomically and resets only at the UTC day', (t) => {
+  const { db, policy: selectedPolicy } = harness(t, 'codex');
+  selectedPolicy.maxDailyReservedCostMicroUsd = 22_500;
+  const beforeMidnight = new Date('2026-09-23T23:59:59.000Z');
+  const afterMidnight = new Date('2026-09-24T00:00:00.000Z');
+  register(db, selectedPolicy, {
+    now: beforeMidnight,
+    expiresAtMs: beforeMidnight.getTime() + 60_000,
+    maxRequests: 3,
+    maxReservedTokens: 1000,
+  });
+  const reserve = (id, tokens, now) => reserveBudget(db, selectedPolicy, {
+    reservationId: id, launchId: LAUNCH_ID,
+    capability: CAPABILITY, model: 'gpt-5.6-sol', routeKind: 'inference',
+    reasoningEffort: 'high', requestBytes: 100, reservedTokens: tokens, now,
+  });
+  reserve('reservation_before_midnight', 400, beforeMidnight);
+  assert.throws(() => reserve('reservation_denied', 101, beforeMidnight),
+    { code: 'PROVIDER_EGRESS_COST_BUDGET_EXHAUSTED' });
+  assert.equal(budgetStatus(db, selectedPolicy, beforeMidnight).usedReservedCostMicroUsd, 18_000);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM provider_egress_reservations').get().count, 1);
+  reserve('reservation_after_midnight', 101, afterMidnight);
+  assert.equal(budgetStatus(db, selectedPolicy, afterMidnight).usedReservedCostMicroUsd, 4_545);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM provider_egress_cost_reservations').get().count, 2);
+});
+
+test('legacy reservation without a cost row blocks new spend and budget status', (t) => {
+  const { db, policy: selectedPolicy } = harness(t, 'claude');
+  register(db, selectedPolicy);
+  const day = new Date().toISOString().slice(0, 10);
+  db.prepare(`
+    INSERT INTO provider_egress_reservations (
+      reservation_id, launch_id, budget_day, model, route_kind,
+      reserved_tokens, request_bytes, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run('reservation_legacy', LAUNCH_ID, day, 'claude-sonnet-5',
+    'inference', 100, 100, new Date().toISOString());
+  assert.throws(() => budgetStatus(db, selectedPolicy),
+    { code: 'PROVIDER_COST_LEDGER_INCOMPLETE' });
+  assert.throws(() => reserveBudget(db, selectedPolicy, {
+    reservationId: 'reservation_after_legacy', launchId: LAUNCH_ID,
+    capability: CAPABILITY, model: 'claude-sonnet-5', routeKind: 'inference',
+    reasoningEffort: 'high', requestBytes: 100, reservedTokens: 200,
+  }), { code: 'PROVIDER_COST_LEDGER_INCOMPLETE' });
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM provider_egress_cost_reservations').get().count, 0);
 });
 
 test('provider state reserve blocks new capabilities and reservations but not revocation', (t) => {
@@ -374,6 +478,12 @@ test('provider state retention prunes only old revoked accounting history', (t) 
   ]);
   assert.deepEqual(db.prepare(
     'SELECT reservation_id FROM provider_egress_reservations ORDER BY reservation_id'
+  ).all(), [
+    { reservation_id: 'reservation_old_active' },
+    { reservation_id: 'reservation_recent' },
+  ]);
+  assert.deepEqual(db.prepare(
+    'SELECT reservation_id FROM provider_egress_cost_reservations ORDER BY reservation_id'
   ).all(), [
     { reservation_id: 'reservation_old_active' },
     { reservation_id: 'reservation_recent' },
@@ -548,6 +658,8 @@ test('pinned client envelopes accept current CLI controls and strip cross-job co
     Buffer.from(JSON.stringify(codexBody)), 'codex', codexPolicy, 'inference'
   );
   assert.equal(parsedCodex.reasoningEffort, 'high');
+  assert.equal(parsedCodex.body.service_tier, 'default');
+  assert.equal(JSON.parse(parsedCodex.canonicalBuffer).service_tier, 'default');
   assert.equal(Object.hasOwn(parsedCodex.body, 'client_metadata'), false);
   assert.equal(Object.hasOwn(parsedCodex.body, 'prompt_cache_key'), false);
   assert.doesNotMatch(parsedCodex.canonicalBuffer.toString('utf8'), /thread_id|prompt_cache_key/);
@@ -644,6 +756,7 @@ test('provider persistence, premium tier selection, and remote content reference
     { store: true },
     { previous_response_id: 'resp_prior' },
     { conversation: 'conversation_prior' },
+    { service_tier: 'default' },
     { service_tier: 'priority' },
   ]) {
     assert.throws(
@@ -755,7 +868,12 @@ test('provider persistence, premium tier selection, and remote content reference
   };
   for (const block of [
     { type: 'image', source: { type: 'url', url: 'https://attacker.invalid/a.png' } },
+    { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'YWJj' } },
     { type: 'document', source: { type: 'file_id', file_id: 'file-prior' } },
+    { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: 'YWJj' } },
+    { type: 'tool_result', tool_use_id: 'tool_1', content: [
+      { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'YWJj' } },
+    ] },
     { type: 'input_image', image_url: 'https://attacker.invalid/a.png' },
   ]) {
     assert.throws(
@@ -963,9 +1081,11 @@ test('Codex exact responses inject the bearer while uncaptured compaction stays 
   });
   assert.equal(compact.status, 403);
   assert.deepEqual(calls.map((call) => call.options.path), ['/v1/responses']);
+  assert.equal(JSON.parse(calls[0].body).service_tier, 'default');
   for (const call of calls) {
     assert.equal(call.options.hostname, 'api.openai.com');
     assert.equal(call.options.headers.authorization, 'Bearer upstream-secret-that-never-returns');
+    assert.equal(call.options.headers['openai-project'], selectedPolicy.openaiProjectId);
     assert.equal(call.options.headers['x-teleagent-launch-capability'], undefined);
   }
   assert.doesNotMatch(inference.body + compact.body, /upstream-secret|ab{10}/);
@@ -985,6 +1105,42 @@ test('Codex exact responses inject the bearer while uncaptured compaction stays 
     reservations: db.prepare('SELECT * FROM provider_egress_reservations').all(),
   });
   assert.doesNotMatch(serializedRows, /upstream-secret|not persisted|untrusted-client|abababab/);
+});
+
+test('Codex refuses an unbound or caller-selected OpenAI project before spend', async (t) => {
+  const { db, policy: initialPolicy } = harness(t);
+  const selectedPolicy = { ...initialPolicy, openaiProjectId: null };
+  register(db, selectedPolicy);
+  const calls = [];
+  const broker = createProviderEgressBroker({
+    config: {
+      provider: 'codex', spec: PROVIDERS.codex, policy: selectedPolicy,
+      credential: 'upstream-secret-that-never-returns',
+    },
+    db, httpsRequest: fakeHttps(calls),
+  });
+  t.after(() => broker.close());
+  await new Promise((resolve) => broker.dataServer.listen(0, '127.0.0.1', resolve));
+  const headers = {
+    'x-teleagent-launch-id': LAUNCH_ID,
+    'x-teleagent-launch-capability': CAPABILITY,
+  };
+  const body = {
+    model: 'gpt-5.6-sol', reasoning: { effort: 'high' },
+    max_output_tokens: 200, input: 'bounded local input',
+  };
+  const unbound = await request(broker.dataServer, {
+    route: '/v1/responses', headers, body,
+  });
+  assert.equal(unbound.status, 503);
+  assert.equal(JSON.parse(unbound.body).code, 'PROVIDER_PROJECT_UNBOUND');
+  const override = await request(broker.dataServer, {
+    route: '/v1/responses', headers: { ...headers, 'openai-project': 'proj_other0001' }, body,
+  });
+  assert.equal(override.status, 403);
+  assert.equal(JSON.parse(override.body).code, 'PROVIDER_PROJECT_HEADER_DENIED');
+  assert.equal(calls.length, 0);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM provider_egress_reservations').get().count, 0);
 });
 
 test('Claude messages and count_tokens are exact while revocation and recovery deny reuse', async (t) => {

@@ -39,7 +39,7 @@ test('attacker hosts, alternate ports, IPv6, whitespace, and trailing junk fail 
 
 test('endpoint validation precedes all secret-bearing network clients', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
-  const validation = source.indexOf('config.media_endpoints = loadMediaControlEndpoints(process.env)');
+  const validation = source.indexOf('config.media_endpoints = loadMediaControlEndpoints(process.env, mediaReceiverRuntime)');
   assert.ok(validation > 0);
   for (const boundary of ['var srf = new Srf()', 'new OutboundRuntimeFence', 'srf.connect({']) {
     assert.ok(validation < source.indexOf(boundary), `endpoint validation must precede ${boundary}`);

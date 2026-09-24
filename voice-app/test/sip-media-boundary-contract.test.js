@@ -9,6 +9,7 @@ const test = require('node:test');
 const {
   ASTERISK_RTP_ATTESTATION_SCHEMA,
   TOPOLOGY_SCHEMA,
+  TOPOLOGY_SCHEMA_V2,
   createAsteriskRtpAttestationSigningInput,
   isSipMediaPacketAllowed,
   validateAsteriskRtpAttestation,
@@ -373,6 +374,23 @@ test('signed Asterisk observation binds effective RTP to topology, boot, key, an
     ),
     /atomic replay consumer is required/u,
   );
+});
+
+test('v2 Asterisk evidence requires an explicit v2 host pin and cannot reuse v1 evidence', () => {
+  const v1 = topologyFixture();
+  const v2 = clone(v1);
+  v2.schema = TOPOLOGY_SCHEMA_V2;
+  for (const [id, port] of [['voice-media-http', 3000], ['voice-reverse-esl', 3002]]) {
+    v2.listeners.push({ id, service: 'voice', protocol: 'tcp', ports: range(port) });
+    v2.flows.push({ id: `freeswitch-to-${id}`, source: 'freeswitch', destination: 'voice', protocol: 'tcp',
+      sourcePorts: range(49152, 65535), destinationPorts: range(port) });
+  }
+  const { privateKey, publicKey } = generateKeyPairSync('ed25519');
+  const v2Digest = validateReceiverSafeSipMediaTopology(v2).digest;
+  const options = () => validationOptions(publicKey, { expectedTopologyDigest: v2Digest });
+  assert.equal(validateAsteriskRtpAttestation(makeAttestation(v2, privateKey), v2, options()).topologyDigest, v2Digest);
+  assert.throws(() => validateAsteriskRtpAttestation(makeAttestation(v1, privateKey), v2, options()), /topology/iu);
+  assert.throws(() => validateAsteriskRtpAttestation(makeAttestation(v2, privateKey), v2, validationOptions(publicKey)), /topology/iu);
 });
 
 test('attestation rejects accessor-backed observations before signature or replay use', () => {

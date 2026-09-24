@@ -18,6 +18,11 @@ artifacts.
   resumes its durable phone state.
 - The Realtime conductor orchestrates the six Claude/Codex profiles; it is not
   itself a shell or a privileged agent.
+- The first Codex-only pilot uses extensions `4`, `5`, `6`, `7`, `44`, `55`,
+  `66`, and `77`.
+  Keep Claude extensions `1`–`3` and `11`–`33` unrouted until their workspace,
+  credential, and full two-provider activation checks are accepted. In that
+  pilot, the Realtime conductor lists only Codex profiles.
 - Outbound calls durably notify the caller about results and alerts.
 - The native OpenAI SIP gateway is a separate, dormant canary until its public
   ingress, PBX authentication, provider configuration, and activation gates
@@ -51,7 +56,7 @@ Asterisk private PBX
              |          |
              |          +--> outbound WSS to OpenAI Realtime for 7/77
              |
-             +--> authenticated loopback controller on :3333
+             +--> authenticated root-owned controller Unix socket
                        |
                        +--> durable task executor
                        |       +--> fixed launcher -> teleagent-worker
@@ -90,6 +95,16 @@ Do not collapse these identities, mount a private broker socket into
 `voice-app`, put a reusable bearer in an agent environment, share the owner's
 tmux socket with the worker, or grant the worker broad sudo/group membership.
 
+Legacy-call star cancellation uses explicit `scope: "task"` and the current
+turn's durable idempotency key. The controller must select only that exact
+call/key pair; the key is not merely a reservation alongside call-wide
+cancellation. Whole-call cancellation remains a separate explicit/default
+compatibility operation. Deploy the voice and controller changes as one
+reviewed release: an older controller ignores the new scope field. Cancellation
+acceptance or an aborted local wait never proves remote quiescence. Star during
+thinking feedback suppresses submission locally; delayed cancel responses must
+not issue media commands against result audio or a later turn.
+
 ## Authorization invariants
 
 Three active HTTP bearer tokens are mandatory, clean, pairwise distinct, and
@@ -101,14 +116,23 @@ scoped:
 | `EXECUTOR_API_TOKEN` | durable `/executor/**` routes |
 | `VOICE_CONTROL_TOKEN` | `/voice-control/**`, operator, and unlock routes |
 
+Controller route matching is case sensitive and rejects trailing slashes.
+Keep those settings ahead of all middleware so handler matching and credential
+scope classification agree, including the operator-only executor unlock route.
+
 The privileged-action bearer and proxy implementation remain only as
 unit-tested future substrate. The production controller service removes their
 environment settings after `EnvironmentFile` processing and cannot access the
 broker socket.
 
 Committed example, placeholder, `changeme`, or `replace-with` values are
-invalid. The controller defaults to `127.0.0.1`; a non-loopback bind requires
-`AGENT_API_NON_LOOPBACK_ENABLED=true` plus reviewed network controls. Docker
+invalid. The production controller accepts only systemd's root-owned listener
+at `/run/teleagent-controller/controller.sock`. Voice mounts its root-owned
+directory read-only and retains the two scoped bearers; it cannot replace the
+listener. This dedicated HTTP socket is separate from private worker/root
+broker sockets. Voice clients never fall back to TCP, proxies, or redirects.
+Direct development starts retain loopback binding; production state enforcement
+requires `AGENT_API_TRANSPORT=systemd-unix`. Docker
 Compose explicitly blanks the general and legacy Claude bearer inside
 `voice-app`.
 
@@ -143,8 +167,9 @@ close the PBX promotion blocker. See
 
 Any future call-start integration must durably invalidate an old approval arm
 before it starts a new call, then replay the exact prompt before re-arming. The
-current dormant store does not implement controller-driven supersession, so
-this remains part of the PBX adapter promotion blocker. Early, clipped, cleared,
+current dormant attester supports signed, same-request supersession with an
+atomic durable replacement claim, but production controller/call-start wiring
+and real PBX recovery proofs remain part of the promotion blocker. Early, clipped, cleared,
 backpressured, lost, mismatched, or timed-out audio never authorizes execution.
 
 Dial `9` is the independent emergency path. A STOPPED response is truthful only
@@ -262,7 +287,7 @@ Useful local checks:
 
 ```bash
 curl -fsS http://127.0.0.1:3000/api/realtime-health
-curl -fsS http://127.0.0.1:3333/health
+sudo curl --unix-socket /run/teleagent-controller/controller.sock http://localhost/health
 npm run voice-history -- --limit 500
 npm run voice-control -- status
 ```

@@ -16,13 +16,16 @@ const {
   cleanupEvidenceDisposition,
   cleanupExactProject,
   cleanupRequiresPanicRecovery,
+  captureCreatedContainerOwnership,
   normalizeActivationState,
+  normalizeContainerOwnership,
   normalizeVoiceImageManifest,
   parseDockerCgroupInfo,
   parseProcessIdentityStatus,
   parseVoiceContainerBoundary,
   parseVoiceEnvironmentFile,
   parseExactProjectContainerIds,
+  parseCreatedContainerOwnership,
   requestJson,
   requireLifecycleLock,
   renderTemplateContents,
@@ -165,6 +168,8 @@ test('root launcher closes fixed voice state/listener values against host overri
     'FREESWITCH_GID=987',
     'DEVICE_CONFIG_DIR=/etc/teleagent-voice/config',
     'VOICE_STATE_DIR=/var/lib/teleagent-voice',
+    'AGENT_PROVIDERS=claude,codex',
+    'OPENAI_PROJECT=proj_fixture0001',
     '',
   ].join('\n');
   assert.deepEqual(parseVoiceEnvironmentFile(base, RUNTIME_IDENTITIES, voiceAppRuntimeContract), {
@@ -176,7 +181,17 @@ test('root launcher closes fixed voice state/listener values against host overri
     FREESWITCH_GID: '987',
     DEVICE_CONFIG_DIR: '/etc/teleagent-voice/config',
     VOICE_STATE_DIR: '/var/lib/teleagent-voice',
+    AGENT_PROVIDERS: 'claude,codex',
+    OPENAI_PROJECT: 'proj_fixture0001',
   });
+  assert.throws(() => parseVoiceEnvironmentFile(
+    base.replace('AGENT_PROVIDERS=claude,codex', 'AGENT_PROVIDERS=claude'),
+    RUNTIME_IDENTITIES, voiceAppRuntimeContract,
+  ), /provider selection is invalid/);
+  assert.throws(() => parseVoiceEnvironmentFile(
+    base.replace('OPENAI_PROJECT=proj_fixture0001', 'OPENAI_PROJECT='),
+    RUNTIME_IDENTITIES, voiceAppRuntimeContract,
+  ), /OpenAI project binding is invalid/);
   for (const [name, values] of Object.entries({
     VOICE_STATE_DB_PATH: ['', '/app/state/voice-state.sqlite', '/tmp/voice-state.sqlite'],
     VOICE_APP_EXECUTION_LOCK_FILE: ['', '/app/state/voice-execution.lock.json', '/tmp/voice.lock'],
@@ -244,7 +259,7 @@ test('stack shutdown refuses persisted-but-unquiesced panic and forced exits', (
 });
 
 test('stop and recovery retain only the exact host handoff lock descriptor', () => {
-  const lockMetadata = directoryMetadata({ dev: 701, ino: 902 });
+  const lockMetadata = directoryMetadata({ dev: 701, ino: 902, mode: 0o700 });
   const filesystem = {
     fstatSync(descriptor) {
       assert.equal(descriptor, 17);
@@ -272,7 +287,7 @@ test('stop and recovery retain only the exact host handoff lock descriptor', () 
 });
 
 test('voice lifecycle lock validation rejects missing, forged, and unsafe descriptors', () => {
-  const safe = directoryMetadata({ dev: 701, ino: 902 });
+  const safe = directoryMetadata({ dev: 701, ino: 902, mode: 0o700 });
   const environment = (value) => value === undefined ? {} : {
     TELEAGENT_HANDOFF_LIFECYCLE_LOCK_FD: value,
   };
@@ -303,6 +318,7 @@ test('voice lifecycle lock validation rejects missing, forged, and unsafe descri
     [safe, directoryMetadata({ dev: 701, ino: 902, uid: 1 })],
     [safe, directoryMetadata({ dev: 701, ino: 902, gid: 1 })],
     [safe, directoryMetadata({ dev: 701, ino: 902, mode: 0o775 })],
+    [safe, directoryMetadata({ dev: 701, ino: 902, mode: 0o755 })],
   ]) {
     assert.throws(() => requireLifecycleLock('recover', {
       environment: environment('17'),
@@ -408,7 +424,8 @@ test('voice activation authenticates exact authority-disabled controller health 
     request: async (options) => {
       assert.equal(options.method, 'GET');
       assert.equal(options.pathname, '/operator/health');
-      assert.equal(options.port, 3333);
+      assert.equal(options.socketPath, '/run/teleagent-controller/controller.sock');
+      assert.equal(options.port, undefined);
       assert.equal(options.token, 'controller-readiness-token-32-bytes');
       return { status: 200, body: exactHealth };
     },
@@ -441,7 +458,8 @@ test('voice activation authenticates executor readiness and erases its token', a
     request: async (options) => {
       assert.equal(options.method, 'GET');
       assert.equal(options.pathname, '/executor/health');
-      assert.equal(options.port, 3333);
+      assert.equal(options.socketPath, '/run/teleagent-controller/controller.sock');
+      assert.equal(options.port, undefined);
       assert.equal(options.token, 'executor-readiness-token-32-bytes--');
       return {
         status: 200,
@@ -666,6 +684,70 @@ test('activation state is canonical, image-bound, generation-monotonic, and miss
   assert.equal(cleanupRequiresPanicRecovery(null), true);
 });
 
+test('created container ownership binds all four full IDs before voice startup', () => {
+  const generation = 9;
+  const services = ['voice-runtime-preflight', 'drachtio', 'freeswitch', 'voice-app'];
+  const ids = ['a', 'b', 'c', 'd'].map((character) => character.repeat(64));
+  const imageIds = [
+    `sha256:${'1'.repeat(64)}`, `sha256:${'2'.repeat(64)}`,
+    `sha256:${'3'.repeat(64)}`, IMAGE_MANIFEST.configDigest,
+  ];
+  const inspection = services.map((service, index) =>
+    `${ids[index]}\t${service}\t${generation}\t${imageIds[index]}`
+  ).join('\n') + '\n';
+  const expected = parseCreatedContainerOwnership(
+    inspection, ids, generation, IMAGE_MANIFEST.configDigest
+  );
+  assert.deepEqual(expected.services.map((row) => row.service), [...services].sort());
+  assert.deepEqual(expected.services.map((row) => row.containerId).sort(), [...ids].sort());
+  assert.deepEqual(normalizeContainerOwnership(
+    expected, generation, IMAGE_MANIFEST.configDigest
+  ), expected);
+  const calls = [];
+  assert.deepEqual(captureCreatedContainerOwnership(generation, IMAGE_MANIFEST.configDigest, {
+    environment: {},
+    runCommand: (_filename, args) => {
+      calls.push(args);
+      return args[1] === 'ls'
+        ? { status: 0, stdout: `${ids.join('\n')}\n` }
+        : { status: 0, stdout: inspection };
+    },
+  }), expected);
+  assert.deepEqual(calls[1].slice(-4), ids);
+  for (const invalid of [
+    inspection.replace(`\t${generation}\t`, '\t8\t'),
+    inspection.replace(`${ids[0]}\t`, `${ids[1]}\t`),
+    inspection.replace(`\tvoice-app\t${generation}\t${IMAGE_MANIFEST.configDigest}`,
+      `\tvoice-app\t${generation}\tsha256:${'4'.repeat(64)}`),
+    inspection.replace('voice-runtime-preflight', 'voice-app'),
+    inspection.trimEnd(),
+    inspection + '\n',
+  ]) {
+    assert.throws(() => parseCreatedContainerOwnership(
+      invalid, ids, generation, IMAGE_MANIFEST.configDigest
+    ), /ownership|generation/);
+  }
+  const active = {
+    version: 3, project: 'teleagent-voice', activationGeneration: generation,
+    phase: 'active', previousPhase: 'starting', panic: 'not_requested', cleanup: 'required',
+    imageManifest: IMAGE_MANIFEST, panicOutcomeUnknownAt: null,
+    interruptedStartRecoveredAt: null, updatedAt: '2026-08-26T12:34:56.789Z',
+    containerOwnership: expected,
+  };
+  assert.deepEqual(normalizeActivationState(`${JSON.stringify(active)}\n`), active);
+  assert.equal(activationRequiresRecovery({ ...active, phase: 'inactive', cleanup: 'proved' }), false);
+  assert.throws(() => normalizeActivationState(`${JSON.stringify({
+    ...active, containerOwnership: null,
+  })}\n`), /lack retained ownership/);
+  const source = fs.readFileSync(
+    path.join(__dirname, '..', '..', 'deploy', 'voice-stack', 'teleagent-voice-stack-launch.js'), 'utf8'
+  );
+  assert.ok(source.indexOf('persistCreatedContainerOwnership(ownership);') >
+    source.indexOf("composeArgs('create'"));
+  assert.ok(source.indexOf('persistCreatedContainerOwnership(ownership);') <
+    source.indexOf("composeArgs('up'"));
+});
+
 test('activation state replacement is file-synced, renamed, then directory-synced', () => {
   const source = fs.readFileSync(
     path.join(__dirname, '..', '..', 'deploy', 'voice-stack', 'teleagent-voice-stack-launch.js'),
@@ -831,7 +913,8 @@ test('offline recovery initializes missing state and retains partial or unavaila
       successEvents.push('controller-panic');
       assert.equal(options.method, 'POST');
       assert.equal(options.pathname, '/voice-control/stop');
-      assert.equal(options.port, 3333);
+      assert.equal(options.socketPath, '/run/teleagent-controller/controller.sock');
+      assert.equal(options.port, undefined);
       assert.equal(successEvents.indexOf('containers-zero') <
         successEvents.indexOf('controller-panic'), true);
       return { status: 200, body: { success: true } };

@@ -126,6 +126,57 @@ admission reserve so existing cancellation and crash truth is not rewritten;
 the mount is the containment boundary, and no audit/panic truth is pruned
 automatically.
 
+## Global launch admission and uncertain cleanup
+
+The root-only `.global-provider-launch.lock` in
+`/run/teleagent-provider-capabilities` serializes both providers. It is a
+crash-atomically published **same-boot admission fence**, not a PID-lifetime
+mutex or proof of reboot recovery. A wrapper exit, dead PID, capability expiry,
+or empty unit enumeration cannot by itself authorize the next launch.
+
+The launcher marks capability uncertainty before the registration RPC and model
+uncertainty before submitting `systemd-run`. It releases admission only after a
+successful helper completion, explicit cgroup quiescence, durable/quiescent
+egress revocation, and successful credential-file cleanup. Nonzero or abnormal
+helper exits are conservatively treated as ambiguous submission, even if a
+later snapshot says the unit is absent. This can require global recovery after
+a genuinely failed task; it never silently assumes that task is still running
+or successfully stopped. Missing, malformed, duplicate, or unreadable
+`cgroup.events` population evidence is not proof of an empty cgroup. The kernel
+defines `populated 0` as no live process in the group or its descendants.
+[Kernel cgroup v2 documentation](https://docs.kernel.org/admin-guide/cgroup-v2.html#un-populated-notification).
+
+An interrupted registration still requires revocation: the egress broker writes
+a durable cancellation tombstone even for an unknown launch ID, so a late
+registration cannot reactivate it. Recovery retains the global panic, stops and
+masks both supervisors, and cancels the retained exact launch identity for both
+provider names before enumerating visible units. The version-1 lock deliberately
+does not name the provider. Termination always requires a successful exact-unit
+`stop --job-mode=replace` as well as empty cgroup and quiescent egress evidence;
+an inactive unit can still have a queued start job. Missing or failed stop proof
+keeps admission and readiness evidence fenced. Both exact cancellation masks
+remain for the boot;
+the global fence is removed only after both model/egress planes are quiescent,
+the recorded wrapper generation is dead, and the captured lock record is still
+identical. Single-provider recovery does not clear this global fence.
+
+Global panic alone may clean an exact absent readiness record after all three
+stop/cgroup/egress proofs succeed. This handles the other provider's never-owned
+record and repeated cleanup of already-removed records. The result marks history
+unavailable; it does not claim the provider never ran. Ordinary status and
+per-launch termination still reject missing history, and unsafe or malformed
+existing records are never treated as absent. The allowance has no CLI or
+environment switch.
+
+The delayed-submission protection uses the existing systemd cancellation-mask
+primitive. In upstream systemd v255, `StartTransientUnit` loads the named unit
+and requires it to be pristine; a masked unit is excluded by that check.
+[Transient creation](https://github.com/systemd/systemd/blob/v255/src/core/dbus-manager.c#L987),
+[pristine-unit check](https://github.com/systemd/systemd/blob/v255/src/core/unit.c#L5153).
+Hermetic tests exercise real temporary lock/mask files and the actual launch and
+recovery functions with mocked systemd/provider operations. This is not a live
+systemd cancellation canary or a Hermes activation approval.
+
 ## Session parity and deliberate limits
 
 Only sessions created on the broker-owned tmux socket are visible. Historical
@@ -220,9 +271,26 @@ delete an orphan automatically.
 
 Activation is a later, explicit root operation. It requires a root review,
 provider-specific credentials with project-side billing limits plus local
-conservative request/reserved-token allowances, the activation sentinel, and a
+conservative request, reserved-token, and reserved-cost allowances, the activation sentinel, and a
 clean run of
 `/usr/local/libexec/verify-worker-session-boundary --installed-check`. The
+root-owned single-link mode-`0444` file
+`/etc/teleagent/provider-runtime/enabled-providers` selects exactly `codex`
+or `claude,codex`, followed by one newline. The controller's root-owned
+`/etc/teleagent/controller/runtime.env` must contain exactly the matching
+`AGENT_PROVIDERS=` assignment. The root-owned
+`/etc/teleagent-voice/voice-app.env` must also contain the same
+`AGENT_PROVIDERS=` assignment and a valid `OPENAI_PROJECT=proj_...` assignment.
+The voice launcher checks both before starting Compose, and Compose passes them
+to the voice app. The worker activation verifier also checks that the voice
+`OPENAI_PROJECT` exactly matches Codex's root-owned egress policy project ID.
+In `codex` mode, the verifier
+requires Claude's key, policy, sockets, and units to be absent or inactive;
+the Codex credential preflight does not require a dummy Claude key. In the
+full two-provider mode, start the Claude supervisor socket explicitly before
+running the verifier, and use the full two-provider canary acknowledgment.
+Neither mode makes the release or phone ready without the remaining gates.
+The
 verifier repeats both storage attestations after verifying the installed
 libexec digest closure. Both the worker broker and provider supervisor units
 also run the root attestations as an `ExecStartPre`, so activation cannot bypass
@@ -244,7 +312,48 @@ supervisor's established client-loss path reserves provider termination and
 checks the launch cgroup. A canary failure never claims that recovery or cgroup
 quiescence has completed.
 
-The local allowance is not actual token usage, dollar spend, or remaining
-OpenAI/Anthropic project balance. Provider billing dashboards remain
-authoritative; Teleagent reports only bounded local request and conservative
-reserved-token counters.
+The local allowance is an estimate, not actual token usage, dollar spend, or
+remaining OpenAI/Anthropic project balance. Provider billing dashboards remain
+authoritative. The durable SQLite ledger reserves request bytes plus the
+maximum output tokens and an envelope for every admitted request, including
+failed upstream requests. It charges those reserved tokens at a fixed
+conservative ceiling of $30 per million for Claude and $45 per million for
+Codex, with a hard policy ceiling of $5 in reserved cost per provider per UTC
+day. The gate rejects multimodal content, hosted tools, and caller-selected
+premium service tiers. Codex requests explicitly use the OpenAI `default`
+service tier so a project-wide Fast setting cannot silently change their
+price. Those rates cover the admitted standard text traffic. A
+missing legacy cost row fails closed. The policy examples also cap each
+provider at 200,000 reserved tokens per UTC day. No local ledger guarantees a
+provider invoice ceiling: verify current model rates, project/workspace
+credential binding, and provider-side monthly hard limits before activating
+either credential. Recheck these fixed rates if the allowed models or provider
+prices change. The September 23, 2026 rate review used the providers'
+[Claude pricing](https://platform.claude.com/docs/en/about-claude/pricing)
+and [OpenAI API pricing](https://developers.openai.com/api/docs/pricing);
+the fixed allowances deliberately exceed standard text-token rates for the
+allowed models at that review.
+
+For the first account-bound, Codex-only pilot, use the owner-selected OpenAI
+`phone` project and its approved $10 monthly limit with standard processing.
+In the [OpenAI project settings](https://developers.openai.com/api/docs/guides/spend-limits),
+open Limits > Spend, confirm the monthly amount, turn on **Enforce a hard limit**,
+and verify the saved setting. A spend alert alone does not stop traffic, and
+hard-limit enforcement can lag enough for a small amount of extra usage. Bind its
+project-scoped API key through the protected host credential path. A Claude
+workspace and key are only needed when activating the later six-profile,
+two-provider release; give that workspace its own spend limit before use.
+The Codex policy example has `openaiProjectId: null`, which makes Codex
+requests fail before budget reservation. After account verification, set the
+exact `proj_...` ID in the root-owned policy; the broker then sends the fixed
+`OpenAI-Project` header and rejects caller-selected project or organization
+headers. This guards against accidentally billing an account default. The
+real provider canary must confirm that the dedicated project accepts the
+service-account key and header together. OpenAI documents that this header
+selects a project when a key otherwise resolves an account default in its
+[Terraform provider guide](https://developers.openai.com/api/docs/guides/terraform).
+The repository contains no account IDs or keys, so neither account binding
+nor vendor limit is asserted by this source policy. OpenAI's
+[spend-limit instructions](https://developers.openai.com/api/docs/guides/spend-limits)
+and Claude's [workspace limits](https://platform.claude.com/docs/en/manage-claude/workspaces)
+describe those account controls.

@@ -244,12 +244,19 @@ application identity check or launcher. Its empty-environment
 `--check-start-gate` cheaply revalidates current-boot approval, selected
 release/manifest identity, and installed runtime metadata without rescanning
 or content-hashing the release. Systemd snapshots the nonsecret, host-owned
-start gate into a private mode-`0400` service credential with `LoadCredential`;
-while holding a shared lock on the stable handoff inode,
+start gate into a private service credential with `LoadCredential`. The verifier
+accepts private mode `0400` or the exact root-owned `0440` projection with a
+single service-UID read ACL and no owning-group or other access.
+While holding a shared lock on the root-owned mode-`0700` handoff inode,
 the fixed host launcher then revalidates the snapshot plus the live approval,
 global boot gate, current selector, immutable release device/inode, component,
 service identity, and scrubbed environment before executing the exact
-release-root launcher and Node runtime. The descriptor is close-on-exec, and the
+release-root launcher and Node runtime. Non-root service units use the host's
+`--supervise-component` protocol: a minimal root parent forks trusted verifier
+code, the child drops to the fixed service identity, and both retain the lock
+until the child's close-on-exec barrier closes. The payload receives no lock
+descriptor. The parent forwards signals and preserves exit status. Root-only
+components keep their fixed direct interface. The descriptor is close-on-exec, and the
 serialized disabled host handoff holds the exclusive side of the same lock
 while validating and installing the already selected approved release. The
 root-only worker/provider/Realtime admission checks use closed profiles in the

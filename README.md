@@ -371,6 +371,8 @@ npm run lint
 
 ## Documentation
 
+- [Inert hosted kernel probe](docs/HOSTED-KERNEL-PROBE.md)
+
 - [CLI Reference](cli/README.md)
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
 - [Outbound API](voice-app/README-OUTBOUND.md)

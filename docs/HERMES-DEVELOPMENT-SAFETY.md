@@ -18,7 +18,7 @@ scripts/hermes-safe-test <command> [args...]
 The wrapper first takes one per-user lock shared by every Teleagent worktree,
 so separate agents cannot overlap otherwise bounded validations. It then
 creates one canonical `hermes-dev-test` scope with a one-core CPU quota,
-1536 MiB memory ceiling, 128 MiB swap ceiling, 192-task ceiling, idle I/O
+512 MiB memory ceiling, no swap allowance, 128-task ceiling, idle I/O
 priority, low CPU scheduling priority, serial Node test-file execution, and a
 hard timeout of five minutes. `HERMES_SAFE_TEST_TIMEOUT_SECONDS` may lower or
 raise the timeout only within 1–900 seconds.

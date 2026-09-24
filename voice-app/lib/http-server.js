@@ -14,6 +14,7 @@ const fsSync = require('fs');
 const fs = fsSync.promises;
 const debug = require('debug')('voice-app:http-server');
 const crypto = require('crypto');
+const { playbackUrl } = require('./media-playback-urls');
 
 // Cleanup interval: every 2 minutes
 const CLEANUP_INTERVAL = 120000;
@@ -72,7 +73,7 @@ async function openConfinedMedia(root, rawValue, options) {
   try {
     handle = await fs.open(
       candidate,
-      fsSync.constants.O_RDONLY | fsSync.constants.O_NOFOLLOW,
+      fsSync.constants.O_RDONLY | fsSync.constants.O_NOFOLLOW | fsSync.constants.O_NONBLOCK,
     );
     const metadata = await handle.stat();
     if (!metadata.isFile() || metadata.size < 0 || metadata.size > MAX_MEDIA_FILE_BYTES) {
@@ -210,7 +211,7 @@ function createHttpServer(audioDir, port = 3000, host = '127.0.0.1', {
 
     await fs.writeFile(filepath, audioBuffer, { flag: 'wx', mode: 0o600 });
 
-    const url = `http://localhost:${port}/audio-files/${filename}`;
+    const url = playbackUrl('audio-files', filename);
     debug(`Audio saved, URL: ${url}`);
 
     return url;
@@ -223,7 +224,7 @@ function createHttpServer(audioDir, port = 3000, host = '127.0.0.1', {
    */
   function getAudioUrl(filename) {
     if (!normalizeMediaPath(filename)) throw new Error('Invalid generated audio filename');
-    return `http://localhost:${port}/audio-files/${filename}`;
+    return playbackUrl('audio-files', filename);
   }
 
   /**
@@ -304,6 +305,9 @@ async function cleanupOldFiles(directory, maxAge) {
 
 module.exports = {
   createHttpServer,
+  canonicalMediaRoot,
+  normalizeMediaPath,
+  openConfinedMedia,
   cleanupOldFiles,
   isLoopbackAddress,
   requireLoopbackMedia

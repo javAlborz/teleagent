@@ -137,13 +137,13 @@ function acquireBrokerSingletonLock(lockPath, { expectedUid = 0 } = {}) {
       (stat.mode & 0o077) !== 0) {
     throw new Error('The privileged broker singleton lock database is unsafe.');
   }
-  const database = new Database(resolved, { timeout: 0 });
+  const database = new Database(resolved, { timeout: 250 });
   try {
-    database.pragma('busy_timeout = 0');
+    database.pragma('busy_timeout = 250');
     database.pragma('journal_mode = DELETE');
     database.pragma('synchronous = FULL');
     database.exec(`
-      BEGIN EXCLUSIVE;
+      BEGIN IMMEDIATE;
       CREATE TABLE IF NOT EXISTS broker_lifetime_lock (
         singleton INTEGER PRIMARY KEY CHECK (singleton = 1)
       );

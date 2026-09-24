@@ -25,6 +25,7 @@ FILE_LIST_NAME = "teleagent-release.files.tsv"
 FORMAT_VERSION = 2
 BUILD_INPUT_VERSION = 1
 MAX_MANIFEST_BYTES = 128 * 1024
+MAX_SBOM_BYTES = 8 * 1024 * 1024
 MAX_FILE_LIST_BYTES = 64 * 1024 * 1024
 MAX_ENTRIES = 1_000_000
 
@@ -55,11 +56,13 @@ BOUND_SOURCE_PATHS = (
     "claude-api-server/agent-cli.js",
     "claude-api-server/agent-profiles.js",
     "claude-api-server/agent-worker-launcher.js",
+    "claude-api-server/controller-listener.js",
     "claude-api-server/controller-state-configuration.js",
     "claude-api-server/executor-task-dispatcher.js",
     "claude-api-server/executor-task-store.js",
     "claude-api-server/operator-inspector.js",
     "claude-api-server/package.json",
+    "claude-api-server/pbx-panic-listener.js",
     "claude-api-server/privileged-action-proxy.js",
     "claude-api-server/provider-egress-broker.js",
     "claude-api-server/provider-egress-shim.js",
@@ -79,8 +82,10 @@ BOUND_SOURCE_PATHS = (
     "claude-api-server/worker-state-storage-boundary.js",
     "deploy/controller/control-plane-install.manifest",
     "deploy/controller/teleagent-agent-controller.service",
+    "deploy/controller/teleagent-agent-controller.socket",
     "deploy/controller/teleagent-agent-controller.tmpfiles",
     "deploy/controller/teleagent-control-plane-install",
+    "deploy/controller/teleagent-pbx-panic.socket",
     "deploy/controller/verify-teleagent-control-plane",
     "deploy/host/teleagent-disabled-host-install",
     "deploy/privileged-action/teleagent-privileged-action.service",
@@ -88,6 +93,8 @@ BOUND_SOURCE_PATHS = (
     "deploy/privileged-action/teleagent-privileged-action.tmpfiles",
     "deploy/voice-stack/drachtio.conf.xml.template",
     "deploy/voice-stack/freeswitch-event-socket.conf.xml.template",
+    "deploy/voice-stack/media-application-boundary.js",
+    "deploy/voice-stack/media-receiver-endpoints.js",
     "deploy/voice-stack/teleagent-sip-local-peer-fence",
     "deploy/voice-stack/teleagent-sip-local-peer-fence-install",
     "deploy/voice-stack/teleagent-sip-local-peer-fence.bundle",
@@ -125,6 +132,8 @@ BOUND_SOURCE_PATHS = (
     "deploy/worker-session/teleagent-provider-supervisor@.socket",
     "deploy/worker-session/teleagent-provider-supervisors.sudoers",
     "deploy/worker-session/teleagent-provider.slice",
+    "deploy/worker-session/teleagent-resource-admission",
+    "deploy/worker-session/teleagent-resource-topology-watch",
     "deploy/worker-session/teleagent-session-pane-entry",
     "deploy/worker-session/teleagent-worker-session-create",
     "deploy/worker-session/teleagent-worker-session-install",
@@ -140,17 +149,21 @@ BOUND_SOURCE_PATHS = (
     "freeswitch/switch.conf.xml",
     "lib/agent-execution-environment.js",
     "lib/durable-state-storage-boundary.js",
+    "lib/media-receiver-runtime.js",
     "lib/phone-deploy-intent.js",
     "lib/privileged-action-plan.js",
     "lib/provider-model-contract.js",
     "lib/provider-secret.js",
     "lib/safe-agent-logging.js",
+    "lib/sip-media-boundary-contract.js",
     "lib/target-session-message.js",
     "lib/voice-app-runtime-env.js",
     "lib/voice-approval-capability.js",
     "lib/voice-authorization-plan.js",
+    "lib/voice-egress-runtime.js",
     "lib/voice-execution-control.js",
     "lib/voice-operation-risk.js",
+    "lib/worker-inspection-contract.js",
     "package.json",
     "privileged-action-broker/broker.js",
     "privileged-action-broker/control.js",
@@ -183,6 +196,10 @@ BOUND_SOURCE_PATHS = (
     "realtime-sip-gateway/src/sip-event.js",
     "realtime-sip-gateway/src/state-storage-boundary.js",
     "realtime-sip-gateway/src/webhook-handler.js",
+    "voice-app/lib/isolated-media-http.js",
+    "voice-app/lib/media-playback-urls.js",
+    "voice-app/lib/voice-egress-transport.js",
+    "voice-app/package.json",
 )
 
 API_LOCK_PATH = "claude-api-server/package-lock.json"
@@ -556,9 +573,10 @@ def _read_release_json(
     *,
     label: str,
     canonical: bool,
+    maximum: int = MAX_MANIFEST_BYTES,
 ) -> tuple[dict[str, Any], Entry]:
     entry = _required_file(entries, relative, label)
-    document = read_json_file(root / entry.path, label=label, canonical=canonical)
+    document = read_json_file(root / entry.path, label=label, canonical=canonical, maximum=maximum)
     return document, entry
 
 
@@ -777,7 +795,9 @@ def _validate_voice_manifest(
 
 
 def _validate_sbom(root: Path, entries: Mapping[str, Entry], relative: str, label: str) -> Entry:
-    document, entry = _read_release_json(root, entries, relative, label=label, canonical=False)
+    document, entry = _read_release_json(
+        root, entries, relative, label=label, canonical=False, maximum=MAX_SBOM_BYTES
+    )
     if document.get("bomFormat") != "CycloneDX" or document.get("specVersion") != "1.6":
         raise _error(f"{label} is not a CycloneDX 1.6 document")
     return entry

@@ -6,6 +6,60 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const axios = require('axios');
 const bridge = require('../lib/claude-bridge');
+const { READY_CAPABILITIES, operatorHealth, executorHealth } = require('./controller-capabilities-fixture');
+const { UNAVAILABLE } = require('../lib/controller-capabilities');
+
+test('runtime availability proves each scope using bounded nonredirecting GETs only', async (t) => {
+  const calls = [];
+  t.mock.method(axios, 'post', () => assert.fail('availability must never POST'));
+  t.mock.method(axios, 'get', async (url, config) => {
+    calls.push({ url, config });
+    return { status: 200, data: url.endsWith('/operator/health') ? operatorHealth() : executorHealth() };
+  });
+  assert.deepEqual(await bridge.getRuntimeCapabilities(), READY_CAPABILITIES);
+  assert.deepEqual(calls.map((call) => call.url), [
+    'http://127.0.0.1:3333/operator/health', 'http://127.0.0.1:3333/executor/health',
+  ]);
+  assert.notEqual(calls[0].config.headers.Authorization, calls[1].config.headers.Authorization);
+  assert.equal(calls[0].config.headers.Authorization, `Bearer ${TEST_RUNTIME_SECRETS.voiceControlToken}`);
+  assert.equal(calls[1].config.headers.Authorization, `Bearer ${TEST_RUNTIME_SECRETS.executorApiToken}`);
+  for (const { config } of calls) {
+    assert.equal(config.maxRedirects, 0);
+    assert.equal(config.proxy, false);
+    assert.equal(config.timeout, 1500);
+    assert.ok(config.signal instanceof AbortSignal);
+    assert.equal(config.maxContentLength, 32768);
+    assert.equal(config.validateStatus(302), false);
+    assert.equal(config.validateStatus(401), false);
+  }
+});
+
+test('missing legacy auth or malformed health cannot enable worker tools or leak diagnostics', async (t) => {
+  let count = 0;
+  t.mock.method(axios, 'get', async () => {
+    count += 1;
+    return { status: 503, data: { success: false, code: 'VOICE_CONTROL_AUTH_NOT_CONFIGURED', error: 'private diagnostic' } };
+  });
+  assert.deepEqual(await bridge.getRuntimeCapabilities(), UNAVAILABLE);
+  assert.equal(count, 1, 'do not probe executor after an invalid operator scope');
+  t.mock.method(axios, 'get', async () => { throw new Error('private bearer detail'); });
+  assert.deepEqual(await bridge.getRuntimeCapabilities(), UNAVAILABLE);
+});
+
+test('executor auth failure preserves inspection but cannot submit a managed job', async (t) => {
+  t.mock.method(axios, 'get', async (url) => {
+    if (url.endsWith('/executor/health')) throw new Error('401');
+    return { status: 200, data: operatorHealth() };
+  });
+  const result = await bridge.getRuntimeCapabilities();
+  assert.equal(result.workerInspectionAvailable, true);
+  assert.equal(result.managedExecutionAvailable, false);
+});
+
+test('HTTP not-ready status cannot be overridden by a ready-looking body', async (t) => {
+  t.mock.method(axios, 'get', async () => ({ status: 503, data: operatorHealth() }));
+  assert.deepEqual(await bridge.getRuntimeCapabilities(), UNAVAILABLE);
+});
 
 function executorTask(overrides = {}) {
   return {
@@ -245,6 +299,51 @@ test('lookup returns null on 404 and wait maps existing failed and canceled task
   }));
   assert.equal(canceled.agentCode, 'AGENT_CANCELED');
   assert.equal(canceled.reason, 'caller_pressed_star');
+});
+
+test('aborting a local executor wait does not report that the durable task was canceled', async (t) => {
+  t.mock.method(axios, 'post', () => assert.fail('a wait abort must not submit or cancel work'));
+  t.mock.method(axios, 'get', () => assert.fail('an already aborted wait must not start another poll'));
+  const controller = new AbortController();
+  controller.abort();
+  const result = await bridge.waitForExecutorTask(executorTask({ state: 'running' }), {
+    signal: controller.signal,
+  });
+  assert.equal(result.success, false);
+  assert.equal(result.code, 'EXECUTOR_WAIT_ABORTED');
+  assert.equal(result.reconciliation_required, true);
+  assert.equal(result.executorTaskId, 'xtask_123');
+  assert.equal(result.idempotencyKey, 'job_voice123');
+  assert.doesNotMatch(result.userMessage, /I stopped|was canceled/i);
+});
+
+test('a known terminal executor result wins over a simultaneous local wait abort', async (t) => {
+  t.mock.method(axios, 'get', () => assert.fail('terminal results do not need another poll'));
+  const controller = new AbortController();
+  controller.abort();
+  const result = await bridge.waitForExecutorTask(executorTask({
+    state: 'completed', terminal: true,
+    result: { payload: { success: true, response: 'Verified result.', provider: 'codex' } },
+  }), { signal: controller.signal });
+  assert.equal(result.success, true);
+  assert.equal(result.response, 'Verified result.');
+});
+
+test('abort during an in-flight executor poll preserves pending reconciliation and never POSTs', async (t) => {
+  const controller = new AbortController();
+  let polls = 0;
+  t.mock.method(axios, 'post', () => assert.fail('wait abort is not remote cancellation'));
+  t.mock.method(axios, 'get', async () => {
+    polls += 1;
+    controller.abort();
+    return { data: { task: executorTask({ state: 'running' }) } };
+  });
+  const result = await bridge.waitForExecutorTask(executorTask(), {
+    signal: controller.signal, timeoutMs: 1000,
+  });
+  assert.equal(polls, 1);
+  assert.equal(result.code, 'EXECUTOR_WAIT_ABORTED');
+  assert.equal(result.reconciliation_required, true);
 });
 
 test('generic target-session executor task payload maps without managed-ask coercion', () => {
@@ -501,9 +600,25 @@ test('cancelSession reserves the exact durable idempotency key', async (t) => {
     callId: 'job_CancelReservation1',
     sessionKey: 'thread:codex-sol:one',
     idempotencyKey: 'job_CancelReservation1',
+    scope: 'call',
     resetSession: false,
     reason: 'caller_pressed_star',
   });
+});
+
+test('cancelSession carries explicit task scope without widening to the call', async (t) => {
+  let request;
+  t.mock.method(axios, 'post', async (url, body) => {
+    request = { url, body };
+    return { data: { success: true } };
+  });
+  await bridge.cancelSession('fixture-call', {
+    sessionKey: 'fixture-thread', idempotencyKey: 'fixture-turn', scope: 'task',
+  });
+  assert.equal(request.body.scope, 'task');
+  assert.equal(request.body.callId, 'fixture-call');
+  assert.equal(request.body.idempotencyKey, 'fixture-turn');
+  assert.equal(request.body.resetSession, false);
 });
 
 test('voice-control and operator clients never reuse the general agent bearer', async (t) => {

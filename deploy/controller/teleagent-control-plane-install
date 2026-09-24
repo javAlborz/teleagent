@@ -216,6 +216,8 @@ load_manifest() {
     case "$relative:$target" in
       *..*) fail 'the control-plane manifest contains path traversal' ;;
       deploy/controller/*:/etc/systemd/system/teleagent-agent-controller.service|\
+      deploy/controller/*:/etc/systemd/system/teleagent-agent-controller.socket|\
+      deploy/controller/*:/etc/systemd/system/teleagent-pbx-panic.socket|\
       deploy/controller/*:/etc/tmpfiles.d/teleagent-agent-controller.conf|\
       deploy/controller/*:/usr/local/libexec/teleagent-control-plane-install|\
       deploy/controller/*:/usr/local/libexec/verify-teleagent-control-plane|\
@@ -239,6 +241,8 @@ load_manifest() {
 
   local expected
   expected='0644 deploy/controller/teleagent-agent-controller.service /etc/systemd/system/teleagent-agent-controller.service
+0644 deploy/controller/teleagent-agent-controller.socket /etc/systemd/system/teleagent-agent-controller.socket
+0644 deploy/controller/teleagent-pbx-panic.socket /etc/systemd/system/teleagent-pbx-panic.socket
 0644 deploy/controller/teleagent-agent-controller.tmpfiles /etc/tmpfiles.d/teleagent-agent-controller.conf
 0755 deploy/controller/teleagent-control-plane-install /usr/local/libexec/teleagent-control-plane-install
 0755 deploy/controller/verify-teleagent-control-plane /usr/local/libexec/verify-teleagent-control-plane
@@ -277,7 +281,11 @@ assert_release_preflight() {
     '/usr/local/libexec/verify-teleagent-release-closure' "$service" || true)
   [ "$exact_count" -eq 1 ] && [ "$reference_count" -eq 2 ] ||
     fail 'a control-plane unit lost or weakened its exact release preflight'
-  expected_start="ExecStart=/usr/bin/python3 -I /usr/local/libexec/verify-teleagent-release-closure --start-component $component \${CREDENTIALS_DIRECTORY}/teleagent-release-gate"
+  if [ "$component" = agent-controller ]; then
+    expected_start="ExecStart=!/usr/bin/python3 -I /usr/local/libexec/verify-teleagent-release-closure --supervise-component $component \${CREDENTIALS_DIRECTORY}/teleagent-release-gate"
+  else
+    expected_start="ExecStart=/usr/bin/python3 -I /usr/local/libexec/verify-teleagent-release-closure --start-component $component \${CREDENTIALS_DIRECTORY}/teleagent-release-gate"
+  fi
   [ "$(/usr/bin/grep -Fxc "$expected_start" "$service" || true)" -eq 1 ] ||
     fail 'a control-plane unit lost its immutable release launcher'
   actual_execution=$(/usr/bin/grep -E "$execution_pattern" "$service" || true)
@@ -360,7 +368,27 @@ source_check() {
     "$controller" || fail 'the controller can reach the retired privileged-action socket'
   assert_release_preflight "$controller" agent-controller
   assert_release_preflight "$privileged" privileged-action
-  ! /usr/bin/grep -Eq '^\[Install\][[:space:]]*$' "$controller" "$privileged" ||
+  local controller_socket="$source_root/teleagent-agent-controller.socket"
+  for required in \
+    'ListenStream=/run/teleagent-controller/controller.sock' \
+    'SocketUser=root' 'SocketGroup=teleagent-voice' 'SocketMode=0660' \
+    'FileDescriptorName=agent-controller' 'Accept=no' \
+    'ConditionPathExists=/etc/teleagent/controller/ENABLE' \
+    'ConditionPathExists=/etc/teleagent/worker-session/ENABLE'; do
+    [ "$(/usr/bin/grep -Fxc "$required" "$controller_socket" || true)" -eq 1 ] ||
+      fail 'the protected controller socket policy is incomplete'
+  done
+  local panic_socket="$source_root/teleagent-pbx-panic.socket"
+  for required in \
+    'ListenStream=/run/teleagent-pbx-panic/panic.sock' \
+    'SocketUser=root' 'SocketGroup=teleagent-asterisk' 'SocketMode=0660' \
+    'FileDescriptorName=pbx-panic' 'Accept=no' \
+    'ConditionPathExists=/etc/teleagent/controller/ENABLE' \
+    'ConditionPathExists=/etc/teleagent/worker-session/ENABLE'; do
+    [ "$(/usr/bin/grep -Fxc "$required" "$panic_socket" || true)" -eq 1 ] ||
+      fail 'the protected PBX panic socket policy is incomplete'
+  done
+  ! /usr/bin/grep -Eq '^\[Install\][[:space:]]*$' "$controller" "$controller_socket" "$panic_socket" "$privileged" ||
     fail 'a dormant control-plane unit became enableable'
   ! /usr/bin/grep -Fq '/ENABLE' \
     "$source_root/teleagent-agent-controller.tmpfiles" \
@@ -489,6 +517,8 @@ assert_dormant() {
   assert_unit_dormant teleagent-provider-supervisor@claude.socket prerequisite
   assert_unit_dormant teleagent-provider-supervisor@codex.socket prerequisite
   assert_unit_dormant teleagent-agent-controller.service "$phase"
+  assert_unit_dormant teleagent-agent-controller.socket "$phase"
+  assert_unit_dormant teleagent-pbx-panic.socket "$phase"
   assert_unit_dormant teleagent-privileged-action.service "$phase"
   assert_sentinels_absent
 }

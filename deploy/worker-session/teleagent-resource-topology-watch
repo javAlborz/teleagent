@@ -1,0 +1,234 @@
+#!/usr/bin/python3 -I
+"""Fixed, read-only raw-inotify witness for one resource-admission interval."""
+
+import ctypes
+import errno
+import json
+import os
+import re
+import select
+import signal
+import stat
+import sys
+import time
+
+ROOT = '/sys/fs/cgroup/teleagent.slice'
+SCHEMA = 'teleagent.resource-topology-watch.v1'
+MAX_GROUPS = 256
+MAX_DEPTH = 16
+MAX_ENTRIES = 512
+MAX_RELATIVE_BYTES = 1024
+MAX_READY_BYTES = 128 * 1024
+LIFETIME_SECONDS = 3.0
+# CREATE, DELETE, MOVED_FROM/TO, DELETE_SELF, MOVE_SELF, UNMOUNT, ATTRIB,
+# ONLYDIR. Overflow and watch removal are delivered without a requested mask.
+WATCH_MASK = 0x100 | 0x200 | 0x40 | 0x80 | 0x400 | 0x800 | 0x2000 | 0x4 | 0x01000000
+DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+
+
+class Refused(Exception):
+    pass
+
+
+LIBC = ctypes.CDLL('libc.so.6', use_errno=True)
+LIBC.inotify_init1.argtypes = [ctypes.c_int]
+LIBC.inotify_init1.restype = ctypes.c_int
+LIBC.inotify_add_watch.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_uint32]
+LIBC.inotify_add_watch.restype = ctypes.c_int
+
+
+def directory_identity(fd):
+    metadata = os.fstat(fd)
+    if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.geteuid() or \
+            metadata.st_gid != os.getegid() or metadata.st_mode & 0o7022:
+        raise Refused()
+    return metadata.st_dev, metadata.st_ino
+
+
+class TopologyWatch:
+    """Internal fixture seam; production main supplies only the fixed ROOT FD."""
+
+    def __init__(self, root_fd, started):
+        self.started = started
+        self.fd = LIBC.inotify_init1(os.O_NONBLOCK | os.O_CLOEXEC)
+        self.directories = []
+        self.groups = []
+        self.watch_ids = set()
+        self.identities = set()
+        if self.fd < 0:
+            raise Refused()
+        try:
+            self._visit(os.dup(root_fd), '', 0, directory_identity(root_fd)[0])
+            self.drain()
+        except BaseException:
+            self.close()
+            raise
+
+    def deadline(self):
+        if time.monotonic() - self.started >= LIFETIME_SECONDS:
+            raise Refused()
+
+    def _visit(self, fd, relative, depth, root_device):
+        self.directories.append(fd)
+        self.deadline()
+        if len(self.directories) > MAX_GROUPS or depth > MAX_DEPTH or \
+                len(relative.encode('ascii')) > MAX_RELATIVE_BYTES:
+            raise Refused()
+        device, inode = directory_identity(fd)
+        if device != root_device or (device, inode) in self.identities:
+            raise Refused()
+        self.identities.add((device, inode))
+        descriptor_path = f'/proc/self/fd/{fd}'
+        # Follow this process's retained descriptor, not a caller pathname.
+        # IN_DONT_FOLLOW would incorrectly watch/refuse the procfs symlink.
+        watch_id = LIBC.inotify_add_watch(self.fd, descriptor_path.encode('ascii'), WATCH_MASK)
+        target = os.stat(descriptor_path)
+        if watch_id < 0 or watch_id in self.watch_ids or \
+                (target.st_dev, target.st_ino) != (device, inode):
+            raise Refused()
+        self.watch_ids.add(watch_id)
+        self.groups.append([relative, str(device), str(inode)])
+        # Watch the parent before enumerating. Any child created during setup
+        # poisons the observation; there is no recursive rebaseline/recovery.
+        children = []
+        with os.scandir(fd) as entries:
+            for index, entry in enumerate(entries):
+                if index >= MAX_ENTRIES or entry.is_symlink():
+                    raise Refused()
+                if not entry.is_dir(follow_symlinks=False):
+                    continue
+                if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.:@-]{0,254}', entry.name):
+                    raise Refused()
+                if len(self.groups) + len(children) >= MAX_GROUPS:
+                    raise Refused()
+                children.append(entry.name)
+        for name in sorted(children):
+            self.deadline()
+            child = os.open(name, DIRECTORY_FLAGS, dir_fd=fd)
+            self._visit(child, f'{relative}/{name}' if relative else name, depth + 1, root_device)
+        if directory_identity(fd) != (device, inode):
+            raise Refused()
+
+    def drain(self):
+        self.deadline()
+        try:
+            os.read(self.fd, 65536)
+        except OSError as error:
+            if error.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
+                return
+            raise Refused() from None
+        # Every byte is refusal evidence. This includes topology events,
+        # overflow, ignored/unmounted watches, malformed or short records;
+        # no asynchronous callback can consume or discard them beforehand.
+        raise Refused()
+
+    def ready(self, boot):
+        message = json.dumps({'schema': SCHEMA, 'boot': boot, 'groups': sorted(self.groups)},
+                             sort_keys=True, separators=(',', ':')).encode('ascii') + b'\n'
+        if len(message) > MAX_READY_BYTES:
+            raise Refused()
+        self.drain()
+        return message
+
+    def close(self):
+        for descriptor in self.directories:
+            os.close(descriptor)
+        self.directories.clear()
+        if self.fd >= 0:
+            os.close(self.fd)
+            self.fd = -1
+
+
+def serve(watcher, boot):
+    # Nonblocking protocol prevents a stopped parent from retaining observers.
+    os.set_blocking(0, False)
+    os.set_blocking(1, False)
+    message = watcher.ready(boot)
+    offset = 0
+    while offset < len(message):
+        watcher.deadline()
+        readable, writable, _ = select.select([watcher.fd, 0], [1], [], 0.05)
+        if watcher.fd in readable:
+            watcher.drain()
+        if 0 in readable:
+            # No CHECK may precede delivery of the complete readiness frame.
+            raise Refused()
+        if 1 in writable:
+            try:
+                offset += os.write(1, message[offset:])
+            except BlockingIOError:
+                pass
+    command = b''
+    while True:
+        watcher.deadline()
+        readable, _, _ = select.select([watcher.fd, 0], [], [], 0.05)
+        if watcher.fd in readable:
+            watcher.drain()
+        if 0 not in readable:
+            continue
+        data = os.read(0, 128)
+        if not data:
+            raise Refused()
+        command += data
+        if len(command) > 71:
+            raise Refused()
+        if b'\n' not in command:
+            continue
+        if not re.fullmatch(rb'CHECK [0-9a-f]{64}\n', command):
+            raise Refused()
+        # This synchronous raw drain defines the end of the observation.
+        # It is not a claim of an atomic observation-to-model-start boundary.
+        watcher.drain()
+        response = b'CHECKED ' + command[6:]
+        if os.write(1, response) != len(response):
+            raise Refused()
+        return
+
+
+def prepare_process():
+    parent = os.getppid()
+    LIBC.prctl.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong,
+                          ctypes.c_ulong, ctypes.c_ulong]
+    LIBC.prctl.restype = ctypes.c_int
+    if parent <= 1 or LIBC.prctl(1, signal.SIGKILL, 0, 0, 0) != 0 or os.getppid() != parent:
+        raise Refused()
+    # No unrelated service FD may be held open by the witness. Parent death
+    # kills this process and closes its FDs. Unsupported close_range refuses.
+    LIBC.close_range.argtypes = [ctypes.c_uint, ctypes.c_uint, ctypes.c_int]
+    LIBC.close_range.restype = ctypes.c_int
+    if LIBC.close_range(3, 0xffffffff, 0) != 0:
+        raise Refused()
+
+
+def main():
+    started = time.monotonic()
+    if not sys.flags.isolated or len(sys.argv) != 1 or os.getuid() != 0 or os.geteuid() != 0:
+        raise Refused()
+    prepare_process()
+    for directory in ['/', '/sys', '/sys/fs', '/sys/fs/cgroup']:
+        fd = os.open(directory, DIRECTORY_FLAGS)
+        try:
+            directory_identity(fd)
+        finally:
+            os.close(fd)
+    with open('/proc/sys/kernel/random/boot_id', 'rb', buffering=0) as stream:
+        boot = stream.read(65)
+    if not re.fullmatch(rb'[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}\n', boot):
+        raise Refused()
+    root_fd = os.open(ROOT, DIRECTORY_FLAGS)
+    watcher = None
+    try:
+        watcher = TopologyWatch(root_fd, started)
+        serve(watcher, boot.decode('ascii'))
+    finally:
+        if watcher is not None:
+            watcher.close()
+        os.close(root_fd)
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except BaseException:
+        # No path, kernel diagnostics or application state reaches the caller.
+        sys.exit(75)

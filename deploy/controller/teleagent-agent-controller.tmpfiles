@@ -2,3 +2,5 @@
 # separate reviewed 2-8 GiB durable filesystem mounted on this exact path.
 d /var/lib/teleagent-control 0700 teleagent-control teleagent-control -
 d /etc/teleagent/controller 0700 root root -
+d /run/teleagent-controller 0755 root root -
+d /run/teleagent-pbx-panic 0755 root root -

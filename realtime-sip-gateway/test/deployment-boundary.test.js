@@ -155,8 +155,8 @@ test('source policy is static, sentinel-gated, bounded, and creates no activatio
     `${RELEASE_PREFLIGHT}\n`
   ));
   assert.ok(service.includes(
-    'ExecStart=/usr/bin/python3 -I /usr/local/libexec/verify-teleagent-release-closure ' +
-    '--start-component realtime-sip-gateway ' +
+    'ExecStart=!/usr/bin/python3 -I /usr/local/libexec/verify-teleagent-release-closure ' +
+    '--supervise-component realtime-sip-gateway ' +
     '${CREDENTIALS_DIRECTORY}/teleagent-release-gate\n'
   ));
   assert.ok(service.includes(

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync, symlinkSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -94,4 +94,41 @@ test('durable-storage startup refusal exits non-restartably before listener setu
   assert.equal(runtimeProcess.exitCode, 77);
   assert.deepEqual(events, []);
   assert.deepEqual(errors, ['Realtime SIP canary gateway failed']);
+});
+
+test('repeated termination signals allow one bounded graceful close to finish', async (t) => {
+  const entrypoint = new URL('../src/index.js', import.meta.url).href;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', `
+    import { main } from ${JSON.stringify(entrypoint)};
+    const keepAlive = setInterval(() => {}, 1000);
+    let closes = 0;
+    await main({
+      loadConfigImpl: () => ({}),
+      runtimeLogger: { info() {}, error() { process.exitCode = 1; } },
+      createAppImpl: async () => ({
+        listen: async () => process.send('ready'),
+        close: async () => {
+          closes += 1;
+          process.send('closing');
+          await new Promise(resolve => setTimeout(resolve, 100));
+          process.send({ closed: closes });
+          clearInterval(keepAlive);
+          process.disconnect();
+        },
+      }),
+    });
+  `], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'], env: { PATH: process.env.PATH ?? '' } });
+  t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); });
+  let closed;
+  const result = await new Promise((resolve, reject) => {
+    const deadline = setTimeout(() => reject(new Error('gateway shutdown probe timed out')), 3000);
+    child.once('error', reject);
+    child.on('message', (message) => {
+      if (message === 'ready' || message === 'closing') child.kill('SIGTERM');
+      else closed = message;
+    });
+    child.once('exit', (code, signal) => { clearTimeout(deadline); resolve({ code, signal }); });
+  });
+  assert.deepEqual(result, { code: 0, signal: null });
+  assert.deepEqual(closed, { closed: 1 });
 });

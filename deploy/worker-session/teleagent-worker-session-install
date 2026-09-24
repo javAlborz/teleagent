@@ -242,13 +242,14 @@ load_assets() {
       *) fail 'a provider libexec source escaped the release root' ;;
     esac
     case "$target:$mode" in
-      teleagent-provider-*:0755|teleagent-provider-*:0444) ;;
+      teleagent-provider-*:0755|teleagent-provider-*:0444|teleagent-resource-admission:0444|teleagent-resource-topology-watch:0555) ;;
       *) fail 'a provider libexec target is invalid' ;;
     esac
     [ "$(/usr/bin/basename -- "$target")" = "$target" ] ||
       fail 'a provider libexec target is not a basename'
     case "$relative" in
       deploy/worker-session/provider-cli.manifest.json|\
+      deploy/worker-session/teleagent-resource-admission|\
       deploy/worker-session/teleagent-provider-model.apparmor) source_mode=0644 ;;
       deploy/worker-session/teleagent-codex-cli-wrapper|*) source_mode=0755 ;;
     esac
@@ -268,7 +269,9 @@ teleagent-provider-egress-credential-check
 teleagent-provider-egress-shim
 teleagent-provider-libexec-install
 teleagent-provider-model.apparmor
-teleagent-provider-runtime'
+teleagent-provider-runtime
+teleagent-resource-admission
+teleagent-resource-topology-watch'
   [ "$(printf '%b' "$provider_targets" | LC_ALL=C /usr/bin/sort)" = \
     "$expected_provider_targets" ] || fail 'the provider libexec closure is incomplete'
 }
@@ -399,7 +402,11 @@ source_check() {
       teleagent-provider-egress@.service) component='provider-egress-%i' ;;
       teleagent-provider-libexec-install.service) component=provider-libexec-install ;;
     esac
-    expected_start="ExecStart=/usr/bin/python3 -I /usr/local/libexec/verify-teleagent-release-closure --start-component $component \${CREDENTIALS_DIRECTORY}/teleagent-release-gate"
+    if [ "$component" = provider-libexec-install ]; then
+      expected_start="ExecStart=/usr/bin/python3 -I /usr/local/libexec/verify-teleagent-release-closure --start-component $component \${CREDENTIALS_DIRECTORY}/teleagent-release-gate"
+    else
+      expected_start="ExecStart=!/usr/bin/python3 -I /usr/local/libexec/verify-teleagent-release-closure --supervise-component $component \${CREDENTIALS_DIRECTORY}/teleagent-release-gate"
+    fi
     start_count=$(/usr/bin/grep -Fxc "$expected_start" "$filename" || true)
     [ "$start_count" -eq 1 ] || fail 'a release-consuming unit lost its immutable launcher'
     credential_count=$(/usr/bin/grep -Fxc "$release_credential" "$filename" || true)

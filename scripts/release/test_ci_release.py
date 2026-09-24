@@ -68,12 +68,15 @@ PACKAGE_SCOPE_PATHS = (
     "package.json",
     "privileged-action-broker/package.json",
     "realtime-sip-gateway/package.json",
+    "voice-app/package.json",
 )
 
 VOICE_AND_HOST_SOURCE_PATHS = (
     "deploy/host/teleagent-disabled-host-install",
     "deploy/voice-stack/drachtio.conf.xml.template",
     "deploy/voice-stack/freeswitch-event-socket.conf.xml.template",
+    "deploy/voice-stack/media-application-boundary.js",
+    "deploy/voice-stack/media-receiver-endpoints.js",
     "deploy/voice-stack/teleagent-sip-local-peer-fence",
     "deploy/voice-stack/teleagent-sip-local-peer-fence-install",
     "deploy/voice-stack/teleagent-sip-local-peer-fence.bundle",
@@ -89,7 +92,13 @@ VOICE_AND_HOST_SOURCE_PATHS = (
     "freeswitch/entrypoint.sh",
     "freeswitch/mrf.xml",
     "freeswitch/switch.conf.xml",
+    "lib/media-receiver-runtime.js",
     "lib/voice-app-runtime-env.js",
+    "lib/voice-egress-runtime.js",
+    "lib/sip-media-boundary-contract.js",
+    "voice-app/lib/isolated-media-http.js",
+    "voice-app/lib/media-playback-urls.js",
+    "voice-app/lib/voice-egress-transport.js",
 )
 
 EXPECTED_PROMOTION_BLOCKERS = (
@@ -142,10 +151,13 @@ EXPECTED_START_COMPONENTS = {
 
 
 def release_start_command(component: str) -> str:
+    supervised = component not in ('privileged-action', 'voice-stack-start', 'provider-libexec-install')
+    prefix = '!' if supervised else ''
+    operation = '--supervise-component' if supervised else '--start-component'
     return (
-        "ExecStart=/usr/bin/python3 -I "
+        f"ExecStart={prefix}/usr/bin/python3 -I "
         "/usr/local/libexec/verify-teleagent-release-closure "
-        f"--start-component {component} "
+        f"{operation} {component} "
         "${CREDENTIALS_DIRECTORY}/teleagent-release-gate"
     )
 
@@ -424,7 +436,9 @@ class CiReleaseTests(unittest.TestCase):
             | sip_sources
         )
         self.assertEqual(BOUND_SOURCE_PATHS, tuple(sorted(expected)))
-        self.assertEqual(len(BOUND_SOURCE_PATHS), 131)
+        self.assertEqual(len(BOUND_SOURCE_PATHS), 147)
+        self.assertIn("deploy/voice-stack/media-application-boundary.js", BOUND_SOURCE_PATHS)
+        self.assertIn("lib/worker-inspection-contract.js", BOUND_SOURCE_PATHS)
         self.assertEqual(len(BOUND_SOURCE_PATHS), len(set(BOUND_SOURCE_PATHS)))
         package_scopes = {
             nearest_package_scope(relative)
@@ -499,15 +513,13 @@ class CiReleaseTests(unittest.TestCase):
                 self.assertEqual(credential_lines.count(RELEASE_GATE_CREDENTIAL), 1, relative)
                 component = EXPECTED_START_COMPONENTS[relative]
                 self.assertIn(
-                    "ExecStart=/usr/bin/python3 -I "
-                    "/usr/local/libexec/verify-teleagent-release-closure "
-                    f"--start-component {component} "
-                    "${CREDENTIALS_DIRECTORY}/teleagent-release-gate",
+                    release_start_command(component),
                     execution_lines_tuple,
                     relative,
                 )
                 self.assertEqual(
-                    sum("--start-component" in line for line in execution_lines),
+                    sum('--start-component' in line or '--supervise-component' in line
+                        for line in execution_lines),
                     1,
                     relative,
                 )

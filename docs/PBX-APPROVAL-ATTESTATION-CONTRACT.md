@@ -96,28 +96,55 @@ does not retry a possibly observed confirmation.
 
 `lib/pbx-approval-attester-store.js` supplies fixture memory storage and an
 injected-SQLite implementation. The SQLite schema uses unique constraints for
-arm digest, approval ID, arm nonce, call handle, playback ID, DTMF event ID, and
-evidence digest, with one-way `pending` to `observed` to `issued` transitions.
+arm digest, arm nonce, call handle, playback ID, DTMF event ID, and evidence
+digest, with one-way `pending` to `observed` to `issued` transitions. An exact
+partial unique index permits only one non-superseded arm per approval ID;
+issued arms remain in that uniqueness boundary. Pending or observed arms may
+instead transition irreversibly to `superseded` during atomic replacement.
 It stores hashes and bounded identifiers, not raw signed tokens, prompts, or
 audio.
 
 The SQLite adapter creates this schema atomically only when its main-schema
-table and expiry-index names are both absent. On every open it then requires
+table, expiry-index, and active-approval-index names are all absent. On every open it then requires
 the exact reviewed table DDL, column/primary-key layout, unique-index closure,
-state `CHECK`, expiry index, and absence of table triggers in both the main and
-temporary schemas. A weaker, extra, partially indexed, trigger-modified, or
+state `CHECK`, both named indexes, and absence of table triggers in both the main and
+temporary schemas. A weaker, extra, unreviewed partial-index, trigger-modified, or
 same-name pre-existing schema fails closed; the adapter does not repair or
 migrate it. Every prepared state transition is explicitly qualified to the
 SQLite `main` schema, so a temporary same-name table cannot intercept replay
-state.
+state. Writes require a standalone connection with `inTransaction === false`;
+an outer transaction cannot make an uncommitted claim appear durable before
+PBX work starts. The connection owner remains responsible for protected storage,
+WAL mode, and `synchronous=FULL` before real use. Older exact schemas fail closed;
+this change deliberately supplies no live-data migration.
 
 The adapter interface is intentionally only a contract:
 
-It does not yet expose controller-driven arm supersession. A real call-start
-adapter must durably invalidate the prior pending/observed arm before placing a
-replacement call and must never make deletion restore replay eligibility. That
-transition, and its crash/retry tests, remain required promotion work rather
-than an inferred property of `purgeExpired`.
+The dormant entrypoint `attest(replacementArmToken, previousArmToken)` verifies
+both raw controller artifacts. Replacement must preserve the approval/job,
+operation, request/plan hashes, target, provider/profile, exact prompt, signing
+key ID and fingerprint, and original deadline. It requires a fresh arm nonce
+and call handle. A changed request needs a separate approval; supersession is
+not a way to change the operation, rotate keys, or extend its consent window.
+
+The SQLite store uses one `BEGIN IMMEDIATE` transaction to mark the exact
+pending/observed old arm `superseded` and claim the replacement. It retains the
+old arm's nonce, call, playback, and DTMF identities as replay tombstones until
+expiry. Conflicts roll back both changes. Issued, absent, already superseded,
+expired, or time-regressed predecessors refuse replacement. A failed rollback
+poisons that store object, including after an external rollback, until a fresh
+validated store is opened. An ambiguous commit result is an error, never
+permission to contact the PBX.
+
+The replacement adapter is called only after that transaction commits and a
+fresh strict clock check confirms the collection window is still open; a slow
+lock/fsync or backward clock cannot initiate a call outside that window. A late
+old callback cannot record an observation or finalize evidence. A crash after
+commit but before collection leaves the replacement claimed; retrying that
+same arm refuses before any call. Actual call quiescence, controller-driven
+replacement selection, and real Asterisk crash/reconnect behavior are still
+unimplemented promotion work. No already-started call is automatically redialed
+or asserted to have hung up by this fixture-only state transition.
 
 ```text
 collectApproval({

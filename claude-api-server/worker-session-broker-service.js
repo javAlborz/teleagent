@@ -31,6 +31,7 @@ const FIXED_TMUX_SOCKET = '/run/teleagent-worker-session/tmux.sock';
 const FIXED_STATE_DB = `${FIXED_BROKER_HOME}/operations.sqlite`;
 const FIXED_SINGLETON_DB = `${FIXED_BROKER_HOME}/lifetime-lock.sqlite`;
 const FIXED_CONTROLLER_GROUP = 'teleagent-control';
+const SINGLETON_BUSY_TIMEOUT_MS = 500;
 const SENSITIVE_ENVIRONMENT_NAME = /(?:TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|API_KEY|AUTH(?:ORIZATION)?)/i;
 
 function fixedPath(value, expected, label) {
@@ -145,9 +146,13 @@ function acquireWorkerSessionSingletonLock(lockPath = FIXED_SINGLETON_DB, {
       (metadata.mode & 0o077) !== 0) {
     throw new Error('Worker session singleton database ownership is unsafe.');
   }
-  const database = new Database(resolved, { timeout: 0 });
+  // Journal/schema initialization can briefly hold a read lock before any
+  // lifetime owner exists. Bound each SQLite lock wait so concurrent startups
+  // can finish that phase; a held EXCLUSIVE transaction still rejects its
+  // contender. Failed acquisitions close promptly, including SQLite's
+  // deadlock-avoidance SQLITE_BUSY path, before any store/recovery work.
+  const database = new Database(resolved, { timeout: SINGLETON_BUSY_TIMEOUT_MS });
   try {
-    database.pragma('busy_timeout = 0');
     database.pragma('journal_mode = DELETE');
     database.pragma('synchronous = FULL');
     database.exec(`

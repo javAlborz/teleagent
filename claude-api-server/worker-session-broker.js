@@ -6,6 +6,7 @@ const path = require('node:path');
 const { targetSessionOperationMarker } = require('../lib/voice-authorization-plan');
 const { canonicalizeTargetSessionMessage } = require('../lib/target-session-message');
 const { requestHash } = require('./worker-session-operation-store');
+const { WORKER_INSPECTION_ACTIONS } = require('../lib/worker-inspection-contract');
 const {
   panicProviderPlaneRoot,
   panicProviderSupervisors,
@@ -14,16 +15,7 @@ const {
 } = require('./provider-supervisor-client');
 
 const MAX_BODY_BYTES = 64 * 1024;
-const ALLOWED_INSPECTIONS = new Set([
-  'list_directory',
-  'read_text_file',
-  'find_files',
-  'git_status',
-  'list_tmux_sessions',
-  'inspect_tmux_pane',
-  'inspect_agent_activity',
-  'describe_runtime',
-]);
+const ALLOWED_INSPECTIONS = new Set(WORKER_INSPECTION_ACTIONS);
 
 function codedError(code, message, status = 400) {
   return Object.assign(new Error(message), { code, status });

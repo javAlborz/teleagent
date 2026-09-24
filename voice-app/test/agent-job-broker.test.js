@@ -67,6 +67,7 @@ function createFixture(t, bridge = null, options = {}) {
     executionControl: options.executionControl,
     privilegedActionBridge: options.privilegedActionBridge,
     outboundControl: options.outboundControl,
+    enabledProviders: options.enabledProviders,
     reconciliationBaseDelayMs: options.reconciliationBaseDelayMs,
     reconciliationMaxDelayMs: options.reconciliationMaxDelayMs,
     reconciliationPollWindowMs: options.reconciliationPollWindowMs,
@@ -708,6 +709,27 @@ test('all six profiles are visible and explicit underscoped profiles are rejecte
   assert.equal(denied.suggested_profile, 'codex-sol');
 });
 
+test('Codex-only phone offers and queues only Codex profiles', async (t) => {
+  const { broker, calls, realtime, stateStore, thread } = createFixture(t, null, {
+    enabledProviders: 'codex',
+  });
+  assert.deepEqual(broker.listProfiles(), ['codex-luna', 'codex-terra', 'codex-sol']);
+  assert.deepEqual(broker.listProfileDetails().map(({ provider }) => provider),
+    ['codex', 'codex', 'codex']);
+
+  const unavailable = await broker.startAgentTask({
+    voiceThreadId: thread.id,
+    realtimeSessionId: realtime.id,
+    toolCallId: 'disabled-claude',
+    profile: 'claude-haiku',
+    request: 'Read the current status.',
+  });
+  assert.equal(unavailable.accepted, false);
+  assert.equal(unavailable.code, 'AGENT_PROVIDER_DISABLED');
+  assert.equal(stateStore.listJobs(thread.id).length, 0);
+  assert.equal(calls.length, 0);
+});
+
 test('only one mutating operation can hold the focused pound approval', async (t) => {
   const { broker, realtime, thread } = createFixture(t);
   const first = await broker.startAgentTask({
@@ -952,6 +974,41 @@ test('startup recovery resumes an existing durable task without minting a fresh 
   assert.equal(completed.id, pending.id);
   assert.equal(completed.status, 'completed');
   assert.equal(directQueries, 0);
+});
+
+test('a local executor wait abort keeps the voice job reconciling, not canceled or failed', { timeout: 5000 }, async (t) => {
+  let submissions = 0;
+  const { broker, realtime, stateStore, thread } = createFixture(t, {
+    async queryDetailed() {
+      submissions += 1;
+      return {
+        success: false,
+        code: 'EXECUTOR_WAIT_ABORTED',
+        agentCode: 'EXECUTOR_WAIT_ABORTED',
+        reconciliation_required: true,
+        executorTaskId: 'xtask_wait_abort',
+        error: 'The local observer stopped waiting.',
+      };
+    },
+  }, { reconciliationBaseDelayMs: 5000, reconciliationMaxDelayMs: 5000 });
+  const reconciliation = new Promise((resolve) => {
+    broker.on('job.updated', (job) => {
+      if (job.status === 'reconciling') resolve(job);
+    });
+  });
+  const accepted = await broker.startAgentTask({
+    voiceThreadId: thread.id,
+    realtimeSessionId: realtime.id,
+    toolCallId: 'local-wait-aborted',
+    profile: 'codex-luna',
+    request: 'Inspect the fixture repository.',
+  });
+  assert.equal(accepted.accepted, true);
+  const pending = await reconciliation;
+  assert.equal(pending.id, accepted.job_id);
+  assert.equal(submissions, 1);
+  assert.equal(stateStore.getJob(pending.id).status, 'reconciling');
+  assert.equal(stateStore.getJob(pending.id).completed_at, null);
 });
 
 test('startup lookup outage stays nonterminal and never resubmits interrupted work', async (t) => {
