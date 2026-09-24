@@ -1,8 +1,8 @@
 [Unit]
 Description=Teleagent private durable agent controller
 Documentation=file:/opt/teleagent/current/docs/CONTROLLER-DEPLOYMENT.md
-Requires=teleagent-agent-controller.socket teleagent-pbx-panic.socket teleagent-worker-session.service teleagent-provider-model-apparmor.service teleagent-provider-supervisor@claude.socket teleagent-provider-supervisor@codex.socket
-After=local-fs.target network-online.target teleagent-agent-controller.socket teleagent-pbx-panic.socket teleagent-worker-session.service teleagent-provider-model-apparmor.service teleagent-provider-supervisor@claude.socket teleagent-provider-supervisor@codex.socket
+Requires=teleagent-agent-controller.socket teleagent-pbx-panic.socket teleagent-worker-session.service teleagent-provider-model-apparmor.service teleagent-provider-supervisor@codex.socket
+After=local-fs.target network-online.target teleagent-agent-controller.socket teleagent-pbx-panic.socket teleagent-worker-session.service teleagent-provider-model-apparmor.service teleagent-provider-supervisor@codex.socket
 Wants=network-online.target
 ConditionPathExists=/etc/teleagent/controller/ENABLE
 ConditionPathExists=/etc/teleagent/worker-session/ENABLE

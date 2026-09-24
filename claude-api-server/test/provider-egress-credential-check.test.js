@@ -222,9 +222,9 @@ test('main binds the exact provider and compares projected and live descriptor b
     ino: descriptor,
     uid: descriptor === 24 ? 1001 : 0,
     gid: descriptor === 24 ? 1001 : 0,
-    mode: descriptor === 24 ? 0o100400 : 0o100600,
+    mode: descriptor === 24 ? 0o100400 : (descriptor === 33 ? 0o100444 : 0o100600),
     nlink: 1,
-    size: Buffer.byteLength(descriptor === 32 ? codex : claude),
+    size: Buffer.byteLength(descriptor === 33 ? 'claude,codex\n' : (descriptor === 32 ? codex : claude)),
     mtimeMs: 23,
     ctimeMs: 24,
     isFile: () => true,
@@ -249,10 +249,12 @@ test('main binds the exact provider and compares projected and live descriptor b
     openSync: (filename, flags) => {
       assert.notEqual(flags & fs.constants.O_NOFOLLOW, 0);
       opened.push(filename);
+      if (filename === '/etc/teleagent/provider-runtime/enabled-providers') return 33;
       return filename.endsWith('/claude.api-key') ? 31 : 32;
     },
     fstatSync: (descriptor) => credentialMetadata(descriptor),
-    readFileSync: (descriptor) => Buffer.from(descriptor === 32 ? codex : claude),
+    readFileSync: (descriptor) => Buffer.from(descriptor === 33
+      ? 'claude,codex\n' : (descriptor === 32 ? codex : claude)),
     closeSync: (descriptor) => closed.push(descriptor),
   };
   let preflightCalls = 0;
@@ -270,10 +272,74 @@ test('main binds the exact provider and compares projected and live descriptor b
   }));
   assert.equal(preflightCalls, 1);
   assert.deepEqual(opened, [
+    '/etc/teleagent/provider-runtime/enabled-providers',
     '/etc/teleagent/provider-egress-secrets/claude.api-key',
     '/etc/teleagent/provider-egress-secrets/codex.api-key',
   ]);
-  assert.deepEqual(closed, [31, 32]);
+  assert.deepEqual(closed, [33, 31, 32]);
+});
+
+test('Codex-only activation requires no Claude credential and refuses a Claude preflight', () => {
+  const codex = 'codex-valid-token-3vT8zP5sL1nD9qW7';
+  const mode = Buffer.from('codex\n');
+  const opened = [];
+  const filesystem = {
+    constants: fs.constants,
+    lstatSync: (filename) => {
+      if (filename.endsWith('/claude.api-key')) {
+        const error = new Error('absent');
+        error.code = 'ENOENT';
+        throw error;
+      }
+      return {
+        uid: 0, gid: 0, mode: 0o40700,
+        isDirectory: () => true, isSymbolicLink: () => false,
+      };
+    },
+    realpathSync: (filename) => filename,
+    openSync: (filename, flags) => {
+      assert.notEqual(flags & fs.constants.O_NOFOLLOW, 0);
+      opened.push(filename);
+      if (filename === '/etc/teleagent/provider-runtime/enabled-providers') return 33;
+      assert.equal(filename, '/etc/teleagent/provider-egress-secrets/codex.api-key');
+      return 32;
+    },
+    fstatSync: (descriptor) => ({
+      dev: 11, ino: descriptor, uid: descriptor === 24 ? 1001 : 0,
+      gid: descriptor === 24 ? 1001 : 0,
+      mode: descriptor === 33 ? 0o100444 : (descriptor === 24 ? 0o100400 : 0o100600),
+      nlink: 1, size: descriptor === 33 ? mode.length : Buffer.byteLength(codex),
+      mtimeMs: 23, ctimeMs: 24,
+      isFile: () => true, isSymbolicLink: () => false,
+    }),
+    readFileSync: (descriptor) => descriptor === 33 ? mode : Buffer.from(codex),
+    closeSync: () => {},
+  };
+  const options = {
+    filesystem,
+    environment: {},
+    uid: 0,
+    argv: ['node', 'teleagent-provider-egress-credential-check', 'codex'],
+    requirePreflight: () => ({ lockDescriptor: 23, credentialDescriptor: 24 }),
+  };
+  assert.doesNotThrow(() => credentialCheck.main(options));
+  assert.deepEqual(opened, [
+    '/etc/teleagent/provider-runtime/enabled-providers',
+    '/etc/teleagent/provider-egress-secrets/codex.api-key',
+  ]);
+  assert.throws(() => credentialCheck.main({
+    ...options,
+    argv: ['node', 'teleagent-provider-egress-credential-check', 'claude'],
+  }), /projected provider is disabled/u);
+  assert.throws(() => credentialCheck.main({
+    ...options,
+    filesystem: {
+      ...filesystem,
+      lstatSync: (filename) => filename.endsWith('/claude.api-key')
+        ? { isFile: () => true }
+        : filesystem.lstatSync(filename),
+    },
+  }), /disabled Claude credential is present/u);
 });
 
 test('provider credential validation rejects placeholders and equal provider secrets', () => {

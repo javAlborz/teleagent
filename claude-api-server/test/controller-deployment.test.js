@@ -56,7 +56,7 @@ test('controller unit is dormant, exact-path, resource-capped, and isolated', ()
   assert.ok(service.split('\n').includes(RELEASE_GATE_CREDENTIAL));
   assert.doesNotMatch(service, /^WorkingDirectory=\/opt\/teleagent\/current$/m);
   assert.match(service, /^Requires=.*teleagent-worker-session\.service/m);
-  assert.match(service, /^Requires=.*teleagent-provider-supervisor@claude\.socket/m);
+  assert.doesNotMatch(service, /^Requires=.*teleagent-provider-supervisor@claude\.socket/m);
   assert.match(service, /^Requires=.*teleagent-provider-supervisor@codex\.socket/m);
   assert.match(service, /^CPUQuota=200%$/m);
   assert.match(service, /^MemoryHigh=2G$/m);

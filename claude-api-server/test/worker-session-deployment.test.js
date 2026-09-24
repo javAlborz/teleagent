@@ -285,9 +285,11 @@ test('session broker, RPC socket, state DB, and tmux socket exclude provider ide
     /^d \/var\/lib\/teleagent-worker-state\/codex-egress 0700 teleagent-codex-egress teleagent-codex-egress -$/m);
   assert.match(credentialCheck, /validateProviderCredential/);
   assert.match(credentialCheck, /providerCredentialsEqual/);
-  assert.match(credentialCheck, /providerCredentialsEqual\(claude, codex\)/);
   assert.match(credentialCheck,
-    /validateCredentialSnapshot\(provider, projectedCredential, credentials\)/);
+    /enabledProviders\.length === 2 && providerCredentialsEqual\(/);
+  assert.match(credentialCheck,
+    /validateCredentialSnapshot\(provider, projectedCredential, credentials, enabledProviders\)/);
+  assert.match(credentialCheck, /disabled Claude credential is present/);
   assert.doesNotMatch(credentialCheck, /\/opt\/teleagent\/current|require\([^)]*provider-secret/);
   assert.match(credentialCheck, /directoryMetadata\.gid !== 0/);
   assert.match(credentialCheck, /before\.gid !== 0 \|\| before\.nlink !== 1/);
@@ -364,6 +366,12 @@ test('activation verification requires clean provider homes, synthetic DAC denia
   assert.match(verifier, /NoNewPrivs/);
   assert.match(verifier, /CapBnd/);
   assert.match(verifier, /PROVIDER_CANARY/);
+  assert.match(verifier, /provider_mode_file=\/etc\/teleagent\/provider-runtime\/enabled-providers/);
+  assert.match(verifier, /controller provider selection differs from activation mode/);
+  assert.match(verifier, /voice provider selection differs from activation mode/);
+  assert.match(verifier, /disabled Claude provider credential or policy is present/);
+  assert.match(verifier, /disabled Claude provider unit is active/);
+  assert.match(verifier, /I_UNDERSTAND_THIS_CALLS_CODEX/);
   assert.match(verifier, /codex resume --help/);
   assert.match(verifier, /claude --help/);
   assert.match(verifier, /teleagent-provider-cli-check --provider claude/);

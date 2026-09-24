@@ -18,6 +18,11 @@ artifacts.
   resumes its durable phone state.
 - The Realtime conductor orchestrates the six Claude/Codex profiles; it is not
   itself a shell or a privileged agent.
+- The first Codex-only pilot uses extensions `4`, `5`, `6`, `7`, `44`, `55`,
+  `66`, and `77`.
+  Keep Claude extensions `1`–`3` and `11`–`33` unrouted until their workspace,
+  credential, and full two-provider activation checks are accepted. In that
+  pilot, the Realtime conductor lists only Codex profiles.
 - Outbound calls durably notify the caller about results and alerts.
 - The native OpenAI SIP gateway is a separate, dormant canary until its public
   ingress, PBX authentication, provider configuration, and activation gates

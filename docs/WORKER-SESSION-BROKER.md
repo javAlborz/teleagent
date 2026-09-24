@@ -274,6 +274,18 @@ provider-specific credentials with project-side billing limits plus local
 conservative request, reserved-token, and reserved-cost allowances, the activation sentinel, and a
 clean run of
 `/usr/local/libexec/verify-worker-session-boundary --installed-check`. The
+root-owned single-link mode-`0444` file
+`/etc/teleagent/provider-runtime/enabled-providers` selects exactly `codex`
+or `claude,codex`, followed by one newline. The controller's root-owned
+`/etc/teleagent/controller/runtime.env` must contain exactly the matching
+`AGENT_PROVIDERS=` assignment. The voice app receives the same setting through
+its reviewed Compose runtime environment. In `codex` mode, the verifier
+requires Claude's key, policy, sockets, and units to be absent or inactive;
+the Codex credential preflight does not require a dummy Claude key. In the
+full two-provider mode, start the Claude supervisor socket explicitly before
+running the verifier, and use the full two-provider canary acknowledgment.
+Neither mode makes the release or phone ready without the remaining gates.
+The
 verifier repeats both storage attestations after verifying the installed
 libexec digest closure. Both the worker broker and provider supervisor units
 also run the root attestations as an `ExecStartPre`, so activation cannot bypass
@@ -317,12 +329,11 @@ and [OpenAI API pricing](https://developers.openai.com/api/docs/pricing);
 the fixed allowances deliberately exceed standard text-token rates for the
 allowed models at that review.
 
-For the first account-bound pilot, use a dedicated OpenAI project and a
-non-default Claude workspace named `teleagent-phone-pilot`, each with a $150
-monthly spending limit. Turn on OpenAI's enforced hard project limit; allow
-only standard processing on that project. Set the Claude workspace's monthly
-spend limit in its own Spend limits tab. Bind each API key only to that
-project/workspace and install it through the protected host credential path.
+For the first account-bound, Codex-only pilot, use a dedicated OpenAI project
+with a $150 monthly hard spending limit and standard processing. Bind its
+project-scoped API key through the protected host credential path. A Claude
+workspace and key are only needed when activating the later six-profile,
+two-provider release; give that workspace its own spend limit before use.
 The Codex policy example has `openaiProjectId: null`, which makes Codex
 requests fail before budget reservation. After account verification, set the
 exact `proj_...` ID in the root-owned policy; the broker then sends the fixed

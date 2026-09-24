@@ -642,6 +642,7 @@ function launchTransactionFixture(t) {
       checkProviderCli: () => {},
       launchOperations: {
         hasCancellationTombstone: () => false,
+        assertProviderEnabled: () => {},
         createGlobalLaunchLock: (id) => boundary.createGlobalLaunchLock(id, options),
         assertResourceAdmission: async () => {},
         validateProviderStorageIsolation: () => {},
@@ -880,6 +881,7 @@ function panicRecoveryFixture(fixture, overrides = {}) {
   const events = [];
   const quiesced = async () => ({ persisted: true, quiesced: true });
   const recovery = () => boundary.panicAllProviderPlanes({
+    activationProviders: ['claude', 'codex'],
     control: quiesced,
     persistPanic: () => {
       events.push('panic-persisted');
@@ -1311,6 +1313,7 @@ test('root recovery commits the global unlock only after both locked supervisors
   const state = { panic: true, recovery: false };
   const ok = { status: 0, signal: null, error: null, stdout: '' };
   const result = await boundary.unlockAllProviderPlanes({
+    activationProviders: ['claude', 'codex'],
     panicAll: async () => {
       order.push('panic-all');
       return { persisted: true, quiesced: true };
@@ -1361,12 +1364,104 @@ test('root recovery commits the global unlock only after both locked supervisors
   assert.deepEqual(order.slice(-2), ['clear-recovery', 'clear-panic']);
 });
 
+test('Codex-only panic and unlock never restart Claude or require its egress broker', async () => {
+  const panicCommands = [];
+  const recovered = [];
+  const panic = await boundary.panicAllProviderPlanes({
+    activationProviders: ['codex'],
+    persistPanic: () => ({ persisted: true }),
+    runSystemctl: (args) => {
+      panicCommands.push(args.join(' '));
+      return { status: 0, signal: null, error: null };
+    },
+    stopUnit: async () => ({ quiesced: true }),
+    enumerateUnits: () => [],
+    recoverEgress: async (provider) => {
+      recovered.push(provider);
+      return { persisted: true, quiesced: true };
+    },
+    inspectLaunchLock: () => {
+      const error = new Error('absent');
+      error.code = 'ENOENT';
+      throw error;
+    },
+    clearLaunchLock: () => ({ proved: true, removed: false }),
+  });
+  assert.equal(panic.quiesced, true);
+  assert.deepEqual(recovered, ['codex']);
+  assert.equal(panic.egress.claude.disabled, true);
+  assert.ok(panicCommands.includes('stop teleagent-provider-egress@claude.socket'));
+  assert.ok(panicCommands.includes('stop teleagent-provider-egress-control@claude.socket'));
+
+  const unlockCommands = [];
+  const unlock = await boundary.unlockAllProviderPlanes({
+    activationProviders: ['codex'],
+    panicAll: async () => ({ persisted: true, quiesced: true }),
+    persistRecovery: () => ({ persisted: true }),
+    clearRecovery: () => ({ persisted: true }),
+    clearPanic: () => ({ persisted: true }),
+    runSystemctl: (args) => {
+      unlockCommands.push(args.join(' '));
+      return { status: 0, signal: null, error: null };
+    },
+    forceStop: async () => assert.fail('Codex-only unlock must not roll back'),
+    probe: async (provider) => ({
+      success: true, provider, ready: false, panicLocked: true,
+      boundaryRecovered: true, active: 0,
+    }),
+  });
+  assert.equal(unlock.success, true);
+  assert.ok(unlockCommands.some((command) => command ===
+    'start teleagent-provider-supervisor@codex.socket'));
+  assert.ok(unlockCommands.every((command) => !command.includes('@claude.')));
+});
+
+test('root provider activation mode accepts only a stable exact root-owned selection', () => {
+  const content = Buffer.from('codex\n');
+  const metadata = {
+    dev: 7, ino: 11, uid: 0, gid: 0, mode: 0o100444,
+    nlink: 1, size: content.length, mtimeMs: 2, ctimeMs: 3,
+    isFile: () => true, isSymbolicLink: () => false,
+  };
+  const filesystem = {
+    constants: fs.constants,
+    openSync: (filename, flags) => {
+      assert.equal(filename, '/etc/teleagent/provider-runtime/enabled-providers');
+      assert.notEqual(flags & fs.constants.O_NOFOLLOW, 0);
+      return 31;
+    },
+    fstatSync: () => metadata,
+    readFileSync: () => content,
+    closeSync: (descriptor) => assert.equal(descriptor, 31),
+  };
+  assert.deepEqual(boundary.readEnabledProviders({ filesystem }), ['codex']);
+  assert.throws(() => boundary.readEnabledProviders({
+    filesystem: { ...filesystem, readFileSync: () => Buffer.from('codex,claude\n') },
+  }), /activation mode is invalid/u);
+  assert.throws(() => boundary.readEnabledProviders({
+    filesystem: {
+      ...filesystem,
+      fstatSync: () => ({ ...metadata, mode: 0o100666 }),
+    },
+  }), /activation mode metadata is unsafe/u);
+});
+
+test('Codex-only activation refuses Claude launches before any model effect', () => {
+  assert.equal(boundary.assertProviderEnabled('codex', {
+    readProviders: () => ['codex'],
+  }), true);
+  assert.throws(() => boundary.assertProviderEnabled('claude', {
+    readProviders: () => ['codex'],
+  }), /provider is disabled by the root activation mode/u);
+});
+
 test('root recovery keeps panic locked and remasks when a supervisor is not locally locked', async () => {
   const commands = [];
   let panicCleared = false;
   let recoveryPending = false;
   let stopped = 0;
   const result = await boundary.unlockAllProviderPlanes({
+    activationProviders: ['claude', 'codex'],
     panicAll: async () => ({ persisted: true, quiesced: true }),
     persistRecovery: () => {
       recoveryPending = true;
