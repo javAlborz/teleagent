@@ -332,10 +332,10 @@ and [OpenAI API pricing](https://developers.openai.com/api/docs/pricing);
 the fixed allowances deliberately exceed standard text-token rates for the
 allowed models at that review.
 
-For the first account-bound, Codex-only pilot, use a dedicated OpenAI project
-with a $150 monthly hard spending limit and standard processing. In the
-[OpenAI project settings](https://developers.openai.com/api/docs/guides/spend-limits),
-open Limits > Spend, set the monthly amount, turn on **Enforce a hard limit**,
+For the first account-bound, Codex-only pilot, use the owner-selected OpenAI
+`phone` project and its approved $10 monthly limit with standard processing.
+In the [OpenAI project settings](https://developers.openai.com/api/docs/guides/spend-limits),
+open Limits > Spend, confirm the monthly amount, turn on **Enforce a hard limit**,
 and verify the saved setting. A spend alert alone does not stop traffic, and
 hard-limit enforcement can lag enough for a small amount of extra usage. Bind its
 project-scoped API key through the protected host credential path. A Claude
