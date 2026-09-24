@@ -8,6 +8,9 @@ before invoking this handoff and must verify the release again afterward. The
 gate is nonsecret host-owned integrity metadata: its root-owned directory is
 mode `0755` and its single-link file is mode `0444`. Systemd separately projects
 that file into a private mode-`0400` per-service credential.
+The consumer requires the host verifier's canonical version 3 gate and protocol
+generation 2, including both verifier policy digests. An older gate is refused
+before any application source check or installation step.
 
 The handoff has three exact modes:
 

@@ -360,7 +360,7 @@ verify_gate_and_release() {
   gate_after=$(/usr/bin/stat -c '%d:%i:%s:%u:%g:%a:%h:%Y:%Z' -- "$gate")
   [ "$gate_before" = "$gate_after" ] || fail 'the release gate changed while it was read'
 
-  gate_regex='^\{"version":1,"application":"teleagent","releaseId":"(sha256-[a-f0-9]{64})","manifestSha256":"(sha256:[a-f0-9]{64})","sourceRevision":"([a-f0-9]+)","currentTarget":"(/opt/teleagent/releases/sha256-[a-f0-9]{64})","releaseDevice":([0-9]+),"releaseInode":([1-9][0-9]*),"bootId":"([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})"\}$'
+  gate_regex='^\{"version":3,"application":"teleagent","verifierProtocolGeneration":2,"verifierSha256":"sha256:[a-f0-9]{64}","verifierSourcePolicySha256":"sha256:[a-f0-9]{64}","releaseId":"(sha256-[a-f0-9]{64})","manifestSha256":"(sha256:[a-f0-9]{64})","sourceRevision":"([a-f0-9]+)","currentTarget":"(/opt/teleagent/releases/sha256-[a-f0-9]{64})","releaseDevice":([0-9]+),"releaseInode":([1-9][0-9]*),"bootId":"([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})"\}$'
   [[ "$gate_contents" =~ $gate_regex ]] || fail 'the release gate schema is invalid'
   release_id=${BASH_REMATCH[1]}
   manifest_digest=${BASH_REMATCH[2]}
