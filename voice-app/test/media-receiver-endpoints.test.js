@@ -148,7 +148,7 @@ test('unreviewed template drift and incomplete runtime remain fail closed', () =
   assert.throws(() => assertVoiceAppRuntimeEnvironment({ ...VOICE_APP_FIXED_ENV, ...output.voiceEnvironment }));
   assert.throws(() => boundary.requireRuntimeIntegration(), { code: 'MEDIA_RUNTIME_UNCOMMISSIONED' });
   const source = fs.readFileSync(path.join(__dirname, '../../deploy/voice-stack/teleagent-voice-stack-launch.js'), 'utf8');
-  assert.match(source, /async function start\(\) \{\s*\/\/[\s\S]*?requireRuntimeIntegration\(\);/u);
+  assert.match(source, /async function start\(lifecycleFd\) \{\s*\/\/[\s\S]*?prepareProtectedReceiverEndpoints\(APP_ROOT, \{ lifecycleFd \}\);\s*requireRuntimeIntegration\(\);/u);
 });
 
 test('protected entrypoint binds the fixed configuration to independent bootstrap admission', () => {

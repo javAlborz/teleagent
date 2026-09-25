@@ -7,6 +7,7 @@ const http = require('node:http');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { requireRuntimeIntegration } = require('./media-application-boundary');
+const { prepareProtectedReceiverEndpoints } = require('./media-receiver-endpoints');
 
 const IMMUTABLE_RELEASE_ROOT = /^\/opt\/teleagent\/releases\/sha256-[a-f0-9]{64}$/u;
 // Unit starts receive this from the infrastructure-owned release launcher.
@@ -1431,9 +1432,10 @@ function rollbackStartedStack(environment) {
   removeRuntimeProjection();
 }
 
-async function start() {
+async function start(lifecycleFd) {
   // Receiver namespaces require coordinated endpoint/health/PBX integration.
   // Source candidates cannot fall back to the old shared host-network plane.
+  prepareProtectedReceiverEndpoints(APP_ROOT, { lifecycleFd });
   requireRuntimeIntegration();
   for (const filename of [APP_ROOT, COMPOSE_FILE, `${APP_ROOT}/lib/voice-app-runtime-env.js`]) {
     inspectRootPath(filename, { directory: filename === APP_ROOT });
@@ -1778,8 +1780,8 @@ async function main() {
       process.argv.length !== 3 || !['start', 'stop', 'cleanup', 'recover'].includes(operation)) {
     refuse('the voice-stack wrapper must run as root through one gated immutable release');
   }
-  requireLifecycleLock(operation);
-  if (operation === 'start') await start();
+  const lifecycleFd = requireLifecycleLock(operation);
+  if (operation === 'start') await start(lifecycleFd);
   else if (operation === 'stop') await stop();
   else if (operation === 'recover') await recover();
   else cleanup();

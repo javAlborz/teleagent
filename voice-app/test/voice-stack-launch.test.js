@@ -350,7 +350,7 @@ test('failed stack start never clears panic evidence after Compose activation wa
     path.join(__dirname, '..', '..', 'deploy', 'voice-stack', 'teleagent-voice-stack-launch.js'),
     'utf8',
   );
-  const startBody = source.slice(source.indexOf('async function start()'),
+  const startBody = source.slice(source.indexOf('async function start(lifecycleFd)'),
     source.indexOf('async function stop()'));
   assert.ok(startBody.indexOf('activationAttempted = true') < startBody.indexOf("composeArgs('create'"));
   assert.match(startBody, /startFailureDisposition\(activationAttempted\)/);
@@ -529,7 +529,7 @@ test('wrapper never puts credentials in Docker argv or inherited environment', (
   assert.match(source, /persistActivationState\('panic_outcome_unknown'/);
   assert.doesNotMatch(source, /Preserve containers and projected credentials/);
 
-  const startBody = source.slice(source.indexOf('async function start()'),
+  const startBody = source.slice(source.indexOf('async function start(lifecycleFd)'),
     source.indexOf('async function stop()'));
   for (const [before, after] of [
     ['activationRequiresRecovery(readActivationState())', 'cleanupExactProject()'],

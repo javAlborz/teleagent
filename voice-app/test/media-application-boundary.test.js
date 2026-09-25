@@ -195,7 +195,10 @@ test('missing authority and unfinished runtime cannot fall back to legacy host n
   }));
   assert.throws(() => boundary.requireRuntimeIntegration(), { code: 'MEDIA_RUNTIME_UNCOMMISSIONED' });
   const source = fs.readFileSync(path.join(__dirname, '../../deploy/voice-stack/teleagent-voice-stack-launch.js'), 'utf8');
-  const start = source.slice(source.indexOf('async function start() {'), source.indexOf('async function stop() {'));
+  const start = source.slice(source.indexOf('async function start(lifecycleFd) {'),
+    source.indexOf('async function stop() {'));
+  assert.ok(start.indexOf('prepareProtectedReceiverEndpoints(APP_ROOT, { lifecycleFd });') <
+    start.indexOf('requireRuntimeIntegration();'));
   assert.ok(start.indexOf('requireRuntimeIntegration();') < start.indexOf('cleanupExactProject();'));
   assert.ok(start.indexOf('requireRuntimeIntegration();') < start.indexOf('readCredentialSet(identity)'));
 });
