@@ -30,6 +30,8 @@ done
   || fail 'pinned sandbox Node version, ABI, or platform drifted'
 
 mkdir -m 0700 -p -- /tmp/home /tmp/npm-cache /tmp/npm-prefix
+: > /tmp/npm-userconfig
+: > /tmp/npm-globalconfig
 export HOME=/tmp/home
 export CI=true
 export LANG=C.UTF-8
@@ -39,11 +41,11 @@ export MAKEFLAGS=-j2
 export npm_config_audit=false
 export npm_config_cache=/tmp/npm-cache
 export npm_config_fund=false
-export npm_config_globalconfig=/dev/null
+export npm_config_globalconfig=/tmp/npm-globalconfig
 export npm_config_jobs=2
 export npm_config_prefix=/tmp/npm-prefix
 export npm_config_update_notifier=false
-export npm_config_userconfig=/dev/null
+export npm_config_userconfig=/tmp/npm-userconfig
 
 npm_ci() {
   local directory=$1
