@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ci_release_support import (
     CiReleaseError,
     PROMOTION_BLOCKERS,
+    _json_difference_paths,
     compare_and_publish,
     inspect_voice_archive,
     load_ci_config,
@@ -595,6 +596,14 @@ class CiReleaseTests(unittest.TestCase):
             self.assertEqual(inspect_voice_archive(archive_path, REVISION), f"sha256:{digest}")
             with self.assertRaisesRegex(CiReleaseError, "source revision differs"):
                 inspect_voice_archive(archive_path, "b" * 40)
+
+    def test_sbom_diagnostic_reports_paths_without_values(self) -> None:
+        first = {"components": [{"bom-ref": "secret-a"}], "metadata": {"timestamp": "one"}}
+        second = {"components": [{"bom-ref": "secret-b"}], "metadata": {"timestamp": "two"}}
+        self.assertEqual(
+            _json_difference_paths(first, second),
+            ["/components/0/bom-ref", "/metadata/timestamp"],
+        )
 
     def test_sbom_normalization_removes_only_ephemeral_identity_deterministically(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

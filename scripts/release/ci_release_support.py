@@ -638,6 +638,38 @@ def _copy_evidence(source: Path, destination: Path) -> None:
     destination.chmod(0o444)
 
 
+def _json_difference_paths(first: Any, second: Any, limit: int = 20) -> list[str]:
+    """Return bounded JSON pointers without exposing the differing values."""
+    paths: list[str] = []
+
+    def visit(left: Any, right: Any, pointer: str) -> None:
+        if len(paths) >= limit:
+            return
+        if type(left) is not type(right):
+            paths.append(pointer or "/")
+        elif isinstance(left, dict):
+            for key in sorted(left.keys() | right.keys()):
+                child = pointer + "/" + key.replace("~", "~0").replace("/", "~1")
+                if key not in left or key not in right:
+                    paths.append(child)
+                else:
+                    visit(left[key], right[key], child)
+                if len(paths) >= limit:
+                    break
+        elif isinstance(left, list):
+            if len(left) != len(right):
+                paths.append(pointer + "/length")
+            for index, (a, b) in enumerate(zip(left, right)):
+                visit(a, b, pointer + "/" + str(index))
+                if len(paths) >= limit:
+                    break
+        elif left != right:
+            paths.append(pointer or "/")
+
+    visit(first, second, "")
+    return paths
+
+
 def compare_and_publish(
     first_root: Path,
     first_bundle: Path,
@@ -670,6 +702,14 @@ def compare_and_publish(
                 f"release inventory differs at {len(changed)} paths; "
                 f"first 20: {', '.join(changed[:20])}\n"
             )
+            release_sbom = "artifacts/sbom/teleagent-release.cdx.json"
+            if release_sbom in changed:
+                first_sbom = _load_json(first_root / release_sbom, "first release SBOM")
+                second_sbom = _load_json(second_root / release_sbom, "second release SBOM")
+                paths = _json_difference_paths(first_sbom, second_sbom)
+                sys.stderr.write(
+                    "release SBOM differs at JSON paths: " + ", ".join(paths) + "\n"
+                )
         else:
             sys.stderr.write("release inventories match; manifest or bundle differs\n")
         raise _error("two fresh release assemblies are not byte-identical")
