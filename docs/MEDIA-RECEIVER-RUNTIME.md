@@ -1,7 +1,14 @@
 # Isolated receiver consumers — dormant source candidate
 
-The voice entrypoint now requires an independent protected runtime admission
-before constructing any secret-bearing client. It uses the v2 projection for
+The voice entrypoint now waits on a fixed root-owned, group-readable FIFO at
+`/run/teleagent-media/voice-start.fifo` before reading runtime admission or
+constructing a secret-bearing client. The host must send exactly one canonical
+64-hex generation followed by a newline and close the FIFO; the entrypoint
+requires the subsequently loaded protected runtime record to name that same
+generation. The FIFO and record directory are intended to be mounted read-only
+from `/run/teleagent-isolated-voice-stack/admission`. An absent FIFO leaves the
+production entrypoint closed, and the launcher still refuses activation.
+The admitted v2 projection supplies
 Drachtio control, FreeSWITCH ESL and fixed reverse ESL, audiofork, generated TTS,
 beeps and hold-music URLs. The launcher still refuses activation unconditionally.
 No record writer, authority mint, Compose change, credential, Docker operation
@@ -46,10 +53,11 @@ unverified digest merely copied into a root file does not meet that contract.
 The application cannot independently observe Docker image identity or effective
 nft rules; those proofs belong to the external host transaction.
 
-This source does not implement that publication/start handshake. In particular,
-the authority must arrange and observe the voice init process identity while
-retaining its start fence, publish the exact record in a protected read-only
-mount, and retain/revoke authority through startup, restart and teardown. No
+The entrypoint side of the start handshake is present, but no host writer or
+publication transaction is implemented. The authority must arrange and observe
+the blocked voice process identity while retaining its start fence, publish the
+exact record in the protected read-only mount, signal that exact generation,
+and retain/revoke authority through startup, restart and teardown. No
 environment-variable path, caller-supplied fixture or writable volume may supply
 this record. Existing environment validation stays strict; endpoint overrides
 come only from the admitted projection, not environment settings. Installing

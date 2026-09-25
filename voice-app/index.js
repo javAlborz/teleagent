@@ -3,13 +3,19 @@
  * Main entry point - v9 with Multi-Extension + Device API Support
  */
 
+var mediaRuntimeModule = require("../lib/media-receiver-runtime");
+var hostStartGeneration = null;
 if (process.env.NODE_ENV !== 'production') require("dotenv").config();
 var voiceAppRuntimeContract = require("../lib/voice-app-runtime-env");
 var mediaReceiverRuntime = null;
 var fixedRuntimeEnvironment = null;
 try {
   fixedRuntimeEnvironment = voiceAppRuntimeContract.assertVoiceAppRuntimeEnvironment(process.env);
-  mediaReceiverRuntime = require("../lib/media-receiver-runtime").loadMediaReceiverRuntime();
+  if (process.env.NODE_ENV === 'production') hostStartGeneration = mediaRuntimeModule.awaitHostStart();
+  mediaReceiverRuntime = mediaRuntimeModule.loadMediaReceiverRuntime();
+  if (hostStartGeneration !== null && mediaReceiverRuntime.generation !== hostStartGeneration) {
+    throw new Error('host start generation differs from independent media admission');
+  }
   var voiceEgressRuntime = require("../lib/voice-egress-runtime").loadVoiceEgressRuntime(mediaReceiverRuntime);
   require("./lib/voice-egress-transport").configureVoiceEgress(voiceEgressRuntime);
   require("./lib/media-playback-urls").configureMediaPlayback(mediaReceiverRuntime);
