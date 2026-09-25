@@ -42,7 +42,9 @@ function inspection(contract, service, running = true) {
     readonly: true, privileged: false, capAdd: null, capDrop: ['ALL'], security: ['no-new-privileges:true'],
     memory, memorySwap: memory, nanoCpus, pidsLimit, cgroupParent: 'teleagent-voice-containers.slice',
     pidMode: '', ipcMode: 'private', usernsMode: 'host', publishAll: false, ports: null, dns: [],
-    dnsSearch: [], dnsOptions: [], extraHosts: null, links: null, mounts: [], devices: [], deviceRequests: null,
+    dnsSearch: [], dnsOptions: [], extraHosts: null, links: null, mounts: [],
+    tmpfs: { '/tmp': 'rw,noexec,nosuid,nodev,size=16777216' },
+    devices: [], deviceRequests: null,
     groupAdd: null, restartPolicy: 'no', healthcheck: ['NONE'] };
 }
 function stat(start = '77') { return `1234 (name has ) brackets) S ${Array(18).fill('0').join(' ')} ${start} 0`; }
@@ -114,7 +116,8 @@ test('container metadata refuses image, network, sandbox, restart and resource d
   for (const [key, changed] of Object.entries({ image: `sha256:${'0'.repeat(64)}`, network: 'host', user: '0:0', readonly: false,
     privileged: true, capAdd: ['NET_ADMIN'], security: [], memory: 0, memorySwap: -1, nanoCpus: 0, pidsLimit: 0,
     cgroupParent: 'system.slice', pidMode: 'host', ipcMode: 'host', usernsMode: '', publishAll: true,
-    ports: { '80/tcp': [] }, dns: ['127.0.0.1'], mounts: [{ Source: '/' }], groupAdd: ['0'],
+    ports: { '80/tcp': [] }, dns: ['127.0.0.1'], mounts: [{ Source: '/' }],
+    tmpfs: { '/tmp': 'rw,size=999999999' }, groupAdd: ['0'],
     restartPolicy: 'always', healthcheck: ['CMD-SHELL', 'true'], restarts: 1, running: false, pid: 0 })) {
     assert.throws(() => boundary.validateDocker({ ...value, [key]: changed }, 'voice-app', contract, IDS['voice-app'], true));
   }

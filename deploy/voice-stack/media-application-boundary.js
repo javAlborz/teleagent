@@ -41,7 +41,8 @@ const INSPECT = '{"id":{{json .Id}},"image":{{json .Image}},"pid":{{json .State.
   '"ports":{{json .HostConfig.PortBindings}},"dns":{{json .HostConfig.Dns}},' +
   '"dnsSearch":{{json .HostConfig.DnsSearch}},"dnsOptions":{{json .HostConfig.DnsOptions}},' +
   '"extraHosts":{{json .HostConfig.ExtraHosts}},"links":{{json .HostConfig.Links}},' +
-  '"mounts":{{json .Mounts}},"devices":{{json .HostConfig.Devices}},' +
+  '"mounts":{{json .Mounts}},"tmpfs":{{json .HostConfig.Tmpfs}},' +
+  '"devices":{{json .HostConfig.Devices}},' +
   '"deviceRequests":{{json .HostConfig.DeviceRequests}},"groupAdd":{{json .HostConfig.GroupAdd}},' +
   '"restartPolicy":{{json .HostConfig.RestartPolicy.Name}},' +
   '"healthcheck":{{if .Config.Healthcheck}}{{json .Config.Healthcheck.Test}}{{else}}null{{end}}}';
