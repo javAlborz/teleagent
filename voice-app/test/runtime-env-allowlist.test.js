@@ -120,6 +120,27 @@ test('voice state and listener invariants are exact application constants', () =
   }
 });
 
+test('private receiver settings require the matching protected runtime admission', () => {
+  const { runtimeFixture } = require('./helpers/media-runtime-fixture');
+  const admission = runtimeFixture().load();
+  const projected = { ...VOICE_APP_FIXED_ENV, ...admission.projection.voiceEnvironment };
+  assert.deepEqual(assertVoiceAppRuntimeEnvironment(projected, admission), {
+    stateDbPath: '/app/state/voice-state.sqlite',
+    executionLockFile: '/app/state/voice-execution.lock.json',
+    httpHost: '127.0.0.1',
+    wsHost: '10.254.0.14',
+    wsConnectHost: '10.254.0.14',
+    wsAllowedPeers: '10.254.0.10',
+    wsNonLoopbackEnabled: true,
+  });
+  assert.throws(() => assertVoiceAppRuntimeEnvironment(projected));
+  assert.throws(() => assertVoiceAppRuntimeEnvironment(projected, { projection: admission.projection }));
+  for (const name of Object.keys(admission.projection.voiceEnvironment)) {
+    assert.throws(() => assertVoiceAppRuntimeEnvironment({ ...projected, [name]: 'unapproved' }, admission),
+      { code: 'VOICE_APP_RUNTIME_CONTRACT_INVALID' }, name);
+  }
+});
+
 test('production voice environment references are closed over the Compose allowlist', () => {
   const referenced = collectEnvironmentReferences();
   const configured = new Set([
@@ -215,7 +236,7 @@ test('canonical Compose exposes exactly the reviewed voice-app runtime environme
 test('voice runtime proves fixed state/listener values before state or network initialization', () => {
   const source = fs.readFileSync(path.join(VOICE_APP_ROOT, 'index.js'), 'utf8');
   const validation = source.indexOf(
-    'voiceAppRuntimeContract.assertVoiceAppRuntimeEnvironment(process.env)'
+    'voiceAppRuntimeContract.assertVoiceAppRuntimeEnvironment(process.env, mediaReceiverRuntime)'
   );
   const capacityAdmission = source.indexOf('var startupCapacityHealth = stateCapacityGuard.check()');
   const ownerFence = source.indexOf('outboundRuntimeFence = new OutboundRuntimeFence({');
