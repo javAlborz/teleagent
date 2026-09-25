@@ -400,12 +400,13 @@ function validateIdentityRecords(passwdSource, groupSource) {
       }
     }
   }
-  const protectedNumbers = new Set(entries.flatMap(({ uid, gid }) => [uid, gid]));
+  const protectedUids = new Set(entries.map(({ uid }) => uid));
+  const protectedGids = new Set(entries.map(({ gid }) => gid));
   if (passwd.some((candidate) => !protectedUsers.has(candidate) && (
-    protectedNumbers.has(numericId(candidate[2], 'passwd uid')) ||
-    protectedNumbers.has(numericId(candidate[3], 'passwd gid'))
+    protectedUids.has(numericId(candidate[2], 'passwd uid')) ||
+    protectedGids.has(numericId(candidate[3], 'passwd gid'))
   )) || groups.some((candidate) => !protectedGroups.has(candidate) &&
-    protectedNumbers.has(numericId(candidate[2], 'group gid')))) {
+    protectedGids.has(numericId(candidate[2], 'group gid')))) {
     refuse('a voice or media numeric identity is reused');
   }
   for (const spec of IDENTITY_SPECS) {
