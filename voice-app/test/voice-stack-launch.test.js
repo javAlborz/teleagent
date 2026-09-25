@@ -1159,6 +1159,9 @@ test('dormant systemd gate binds the private voice identity and every prerequisi
   assert.match(unit, /^MemorySwapMax=0$/m);
   assert.match(unit, /^TasksMax=128$/m);
   assert.match(unit, /^IOWeight=50$/m);
+  assert.match(unit, /^ReadOnlyPaths=.*\/etc\/teleagent-isolated-voice(?:\s|$)/m);
+  assert.match(unit, /^ReadWritePaths=.*\/var\/lib\/teleagent-isolated-voice$/m);
+  assert.doesNotMatch(unit, /^ReadWritePaths=.*\/var\/lib\/teleagent-voice(?:\s|$)/m);
   assert.doesNotMatch(unit, /^Environment=.*(?:TOKEN|PASSWORD|SECRET|KEY)=/m);
   assert.doesNotMatch(unit, /^\[Install\]$/m);
   assert.doesNotMatch(containerSlice, /^\[Install\]$/m);
