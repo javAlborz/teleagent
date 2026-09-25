@@ -243,6 +243,33 @@ test('host contract ownership and exact independent admission are mandatory', ()
   assert.throws(() => boundary.loadAdmission(RELEASE, 'running', evidence, { io, run: () => assert.fail('unsafe authority executed') }));
 });
 
+test('placement reuses only the independent host journal evidence while fenced', () => {
+  const contract = fixture();
+  const evidence = `sha256:${'a'.repeat(64)}`;
+  const placements = { drachtio: IDS.drachtio, freeswitch: IDS.freeswitch,
+    'voice-app': IDS['voice-app'] };
+  const calls = [];
+  const load = (root, stage, observed, options) => {
+    calls.push([root, stage, observed, options.lifecycleFd]);
+    return contract;
+  };
+  const observation = { schema: 'teleagent.media-application-observation.v1' };
+  const verify = (received, ids, { stage, anchorCheck }) => {
+    assert.equal(received, contract);
+    assert.deepEqual(ids, placements);
+    assert.equal(stage, 'created');
+    assert.deepEqual(anchorCheck(), contract.bootstrap);
+    return observation;
+  };
+  assert.equal(boundary.verifyProtectedPlacement(RELEASE, placements, 'created', {
+    lifecycleFd: 7, hostEvidenceDigest: evidence, load, verify, inspect: () => assert.fail('not needed'),
+  }), observation);
+  assert.deepEqual(calls, Array(3).fill([RELEASE, 'created', evidence, 7]));
+  assert.throws(() => boundary.verifyProtectedPlacement(RELEASE, placements, 'created', {
+    lifecycleFd: 7, load, verify,
+  }), { code: 'MEDIA_APPLICATION_REFUSED' });
+});
+
 test('placement refuses escaped workload tasks and init disappearance after kernel observation', () => {
   const contract = fixture();
   const processes = new Map();

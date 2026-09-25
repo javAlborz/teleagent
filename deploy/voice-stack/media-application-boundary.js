@@ -332,16 +332,20 @@ function inspectDocker(containerId) {
     '/etc/teleagent-media/docker-client', 'inspect', '--type', 'container', '--format', INSPECT, containerId]));
 }
 
-function verifyProtectedPlacement(releaseRoot, placements, stage, { lifecycleFd = null } = {}) {
-  const inputDigest = digest(canonical(placements));
-  const contract = loadAdmission(releaseRoot, stage, inputDigest, { lifecycleFd });
-  const observation = verifyPlacement(contract, placements, {
-    stage, inspect: inspectDocker,
-    anchorCheck: () => loadAdmission(releaseRoot, stage, inputDigest, { lifecycleFd }).bootstrap,
+function verifyProtectedPlacement(releaseRoot, placements, stage, {
+  lifecycleFd = null, hostEvidenceDigest = null,
+  load = loadAdmission, verify = verifyPlacement, inspect = inspectDocker,
+} = {}) {
+  need(sha(hostEvidenceDigest));
+  const contract = load(releaseRoot, stage, hostEvidenceDigest, { lifecycleFd });
+  const observation = verify(contract, placements, {
+    stage, inspect,
+    anchorCheck: () => load(releaseRoot, stage, hostEvidenceDigest, { lifecycleFd }).bootstrap,
   });
-  // Admission must bind this particular evidence and retain the lifecycle
-  // fence through the caller's eventual mutation, not a reusable JSON token.
-  const admitted = loadAdmission(releaseRoot, stage, digest(canonical(observation)), { lifecycleFd });
+  // The host evidence binds the retained project journal. Re-admit it after
+  // the app's separate Docker/kernel observation while the lifecycle fence
+  // remains held; an app-computed observation hash cannot grant authority.
+  const admitted = load(releaseRoot, stage, hostEvidenceDigest, { lifecycleFd });
   need(canonical(admitted) === canonical(contract));
   return observation;
 }
