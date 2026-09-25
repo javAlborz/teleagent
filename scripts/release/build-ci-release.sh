@@ -49,7 +49,7 @@ fail() {
 
 readonly required_tools=(
   awk chmod curl df docker git id install jq mkdir mktemp mv python3
-  realpath rm sha256sum sort tar timeout xz
+  realpath rm sha256sum sort stat tar timeout xz
 )
 for tool in "${required_tools[@]}"; do
   command -v -- "${tool}" >/dev/null 2>&1 \
@@ -226,6 +226,18 @@ run_lifecycle_sandbox() {
     --mount "type=bind,src=${staging_root},dst=/work,readonly"
     --entrypoint /usr/bin/env
   )
+  if [[ "${mode}" == test ]]; then
+    # Broker tests validate the root-owned executable boundary for these
+    # paths with a fake spawn. The pinned Node image has no systemd tools.
+    # Bind inert `true` at the two paths, never a host systemd executable.
+    [[ "$(stat -c '%u:%g:%a:%F' /usr/bin/true)" == \
+       '0:0:755:regular file' && ! -L /usr/bin/true ]] \
+      || fail 'the inert broker test executable is not root-owned and fixed-mode'
+    docker_arguments+=(
+      --mount type=bind,src=/usr/bin/true,dst=/usr/bin/systemctl,readonly
+      --mount type=bind,src=/usr/bin/true,dst=/usr/bin/journalctl,readonly
+    )
+  fi
   local relative
   for relative in "${module_paths[@]}"; do
     [[ ! -e "${staging_root}/${relative}" && ! -L "${staging_root}/${relative}" ]] \
