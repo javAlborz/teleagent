@@ -84,6 +84,7 @@ const ALLOWED_RUNTIME_ENV = new Set([
   'LISTEN_PID', 'LISTEN_FDS', 'LISTEN_FDNAMES',
   'CREDENTIALS_DIRECTORY', 'INVOCATION_ID', 'JOURNAL_STREAM', 'SYSTEMD_EXEC_PID',
   'MEMORY_PRESSURE_WATCH', 'MEMORY_PRESSURE_WRITE',
+  'PWD', 'TELEAGENT_RELEASE_ROOT',
 ]);
 
 function codedError(code, message, status = 400) {
@@ -126,6 +127,15 @@ function rejectUnsafeEnvironment(environment) {
   ));
   if (unsafe.length) {
     throw new Error(`Provider egress refuses unsafe runtime environment names: ${unsafe.sort().join(', ')}.`);
+  }
+}
+
+function validateCoordinatorEnvironment(environment, spec,
+  selectedReleaseRoot = fs.realpathSync('/opt/teleagent/current')) {
+  if (environment.PWD !== spec.home ||
+      !/^\/opt\/teleagent\/releases\/sha256-[a-f0-9]{64}$/.test(selectedReleaseRoot) ||
+      environment.TELEAGENT_RELEASE_ROOT !== selectedReleaseRoot) {
+    throw new Error('Provider egress release coordinator environment is unsafe.');
   }
 }
 
@@ -243,6 +253,7 @@ function normalizeConfig(environment = process.env, {
     throw new Error('Provider egress identity does not match its fixed provider.');
   }
   rejectUnsafeEnvironment(environment);
+  validateCoordinatorEnvironment(environment, spec);
   if (String(environment.LISTEN_PID || '') !== String(pid) || environment.LISTEN_FDS !== '2') {
     throw new Error('Provider egress requires its data and root-control systemd sockets.');
   }
@@ -1732,6 +1743,7 @@ module.exports = {
   parseRequestBody,
   readPolicy,
   rejectUnsafeEnvironment,
+  validateCoordinatorEnvironment,
   recoverCapabilities,
   pruneBudgetHistory,
   registerCapability,

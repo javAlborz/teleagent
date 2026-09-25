@@ -760,7 +760,7 @@ const net = require("node:net");
 const socket = net.createConnection({ path: process.argv[1] });
 socket.once("connect", () => {
   socket.destroy();
-  process.stdout.write("VISIBLE_SOCKET_DAC_ALLOWED\\n");
+  process.stdout.write("VISIBLE_SOCKET_DAC_ALLOWED\n");
 });
 socket.once("error", () => process.exit(1));
 setTimeout(() => process.exit(1), 2000).unref();

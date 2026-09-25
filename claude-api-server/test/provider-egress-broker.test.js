@@ -26,6 +26,7 @@ const {
   pruneBudgetHistory,
   recoverCapabilities,
   rejectUnsafeEnvironment,
+  validateCoordinatorEnvironment,
   registerCapability,
   reserveBudget,
   revokeCapability,
@@ -290,7 +291,21 @@ test('credential broker refuses Node/TLS debug injection without echoing secret 
     LISTEN_FDS: '2',
     LISTEN_FDNAMES: 'egress-claude:egress-control-claude',
     INVOCATION_ID: 'f'.repeat(32),
+    PWD: PROVIDERS.claude.home,
+    TELEAGENT_RELEASE_ROOT: `/opt/teleagent/releases/sha256-${'a'.repeat(64)}`,
   }));
+  const releaseRoot = `/opt/teleagent/releases/sha256-${'a'.repeat(64)}`;
+  assert.doesNotThrow(() => validateCoordinatorEnvironment({
+    PWD: PROVIDERS.claude.home,
+    TELEAGENT_RELEASE_ROOT: releaseRoot,
+  }, PROVIDERS.claude, releaseRoot));
+  for (const environment of [
+    { PWD: '/', TELEAGENT_RELEASE_ROOT: releaseRoot },
+    { PWD: PROVIDERS.claude.home, TELEAGENT_RELEASE_ROOT: '/tmp/elsewhere' },
+  ]) {
+    assert.throws(() => validateCoordinatorEnvironment(environment, PROVIDERS.claude,
+      releaseRoot), /release coordinator environment is unsafe/);
+  }
   const modulePath = path.join(__dirname, '..', 'provider-egress-broker.js');
   const child = spawnSync(process.execPath, ['-e', `
     const { rejectUnsafeEnvironment } = require(${JSON.stringify(modulePath)});
