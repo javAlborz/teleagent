@@ -18,6 +18,10 @@ test('provider libexec manifest pins the complete reviewed install closure', () 
   const lines = fs.readFileSync(MANIFEST, 'utf8').trim().split('\n');
   const targets = new Set();
   let hasModelProfile = false;
+  const providerCli = JSON.parse(fs.readFileSync(path.join(
+    ROOT, 'deploy', 'worker-session', 'provider-cli.manifest.json'), 'utf8'));
+  const codexWrapper = providerCli.artifacts.find((artifact) => artifact.id === 'codex-wrapper');
+  assert.equal(codexWrapper?.mode, '0755');
   const requiredTargets = new Set([
     'teleagent-provider-cli-check',
     'teleagent-provider-canary',
@@ -49,6 +53,10 @@ test('provider libexec manifest pins the complete reviewed install closure', () 
       hasModelProfile = true;
       assert.equal(source, 'deploy/worker-session/teleagent-provider-model.apparmor');
       assert.equal(mode, '0444');
+    }
+    if (target === 'teleagent-provider-codex-cli-wrapper') {
+      assert.equal(source, 'deploy/worker-session/teleagent-codex-cli-wrapper');
+      assert.equal(mode, codexWrapper.mode);
     }
     if (target === 'teleagent-resource-admission') {
       assert.equal(source, 'deploy/worker-session/teleagent-resource-admission');
