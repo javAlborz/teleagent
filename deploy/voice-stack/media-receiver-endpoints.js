@@ -258,13 +258,14 @@ function preparePrivateCompose(document, contract, projection) {
   freeswitch.volumes.push(bind(`${runtimeRoot}/freeswitch-acl.conf.xml`,
     '/usr/local/freeswitch/conf/autoload_configs/acl.conf.xml'));
   const voice = candidate.services['voice-app'];
-  refuse(Array.isArray(voice.volumes) && voice.volumes.length === 5 &&
+  refuse(Array.isArray(voice.volumes) && voice.volumes.length === 6 &&
     voice.environment && Object.getPrototypeOf(voice.environment) === Object.prototype);
   for (const [source, target, readOnly] of [
     ['/etc/teleagent-isolated-voice/config', '/app/config', true],
     ['/var/lib/teleagent-isolated-voice', '/app/state', false],
     [`${runtimeRoot}/voice-secrets`, '/run/secrets', true],
     [`${runtimeRoot}/admission`, '/run/teleagent-media', true],
+    ['/run/teleagent-voice-egress', '/run/teleagent-voice-egress', true],
     ['/run/teleagent-controller', '/run/teleagent-controller', true],
   ]) {
     const match = voice.volumes.find((volume) => volume?.target === target);

@@ -241,6 +241,7 @@ services:
       # agent/controller processes receive only their own public/verifier data.
       - /run/teleagent-isolated-voice-stack/voice-secrets:/run/secrets:ro
       - /run/teleagent-isolated-voice-stack/admission:/run/teleagent-media:ro
+      - /run/teleagent-voice-egress:/run/teleagent-voice-egress:ro
       - /run/teleagent-controller:/run/teleagent-controller:ro
     depends_on:
       - drachtio

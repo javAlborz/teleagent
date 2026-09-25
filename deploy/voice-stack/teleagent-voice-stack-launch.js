@@ -1004,6 +1004,36 @@ function publishReceiverRuntimeAdmission(activationGeneration, lifecycleFd) {
   }
 }
 
+function publishVoiceEgressAdmission(activationGeneration, lifecycleFd) {
+  if (!Number.isSafeInteger(activationGeneration) || activationGeneration < 1 ||
+      !Number.isSafeInteger(lifecycleFd) || lifecycleFd < 3) {
+    refuse('voice egress publication has no activation generation or lifecycle lock');
+  }
+  inspectRootPath(MEDIA_RUNTIME_PREPARER, { mode: 0o555, nlink: 1 });
+  const result = spawnSync(MEDIA_RUNTIME_PREPARER,
+    ['publish-egress', String(activationGeneration)], {
+      encoding: 'utf8', timeout: 30000, maxBuffer: 4096,
+      env: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C', LC_ALL: 'C' },
+      stdio: ['ignore', 'pipe', 'pipe', lifecycleFd],
+    });
+  if (result.error || result.status !== 0 ||
+      Buffer.byteLength(result.stdout || '') > 1024) {
+    refuse('independent voice egress publication refused');
+  }
+  let published;
+  try { published = JSON.parse(result.stdout); } catch {
+    refuse('independent voice egress publication is unreadable');
+  }
+  if (!published || Object.keys(published).sort().join(' ') !==
+      'egressDigest generation phase startReleased' ||
+      published.phase !== 'egress-published' ||
+      published.generation !== activationGeneration ||
+      !/^sha256:[a-f0-9]{64}$/u.test(published.egressDigest) ||
+      published.startReleased !== false) {
+    refuse('independent voice egress publication has unexpected evidence');
+  }
+}
+
 function publishContainerAdmission(ownership, lifecycleFd, stage) {
   if (!Number.isSafeInteger(lifecycleFd) || lifecycleFd < 3 ||
       !['created', 'running'].includes(stage) ||
@@ -1671,6 +1701,7 @@ async function start(lifecycleFd) {
     verifyRunningProjectProcessIdentities(identities, { environment });
     publishRunningContainerAdmission(ownership, lifecycleFd);
     publishReceiverRuntimeAdmission(startingState.activationGeneration, lifecycleFd);
+    publishVoiceEgressAdmission(startingState.activationGeneration, lifecycleFd);
     await waitForHealth();
     verifyRunningProjectProcessIdentities(identities, { environment });
     verifyExactProjectContainerBoundary(
@@ -1765,7 +1796,7 @@ async function stop() {
     ownedVoice.imageId
   );
   try {
-    run(DOCKER, composeArgs('stop', '--timeout', '25', 'voice-app'), {
+    run(DOCKER, privateComposeArgs('stop', '--timeout', '25', 'voice-app'), {
       environment,
       timeoutMs: 40000,
     });
@@ -1773,7 +1804,7 @@ async function stop() {
       'inspect', '--format', '{{.State.Status}} {{.State.ExitCode}}', ownedVoice.containerId,
     ], { capture: true, environment, timeoutMs: 10000 }).stdout.trim();
     assertVoiceExit(inspection);
-    run(DOCKER, composeArgs('down', '--timeout', '10', '--remove-orphans'), {
+    run(DOCKER, privateComposeArgs('down', '--timeout', '10', '--remove-orphans'), {
       environment,
       timeoutMs: 20000,
     });

@@ -12,6 +12,18 @@ const {
   validateVoiceRuntimePreflight,
 } = require('../lib/voice-runtime-preflight');
 const { SECRET_PATHS } = require('../lib/runtime-secrets');
+const { canonical, digest } = require('../../lib/media-receiver-runtime');
+const { successEvidence } = require('../voice-runtime-preflight');
+
+test('successful image preflight emits only the canonical TLS root digest', () => {
+  const roots = ['-----BEGIN CERTIFICATE-----\nunit-test\n-----END CERTIFICATE-----'];
+  assert.equal(successEvidence(roots), canonical({
+    schema: 'teleagent.voice-preflight-ca-evidence.v1',
+    caDigest: digest(canonical(roots)),
+  }));
+  assert.throws(() => successEvidence([]));
+  assert.throws(() => successEvidence(['not a certificate']));
+});
 
 const UID = 989;
 const GID = 989;

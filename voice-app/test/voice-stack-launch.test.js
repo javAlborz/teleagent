@@ -564,7 +564,7 @@ test('wrapper never puts credentials in Docker argv or inherited environment', (
   assert.doesNotMatch(source, /composeArgs\([^)]*(?:secret|token|password)/i);
   assert.match(source, /--env-file', '\/dev\/null'/);
   assert.match(source, /--no-build', '--pull', 'never'/);
-  assert.match(source, /assertPanicQuiesced\(panic\)[\s\S]*assertVoiceExit\(inspection\)[\s\S]*composeArgs\('down'/);
+  assert.match(source, /assertPanicQuiesced\(panic\)[\s\S]*assertVoiceExit\(inspection\)[\s\S]*privateComposeArgs\('down'/);
   assert.match(source, /requireControllerReady\(controllerControlToken\)/);
   assert.match(source, /requireExecutorReady\(executorReadinessToken\)/);
   assert.match(source, /body\?\.phoneAuthority\?\.mode !== 'read_only'/);
@@ -596,6 +596,8 @@ test('wrapper never puts credentials in Docker argv or inherited environment', (
     ['publishRunningContainerAdmission(ownership, lifecycleFd)',
       'publishReceiverRuntimeAdmission(startingState.activationGeneration, lifecycleFd)'],
     ['publishReceiverRuntimeAdmission(startingState.activationGeneration, lifecycleFd)',
+      'publishVoiceEgressAdmission(startingState.activationGeneration, lifecycleFd)'],
+    ['publishVoiceEgressAdmission(startingState.activationGeneration, lifecycleFd)',
       'await waitForHealth()'],
     ['await waitForHealth()', "persistActivationState('active'"],
     ['resolveVoiceIdentities()', 'verifyBoundedHostStateFilesystem(identity)'],
@@ -874,6 +876,11 @@ test('created container ownership binds all four full IDs before voice startup',
     source.indexOf("privateComposeArgs('up'"));
   assert.ok(source.indexOf('publishRunningContainerAdmission(ownership, lifecycleFd);') <
     source.indexOf('await waitForHealth()'));
+  const stopBody = source.slice(source.indexOf('async function stop() {'),
+    source.indexOf('function cleanup() {'));
+  assert.match(stopBody, /privateComposeArgs\('stop'/u);
+  assert.match(stopBody, /privateComposeArgs\('down'/u);
+  assert.doesNotMatch(stopBody, /run\(DOCKER, composeArgs\(/u);
 });
 
 test('activation state replacement is file-synced, renamed, then directory-synced', () => {
