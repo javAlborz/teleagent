@@ -36,6 +36,7 @@ from release_closure import (
     REALTIME_SIP_NODE_MODULES_PATH,
     ClosureError,
     canonical_json_bytes,
+    parse_file_list,
     verify_release,
 )
 
@@ -650,10 +651,27 @@ def compare_and_publish(
     second_digest, second_manifest = verify_release(second_root)
     first_bundle_digest, first_bundle_size = _sha256_file(first_bundle)
     second_bundle_digest, second_bundle_size = _sha256_file(second_bundle)
-    if first_digest != second_digest or first_manifest != second_manifest or \
-            (first_root / MANIFEST_NAME).read_bytes() != (second_root / MANIFEST_NAME).read_bytes() or \
-            (first_root / FILE_LIST_NAME).read_bytes() != (second_root / FILE_LIST_NAME).read_bytes() or \
-            first_bundle_digest != second_bundle_digest or first_bundle_size != second_bundle_size:
+    first_inventory = (first_root / FILE_LIST_NAME).read_bytes()
+    second_inventory = (second_root / FILE_LIST_NAME).read_bytes()
+    same_manifest = (first_digest == second_digest and first_manifest == second_manifest and
+                     (first_root / MANIFEST_NAME).read_bytes() ==
+                     (second_root / MANIFEST_NAME).read_bytes())
+    same_bundle = (first_bundle_digest == second_bundle_digest and
+                   first_bundle_size == second_bundle_size)
+    if not same_manifest or first_inventory != second_inventory or not same_bundle:
+        if first_inventory != second_inventory:
+            first_entries = {item.path: item for item in parse_file_list(first_inventory)}
+            second_entries = {item.path: item for item in parse_file_list(second_inventory)}
+            changed = sorted(
+                path for path in first_entries.keys() | second_entries.keys()
+                if first_entries.get(path) != second_entries.get(path)
+            )
+            sys.stderr.write(
+                f"release inventory differs at {len(changed)} paths; "
+                f"first 20: {', '.join(changed[:20])}\n"
+            )
+        else:
+            sys.stderr.write("release inventories match; manifest or bundle differs\n")
         raise _error("two fresh release assemblies are not byte-identical")
     scan_digest, scan_size = _assert_clean_scan(scan_path)
     if output.exists() or output.is_symlink():
