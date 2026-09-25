@@ -315,17 +315,17 @@ install_staged_dependencies() {
 }
 
 build_voice_image() {
-  local image_tag=$1
-  if docker image inspect -- "${image_tag}" >/dev/null 2>&1; then
+  local requested_image_tag=$1
+  if docker image inspect -- "${requested_image_tag}" >/dev/null 2>&1; then
     fail 'the exact temporary voice image tag already exists on the CI guest'
   fi
-  current_image_tag="${image_tag}"
+  current_image_tag="${requested_image_tag}"
   timeout --signal=TERM --kill-after=30s 1800s \
     docker build --pull --no-cache --platform linux/amd64 \
       --build-arg "TELEAGENT_SOURCE_REVISION=${source_revision}" \
-      --tag "${image_tag}" --file voice-app/Dockerfile .
+      --tag "${requested_image_tag}" --file voice-app/Dockerfile .
   local inspection="${work_root}/image-inspection.json"
-  docker image inspect -- "${image_tag}" > "${inspection}"
+  docker image inspect -- "${requested_image_tag}" > "${inspection}"
   local image_id
   image_id="$(jq -er '.[0].Id' "${inspection}")"
   [[ "${image_id}" =~ ^sha256:[a-f0-9]{64}$ ]] \
@@ -340,7 +340,7 @@ build_voice_image() {
 
 assemble_release() {
   local round=$1
-  local image_tag=$2
+  local requested_image_tag=$2
   local config_digest=$3
   local staging_root="${work_root}/${round}/release"
   local build_input="${work_root}/${round}/build-input.json"
@@ -354,12 +354,12 @@ assemble_release() {
     || fail "pinned CI tools changed before ${round} SBOM generation"
   mkdir -p -- "${staging_root}/artifacts/voice" "${staging_root}/artifacts/sbom"
   docker image save --output \
-    "${staging_root}/artifacts/voice/voice-image.docker.tar" "${image_tag}"
+    "${staging_root}/artifacts/voice/voice-image.docker.tar" "${requested_image_tag}"
   python3 "${support_script}" write-voice-manifest \
     --destination "${staging_root}/artifacts/voice/voice-image.manifest.json" \
     --revision "${source_revision}" --config-digest "${config_digest}"
   timeout --signal=TERM --kill-after=20s 600s \
-    "${syft_path}" scan "docker:${image_tag}" --source-name teleagent-voice \
+    "${syft_path}" scan "docker:${requested_image_tag}" --source-name teleagent-voice \
       --source-version "${source_revision}" \
       --output "cyclonedx-json@1.6=${raw_voice_sbom}"
   python3 "${support_script}" normalize-sbom --source "${raw_voice_sbom}" \

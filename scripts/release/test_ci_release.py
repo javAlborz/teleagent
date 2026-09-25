@@ -799,6 +799,7 @@ class CiReleaseTests(unittest.TestCase):
         self.assertIn("--scanners vuln,secret", builder)
         self.assertIn("--severity HIGH,CRITICAL --exit-code 1", builder)
         self.assertEqual(len(re.findall(r"(?m)^build_voice_image \"\$\{image_tag\}\"$", builder)), 2)
+        self.assertNotIn("local image_tag=", builder)
         self.assertIn('assemble_release first "${image_tag}"', builder)
         self.assertIn('assemble_release second "${image_tag}"', builder)
         self.assertNotIn("npm_ci", builder)
