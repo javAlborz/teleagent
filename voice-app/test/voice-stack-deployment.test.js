@@ -464,6 +464,18 @@ test('voice identity accepts four distinct private nologin peers with no ID reus
   }), /differs from the exact local database contract/);
 });
 
+test('voice identity permits a user ID to equal an unrelated group ID', () => {
+  const fixture = identityFixture({
+    voiceUser: 'teleagent-voice:x:996:991:Teleagent:/var/lib/teleagent-voice:/usr/sbin/nologin',
+    extraGroups: ['input:x:996:'],
+  });
+  assert.deepEqual(validateIdentityRecords(fixture.passwd, fixture.group).voice,
+    { name: 'teleagent-voice', uid: 996, gid: 991 });
+  const duplicateUser = `${fixture.passwd}intruder:x:996:998:Reuse:/nonexistent:/usr/sbin/nologin\n`;
+  assert.throws(() => validateIdentityRecords(duplicateUser, fixture.group),
+    /numeric identity is reused/);
+});
+
 test('voice identity rejects duplicate, reused, login-capable, and supplementary identities', () => {
   const invalid = [
     identityFixture({ extraPasswd: [
