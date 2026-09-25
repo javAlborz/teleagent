@@ -1,5 +1,4 @@
 [Unit]
-StopWhenUnneeded=no
 Description=Aggregate resource boundary for Teleagent voice containers
 Documentation=file:/opt/teleagent/current/docs/PHONE-AGENT-ARCHITECTURE.md
 StopWhenUnneeded=yes

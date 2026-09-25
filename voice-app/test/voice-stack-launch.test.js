@@ -1182,11 +1182,12 @@ test('dormant systemd gate binds the private voice identity and every prerequisi
   assert.match(unit,
     /^ExecStopPost=\/usr\/bin\/python3 -I \/usr\/local\/libexec\/verify-teleagent-release-closure --cleanup-voice-stack$/m);
   assert.match(unit, /^NoNewPrivileges=yes$/m);
+  assert.match(unit, /^Slice=teleagent-voice\.slice$/m);
   assert.match(unit, /^CPUQuota=100%$/m);
-  assert.match(unit, /^MemoryHigh=384M$/m);
-  assert.match(unit, /^MemoryMax=512M$/m);
+  assert.match(unit, /^MemoryHigh=201326592$/m);
+  assert.match(unit, /^MemoryMax=268435456$/m);
   assert.match(unit, /^MemorySwapMax=0$/m);
-  assert.match(unit, /^TasksMax=128$/m);
+  assert.match(unit, /^TasksMax=64$/m);
   assert.match(unit, /^IOWeight=50$/m);
   assert.match(unit, /^ReadOnlyPaths=.*\/etc\/teleagent-isolated-voice(?:\s|$)/m);
   assert.match(unit, /^ReadWritePaths=.*\/var\/lib\/teleagent-isolated-voice$/m);
@@ -1197,8 +1198,8 @@ test('dormant systemd gate binds the private voice identity and every prerequisi
   for (const expected of [
     /^StopWhenUnneeded=yes$/m,
     /^CPUQuota=300%$/m,
-    /^MemoryHigh=2560M$/m,
-    /^MemoryMax=3G$/m,
+    /^MemoryHigh=2684354560$/m,
+    /^MemoryMax=3221225472$/m,
     /^MemorySwapMax=0$/m,
     /^TasksMax=1024$/m,
     /^IOWeight=50$/m,
