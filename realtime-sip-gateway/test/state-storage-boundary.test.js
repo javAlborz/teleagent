@@ -64,7 +64,7 @@ function initializationFixture(overrides = {}) {
     `state_root=${SIP_STATE_ROOT}`,
     `database_path=${SIP_STATE_DATABASE}`,
     `singleton_path=${SIP_STATE_SINGLETON}`,
-    'state_dev=2',
+    `state_dev=${overrides.markerDev ?? 2}`,
     'database_ino=30',
     'database_birthtime_ns=3000',
     'singleton_ino=31',
@@ -207,6 +207,9 @@ test('runtime binds both SQLite files to the root-authored initialization marker
   const initialized = inspectSipStateInitialization(valid.options);
   assert.equal(initialized.database.ino, 30n);
   assert.equal(initialized.singleton.ino, 31n);
+
+  const remounted = initializationFixture({ markerDev: 7 });
+  assert.equal(inspectSipStateInitialization(remounted.options).database.ino, 30n);
 
   const replaced = initializationFixture({ databaseIno: 33 });
   assert.throws(() => inspectSipStateInitialization(replaced.options), {
