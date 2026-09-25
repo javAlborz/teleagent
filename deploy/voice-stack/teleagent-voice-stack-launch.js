@@ -32,6 +32,7 @@ const TAR = '/usr/bin/tar';
 const VOICE_IMAGE_ARCHIVE = `${APP_ROOT}/artifacts/voice/voice-image.docker.tar`;
 const IDENTITY_VERIFIER = '/usr/local/libexec/verify-voice-stack-identity';
 const MEDIA_APPLICATION_PUBLISHER = '/usr/local/libexec/commission-teleagent-media-application-contract';
+const MEDIA_RUNTIME_PREPARER = '/usr/local/libexec/stage-teleagent-media-runtime';
 const SYSTEMCTL = '/usr/bin/systemctl';
 const SIP_FENCE = '/usr/local/libexec/teleagent-sip-local-peer-fence';
 const PROVIDER_CLI_CHECK = '/usr/local/libexec/teleagent-provider-cli-check';
@@ -944,6 +945,35 @@ function projectPrivateCompose(contract, projection, environment) {
   });
 }
 
+function prepareHostRuntimeAdmission(activationGeneration, lifecycleFd) {
+  if (!Number.isSafeInteger(activationGeneration) || activationGeneration < 1 ||
+      !Number.isSafeInteger(lifecycleFd) || lifecycleFd < 3) {
+    refuse('voice runtime preparation has no activation generation or lifecycle lock');
+  }
+  inspectRootPath(MEDIA_RUNTIME_PREPARER, { mode: 0o555, nlink: 1 });
+  const result = spawnSync(MEDIA_RUNTIME_PREPARER,
+    ['prepare', String(activationGeneration)], {
+      encoding: 'utf8', timeout: 30000, maxBuffer: 4096,
+      env: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C', LC_ALL: 'C' },
+      stdio: ['ignore', 'pipe', 'pipe', lifecycleFd],
+    });
+  if (result.error || result.status !== 0 ||
+      Buffer.byteLength(result.stdout || '') > 1024) {
+    refuse('independent voice runtime preparation refused');
+  }
+  let prepared;
+  try { prepared = JSON.parse(result.stdout); } catch {
+    refuse('independent voice runtime preparation is unreadable');
+  }
+  if (!prepared || Object.keys(prepared).sort().join(' ') !==
+      'generation phase runtimePublished' ||
+      prepared.phase !== 'prepared' ||
+      prepared.generation !== activationGeneration ||
+      prepared.runtimePublished !== false) {
+    refuse('independent voice runtime preparation has unexpected evidence');
+  }
+}
+
 function publishContainerAdmission(ownership, lifecycleFd, stage) {
   if (!Number.isSafeInteger(lifecycleFd) || lifecycleFd < 3 ||
       !['created', 'running'].includes(stage) ||
@@ -1199,6 +1229,7 @@ function requireActiveUnit(unit) {
 }
 
 function removeRuntimeProjection() {
+  fs.rmSync(`${RUNTIME_ROOT}/admission`, { recursive: true, force: true });
   fs.rmSync(RUNTIME_SECRET_ROOT, { recursive: true, force: true });
   for (const filename of [
     `${RUNTIME_ROOT}/drachtio.conf.xml`,
@@ -1578,6 +1609,7 @@ async function start(lifecycleFd) {
   try {
     const credentials = readCredentialSet(identity);
     projectRuntime(identities, credentials, receiverProjection);
+    prepareHostRuntimeAdmission(startingState.activationGeneration, lifecycleFd);
     const contract = loadAdmission(APP_ROOT, 'bootstrap-app',
       receiverProjection.configurationDigest, { lifecycleFd });
     projectPrivateCompose(contract, receiverProjection, environment);

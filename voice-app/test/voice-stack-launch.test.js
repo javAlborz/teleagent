@@ -586,6 +586,8 @@ test('wrapper never puts credentials in Docker argv or inherited environment', (
     ['beginActivation: true', "privateComposeArgs('create'"],
     ['requireActiveUnit(CONTAINER_SLICE)', "privateComposeArgs('create'"],
     ['requireDockerCgroupBoundary()', "privateComposeArgs('create'"],
+    ['prepareHostRuntimeAdmission(startingState.activationGeneration, lifecycleFd)',
+      "privateComposeArgs('create'"],
     ['projectPrivateCompose(contract, receiverProjection, environment)', "privateComposeArgs('create'"],
     ["privateComposeArgs('create'", 'verifyExactProjectContainerBoundary('],
     ['verifyExactProjectContainerBoundary(', "privateComposeArgs('up'"],
