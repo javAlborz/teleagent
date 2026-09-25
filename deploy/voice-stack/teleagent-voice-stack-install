@@ -470,6 +470,8 @@ install_disabled() {
     fail 'the installed voice identity did not verify'
   assert_disabled
   complete=1
+  /usr/bin/rm -rf -- "$staging"
+  trap - EXIT INT TERM
   printf 'VOICE_STACK_INSTALLED_DISABLED\n'
 }
 
