@@ -23,7 +23,9 @@ The module implements concrete preparation and verification operations:
   restart and cutover remain refused.
 - Produce a complete resolved Compose candidate whose three running voice
   services use `network_mode: container:<full anchor ID>`, exact local image
-  IDs, explicit host user namespaces and disabled container health checks.
+  IDs, distinct `teleagent-isolated-*` container names, explicit host user
+  namespaces and disabled container health checks. The distinct names permit
+  pre-cutover creation while the legacy containers retain their global names.
   Conflicting hostname, published-port, DNS, additional-host, link and other
   network settings are refused. Commands, environments and mounts are copied
   unchanged. The candidate must not be launched until the remaining gates below

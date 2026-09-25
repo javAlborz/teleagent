@@ -13,6 +13,11 @@ const AUTHORITY = '/usr/local/libexec/verify-teleagent-media-application';
 const BOOT = '/proc/sys/kernel/random/boot_id';
 const SOURCE_DIGEST = 'sha256:36dada2904ba928ef6189a8a1de5545876690f3cb2eecec8c36c37c1eb8c75dd';
 const SERVICES = Object.freeze(['drachtio', 'freeswitch', 'voice-app']);
+const ISOLATED_NAMES = Object.freeze({
+  drachtio: 'teleagent-isolated-drachtio',
+  freeswitch: 'teleagent-isolated-freeswitch',
+  'voice-app': 'teleagent-isolated-voice-app',
+});
 const PEERS = Object.freeze(['asterisk', 'drachtio', 'freeswitch', 'voice']);
 const LIMITS = Object.freeze({
   drachtio: [402653184, 1000000000, 256],
@@ -159,9 +164,13 @@ function exactComposeCandidate(document, contract) {
   for (const service of SERVICES) {
     const config = candidate.services[service];
     need(config && FORBIDDEN.every((name) => !(name in config)) &&
-      ['host', undefined].includes(config.network_mode));
+      ['host', undefined].includes(config.network_mode) &&
+      [service, undefined].includes(config.container_name));
     const peer = service === 'voice-app' ? 'voice' : service;
     config.network_mode = contract.bootstrap.services[peer].networkMode;
+    // Legacy keeps the three global names while its call path is active.
+    // Separate names let the isolated project be created and checked first.
+    config.container_name = ISOLATED_NAMES[service];
     config.image = contract.workloads[service].imageId;
     config.userns_mode = 'host';
     config.healthcheck = { disable: true };

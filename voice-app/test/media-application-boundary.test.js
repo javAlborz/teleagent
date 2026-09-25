@@ -82,7 +82,8 @@ test('contract binds immutable boot, release, four distinct anchors and approved
 test('candidate selects exact IDs and keeps commands, credentials and all FreeSWITCH volumes unchanged', () => {
   const original = { services: { 'voice-runtime-preflight': { network_mode: 'none' } } };
   for (const service of Object.keys(IDS)) original.services[service] = {
-    image: 'old', network_mode: 'host', command: ['fixed'], environment: { FIXED: 'value' },
+    image: 'old', network_mode: 'host', container_name: service,
+    command: ['fixed'], environment: { FIXED: 'value' },
     volumes: ['freeswitch-conf:/etc/freeswitch', 'freeswitch-log:/var/log/freeswitch', 'freeswitch-db:/var/lib/freeswitch/db'],
   };
   const contract = fixture();
@@ -90,6 +91,8 @@ test('candidate selects exact IDs and keeps commands, credentials and all FreeSW
   for (const service of Object.keys(IDS)) {
     assert.match(result.services[service].network_mode, /^container:[a-f0-9]{64}$/u);
     assert.equal(result.services[service].userns_mode, 'host');
+    assert.equal(result.services[service].container_name, `teleagent-isolated-${service}`);
+    assert.equal(original.services[service].container_name, service);
     assert.deepEqual(result.services[service].healthcheck, { disable: true });
     for (const key of ['command', 'environment', 'volumes']) assert.deepEqual(result.services[service][key], original.services[service][key]);
     assert.equal(original.services[service].network_mode, 'host');
@@ -98,6 +101,9 @@ test('candidate selects exact IDs and keeps commands, credentials and all FreeSW
     const changed = structuredClone(original); changed.services.drachtio[field] = [];
     assert.throws(() => boundary.exactComposeCandidate(changed, contract));
   }
+  const conflicting = structuredClone(original);
+  conflicting.services['voice-app'].container_name = 'voice-app-other';
+  assert.throws(() => boundary.exactComposeCandidate(conflicting, contract));
 });
 
 test('container metadata refuses image, network, sandbox, restart and resource drift', () => {
