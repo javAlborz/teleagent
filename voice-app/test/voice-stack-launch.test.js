@@ -860,6 +860,10 @@ test('created container ownership binds all four full IDs before voice startup',
     source.indexOf("privateComposeArgs('create'"));
   assert.ok(source.indexOf('persistCreatedContainerOwnership(ownership);') <
     source.indexOf("privateComposeArgs('up'"));
+  assert.ok(source.indexOf('publishCreatedContainerAdmission(ownership, lifecycleFd);') >
+    source.indexOf('persistCreatedContainerOwnership(ownership);'));
+  assert.ok(source.indexOf('publishCreatedContainerAdmission(ownership, lifecycleFd);') <
+    source.indexOf("privateComposeArgs('up'"));
 });
 
 test('activation state replacement is file-synced, renamed, then directory-synced', () => {

@@ -9,7 +9,7 @@ const { spawnSync } = require('node:child_process');
 const { requireRuntimeIntegration } = require('./media-application-boundary');
 const { prepareProtectedReceiverEndpoints, preparePrivateCompose,
   materializePrivateReceiverFiles } = require('./media-receiver-endpoints');
-const { loadAdmission } = require('./media-application-boundary');
+const { loadAdmission, verifyProtectedPlacement } = require('./media-application-boundary');
 
 const IMMUTABLE_RELEASE_ROOT = /^\/opt\/teleagent\/releases\/sha256-[a-f0-9]{64}$/u;
 // Unit starts receive this from the infrastructure-owned release launcher.
@@ -31,6 +31,7 @@ const DOCKER = '/usr/bin/docker';
 const TAR = '/usr/bin/tar';
 const VOICE_IMAGE_ARCHIVE = `${APP_ROOT}/artifacts/voice/voice-image.docker.tar`;
 const IDENTITY_VERIFIER = '/usr/local/libexec/verify-voice-stack-identity';
+const MEDIA_APPLICATION_PUBLISHER = '/usr/local/libexec/commission-teleagent-media-application-contract';
 const SYSTEMCTL = '/usr/bin/systemctl';
 const SIP_FENCE = '/usr/local/libexec/teleagent-sip-local-peer-fence';
 const PROVIDER_CLI_CHECK = '/usr/local/libexec/teleagent-provider-cli-check';
@@ -943,6 +944,45 @@ function projectPrivateCompose(contract, projection, environment) {
   });
 }
 
+function publishCreatedContainerAdmission(ownership, lifecycleFd) {
+  if (!Number.isSafeInteger(lifecycleFd) || lifecycleFd < 3 ||
+      !Number.isSafeInteger(ownership?.activationGeneration) ||
+      ownership.activationGeneration < 1 || !Array.isArray(ownership.services) ||
+      ownership.services.length !== VOICE_SERVICES.length) {
+    refuse('created media admission has no retained ownership or lifecycle lock');
+  }
+  inspectRootPath(MEDIA_APPLICATION_PUBLISHER, { mode: 0o555, nlink: 1 });
+  const result = spawnSync(MEDIA_APPLICATION_PUBLISHER,
+    ['created', String(ownership.activationGeneration)], {
+      encoding: 'utf8', timeout: 30000, maxBuffer: 8192,
+      env: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C', LC_ALL: 'C' },
+      stdio: ['ignore', 'pipe', 'pipe', lifecycleFd],
+    });
+  if (result.error || result.status !== 0 ||
+      Buffer.byteLength(result.stdout || '') > 4096) {
+    refuse('independent created media admission refused');
+  }
+  let admitted;
+  try { admitted = JSON.parse(result.stdout); } catch {
+    refuse('independent created media admission is unreadable');
+  }
+  if (!admitted || Object.keys(admitted).sort().join(' ') !==
+      'applicationStarted contractDigest observationDigest phase sandboxPlacementAdmitted' ||
+      admitted.phase !== 'created' || admitted.applicationStarted !== false ||
+      admitted.sandboxPlacementAdmitted !== true ||
+      !/^sha256:[a-f0-9]{64}$/u.test(admitted.contractDigest) ||
+      !/^sha256:[a-f0-9]{64}$/u.test(admitted.observationDigest)) {
+    refuse('independent created media admission has unexpected evidence');
+  }
+  const placements = Object.fromEntries(ownership.services
+    .filter((row) => row.service !== 'voice-runtime-preflight')
+    .map((row) => [row.service, row.containerId]));
+  verifyProtectedPlacement(APP_ROOT, placements, 'created', {
+    lifecycleFd, hostEvidenceDigest: admitted.observationDigest,
+  });
+  return admitted.observationDigest;
+}
+
 function requestJson({
   method,
   pathname,
@@ -1544,6 +1584,7 @@ async function start(lifecycleFd) {
     )) !== JSON.stringify(ownership)) {
       refuse('created voice container identities changed before start');
     }
+    publishCreatedContainerAdmission(ownership, lifecycleFd);
     // `up` retains Compose's preflight completion dependency after the
     // separately inspected create phase.
     run(DOCKER, privateComposeArgs('up', '--detach', '--no-build', '--pull', 'never'), { environment });
