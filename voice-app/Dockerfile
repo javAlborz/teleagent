@@ -14,9 +14,10 @@ FROM node:24-alpine@sha256:2a49bdf71e9fd965a58c1703fd9ddd205b34e5782b692a72dd1d2
 # The generic Node image includes npm/yarn tooling that the production voice
 # process never invokes. Remove that executable package-manager surface and
 # pin the currently fixed Alpine OpenSSL libraries in the runtime stage.
-RUN apk add --no-cache --upgrade \
+RUN apk add --no-cache --no-scripts --upgrade \
       libcrypto3=3.5.8-r0 \
       libssl3=3.5.8-r0 \
+    && rm -f /var/log/apk.log \
     && rm -rf /usr/local/lib/node_modules/npm /opt/yarn-v* \
     && rm -f \
       /usr/local/bin/corepack \
