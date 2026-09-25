@@ -217,7 +217,7 @@ PRIVILEGED_BROKER_NATIVE_MODULE_PATHS = (
 REALTIME_SIP_LOCK_PATH = "realtime-sip-gateway/package-lock.json"
 REALTIME_SIP_NODE_MODULES_PATH = "realtime-sip-gateway/node_modules"
 REALTIME_SIP_NATIVE_MODULE_PATHS = (
-    "realtime-sip-gateway/node_modules/better-sqlite3/build/Release/better_sqlite3.node",
+    "realtime-sip-gateway/node_modules/better-sqlite3/prebuilds/linux-x64.node",
 )
 
 PROVIDER_ARTIFACT_IDS = ("claude", "codex-wrapper", "codex-vendor")
