@@ -18,6 +18,7 @@ const {
   cleanupExactProject,
   cleanupRequiresPanicRecovery,
   captureCreatedContainerOwnership,
+  fixedDockerEnvironment,
   normalizeActivationState,
   normalizeContainerOwnership,
   normalizeVoiceImageManifest,
@@ -685,9 +686,7 @@ test('activation state is canonical, image-bound, generation-monotonic, and miss
     interruptedStartRecoveredAt: null,
     updatedAt: '2026-08-26T12:34:56.789Z',
   };
-  assert.deepEqual(normalizeActivationState(`${JSON.stringify(active)}\n`, {
-    resolveImageId: () => IMAGE_MANIFEST.configDigest,
-  }), active);
+  assert.deepEqual(normalizeActivationState(`${JSON.stringify(active)}\n`), active);
   assert.equal(activationGenerationForTransition(active, false), 7);
   assert.equal(activationGenerationForTransition(active, true), 8);
   assert.equal(activationGenerationForTransition(null, true), 1);
@@ -788,9 +787,19 @@ test('created container ownership binds all four full IDs before voice startup',
     interruptedStartRecoveredAt: null, updatedAt: '2026-08-26T12:34:56.789Z',
     containerOwnership: expected,
   };
-  assert.deepEqual(normalizeActivationState(`${JSON.stringify(active)}\n`, {
-    resolveImageId: () => IMAGE_MANIFEST.configDigest,
-  }), active);
+  assert.deepEqual(normalizeActivationState(`${JSON.stringify(active)}\n`), active);
+  const priorImageId = `sha256:${'5'.repeat(64)}`;
+  const upgraded = {
+    ...active,
+    containerOwnership: {
+      ...expected,
+      services: expected.services.map((row) => row.service === 'voice-app' ?
+        { ...row, imageId: priorImageId } : row),
+    },
+  };
+  assert.deepEqual(normalizeActivationState(`${JSON.stringify(upgraded)}\n`), upgraded);
+  assert.equal(fixedDockerEnvironment({}, IMAGE_MANIFEST, generation, priorImageId)
+    .TELEAGENT_VOICE_IMAGE, priorImageId);
   assert.equal(activationRequiresRecovery({ ...active, phase: 'inactive', cleanup: 'proved' }), false);
   assert.throws(() => normalizeActivationState(`${JSON.stringify({
     ...active, containerOwnership: null,

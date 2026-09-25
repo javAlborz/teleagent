@@ -123,10 +123,14 @@ function run(filename, args, {
   return result;
 }
 
-function fixedDockerEnvironment(settings = {}, imageManifest = null, activationGeneration = null) {
+function fixedDockerEnvironment(settings = {}, imageManifest = null, activationGeneration = null,
+  retainedImageId = null) {
   if (activationGeneration !== null &&
       (!Number.isSafeInteger(activationGeneration) || activationGeneration < 1)) {
     refuse('the voice activation generation is invalid');
+  }
+  if (retainedImageId !== null && !/^sha256:[a-f0-9]{64}$/u.test(retainedImageId)) {
+    refuse('the retained voice image ID is invalid');
   }
   return Object.freeze({
     ...settings,
@@ -136,7 +140,7 @@ function fixedDockerEnvironment(settings = {}, imageManifest = null, activationG
     LANG: 'C.UTF-8',
     LC_ALL: 'C.UTF-8',
     ...(imageManifest ? { TELEAGENT_VOICE_IMAGE: imageManifest.registryReference ||
-      resolveVoiceImageId(imageManifest) } : {}),
+      retainedImageId || resolveVoiceImageId(imageManifest) } : {}),
     ...(activationGeneration === null ? {} : {
       TELEAGENT_VOICE_ACTIVATION_GENERATION: String(activationGeneration),
     }),
@@ -674,7 +678,7 @@ function normalizeLegacyActivationState(state, text) {
   return Object.freeze({ ...state });
 }
 
-function normalizeActivationState(source, { resolveImageId = resolveVoiceImageId } = {}) {
+function normalizeActivationState(source) {
   const text = Buffer.isBuffer(source) ? source.toString('utf8') : String(source);
   if (Buffer.byteLength(text) > 8192 || /\r|\0/u.test(text)) {
     refuse('the durable voice activation state has invalid encoding');
@@ -716,8 +720,11 @@ function normalizeActivationState(source, { resolveImageId = resolveVoiceImageId
   }
   if (state.version === 3) {
     if (state.containerOwnership !== null) {
+      // Creation already compared this retained image ID with the accepted
+      // archive. A later release must still be able to read and recover it.
+      const retained = state.containerOwnership.services?.find((row) => row.service === 'voice-app');
       normalizeContainerOwnership(state.containerOwnership, state.activationGeneration,
-        imageManifest && resolveImageId(imageManifest));
+        retained?.imageId);
     } else if (state.phase === 'active') {
       refuse('active voice containers lack retained ownership');
     }
@@ -1601,7 +1608,8 @@ async function stop() {
   stoppingState = persistActivationState('stopping', { panic: 'quiesced', cleanup: 'required' });
   const imageManifest = stoppingState.imageManifest;
   const environment = fixedDockerEnvironment(
-    settings, imageManifest, stoppingState.activationGeneration
+    settings, imageManifest, stoppingState.activationGeneration,
+    stoppingState.containerOwnership?.services.find((row) => row.service === 'voice-app')?.imageId
   );
   try {
     run(DOCKER, composeArgs('stop', '--timeout', '25', 'voice-app'), {
@@ -1786,6 +1794,7 @@ module.exports = {
   cleanupExactProject,
   cleanupRequiresPanicRecovery,
   captureCreatedContainerOwnership,
+  fixedDockerEnvironment,
   normalizeActivationState,
   normalizeContainerOwnership,
   normalizeVoiceImageManifest,
