@@ -1,4 +1,4 @@
-# Isolated receiver consumers — dormant source candidate
+# Isolated receiver consumers and host start handshake
 
 The voice entrypoint now waits on a fixed root-owned, group-readable FIFO at
 `/run/teleagent-media/voice-start.fifo` before reading runtime admission or
@@ -7,12 +7,11 @@ constructing a secret-bearing client. The host must send exactly one canonical
 requires the subsequently loaded protected runtime record to name that same
 generation. The FIFO and record directory are intended to be mounted read-only
 from `/run/teleagent-isolated-voice-stack/admission`. An absent FIFO leaves the
-voice entrypoint closed in every mode, and the launcher still refuses activation.
+voice entrypoint closed in every mode. The host publisher records both receiver
+and Realtime egress admission before a separate one-use release step signals it.
 The admitted v2 projection supplies
 Drachtio control, FreeSWITCH ESL and fixed reverse ESL, audiofork, generated TTS,
-beeps and hold-music URLs. The launcher still refuses activation unconditionally.
-No host record writer, authority mint, credential, Docker operation or live
-commissioning is supplied by this entrypoint change.
+beeps and hold-music URLs. This source path has no live commissioning yet.
 
 ## Independent admission input
 
@@ -30,7 +29,7 @@ are validated in source:
   namespace device/inode of the consuming voice process.
 - `projection` and `projectionDigest`: the complete reviewed renderer output,
   still with `readyToLaunch: false`, matching the independently admitted topology.
-- `approvedRuntimeSources`: exact eighteen-path map named by `REQUIRED_SOURCES`,
+- `approvedRuntimeSources`: exact twenty-two-path map named by `REQUIRED_SOURCES`,
   including the actual pinned `drachtio-fsmrf` implementation. Every value is
   compared to bytes read from root-protected `/app` files before use.
 
@@ -53,11 +52,13 @@ unverified digest merely copied into a root file does not meet that contract.
 The application cannot independently observe Docker image identity or effective
 nft rules; those proofs belong to the external host transaction.
 
-The entrypoint side of the start handshake is present, but no host writer or
-publication transaction is implemented. The authority must arrange and observe
-the blocked voice process identity while retaining its start fence, publish the
-exact record in the protected read-only mount, signal that exact generation,
-and retain/revoke authority through startup, restart and teardown. No
+The host helper now publishes receiver and egress records after running
+placement admission. Its `release-start` operation repeats that admission,
+rechecks the voice process, image, source bytes, Realtime socket and image CA
+evidence, writes a one-use `prepared` journal, then signals the exact media
+generation through the FIFO. It commits `released` only after the write. A
+crash after `prepared` requires explicit recovery; retrying cannot send a
+second signal. Full restart and teardown authority still needs live acceptance. No
 environment-variable path, caller-supplied fixture or writable volume may supply
 this record. Existing environment validation stays strict; endpoint overrides
 come only from the admitted projection, not environment settings. Installing
@@ -112,14 +113,14 @@ identity, prompt completion, DTMF approval or permission to execute work.
 
 ## Remaining acceptance work
 
-The host start/rollback/restart transaction, protected credential/template
-installation, effective image configuration, all listener readiness and panic
+The protected credential/template installation, effective image configuration,
+all listener readiness and panic
 transport, SIP trunk endpoint/authentication projection, Asterisk lifecycle and
 effective RTP evidence remain commissioning gates. So do exact provider WSS,
 legacy TTS/STT and outbound SIP egress with DNS/CA dependencies, isolated packet
 and actual Docker acceptance, resource acceptance and handset canaries. No host
 default route or provider permission is added here. All three FreeSWITCH volume
-definitions, controller transport and the launcher activation refusal remain.
+definitions and controller transport remain.
 
 The focused source suite uses synthetic root metadata/authority records,
 temporary media files and unprivileged local listener tests. It exercises

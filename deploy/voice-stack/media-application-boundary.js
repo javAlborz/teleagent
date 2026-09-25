@@ -350,15 +350,6 @@ function verifyProtectedPlacement(releaseRoot, placements, stage, {
   return observation;
 }
 
-function requireRuntimeIntegration() {
-  // This source slice intentionally cannot bless loopback-only SIP/ESL/media,
-  // host HTTP health probes, absent public WSS/legacy STT-TTS egress, or an
-  // uncoordinated Asterisk lifecycle. Those integrations need their own review.
-  const error = new Error('media endpoint, readiness, egress and coordinated PBX integration remain uncommissioned');
-  error.code = 'MEDIA_RUNTIME_UNCOMMISSIONED';
-  throw error;
-}
-
 module.exports = { CONTRACT, AUTHORITY, INSPECT, SOURCE_DIGEST, LIMITS, canonical, digest, validateContract,
   protectedFile, loadAdmission, exactComposeCandidate, profile, validateDocker, startTicks, kernelProcess,
-  kernelLimits, verifyTasks, verifyPlacement, verifyProtectedPlacement, requireRuntimeIntegration };
+  kernelLimits, verifyTasks, verifyPlacement, verifyProtectedPlacement };

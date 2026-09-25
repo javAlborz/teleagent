@@ -598,6 +598,8 @@ test('wrapper never puts credentials in Docker argv or inherited environment', (
     ['publishReceiverRuntimeAdmission(startingState.activationGeneration, lifecycleFd)',
       'publishVoiceEgressAdmission(startingState.activationGeneration, lifecycleFd)'],
     ['publishVoiceEgressAdmission(startingState.activationGeneration, lifecycleFd)',
+      'releaseHostVoiceStart(startingState.activationGeneration, lifecycleFd)'],
+    ['releaseHostVoiceStart(startingState.activationGeneration, lifecycleFd)',
       'await waitForHealth()'],
     ['await waitForHealth()', "persistActivationState('active'"],
     ['resolveVoiceIdentities()', 'verifyBoundedHostStateFilesystem(identity)'],

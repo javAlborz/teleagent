@@ -6,7 +6,6 @@ const fs = require('node:fs');
 const http = require('node:http');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
-const { requireRuntimeIntegration } = require('./media-application-boundary');
 const { prepareProtectedReceiverEndpoints, preparePrivateCompose,
   materializePrivateReceiverFiles } = require('./media-receiver-endpoints');
 const { loadAdmission, verifyProtectedPlacement } = require('./media-application-boundary');
@@ -1040,6 +1039,35 @@ function publishVoiceEgressAdmission(activationGeneration, lifecycleFd) {
   }
 }
 
+function releaseHostVoiceStart(activationGeneration, lifecycleFd) {
+  if (!Number.isSafeInteger(activationGeneration) || activationGeneration < 1 ||
+      !Number.isSafeInteger(lifecycleFd) || lifecycleFd < 3) {
+    refuse('voice start release has no activation generation or lifecycle lock');
+  }
+  inspectRootPath(MEDIA_RUNTIME_PREPARER, { mode: 0o555, nlink: 1 });
+  const result = spawnSync(MEDIA_RUNTIME_PREPARER,
+    ['release-start', String(activationGeneration)], {
+      encoding: 'utf8', timeout: 30000, maxBuffer: 4096,
+      env: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C', LC_ALL: 'C' },
+      stdio: ['ignore', 'pipe', 'pipe', lifecycleFd],
+    });
+  if (result.error || result.status !== 0 ||
+      Buffer.byteLength(result.stdout || '') > 1024) {
+    refuse('independent voice start release refused');
+  }
+  let released;
+  try { released = JSON.parse(result.stdout); } catch {
+    refuse('independent voice start release is unreadable');
+  }
+  if (!released || Object.keys(released).sort().join(' ') !==
+      'generation phase startReleased' ||
+      released.phase !== 'released' ||
+      released.generation !== activationGeneration ||
+      released.startReleased !== true) {
+    refuse('independent voice start release has unexpected evidence');
+  }
+}
+
 function publishContainerAdmission(ownership, lifecycleFd, stage) {
   if (!Number.isSafeInteger(lifecycleFd) || lifecycleFd < 3 ||
       !['created', 'running'].includes(stage) ||
@@ -1615,10 +1643,7 @@ function rollbackStartedStack(environment) {
 }
 
 async function start(lifecycleFd) {
-  // Receiver namespaces require coordinated endpoint/health/PBX integration.
-  // Source candidates cannot fall back to the old shared host-network plane.
   const receiverProjection = prepareProtectedReceiverEndpoints(APP_ROOT, { lifecycleFd });
-  requireRuntimeIntegration();
   for (const filename of [APP_ROOT, COMPOSE_FILE, `${APP_ROOT}/lib/voice-app-runtime-env.js`]) {
     inspectRootPath(filename, { directory: filename === APP_ROOT });
   }
@@ -1710,6 +1735,7 @@ async function start(lifecycleFd) {
     publishRunningContainerAdmission(ownership, lifecycleFd);
     publishReceiverRuntimeAdmission(startingState.activationGeneration, lifecycleFd);
     publishVoiceEgressAdmission(startingState.activationGeneration, lifecycleFd);
+    releaseHostVoiceStart(startingState.activationGeneration, lifecycleFd);
     await waitForHealth();
     verifyRunningProjectProcessIdentities(identities, { environment });
     verifyExactProjectContainerBoundary(

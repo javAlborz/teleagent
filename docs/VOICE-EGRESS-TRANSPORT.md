@@ -78,8 +78,8 @@ unit closure, destination and DNS policy, socket/mount ownership, resource
 admission, retained handles and the durable start/restart/stop generation. An
 application stat of a socket cannot prove these properties. No source fixture,
 self-reported digest or writable sentinel may create that authority. The record
-writer/start handshake and lifetime monitor remain unimplemented and activation
-is unconditionally refused.
+writer and one-use start handshake are now source-implemented; the live lifetime
+monitor and provider acceptance remain uncommissioned.
 
 The paired infra source defines a disabled native `systemd-socket-proxyd` unit
 for the exact OpenAI443 target, capped at eight connections. It does not decrypt

@@ -202,18 +202,19 @@ test('namespace scan retries only disappearing proc entries with a fixed bound',
   assert.throws(() => boundary.verifyTasks(contract, {}, io), /unreadable \/proc/u);
 });
 
-test('missing authority and unfinished runtime cannot fall back to legacy host networking', () => {
+test('missing authority and unpublished host start cannot fall back to legacy host networking', () => {
   assert.throws(() => boundary.loadAdmission(RELEASE, 'bootstrap', `sha256:${'0'.repeat(64)}`, {
     io: { lstatSync() { throw new Error('absent host authority'); } }, run() { assert.fail('must not execute'); },
   }));
-  assert.throws(() => boundary.requireRuntimeIntegration(), { code: 'MEDIA_RUNTIME_UNCOMMISSIONED' });
   const source = fs.readFileSync(path.join(__dirname, '../../deploy/voice-stack/teleagent-voice-stack-launch.js'), 'utf8');
   const start = source.slice(source.indexOf('async function start(lifecycleFd) {'),
     source.indexOf('async function stop() {'));
   assert.ok(start.indexOf('prepareProtectedReceiverEndpoints(APP_ROOT, { lifecycleFd });') <
-    start.indexOf('requireRuntimeIntegration();'));
-  assert.ok(start.indexOf('requireRuntimeIntegration();') < start.indexOf('cleanupExactProject();'));
-  assert.ok(start.indexOf('requireRuntimeIntegration();') < start.indexOf('readCredentialSet(identity)'));
+    start.indexOf('cleanupExactProject();'));
+  assert.ok(start.indexOf('publishVoiceEgressAdmission(startingState.activationGeneration, lifecycleFd);') <
+    start.indexOf('releaseHostVoiceStart(startingState.activationGeneration, lifecycleFd);'));
+  assert.ok(start.indexOf('releaseHostVoiceStart(startingState.activationGeneration, lifecycleFd);') <
+    start.indexOf('await waitForHealth();'));
 });
 
 test('host contract ownership and exact independent admission are mandatory', () => {
