@@ -89,6 +89,32 @@ test('private Compose projection binds receiver files and environment without br
   }
 });
 
+test('private receiver files parse with escaped credentials and no template slots', () => {
+  const { config, contract } = fixture('v2');
+  const projection = renderer.renderReceiverEndpoints(config, contract);
+  const drachtioSecret = 'Abc12345'.repeat(4) + '&"<>';
+  const freeswitchSecret = 'Xyz98765'.repeat(4) + "'&<>";
+  const files = renderer.materializePrivateReceiverFiles(projection, drachtioSecret, freeswitchSecret);
+  assert.deepEqual(Object.keys(files).sort(), [
+    'drachtio.conf.xml', 'freeswitch-acl.conf.xml', 'freeswitch-event-socket.conf.xml',
+    'freeswitch-mrf.xml', 'freeswitch-switch.conf.xml',
+  ]);
+  assert.doesNotMatch(Object.values(files).join(''), /__[A-Z_]+__/u);
+  const result = spawnSync('/usr/bin/python3', ['-I', '-c',
+    "import json,sys,xml.etree.ElementTree as E\n" +
+    "v=json.load(sys.stdin);docs={k:E.fromstring(x) for k,x in v['files'].items()}\n" +
+    "assert docs['drachtio.conf.xml'].find('admin').attrib['secret']==v['drachtio']\n" +
+    "rows=docs['freeswitch-event-socket.conf.xml'].findall('.//param')\n" +
+    "assert [r.attrib['value'] for r in rows if r.attrib['name']=='password']==[v['freeswitch']]\n"], {
+    input: JSON.stringify({ files, drachtio: drachtioSecret, freeswitch: freeswitchSecret }),
+    encoding: 'utf8', timeout: 5000, maxBuffer: 65536,
+    env: { PATH: '/usr/bin:/bin', LANG: 'C.UTF-8' },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.throws(() => renderer.materializePrivateReceiverFiles(
+    { ...projection, projectionDigest: 'sha256:' + '0'.repeat(64) }, drachtioSecret, freeswitchSecret));
+});
+
 test('generated XML parses and pins SIP, ESL ACLs, RTP and bounded core settings', () => {
   const { config, contract } = fixture();
   const output = renderer.renderReceiverEndpoints(config, contract);

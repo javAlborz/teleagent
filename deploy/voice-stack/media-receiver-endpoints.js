@@ -195,6 +195,32 @@ function prepareProtectedReceiverEndpoints(releaseRoot, { lifecycleFd = null } =
   return renderReceiverEndpoints(config, contract);
 }
 
+function materializePrivateReceiverFiles(projection, drachtioSecret, freeswitchSecret) {
+  const { projectionDigest, ...unsigned } = projection || {};
+  refuse(projection && projection.schema === 'teleagent.media-receiver-endpoint-projection.v1' &&
+    projectionDigest === boundary.digest(boundary.canonical(unsigned)) &&
+    projection.privateHttpAudio && projection.reverseEsl &&
+    typeof drachtioSecret === 'string' && /^[\x21-\x7e]{32,4096}$/u.test(drachtioSecret) &&
+    typeof freeswitchSecret === 'string' && /^[\x21-\x7e]{32,4096}$/u.test(freeswitchSecret));
+  exactKeys(projection.files,
+    'drachtio.conf.xml.template freeswitch-event-socket.conf.xml.template freeswitch-acl.conf.xml freeswitch-mrf.xml freeswitch-switch.conf.xml');
+  const xmlAttribute = (value) => value.replace(/&/gu, '&amp;').replace(/"/gu, '&quot;')
+    .replace(/</gu, '&lt;').replace(/>/gu, '&gt;').replace(/'/gu, '&apos;');
+  const files = {
+    'drachtio.conf.xml': replaceExactly(projection.files['drachtio.conf.xml.template'],
+      '__DRACHTIO_SECRET__', xmlAttribute(drachtioSecret)),
+    'freeswitch-event-socket.conf.xml': replaceExactly(
+      projection.files['freeswitch-event-socket.conf.xml.template'],
+      '__FREESWITCH_SECRET__', xmlAttribute(freeswitchSecret)),
+    'freeswitch-acl.conf.xml': projection.files['freeswitch-acl.conf.xml'],
+    'freeswitch-mrf.xml': projection.files['freeswitch-mrf.xml'],
+    'freeswitch-switch.conf.xml': projection.files['freeswitch-switch.conf.xml'],
+  };
+  refuse(!Object.values(files).some((contents) =>
+    typeof contents !== 'string' || /__[A-Z_]+__/u.test(contents)));
+  return freeze(files);
+}
+
 function preparePrivateCompose(document, contract, projection) {
   refuse(projection?.releaseRoot === contract?.releaseRoot &&
     projection?.privateHttpAudio && projection?.reverseEsl &&
@@ -257,4 +283,5 @@ function preparePrivateCompose(document, contract, projection) {
 }
 
 module.exports = { NETWORK_CONFIG, SOURCE_PATHS, REMAINING_GATES, replaceExactly,
-  renderReceiverEndpoints, prepareProtectedReceiverEndpoints, preparePrivateCompose };
+  renderReceiverEndpoints, prepareProtectedReceiverEndpoints, preparePrivateCompose,
+  materializePrivateReceiverFiles };

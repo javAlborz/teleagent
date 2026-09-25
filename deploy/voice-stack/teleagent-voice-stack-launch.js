@@ -7,7 +7,7 @@ const http = require('node:http');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { requireRuntimeIntegration } = require('./media-application-boundary');
-const { prepareProtectedReceiverEndpoints } = require('./media-receiver-endpoints');
+const { prepareProtectedReceiverEndpoints, materializePrivateReceiverFiles } = require('./media-receiver-endpoints');
 
 const IMMUTABLE_RELEASE_ROOT = /^\/opt\/teleagent\/releases\/sha256-[a-f0-9]{64}$/u;
 // Unit starts receive this from the infrastructure-owned release launcher.
@@ -863,7 +863,7 @@ function persistActivationState(phase, {
   return Object.freeze(state);
 }
 
-function projectRuntime(identities, credentials) {
+function projectRuntime(identities, credentials, projection) {
   const identity = identities.voice;
   inspectRootPath(RUNTIME_ROOT, { directory: true });
   const staging = `${RUNTIME_ROOT}/voice-secrets.new-${process.pid}`;
@@ -881,19 +881,12 @@ function projectRuntime(identities, credentials) {
 
     const drachtio = credentials.get('teleagent-drachtio-secret').toString('utf8');
     const freeswitch = credentials.get('teleagent-freeswitch-secret').toString('utf8');
-    atomicReplaceFile(`${RUNTIME_ROOT}/drachtio.conf.xml`, renderTemplate(
-      `${APP_ROOT}/deploy/voice-stack/drachtio.conf.xml.template`,
-      {
-        __DRACHTIO_SECRET__: drachtio,
-        __DRACHTIO_EXTERNAL_IP__: '127.0.0.1',
-        __DRACHTIO_SIP_PORT__: '5070',
-        __DRACHTIO_SIP_TRANSPORT__: 'udp',
-      },
-    ), { mode: 0o440, uid: 0, gid: identities.drachtio.gid });
-    atomicReplaceFile(`${RUNTIME_ROOT}/freeswitch-event-socket.conf.xml`, renderTemplate(
-      `${APP_ROOT}/deploy/voice-stack/freeswitch-event-socket.conf.xml.template`,
-      { __FREESWITCH_SECRET__: freeswitch },
-    ), { mode: 0o440, uid: 0, gid: identities.freeswitch.gid });
+    const files = materializePrivateReceiverFiles(projection, drachtio, freeswitch);
+    for (const [name, contents] of Object.entries(files)) {
+      const gid = name === 'drachtio.conf.xml' ? identities.drachtio.gid : identities.freeswitch.gid;
+      atomicReplaceFile(`${RUNTIME_ROOT}/${name}`, contents,
+        { mode: 0o440, uid: 0, gid });
+    }
     ensureDockerConfigDirectory();
   } catch (error) {
     fs.rmSync(staging, { recursive: true, force: true });
@@ -1126,6 +1119,9 @@ function removeRuntimeProjection() {
   for (const filename of [
     `${RUNTIME_ROOT}/drachtio.conf.xml`,
     `${RUNTIME_ROOT}/freeswitch-event-socket.conf.xml`,
+    `${RUNTIME_ROOT}/freeswitch-acl.conf.xml`,
+    `${RUNTIME_ROOT}/freeswitch-mrf.xml`,
+    `${RUNTIME_ROOT}/freeswitch-switch.conf.xml`,
   ]) fs.rmSync(filename, { force: true });
 }
 
@@ -1437,7 +1433,7 @@ function rollbackStartedStack(environment) {
 async function start(lifecycleFd) {
   // Receiver namespaces require coordinated endpoint/health/PBX integration.
   // Source candidates cannot fall back to the old shared host-network plane.
-  prepareProtectedReceiverEndpoints(APP_ROOT, { lifecycleFd });
+  const receiverProjection = prepareProtectedReceiverEndpoints(APP_ROOT, { lifecycleFd });
   requireRuntimeIntegration();
   for (const filename of [APP_ROOT, COMPOSE_FILE, `${APP_ROOT}/lib/voice-app-runtime-env.js`]) {
     inspectRootPath(filename, { directory: filename === APP_ROOT });
@@ -1496,7 +1492,7 @@ async function start(lifecycleFd) {
   let activationAttempted = false;
   try {
     const credentials = readCredentialSet(identity);
-    projectRuntime(identities, credentials);
+    projectRuntime(identities, credentials, receiverProjection);
     run(DOCKER, composeArgs('config', '--quiet'), { environment });
     // Container creation is the first activating Docker mutation. Inspect the
     // immutable configured identities before any service process may start.
