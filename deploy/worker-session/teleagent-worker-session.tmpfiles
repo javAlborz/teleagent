@@ -7,6 +7,7 @@ d /var/lib/teleagent-worker-state/codex-egress 0700 teleagent-codex-egress telea
 d /var/lib/teleagent-provider-plane 0751 root root -
 d /var/lib/teleagent-provider-plane/claude-supervisor 0700 teleagent-claude-supervisor teleagent-claude-supervisor -
 d /var/lib/teleagent-provider-plane/codex-supervisor 0700 teleagent-codex-supervisor teleagent-codex-supervisor -
+d /var/lib/teleagent-provider-plane/canary 0700 teleagent-control teleagent-control -
 # Provider UIDs may traverse but never rename/replace an authorized workspace.
 # Exact children are provisioned by root and carry the shared write group.
 d /srv/teleagent-agent-workspaces 0751 root teleagent-agent-workspace -

@@ -2,6 +2,7 @@
 'use strict';
 
 const { spawn } = require('node:child_process');
+const fs = require('node:fs');
 const path = require('node:path');
 const { TextDecoder } = require('node:util');
 
@@ -13,6 +14,61 @@ const CANARY_RESPONSE = 'PROVIDER_CANARY_OK';
 const MAX_COMBINED_OUTPUT_BYTES = 16 * 1024;
 const CANARY_DEADLINE_MS = 60 * 1000;
 const POST_KILL_CLOSE_MS = 2 * 1000;
+const CANARY_RECEIPTS = '/var/lib/teleagent-provider-plane/canary';
+const LAUNCH_ID = /^launch_[a-f0-9]{32}$/;
+
+function acknowledgePersistedLaunch(child, provider, {
+  receiptDirectory = CANARY_RECEIPTS,
+} = {}) {
+  if (!child?.stdio?.[3] || !child?.stdio?.[4]) {
+    throw new Error('provider canary status channel is unavailable');
+  }
+  let status = Buffer.alloc(0);
+  let complete = false;
+  child.stdio[3].on('data', (chunk) => {
+    if (complete) return;
+    status = Buffer.concat([status, chunk]);
+    if (status.length > 1024) {
+      complete = true;
+      child.stdio[4].end();
+      return;
+    }
+    const newline = status.indexOf(0x0a);
+    if (newline < 0) return;
+    complete = true;
+    try {
+      if (newline !== status.length - 1) throw new Error('invalid status frame');
+      const parsed = JSON.parse(status.subarray(0, newline).toString('utf8'));
+      if (parsed?.version !== 1 || parsed.accepted !== true ||
+          !LAUNCH_ID.test(parsed.launchId)) throw new Error('launch was not accepted');
+      const receipt = Buffer.from(JSON.stringify({
+        version: 1, provider, launchId: parsed.launchId,
+        accepted: true, observedAt: new Date().toISOString(),
+      }) + '\n');
+      const directory = fs.openSync(receiptDirectory,
+        fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+      try {
+        const filename = `${receiptDirectory}/${provider}-${parsed.launchId}.json`;
+        const file = fs.openSync(filename,
+          fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL |
+          fs.constants.O_NOFOLLOW, 0o600);
+        try {
+          fs.writeSync(file, receipt);
+          fs.fsyncSync(file);
+        } finally { fs.closeSync(file); }
+        fs.fsyncSync(directory);
+      } finally { fs.closeSync(directory); }
+      child.stdio[4].end(`${JSON.stringify({
+        version: 1, statusPersisted: true, launchId: parsed.launchId,
+      })}\n`);
+    } catch {
+      child.stdio[4].end();
+    }
+  });
+  child.stdio[3].once('end', () => {
+    if (!complete) child.stdio[4].end();
+  });
+}
 
 function buildCanaryInvocation(provider, workspaceInput) {
   const workspace = path.resolve(String(workspaceInput || ''));
@@ -247,14 +303,16 @@ async function executeProviderCanary(provider, workspace, {
   deadlineMs = CANARY_DEADLINE_MS,
   maxCombinedOutputBytes = MAX_COMBINED_OUTPUT_BYTES,
   postKillCloseMs = POST_KILL_CLOSE_MS,
+  receiptDirectory = CANARY_RECEIPTS,
 } = {}) {
   const args = buildCanaryInvocation(provider, workspace);
   const child = spawnImpl(CLIENT, args, {
     cwd: '/',
     env: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8' },
-    stdio: ['pipe', 'pipe', 'pipe'],
+    stdio: ['pipe', 'pipe', 'pipe', 'pipe', 'pipe'],
     shell: false,
   });
+  acknowledgePersistedLaunch(child, provider, { receiptDirectory });
   child.stdin.on('error', () => {});
   child.stdin.end('Reply exactly PROVIDER_CANARY_OK.\n');
   const result = await captureProviderProcess(child, {
@@ -289,6 +347,7 @@ module.exports = {
   POST_KILL_CLOSE_MS,
   buildCanaryInvocation,
   captureProviderProcess,
+  acknowledgePersistedLaunch,
   executeProviderCanary,
   parseProviderCanaryOutput,
 };

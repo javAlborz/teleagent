@@ -2,11 +2,15 @@
 
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const { PassThrough } = require('node:stream');
 const test = require('node:test');
 const {
   CANARY_RESPONSE,
   MAX_COMBINED_OUTPUT_BYTES,
+  acknowledgePersistedLaunch,
   executeProviderCanary,
   parseProviderCanaryOutput,
 } = require('../../deploy/worker-session/teleagent-provider-canary');
@@ -59,15 +63,17 @@ function codexJsonl({
 
 function fakeSpawn({
   stdout = '', stderr = '', code = 0, signal = null, never = false,
-  killCloses = true, closeNaturally = true,
+  killCloses = true, closeNaturally = true, acceptedStatus = false,
 } = {}) {
-  const state = { killed: null, input: '', invocation: null };
+  const state = { killed: null, input: '', invocation: null, acknowledgement: '' };
   const spawnImpl = (command, args, options) => {
     state.invocation = { command, args, options };
     const child = new EventEmitter();
     child.stdin = new PassThrough();
     child.stdout = new PassThrough();
     child.stderr = new PassThrough();
+    child.stdio = [child.stdin, child.stdout, child.stderr, new PassThrough(), new PassThrough()];
+    child.stdio[4].on('data', (chunk) => { state.acknowledgement += chunk.toString('utf8'); });
     child.stdin.on('data', (chunk) => { state.input += chunk.toString('utf8'); });
     let closed = false;
     const close = (closeCode, closeSignal) => {
@@ -82,6 +88,9 @@ function fakeSpawn({
     };
     if (!never) {
       setImmediate(() => {
+        if (acceptedStatus) child.stdio[3].write(`${JSON.stringify({
+          version: 1, accepted: true, launchId: `launch_${'a'.repeat(32)}`,
+        })}\n`);
         child.stdout.end(stdout);
         child.stderr.end(stderr);
         if (closeNaturally) setImmediate(() => close(code, signal));
@@ -154,18 +163,36 @@ test('provider canary parsers accept only exact provider-specific final evidence
 });
 
 test('provider canary captures output and emits only fixed attestation after exact success', async () => {
+  const receiptDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'teleagent-canary-test-'));
   for (const [provider, stdout] of [
     ['claude', `${CANARY_RESPONSE}\n`],
     ['codex', codexJsonl()],
   ]) {
-    const fake = fakeSpawn({ stdout, stderr: 'provider diagnostic that must stay captured\n' });
+    const fake = fakeSpawn({ stdout, stderr: 'provider diagnostic that must stay captured\n', acceptedStatus: true });
     assert.equal(await executeProviderCanary(provider, WORKSPACE, {
       spawnImpl: fake.spawnImpl,
+      receiptDirectory,
     }), `PROVIDER_CANARY_ATTESTED ${provider}`);
     assert.equal(fake.state.input, 'Reply exactly PROVIDER_CANARY_OK.\n');
-    assert.deepEqual(fake.state.invocation.options.stdio, ['pipe', 'pipe', 'pipe']);
+    assert.deepEqual(fake.state.invocation.options.stdio, ['pipe', 'pipe', 'pipe', 'pipe', 'pipe']);
+    assert.match(fake.state.acknowledgement, /"statusPersisted":true/);
+    assert.equal(fs.existsSync(path.join(receiptDirectory,
+      `${provider}-launch_${'a'.repeat(32)}.json`)), true);
     assert.equal(fake.state.killed, null);
   }
+  fs.rmSync(receiptDirectory, { recursive: true });
+});
+
+test('provider canary withholds launch acknowledgement if its receipt cannot persist', () => {
+  const fake = fakeSpawn({ never: true });
+  const child = fake.spawnImpl('client', [], {});
+  acknowledgePersistedLaunch(child, 'codex', {
+    receiptDirectory: '/nonexistent/teleagent-canary-receipts',
+  });
+  child.stdio[3].write(`${JSON.stringify({
+    version: 1, accepted: true, launchId: `launch_${'b'.repeat(32)}`,
+  })}\n`);
+  assert.equal(fake.state.acknowledgement, '');
 });
 
 test('provider canary refuses exit zero without exact final evidence and never echoes it', async () => {

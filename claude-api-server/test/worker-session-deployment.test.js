@@ -402,7 +402,9 @@ test('activation canaries use the exact production clean-config argument builder
   assert.match(canarySource, /MAX_COMBINED_OUTPUT_BYTES = 16 \* 1024/);
   assert.match(canarySource, /CANARY_DEADLINE_MS = 60 \* 1000/);
   assert.match(canarySource, /POST_KILL_CLOSE_MS = 2 \* 1000/);
-  assert.match(canarySource, /stdio: \['pipe', 'pipe', 'pipe'\]/);
+  assert.match(canarySource, /stdio: \['pipe', 'pipe', 'pipe', 'pipe', 'pipe'\]/);
+  assert.match(canarySource, /fs\.fsyncSync\(file\)/);
+  assert.match(canarySource, /fs\.fsyncSync\(directory\)/);
   assert.doesNotMatch(canarySource, /stdio: \[[^\]]*'inherit'/);
   assert.match(canarySource, /event\.type === 'item\.started'/);
   assert.match(canarySource, /event\.type === 'item\.updated'/);
