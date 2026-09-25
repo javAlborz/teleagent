@@ -59,10 +59,11 @@ test('controller unit is dormant, exact-path, resource-capped, and isolated', ()
   assert.doesNotMatch(service, /^Requires=.*teleagent-provider-supervisor@claude\.socket/m);
   assert.match(service, /^Requires=.*teleagent-provider-supervisor@codex\.socket/m);
   assert.match(service, /^CPUQuota=200%$/m);
-  assert.match(service, /^MemoryHigh=2G$/m);
-  assert.match(service, /^MemoryMax=3G$/m);
+  assert.match(service, /^Slice=teleagent\.slice$/m);
+  assert.match(service, /^MemoryHigh=671088640$/m);
+  assert.match(service, /^MemoryMax=805306368$/m);
   assert.match(service, /^MemorySwapMax=0$/m);
-  assert.match(service, /^TasksMax=512$/m);
+  assert.match(service, /^TasksMax=128$/m);
   assert.match(service, /^LimitFSIZE=8589934592$/m);
   assert.match(service, /^LimitCORE=0$/m);
   assert.match(service, /^NoNewPrivileges=yes$/m);

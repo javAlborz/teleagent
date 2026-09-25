@@ -66,12 +66,13 @@ test('session broker, RPC socket, state DB, and tmux socket exclude provider ide
     /^d \/var\/lib\/teleagent-worker-state\/session-broker 0700 teleagent-session-broker teleagent-session-broker -$/m);
   assert.match(service,
     /^Environment=WORKER_SESSION_DB_PATH=\/var\/lib\/teleagent-worker-state\/session-broker\/operations\.sqlite$/m);
-  assert.match(service, /^MemoryHigh=384M$/m);
-  assert.match(service, /^MemoryMax=512M$/m);
+  assert.match(service, /^Slice=teleagent\.slice$/m);
+  assert.match(service, /^MemoryHigh=201326592$/m);
+  assert.match(service, /^MemoryMax=268435456$/m);
   assert.match(service,
     /^RequiresMountsFor=\/var\/lib\/teleagent-worker-state \/var\/lib\/teleagent-provider-plane$/m);
   assert.match(service, /^MemorySwapMax=0$/m);
-  assert.match(service, /^TasksMax=128$/m);
+  assert.match(service, /^TasksMax=64$/m);
   assert.match(service, /^CPUQuota=50%$/m);
   assert.match(service, /^IOAccounting=yes$/m);
   assert.match(service,
@@ -114,7 +115,7 @@ test('session broker, RPC socket, state DB, and tmux socket exclude provider ide
   assert.doesNotMatch(providerService, /\/var\/lib\/teleagent-%i-supervisor/);
   assert.match(providerService, /^LimitCORE=0$/m);
   assert.match(providerService, /^Slice=teleagent-provider\.slice$/m);
-  assert.match(providerService, /^MemoryMax=512M$/m);
+  assert.match(providerService, /^MemoryMax=536870912$/m);
   assert.match(providerService, /^MemorySwapMax=0$/m);
   assert.match(providerService, /^CPUQuota=25%$/m);
   for (const protectedPath of [
@@ -144,8 +145,8 @@ test('session broker, RPC socket, state DB, and tmux socket exclude provider ide
   assert.match(providerBoundary, /'IOWeight=25'/);
   assert.match(providerSlice, /^ConditionPathExists=\/etc\/teleagent\/worker-session\/ENABLE$/m);
   assert.match(providerSlice, /^CPUQuota=250%$/m);
-  assert.match(providerSlice, /^MemoryHigh=5G$/m);
-  assert.match(providerSlice, /^MemoryMax=6G$/m);
+  assert.match(providerSlice, /^MemoryHigh=4831838208$/m);
+  assert.match(providerSlice, /^MemoryMax=5368709120$/m);
   assert.match(providerSlice, /^MemorySwapMax=0$/m);
   assert.match(providerSlice, /^TasksMax=1024$/m);
   assert.match(providerSlice, /^IOAccounting=yes$/m);
@@ -154,8 +155,8 @@ test('session broker, RPC socket, state DB, and tmux socket exclude provider ide
   assert.match(providerModelSlice,
     /^ConditionPathExists=\/etc\/teleagent\/worker-session\/ENABLE$/m);
   assert.match(providerModelSlice, /^CPUQuota=200%$/m);
-  assert.match(providerModelSlice, /^MemoryHigh=3G$/m);
-  assert.match(providerModelSlice, /^MemoryMax=4G$/m);
+  assert.match(providerModelSlice, /^MemoryHigh=3221225472$/m);
+  assert.match(providerModelSlice, /^MemoryMax=4294967296$/m);
   assert.match(providerModelSlice, /^MemorySwapMax=0$/m);
   assert.match(providerModelSlice, /^TasksMax=768$/m);
   assert.doesNotMatch(providerModelSlice, /^\[Install\]$/m);
@@ -242,7 +243,7 @@ test('session broker, RPC socket, state DB, and tmux socket exclude provider ide
 
   assert.match(egressService, /^User=teleagent-%i-egress$/m);
   assert.match(egressService, /^Slice=teleagent-provider\.slice$/m);
-  assert.match(egressService, /^MemoryMax=512M$/m);
+  assert.match(egressService, /^MemoryMax=536870912$/m);
   assert.match(egressService, /^RequiresMountsFor=\/var\/lib\/teleagent-worker-state$/m);
   assert.match(egressService, /^MemorySwapMax=0$/m);
   assert.match(egressService, /^CPUQuota=25%$/m);
