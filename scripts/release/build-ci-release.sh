@@ -8,6 +8,9 @@ export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export LANG=C.UTF-8
 export LC_ALL=C.UTF-8
 export TZ=UTC
+# The support CLI imports release_closure before the clean-tree gate. Keep
+# Python from creating __pycache__ inside the checked-out release source.
+export PYTHONDONTWRITEBYTECODE=1
 
 readonly script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 readonly repository_root="$(cd -- "${script_dir}/../.." && pwd -P)"
