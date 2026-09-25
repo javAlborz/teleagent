@@ -234,7 +234,7 @@ function sourceCheck(sourceRoot = SOURCE_ROOT, { sourceUid = 0, sourceGid = 0 } 
     'd /etc/teleagent-voice/credentials 0750 root teleagent-voice -',
     'd /var/lib/teleagent-voice 0700 teleagent-voice teleagent-voice -',
     'd /var/lib/teleagent-voice-stack 0700 root root -',
-    'd /run/teleagent-voice-stack 0700 root root -',
+    'd /run/teleagent-isolated-voice-stack 0700 root root -',
   ])) refuse('the tmpfiles directory contract drifted');
   if (JSON.stringify(meaningfulLines(slice)) !== JSON.stringify([
     '[Unit]',
@@ -516,7 +516,7 @@ function installedCheck({
     ['/etc/teleagent-voice/credentials', 0, identity.gid, 0o750],
     ['/var/lib/teleagent-voice', identity.uid, identity.gid, 0o700],
     ['/var/lib/teleagent-voice-stack', 0, 0, 0o700],
-    ['/run/teleagent-voice-stack', 0, 0, 0o700],
+    ['/run/teleagent-isolated-voice-stack', 0, 0, 0o700],
   ]) inspectPath(filename, { type: 'directory', uid, gid, mode });
   return identities;
 }

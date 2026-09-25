@@ -89,6 +89,7 @@ InaccessiblePaths=/run/teleagent-provider-egress-control
 InaccessiblePaths=/run/teleagent-provider-capabilities
 InaccessiblePaths=/run/teleagent-privileged-action
 InaccessiblePaths=/run/teleagent-voice-stack
+InaccessiblePaths=/run/teleagent-isolated-voice-stack
 InaccessiblePaths=/run/teleagent-sip-local-peer-fence
 InaccessiblePaths=/etc/teleagent/worker-session
 InaccessiblePaths=/etc/teleagent/provider-egress

@@ -288,6 +288,22 @@ test('isolated stop selects only the durable voice container ID', () => {
   assert.match(stopBody, /'inspect', '--format', '\{\{\.State\.Status\}\} \{\{\.State\.ExitCode\}\}', ownedVoice\.containerId/u);
 });
 
+test('replacement runtime projection cannot reuse the live legacy runtime directory', () => {
+  const root = path.join(__dirname, '..', '..');
+  const launcher = fs.readFileSync(path.join(root, 'deploy/voice-stack/teleagent-voice-stack-launch.js'), 'utf8');
+  const compose = fs.readFileSync(path.join(root, 'docker-compose.yml'), 'utf8');
+  const installer = fs.readFileSync(path.join(root, 'deploy/voice-stack/teleagent-voice-stack-install'), 'utf8');
+  const unit = fs.readFileSync(path.join(root, 'deploy/voice-stack/teleagent-voice-stack.service'), 'utf8');
+  const runtime = '/run/teleagent-isolated-voice-stack';
+  assert.match(launcher, /const RUNTIME_ROOT = '\/run\/teleagent-isolated-voice-stack'/u);
+  assert.equal((compose.match(/\/run\/teleagent-isolated-voice-stack\//gu) || []).length, 4);
+  assert.ok(installer.includes(`runtime_root=$(host_path ${runtime})`));
+  assert.ok(unit.includes(`ReadWritePaths=${runtime} `));
+  for (const source of [launcher, compose, installer, unit]) {
+    assert.equal(source.includes('/run/teleagent-voice-stack'), false);
+  }
+});
+
 test('start, stop and recovery retain only the exact host handoff lock descriptor', () => {
   const lockMetadata = directoryMetadata({ dev: 701, ino: 902, mode: 0o700 });
   const filesystem = {
@@ -1157,7 +1173,7 @@ test('dormant systemd gate binds the private voice identity and every prerequisi
   assert.match(tmpfiles,
     /^d \/var\/lib\/teleagent-voice 0700 teleagent-voice teleagent-voice -$/m);
   assert.match(tmpfiles, /^d \/var\/lib\/teleagent-voice-stack 0700 root root -$/m);
-  assert.match(tmpfiles, /^d \/run\/teleagent-voice-stack 0700 root root -$/m);
+  assert.match(tmpfiles, /^d \/run\/teleagent-isolated-voice-stack 0700 root root -$/m);
   assert.equal((compose.match(/image: "\$\{TELEAGENT_VOICE_IMAGE:\?/g) || []).length, 2);
   assert.match(compose, /user: "\$\{DRACHTIO_UID:\?[^}]+}:\$\{DRACHTIO_GID:\?[^}]+}"/);
   assert.match(compose, /user: "\$\{FREESWITCH_UID:\?[^}]+}:\$\{FREESWITCH_GID:\?[^}]+}"/);

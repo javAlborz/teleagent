@@ -28,6 +28,10 @@ The module implements concrete preparation and verification operations:
   pre-cutover creation while the legacy containers retain their global names.
   The replacement launcher's Compose project is `teleagent-isolated-voice`;
   its project-scoped cleanup cannot enumerate the live legacy project label.
+  The replacement's temporary credentials and rendered SIP/ESL files live under
+  `/run/teleagent-isolated-voice-stack`. The legacy containers mount files from
+  `/run/teleagent-voice-stack`; the disabled installer and emergency cleanup
+  must not read, replace or remove that live runtime tree.
   Conflicting hostname, published-port, DNS, additional-host, link and other
   network settings are refused. Commands, environments and mounts are copied
   unchanged. The candidate must not be launched until the remaining gates below

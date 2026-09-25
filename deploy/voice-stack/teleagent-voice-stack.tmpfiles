@@ -4,4 +4,4 @@ d /etc/teleagent-voice/config 0750 root teleagent-voice -
 d /etc/teleagent-voice/credentials 0750 root teleagent-voice -
 d /var/lib/teleagent-voice 0700 teleagent-voice teleagent-voice -
 d /var/lib/teleagent-voice-stack 0700 root root -
-d /run/teleagent-voice-stack 0700 root root -
+d /run/teleagent-isolated-voice-stack 0700 root root -
