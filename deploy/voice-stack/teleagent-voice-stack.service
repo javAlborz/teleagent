@@ -50,10 +50,10 @@ RestrictNamespaces=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-ReadOnlyPaths=/opt/teleagent/releases /etc/teleagent-voice /etc/teleagent/provider-runtime
+ReadOnlyPaths=/opt/teleagent/releases /etc/teleagent-isolated-voice /etc/teleagent/provider-runtime
 ReadOnlyPaths=/usr/local/libexec /sys/kernel/security/apparmor/profiles
-ReadWritePaths=/run/teleagent-voice-stack /var/lib/teleagent-voice
-ReadWritePaths=/var/lib/teleagent-voice-stack
+ReadWritePaths=/run/teleagent-isolated-voice-stack /var/lib/teleagent-isolated-voice
+ReadWritePaths=/var/lib/teleagent-isolated-voice-stack
 InaccessiblePaths=/etc/teleagent/provider-egress-secrets /etc/teleagent/privileged-action
 InaccessiblePaths=/var/lib/teleagent-provider-plane /var/lib/teleagent-worker-state
 

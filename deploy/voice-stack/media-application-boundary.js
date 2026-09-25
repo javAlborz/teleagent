@@ -9,10 +9,15 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
 const CONTRACT = '/etc/teleagent-media/application-launch.json';
-const AUTHORITY = '/usr/local/libexec/verify-teleagent-media-activation';
+const AUTHORITY = '/usr/local/libexec/verify-teleagent-media-application';
 const BOOT = '/proc/sys/kernel/random/boot_id';
 const SOURCE_DIGEST = 'sha256:36dada2904ba928ef6189a8a1de5545876690f3cb2eecec8c36c37c1eb8c75dd';
 const SERVICES = Object.freeze(['drachtio', 'freeswitch', 'voice-app']);
+const ISOLATED_NAMES = Object.freeze({
+  drachtio: 'teleagent-isolated-drachtio',
+  freeswitch: 'teleagent-isolated-freeswitch',
+  'voice-app': 'teleagent-isolated-voice-app',
+});
 const PEERS = Object.freeze(['asterisk', 'drachtio', 'freeswitch', 'voice']);
 const LIMITS = Object.freeze({
   drachtio: [402653184, 1000000000, 256],
@@ -36,7 +41,8 @@ const INSPECT = '{"id":{{json .Id}},"image":{{json .Image}},"pid":{{json .State.
   '"ports":{{json .HostConfig.PortBindings}},"dns":{{json .HostConfig.Dns}},' +
   '"dnsSearch":{{json .HostConfig.DnsSearch}},"dnsOptions":{{json .HostConfig.DnsOptions}},' +
   '"extraHosts":{{json .HostConfig.ExtraHosts}},"links":{{json .HostConfig.Links}},' +
-  '"mounts":{{json .Mounts}},"devices":{{json .HostConfig.Devices}},' +
+  '"mounts":{{json .Mounts}},"tmpfs":{{json .HostConfig.Tmpfs}},' +
+  '"devices":{{json .HostConfig.Devices}},' +
   '"deviceRequests":{{json .HostConfig.DeviceRequests}},"groupAdd":{{json .HostConfig.GroupAdd}},' +
   '"restartPolicy":{{json .HostConfig.RestartPolicy.Name}},' +
   '"healthcheck":{{if .Config.Healthcheck}}{{json .Config.Healthcheck.Test}}{{else}}null{{end}}}';
@@ -121,15 +127,17 @@ function protectedFile(filename, io = fs) {
   } finally { io.closeSync(fd); }
 }
 
-function command(executable, args) {
+function command(executable, args, { lifecycleFd = null } = {}) {
+  need(Number.isSafeInteger(lifecycleFd) && lifecycleFd >= 3);
   const result = spawnSync(executable, args, { encoding: 'utf8', env: CLEAN_ENV, timeout: 15000,
-    killSignal: 'SIGKILL', maxBuffer: 262144, stdio: ['ignore', 'pipe', 'pipe'] });
+    killSignal: 'SIGKILL', maxBuffer: 262144, stdio: ['ignore', 'pipe', 'pipe', lifecycleFd] });
   need(!result.error && result.status === 0);
   return result.stdout;
 }
 
-function loadAdmission(releaseRoot, stage, evidenceDigest, { io = fs, run = command } = {}) {
-  need(['bootstrap', 'created', 'running', 'restart'].includes(stage) && sha(evidenceDigest));
+function loadAdmission(releaseRoot, stage, evidenceDigest,
+  { io = fs, run = command, lifecycleFd = null } = {}) {
+  need(['bootstrap', 'bootstrap-app', 'created', 'running', 'restart'].includes(stage) && sha(evidenceDigest));
   const source = protectedFile(CONTRACT, io);
   const bootId = io.readFileSync(BOOT, 'utf8').trim();
   const parsed = JSON.parse(source);
@@ -140,10 +148,11 @@ function loadAdmission(releaseRoot, stage, evidenceDigest, { io = fs, run = comm
   const contractDigest = digest(source);
   const expected = { schema: 'teleagent.media-application-admission.v1', stage, contractDigest, bootId,
     releaseRoot, evidenceDigest };
-  // The authority independently checks installed source/tool/image/credential
-  // closure, global pending journals and retained lifecycle admission. It must
-  // never merely echo these arguments. No implementation is supplied here.
-  const response = run(AUTHORITY, ['--admit-media-application', stage, contractDigest, bootId, releaseRoot, evidenceDigest]);
+  // The separately managed host verifier admits only a read-only bootstrap.
+  // Created, running and restart admission still require a retained lifecycle
+  // transaction; it must never merely echo these arguments.
+  const response = run(AUTHORITY, ['--admit-media-application', stage, contractDigest, bootId, releaseRoot, evidenceDigest],
+    { lifecycleFd });
   need(canonical(JSON.parse(response)) === canonical(expected));
   return contract;
 }
@@ -153,12 +162,22 @@ function exactComposeCandidate(document, contract) {
   keys(document.services, 'drachtio freeswitch voice-app voice-runtime-preflight');
   const candidate = structuredClone(document);
   need(candidate.services['voice-runtime-preflight'].network_mode === 'none');
+  need(!candidate.services['voice-runtime-preflight'].container_name &&
+    !candidate.services['voice-runtime-preflight'].userns_mode);
+  candidate.services['voice-runtime-preflight'].container_name = 'teleagent-isolated-voice-preflight';
+  candidate.services['voice-runtime-preflight'].image = contract.workloads['voice-app'].imageId;
+  candidate.services['voice-runtime-preflight'].userns_mode = 'host';
+  candidate.services['voice-runtime-preflight'].healthcheck = { disable: true };
   for (const service of SERVICES) {
     const config = candidate.services[service];
     need(config && FORBIDDEN.every((name) => !(name in config)) &&
-      ['host', undefined].includes(config.network_mode));
+      ['host', undefined].includes(config.network_mode) &&
+      [service, undefined].includes(config.container_name));
     const peer = service === 'voice-app' ? 'voice' : service;
     config.network_mode = contract.bootstrap.services[peer].networkMode;
+    // Legacy keeps the three global names while its call path is active.
+    // Separate names let the isolated project be created and checked first.
+    config.container_name = ISOLATED_NAMES[service];
     config.image = contract.workloads[service].imageId;
     config.userns_mode = 'host';
     config.healthcheck = { disable: true };
@@ -222,7 +241,7 @@ function kernelLimits(cgroup, limits, io = fs) {
   }
 }
 
-function verifyTasks(contract, placements, io = fs) {
+function verifyTasksOnce(contract, placements, io) {
   const expected = new Map();
   const admittedCgroups = new Map();
   for (const peer of PEERS) {
@@ -259,6 +278,19 @@ function verifyTasks(contract, placements, io = fs) {
   }
   for (const value of expected.values()) need(value.tasks.some((task) => task.pid === value.anchor.pid && task.tid === value.anchor.pid));
   return Object.fromEntries([...expected].map(([namespace, value]) => [namespace, value.tasks.sort((a, b) => a.tid - b.tid)]));
+}
+
+function verifyTasks(contract, placements, io = fs) {
+  // A process can exit between the /proc listing and its task read on a busy
+  // host. Retry the complete inventory a fixed number of times; any stable
+  // foreign task, privilege mismatch or unreadable non-racy state still fails.
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    try { return verifyTasksOnce(contract, placements, io); }
+    catch (error) {
+      if (!['ENOENT', 'ENOTDIR', 'ESRCH'].includes(error.code) || attempt === 4) throw error;
+    }
+  }
+  need(false);
 }
 
 function verifyPlacement(contract, placements, { inspect, anchorCheck, io = fs, stage = 'running' } = {}) {
@@ -300,29 +332,24 @@ function inspectDocker(containerId) {
     '/etc/teleagent-media/docker-client', 'inspect', '--type', 'container', '--format', INSPECT, containerId]));
 }
 
-function verifyProtectedPlacement(releaseRoot, placements, stage) {
-  const inputDigest = digest(canonical(placements));
-  const contract = loadAdmission(releaseRoot, stage, inputDigest);
-  const observation = verifyPlacement(contract, placements, {
-    stage, inspect: inspectDocker,
-    anchorCheck: () => loadAdmission(releaseRoot, stage, inputDigest).bootstrap,
+function verifyProtectedPlacement(releaseRoot, placements, stage, {
+  lifecycleFd = null, hostEvidenceDigest = null,
+  load = loadAdmission, verify = verifyPlacement, inspect = inspectDocker,
+} = {}) {
+  need(sha(hostEvidenceDigest));
+  const contract = load(releaseRoot, stage, hostEvidenceDigest, { lifecycleFd });
+  const observation = verify(contract, placements, {
+    stage, inspect,
+    anchorCheck: () => load(releaseRoot, stage, hostEvidenceDigest, { lifecycleFd }).bootstrap,
   });
-  // Admission must bind this particular evidence and retain the lifecycle
-  // fence through the caller's eventual mutation, not a reusable JSON token.
-  const admitted = loadAdmission(releaseRoot, stage, digest(canonical(observation)));
+  // The host evidence binds the retained project journal. Re-admit it after
+  // the app's separate Docker/kernel observation while the lifecycle fence
+  // remains held; an app-computed observation hash cannot grant authority.
+  const admitted = load(releaseRoot, stage, hostEvidenceDigest, { lifecycleFd });
   need(canonical(admitted) === canonical(contract));
   return observation;
 }
 
-function requireRuntimeIntegration() {
-  // This source slice intentionally cannot bless loopback-only SIP/ESL/media,
-  // host HTTP health probes, absent public WSS/legacy STT-TTS egress, or an
-  // uncoordinated Asterisk lifecycle. Those integrations need their own review.
-  const error = new Error('media endpoint, readiness, egress and coordinated PBX integration remain uncommissioned');
-  error.code = 'MEDIA_RUNTIME_UNCOMMISSIONED';
-  throw error;
-}
-
 module.exports = { CONTRACT, AUTHORITY, INSPECT, SOURCE_DIGEST, LIMITS, canonical, digest, validateContract,
   protectedFile, loadAdmission, exactComposeCandidate, profile, validateDocker, startTicks, kernelProcess,
-  kernelLimits, verifyTasks, verifyPlacement, verifyProtectedPlacement, requireRuntimeIntegration };
+  kernelLimits, verifyTasks, verifyPlacement, verifyProtectedPlacement };

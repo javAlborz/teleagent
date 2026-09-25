@@ -42,7 +42,9 @@ function inspection(contract, service, running = true) {
     readonly: true, privileged: false, capAdd: null, capDrop: ['ALL'], security: ['no-new-privileges:true'],
     memory, memorySwap: memory, nanoCpus, pidsLimit, cgroupParent: 'teleagent-voice-containers.slice',
     pidMode: '', ipcMode: 'private', usernsMode: 'host', publishAll: false, ports: null, dns: [],
-    dnsSearch: [], dnsOptions: [], extraHosts: null, links: null, mounts: [], devices: [], deviceRequests: null,
+    dnsSearch: [], dnsOptions: [], extraHosts: null, links: null, mounts: [],
+    tmpfs: { '/tmp': 'rw,noexec,nosuid,nodev,size=16777216' },
+    devices: [], deviceRequests: null,
     groupAdd: null, restartPolicy: 'no', healthcheck: ['NONE'] };
 }
 function stat(start = '77') { return `1234 (name has ) brackets) S ${Array(18).fill('0').join(' ')} ${start} 0`; }
@@ -82,14 +84,21 @@ test('contract binds immutable boot, release, four distinct anchors and approved
 test('candidate selects exact IDs and keeps commands, credentials and all FreeSWITCH volumes unchanged', () => {
   const original = { services: { 'voice-runtime-preflight': { network_mode: 'none' } } };
   for (const service of Object.keys(IDS)) original.services[service] = {
-    image: 'old', network_mode: 'host', command: ['fixed'], environment: { FIXED: 'value' },
+    image: 'old', network_mode: 'host', container_name: service,
+    command: ['fixed'], environment: { FIXED: 'value' },
     volumes: ['freeswitch-conf:/etc/freeswitch', 'freeswitch-log:/var/log/freeswitch', 'freeswitch-db:/var/lib/freeswitch/db'],
   };
   const contract = fixture();
   const result = boundary.exactComposeCandidate(original, contract);
+  assert.equal(result.services['voice-runtime-preflight'].container_name, 'teleagent-isolated-voice-preflight');
+  assert.equal(result.services['voice-runtime-preflight'].image, contract.workloads['voice-app'].imageId);
+  assert.equal(result.services['voice-runtime-preflight'].userns_mode, 'host');
+  assert.deepEqual(result.services['voice-runtime-preflight'].healthcheck, { disable: true });
   for (const service of Object.keys(IDS)) {
     assert.match(result.services[service].network_mode, /^container:[a-f0-9]{64}$/u);
     assert.equal(result.services[service].userns_mode, 'host');
+    assert.equal(result.services[service].container_name, `teleagent-isolated-${service}`);
+    assert.equal(original.services[service].container_name, service);
     assert.deepEqual(result.services[service].healthcheck, { disable: true });
     for (const key of ['command', 'environment', 'volumes']) assert.deepEqual(result.services[service][key], original.services[service][key]);
     assert.equal(original.services[service].network_mode, 'host');
@@ -98,6 +107,9 @@ test('candidate selects exact IDs and keeps commands, credentials and all FreeSW
     const changed = structuredClone(original); changed.services.drachtio[field] = [];
     assert.throws(() => boundary.exactComposeCandidate(changed, contract));
   }
+  const conflicting = structuredClone(original);
+  conflicting.services['voice-app'].container_name = 'voice-app-other';
+  assert.throws(() => boundary.exactComposeCandidate(conflicting, contract));
 });
 
 test('container metadata refuses image, network, sandbox, restart and resource drift', () => {
@@ -108,7 +120,8 @@ test('container metadata refuses image, network, sandbox, restart and resource d
   for (const [key, changed] of Object.entries({ image: `sha256:${'0'.repeat(64)}`, network: 'host', user: '0:0', readonly: false,
     privileged: true, capAdd: ['NET_ADMIN'], security: [], memory: 0, memorySwap: -1, nanoCpus: 0, pidsLimit: 0,
     cgroupParent: 'system.slice', pidMode: 'host', ipcMode: 'host', usernsMode: '', publishAll: true,
-    ports: { '80/tcp': [] }, dns: ['127.0.0.1'], mounts: [{ Source: '/' }], groupAdd: ['0'],
+    ports: { '80/tcp': [] }, dns: ['127.0.0.1'], mounts: [{ Source: '/' }],
+    tmpfs: { '/tmp': 'rw,size=999999999' }, groupAdd: ['0'],
     restartPolicy: 'always', healthcheck: ['CMD-SHELL', 'true'], restarts: 1, running: false, pid: 0 })) {
     assert.throws(() => boundary.validateDocker({ ...value, [key]: changed }, 'voice-app', contract, IDS['voice-app'], true));
   }
@@ -164,15 +177,44 @@ test('namespace scan detects a foreign thread even when its process leader is el
   escaped = false; missing = true; assert.throws(() => boundary.verifyTasks(contract, {}, io));
 });
 
-test('missing authority and unfinished runtime cannot fall back to legacy host networking', () => {
+test('namespace scan retries only disappearing proc entries with a fixed bound', () => {
+  const contract = fixture();
+  const anchors = Object.values(contract.bootstrap.services);
+  let races = 0;
+  const io = { readdirSync(filename) {
+    if (filename === '/proc') return anchors.map((anchor) => String(anchor.pid));
+    if (races > 0) { races -= 1; throw Object.assign(new Error('exited during scan'), { code: 'ENOENT' }); }
+    return [filename.split('/')[2]];
+  }, statSync(filename) {
+    const pid = Number(filename.split('/')[2]);
+    return { dev: 4, ino: 1000 + pid - 100 };
+  }, readFileSync(filename) {
+    const pid = Number(filename.split('/')[2]);
+    const anchor = anchors.find((value) => value.pid === pid);
+    return `0::/teleagent.slice/teleagent-media.slice/docker-${anchor.containerId}.scope`;
+  } };
+  races = 4;
+  assert.equal(Object.keys(boundary.verifyTasks(contract, {}, io)).length, 4);
+  races = 5;
+  assert.throws(() => boundary.verifyTasks(contract, {}, io), { code: 'ENOENT' });
+  races = 0;
+  io.readdirSync = () => { throw new Error('unreadable /proc'); };
+  assert.throws(() => boundary.verifyTasks(contract, {}, io), /unreadable \/proc/u);
+});
+
+test('missing authority and unpublished host start cannot fall back to legacy host networking', () => {
   assert.throws(() => boundary.loadAdmission(RELEASE, 'bootstrap', `sha256:${'0'.repeat(64)}`, {
     io: { lstatSync() { throw new Error('absent host authority'); } }, run() { assert.fail('must not execute'); },
   }));
-  assert.throws(() => boundary.requireRuntimeIntegration(), { code: 'MEDIA_RUNTIME_UNCOMMISSIONED' });
   const source = fs.readFileSync(path.join(__dirname, '../../deploy/voice-stack/teleagent-voice-stack-launch.js'), 'utf8');
-  const start = source.slice(source.indexOf('async function start() {'), source.indexOf('async function stop() {'));
-  assert.ok(start.indexOf('requireRuntimeIntegration();') < start.indexOf('cleanupExactProject();'));
-  assert.ok(start.indexOf('requireRuntimeIntegration();') < start.indexOf('readCredentialSet(identity)'));
+  const start = source.slice(source.indexOf('async function start(lifecycleFd) {'),
+    source.indexOf('async function stop() {'));
+  assert.ok(start.indexOf('prepareProtectedReceiverEndpoints(APP_ROOT, { lifecycleFd });') <
+    start.indexOf('cleanupExactProject();'));
+  assert.ok(start.indexOf('publishVoiceEgressAdmission(startingState.activationGeneration, lifecycleFd);') <
+    start.indexOf('releaseHostVoiceStart(startingState.activationGeneration, lifecycleFd);'));
+  assert.ok(start.indexOf('releaseHostVoiceStart(startingState.activationGeneration, lifecycleFd);') <
+    start.indexOf('await waitForHealth();'));
 });
 
 test('host contract ownership and exact independent admission are mandatory', () => {
@@ -184,18 +226,49 @@ test('host contract ownership and exact independent admission are mandatory', ()
   const io = { lstatSync: metadata, fstatSync: metadata, openSync: (filename) => filename, closeSync() {},
     readFileSync(filename) { return filename === '/proc/sys/kernel/random/boot_id' ? BOOT : files[filename]; } };
   const evidence = `sha256:${'a'.repeat(64)}`;
-  const run = (executable, args) => {
+  const run = (executable, args, options) => {
     assert.equal(executable, boundary.AUTHORITY);
+    assert.deepEqual(options, { lifecycleFd: 7 });
     assert.deepEqual(args, ['--admit-media-application', 'running', boundary.digest(files[boundary.CONTRACT]), BOOT, RELEASE, evidence]);
     return JSON.stringify({ schema: 'teleagent.media-application-admission.v1', stage: 'running',
       contractDigest: args[2], bootId: BOOT, releaseRoot: RELEASE, evidenceDigest: evidence });
   };
-  assert.deepEqual(boundary.loadAdmission(RELEASE, 'running', evidence, { io, run }), contract);
-  assert.throws(() => boundary.loadAdmission(RELEASE, 'running', evidence, { io, run: () => '{}' }));
+  assert.deepEqual(boundary.loadAdmission(RELEASE, 'running', evidence,
+    { io, run, lifecycleFd: 7 }), contract);
+  assert.throws(() => boundary.loadAdmission(RELEASE, 'running', evidence,
+    { io, run: () => '{}', lifecycleFd: 7 }));
   files[boundary.CONTRACT] += ' '; // trailing space does not change canonical content
-  assert.deepEqual(boundary.loadAdmission(RELEASE, 'running', evidence, { io, run }), contract);
+  assert.deepEqual(boundary.loadAdmission(RELEASE, 'running', evidence,
+    { io, run, lifecycleFd: 7 }), contract);
   unsafe = true;
   assert.throws(() => boundary.loadAdmission(RELEASE, 'running', evidence, { io, run: () => assert.fail('unsafe authority executed') }));
+});
+
+test('placement reuses only the independent host journal evidence while fenced', () => {
+  const contract = fixture();
+  const evidence = `sha256:${'a'.repeat(64)}`;
+  const placements = { drachtio: IDS.drachtio, freeswitch: IDS.freeswitch,
+    'voice-app': IDS['voice-app'] };
+  const calls = [];
+  const load = (root, stage, observed, options) => {
+    calls.push([root, stage, observed, options.lifecycleFd]);
+    return contract;
+  };
+  const observation = { schema: 'teleagent.media-application-observation.v1' };
+  const verify = (received, ids, { stage, anchorCheck }) => {
+    assert.equal(received, contract);
+    assert.deepEqual(ids, placements);
+    assert.equal(stage, 'created');
+    assert.deepEqual(anchorCheck(), contract.bootstrap);
+    return observation;
+  };
+  assert.equal(boundary.verifyProtectedPlacement(RELEASE, placements, 'created', {
+    lifecycleFd: 7, hostEvidenceDigest: evidence, load, verify, inspect: () => assert.fail('not needed'),
+  }), observation);
+  assert.deepEqual(calls, Array(3).fill([RELEASE, 'created', evidence, 7]));
+  assert.throws(() => boundary.verifyProtectedPlacement(RELEASE, placements, 'created', {
+    lifecycleFd: 7, load, verify,
+  }), { code: 'MEDIA_APPLICATION_REFUSED' });
 });
 
 test('placement refuses escaped workload tasks and init disappearance after kernel observation', () => {

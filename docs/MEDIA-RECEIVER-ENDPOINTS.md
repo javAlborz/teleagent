@@ -14,7 +14,7 @@ validated distinct /30 links. Unknown/missing fields, reordered services,
 missing flows, broad port intervals, shared addresses or mismatched generations
 refuse before output.
 
-`prepareProtectedReceiverEndpoints(releaseRoot)` reads only fixed root-protected
+`prepareProtectedReceiverEndpoints(releaseRoot, { lifecycleFd })` reads only fixed root-protected
 `/etc/teleagent-media/docker-network.json`, requires canonical JSON, and obtains
 independent bootstrap admission through the existing protected application
 boundary module. The authority must validate the complete external edge and
@@ -92,6 +92,16 @@ source-UID and exact interface/address/port filtering. A v1 record cannot
 acquire v2 permissions, and a v2 record missing either addition is refused.
 The topology digest and independent Asterisk evidence must explicitly bind v2;
 v1 evidence cannot be reused.
+
+The separate infrastructure `teleagent.media-network-install.v3` policy pins
+one iPhone Air Tailnet peer and admits its changing high UDP source ports only
+to Asterisk's fixed SIP and narrow RTP destination ports. The receiver
+projection now recognizes this version when the same exact application v2
+topology and independent whole-configuration digest are admitted. Its service
+endpoints and voice environment are identical to the v2 projection; the
+external handset source-port policy grants no extra internal listener or flow.
+Unknown network schema versions still refuse, and `readyToLaunch` remains
+false. This source compatibility is not media commissioning.
 
 For v1, the renderer keeps `reverseEsl` and `privateHttpAudio` null. For v2 it
 emits explicit reverse ESL bind/advertisement options and media-only HTTP

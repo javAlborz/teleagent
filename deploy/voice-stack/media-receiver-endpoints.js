@@ -9,6 +9,7 @@ const {
   validateReceiverSafeSipMediaTopology,
 } = require('../../lib/sip-media-boundary-contract');
 const boundary = require('./media-application-boundary');
+const { VOICE_APP_FIXED_ENV } = require('../../lib/voice-app-runtime-env');
 
 const NETWORK_CONFIG = '/etc/teleagent-media/docker-network.json';
 const SOURCE_PATHS = Object.freeze({
@@ -65,7 +66,8 @@ function renderReceiverEndpoints(networkConfig, applicationContract) {
   exactKeys(networkConfig, 'schema network anchor');
   refuse(networkConfig.schema === 'teleagent.media-docker-install.v1');
   exactKeys(networkConfig.network, 'schema topology boundary');
-  refuse(networkConfig.network.schema === 'teleagent.media-network-install.v1');
+  refuse(['teleagent.media-network-install.v1', 'teleagent.media-network-install.v2',
+    'teleagent.media-network-install.v3'].includes(networkConfig.network.schema));
   const validated = validateReceiverSafeSipMediaTopology(networkConfig.network.topology);
   const topology = validated.topology;
   const contract = boundary.validateContract(applicationContract, applicationContract?.bootstrap?.bootId);
@@ -181,17 +183,116 @@ function renderReceiverEndpoints(networkConfig, applicationContract) {
   return freeze({ ...projection, projectionDigest: boundary.digest(boundary.canonical(projection)) });
 }
 
-function prepareProtectedReceiverEndpoints(releaseRoot) {
+function prepareProtectedReceiverEndpoints(releaseRoot, { lifecycleFd = null } = {}) {
   const text = boundary.protectedFile(NETWORK_CONFIG);
   const config = JSON.parse(text);
   refuse(text.trim() === boundary.canonical(config));
   const configDigest = boundary.digest(boundary.canonical(config));
-  const contract = boundary.loadAdmission(releaseRoot, 'bootstrap', configDigest);
+  const contract = boundary.loadAdmission(releaseRoot, 'bootstrap-app', configDigest, { lifecycleFd });
   // The host authority validates the entire infra config, external boundary,
   // current boot and independent provenance. This renderer validates and uses
   // its receiver topology; matching the whole-config digest prevents splicing.
   return renderReceiverEndpoints(config, contract);
 }
 
+function materializePrivateReceiverFiles(projection, drachtioSecret, freeswitchSecret) {
+  const { projectionDigest, ...unsigned } = projection || {};
+  refuse(projection && projection.schema === 'teleagent.media-receiver-endpoint-projection.v1' &&
+    projectionDigest === boundary.digest(boundary.canonical(unsigned)) &&
+    projection.privateHttpAudio && projection.reverseEsl &&
+    typeof drachtioSecret === 'string' && /^[\x21-\x7e]{32,4096}$/u.test(drachtioSecret) &&
+    typeof freeswitchSecret === 'string' && /^[\x21-\x7e]{32,4096}$/u.test(freeswitchSecret));
+  exactKeys(projection.files,
+    'drachtio.conf.xml.template freeswitch-event-socket.conf.xml.template freeswitch-acl.conf.xml freeswitch-mrf.xml freeswitch-switch.conf.xml');
+  const xmlAttribute = (value) => value.replace(/&/gu, '&amp;').replace(/"/gu, '&quot;')
+    .replace(/</gu, '&lt;').replace(/>/gu, '&gt;').replace(/'/gu, '&apos;');
+  const files = {
+    'drachtio.conf.xml': replaceExactly(projection.files['drachtio.conf.xml.template'],
+      '__DRACHTIO_SECRET__', xmlAttribute(drachtioSecret)),
+    'freeswitch-event-socket.conf.xml': replaceExactly(
+      projection.files['freeswitch-event-socket.conf.xml.template'],
+      '__FREESWITCH_SECRET__', xmlAttribute(freeswitchSecret)),
+    'freeswitch-acl.conf.xml': projection.files['freeswitch-acl.conf.xml'],
+    'freeswitch-mrf.xml': projection.files['freeswitch-mrf.xml'],
+    'freeswitch-switch.conf.xml': projection.files['freeswitch-switch.conf.xml'],
+  };
+  refuse(!Object.values(files).some((contents) =>
+    typeof contents !== 'string' || /__[A-Z_]+__/u.test(contents)));
+  return freeze(files);
+}
+
+function preparePrivateCompose(document, contract, projection) {
+  refuse(projection?.releaseRoot === contract?.releaseRoot &&
+    projection?.privateHttpAudio && projection?.reverseEsl &&
+    projection?.readyToLaunch === false);
+  const { projectionDigest, ...unsigned } = projection;
+  refuse(projectionDigest === boundary.digest(boundary.canonical(unsigned)));
+  const candidate = boundary.exactComposeCandidate(document, contract);
+  const runtimeRoot = '/run/teleagent-isolated-voice-stack';
+  const bind = (source, target) => ({ type: 'bind', source, target, read_only: true, bind: {} });
+  const exactBind = (volume, source, target, readOnly = true) => {
+    const keys = readOnly ? 'bind read_only source target type' : 'bind source target type';
+    refuse(volume && Object.keys(volume).sort().join(' ') === keys &&
+      volume.type === 'bind' && volume.source === source && volume.target === target &&
+      (readOnly ? volume.read_only === true : !Object.hasOwn(volume, 'read_only')) &&
+      Object.keys(volume.bind || {}).length === 0);
+  };
+  const drachtio = candidate.services.drachtio;
+  refuse(Array.isArray(drachtio.volumes) && drachtio.volumes.length === 1);
+  exactBind(drachtio.volumes[0], `${runtimeRoot}/drachtio.conf.xml`, '/etc/drachtio.conf.xml');
+  const freeswitch = candidate.services.freeswitch;
+  refuse(Array.isArray(freeswitch.volumes) && freeswitch.volumes.length === 4);
+  const existing = [
+    [`${contract.releaseRoot}/freeswitch/entrypoint.sh`, '/usr/local/bin/entrypoint-hermes-freeswitch.sh', null],
+    [`${contract.releaseRoot}/freeswitch/mrf.xml`, '/usr/local/freeswitch/conf/sip_profiles/mrf.xml',
+      `${runtimeRoot}/freeswitch-mrf.xml`],
+    [`${contract.releaseRoot}/freeswitch/switch.conf.xml`, '/usr/local/freeswitch/conf/autoload_configs/switch.conf.xml',
+      `${runtimeRoot}/freeswitch-switch.conf.xml`],
+    [`${runtimeRoot}/freeswitch-event-socket.conf.xml`,
+      '/usr/local/freeswitch/conf/autoload_configs/event_socket.conf.xml', null],
+  ];
+  for (const [index, [source, target, replacement]] of existing.entries()) {
+    exactBind(freeswitch.volumes[index], source, target);
+    if (replacement) freeswitch.volumes[index] = bind(replacement, target);
+  }
+  freeswitch.volumes.push(bind(`${runtimeRoot}/freeswitch-acl.conf.xml`,
+    '/usr/local/freeswitch/conf/autoload_configs/acl.conf.xml'));
+  const voice = candidate.services['voice-app'];
+  refuse(Array.isArray(voice.volumes) && voice.volumes.length === 7 &&
+    voice.environment && Object.getPrototypeOf(voice.environment) === Object.prototype);
+  for (const [source, target, readOnly] of [
+    ['/etc/teleagent-isolated-voice/config', '/app/config', true],
+    ['/var/lib/teleagent-isolated-voice', '/app/state', false],
+    [`${runtimeRoot}/voice-secrets`, '/run/secrets', true],
+    [`${runtimeRoot}/admission`, '/run/teleagent-media', true],
+    ['/run/teleagent-voice-egress', '/run/teleagent-voice-egress', true],
+    [`${runtimeRoot}/control`, '/run/teleagent-voice-control', false],
+    ['/run/teleagent-controller', '/run/teleagent-controller', true],
+  ]) {
+    const match = voice.volumes.find((volume) => volume?.target === target);
+    exactBind(match, source, target, readOnly);
+  }
+  for (const [key, value] of Object.entries(projection.voiceEnvironment)) {
+    refuse(Object.hasOwn(voice.environment, key) &&
+      (key === 'WS_PORT' ? ['', value].includes(voice.environment[key]) :
+        voice.environment[key] === VOICE_APP_FIXED_ENV[key]));
+    voice.environment[key] = value;
+  }
+  refuse(voice.environment.HTTP_HOST === '127.0.0.1' &&
+    voice.environment.OUTBOUND_API_NON_LOOPBACK_ENABLED === 'false' &&
+    voice.environment.VOICE_PRIVILEGED_ACTIONS_ENABLED === 'false');
+  // Docker Compose normalizes the source's `ulimits: { core: 0 }` to
+  // `{ core: {} }` in `config --format json`, but rejects that normalized
+  // object when it is consumed as a Compose file. Reassert the reviewed
+  // fixed zero limit before serializing the private candidate.
+  for (const service of Object.values(candidate.services)) {
+    exactKeys(service.ulimits, 'core');
+    exactKeys(service.ulimits.core, '');
+    service.ulimits.core = 0;
+  }
+  return candidate;
+}
+
 module.exports = { NETWORK_CONFIG, SOURCE_PATHS, REMAINING_GATES, replaceExactly,
-  renderReceiverEndpoints, prepareProtectedReceiverEndpoints };
+  renderReceiverEndpoints, prepareProtectedReceiverEndpoints, preparePrivateCompose,
+  materializePrivateReceiverFiles };

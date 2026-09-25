@@ -43,7 +43,7 @@ also differs from `/srv`:
 /var/lib/teleagent-control
 /var/lib/teleagent-privileged-action
 /var/lib/teleagent-sip-gateway
-/var/lib/teleagent-voice
+/var/lib/teleagent-isolated-voice
 /srv/teleagent-agent-workspaces
 ```
 

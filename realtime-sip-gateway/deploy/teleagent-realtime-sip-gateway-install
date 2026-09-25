@@ -368,6 +368,7 @@ LoadCredential=teleagent-release-gate:/run/teleagent-release-gate/verified.json'
     /run/teleagent-provider-capabilities \
     /run/teleagent-privileged-action \
     /run/teleagent-voice-stack \
+    /run/teleagent-isolated-voice-stack \
     /run/teleagent-sip-local-peer-fence \
     /etc/teleagent/worker-session \
     /etc/teleagent/provider-egress \

@@ -1,9 +1,11 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
-const { ADMISSION_FILE, REQUIRED_SOURCES, canonical, digest, assertMediaReceiverRuntime } = require('../../lib/media-receiver-runtime');
+const { ADMISSION_FILE, START_FIFO, REQUIRED_SOURCES, canonical, digest, awaitHostStart,
+  assertMediaReceiverRuntime } = require('../../lib/media-receiver-runtime');
 const { runtimeFixture } = require('./helpers/media-runtime-fixture');
 const { loadMediaControlEndpoints, buildFreeswitchConnectionOptions } = require('../lib/media-control-endpoints');
 const { VOICE_APP_FIXED_ENV } = require('../../lib/voice-app-runtime-env');
@@ -14,9 +16,49 @@ test('real entrypoint refuses absent independent runtime before dependencies, se
   });
   assert.equal(result.status, 1);
   assert.match(result.stderr, /Voice state\/listener boundary failed:/u);
-  assert.match(result.stderr, /receiver-runtime\.json|teleagent-media/u);
+  assert.match(result.stderr, /media runtime admission|teleagent-media/u);
   assert.doesNotMatch(result.stderr, /Cannot find module|MODULE_NOT_FOUND/u);
   assert.equal(result.stdout, '');
+});
+
+test('host start fence requires a root-owned FIFO and one exact generation', () => {
+  const generation = 'a'.repeat(64);
+  const metadata = { dev: 3, ino: 82, uid: 0, gid: 987, mode: 0o010440,
+    nlink: 1, isFIFO: () => true };
+  const directory = { uid: 0, gid: 0, mode: 0o40755, isDirectory: () => true };
+  const createIo = (payload, altered = {}) => {
+    let position = 0, closed = false;
+    const fifo = { ...metadata, ...altered };
+    return {
+      lstatSync(filename) { return filename === START_FIFO ? fifo : directory; },
+      openSync(filename) { assert.equal(filename, START_FIFO); return 11; },
+      fstatSync() { return fifo; },
+      readSync(_fd, target, offset, length) {
+        const count = Math.min(length, 7, payload.length - position);
+        if (count > 0) payload.copy(target, offset, position, position + count);
+        position += count;
+        return count;
+      },
+      closeSync() { closed = true; },
+      get closed() { return closed; },
+    };
+  };
+  const accepted = createIo(Buffer.from(`${generation}\n`));
+  assert.equal(awaitHostStart({ io: accepted, gid: 987 }), generation);
+  assert.equal(accepted.closed, true);
+  for (const [payload, altered] of [
+    [Buffer.from(`${generation}\nextra`), {}],
+    [Buffer.from(`${generation.slice(1)}\n`), {}],
+    [Buffer.from(`${'z'.repeat(64)}\n`), {}],
+    [Buffer.from(`${generation}\n`), { isFIFO: () => false }],
+    [Buffer.from(`${generation}\n`), { mode: 0o010660 }],
+  ]) assert.throws(() => awaitHostStart({ io: createIo(payload, altered), gid: 987 }));
+  const entrypoint = fs.readFileSync(path.join(__dirname, '../index.js'), 'utf8');
+  assert.ok(entrypoint.indexOf('hostStartGeneration = mediaRuntimeModule.awaitHostStart();') <
+    entrypoint.indexOf('mediaReceiverRuntime = mediaRuntimeModule.loadMediaReceiverRuntime();'));
+  assert.ok(entrypoint.indexOf('hostStartGeneration = mediaRuntimeModule.awaitHostStart();') <
+    entrypoint.indexOf('require("dotenv").config()'));
+  assert.doesNotMatch(entrypoint, /NODE_ENV === 'production'\) hostStartGeneration/u);
 });
 
 test('runtime admission binds actual sources, private clients and fixed native reverse ESL options', () => {

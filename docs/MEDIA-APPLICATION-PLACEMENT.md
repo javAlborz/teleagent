@@ -17,12 +17,21 @@ The module implements concrete preparation and verification operations:
   `/etc/teleagent-media/application-launch.json`. Every ancestor and final file
   must be root-owned, not writable by group/others, and free of symlink aliases;
   the file has one link and bounded size. Canonical JSON excludes duplicates.
-- Require the separate protected `/usr/local/libexec/verify-teleagent-media-activation`
-  to admit the release, exact file digest, stage and evidence digest. No
-  implementation, approval record, configuration or sentinel is fabricated.
+- Require the separate protected `/usr/local/libexec/verify-teleagent-media-application`
+  to admit the release, exact file digest, stage and evidence digest. Its
+  installed implementation currently admits only bootstrap; created, running,
+  restart and cutover remain refused.
 - Produce a complete resolved Compose candidate whose three running voice
   services use `network_mode: container:<full anchor ID>`, exact local image
-  IDs, explicit host user namespaces and disabled container health checks.
+  IDs, distinct `teleagent-isolated-*` container names, explicit host user
+  namespaces and disabled container health checks. The distinct names permit
+  pre-cutover creation while the legacy containers retain their global names.
+  The replacement launcher's Compose project is `teleagent-isolated-voice`;
+  its project-scoped cleanup cannot enumerate the live legacy project label.
+  The replacement's temporary credentials and rendered SIP/ESL files live under
+  `/run/teleagent-isolated-voice-stack`. The legacy containers mount files from
+  `/run/teleagent-voice-stack`; the disabled installer and emergency cleanup
+  must not read, replace or remove that live runtime tree.
   Conflicting hostname, published-port, DNS, additional-host, link and other
   network settings are refused. Commands, environments and mounts are copied
   unchanged. The candidate must not be launched until the remaining gates below
@@ -64,7 +73,7 @@ retain the shared lifecycle fence across the eventual caller's mutation.
 Echoing request arguments or accepting caller-selected images is not admission.
 The returned JSON is a checked observation, not a transferable authorization.
 
-`verifyProtectedPlacement(releaseRoot, fullContainerIds, stage)` is the concrete
+`verifyProtectedPlacement(releaseRoot, fullContainerIds, stage, { lifecycleFd })` is the concrete
 read-only operation for `created`, `running` and `restart`. It uses the exact
 local Docker socket and protected empty Docker client configuration, then
 submits the full observation digest to the authority. Automatic container or

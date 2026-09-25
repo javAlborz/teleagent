@@ -68,13 +68,15 @@ function loadVoiceControlAuthConfig({ env: suppliedSettings = null, runtimeSecre
   return Object.freeze({ apiToken });
 }
 
+const { isLocalUnixRequest } = require('./local-control-request');
+
 function isLoopbackAddress(address) {
   const value = String(address || '').toLowerCase();
   return value === '127.0.0.1' || value === '::1' || value === '::ffff:127.0.0.1';
 }
 
 function requireLoopback(req, res, next) {
-  if (isLoopbackAddress(req.socket?.remoteAddress)) return next();
+  if (isLoopbackAddress(req.socket?.remoteAddress) || isLocalUnixRequest(req)) return next();
   return res.status(403).json({ success: false, error: 'loopback_required' });
 }
 

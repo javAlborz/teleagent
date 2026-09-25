@@ -77,7 +77,7 @@ IPAddressDeny=any
 SystemCallArchitectures=native
 ReadOnlyPaths=/opt/teleagent/releases /opt/teleagent/agent-tools /usr/local/libexec /etc/teleagent/controller
 ReadWritePaths=/var/lib/teleagent-control
-InaccessiblePaths=/opt/teleagent/current/.env /opt/teleagent/current/voice-app/.env /var/lib/teleagent-worker-state /var/lib/teleagent-privileged-action /var/lib/teleagent-voice /var/lib/teleagent-voice-stack /srv/teleagent-agent-workspaces /etc/teleagent-voice /etc/teleagent/privileged-action /etc/teleagent/provider-egress-secrets /run/teleagent-provider-egress /run/teleagent-provider-egress-control /run/teleagent-privileged-action /run/teleagent-voice-stack
+InaccessiblePaths=/opt/teleagent/current/.env /opt/teleagent/current/voice-app/.env /var/lib/teleagent-worker-state /var/lib/teleagent-privileged-action /var/lib/teleagent-voice /var/lib/teleagent-isolated-voice /var/lib/teleagent-voice-stack /var/lib/teleagent-isolated-voice-stack /srv/teleagent-agent-workspaces /etc/teleagent-voice /etc/teleagent-isolated-voice /etc/teleagent/privileged-action /etc/teleagent/provider-egress-secrets /run/teleagent-provider-egress /run/teleagent-provider-egress-control /run/teleagent-privileged-action /run/teleagent-voice-stack /run/teleagent-isolated-voice-stack
 
 # Deliberately dormant: no [Install] section. A root operator must provision the
 # dedicated state filesystem, exact runtime environment, both ENABLE sentinels,

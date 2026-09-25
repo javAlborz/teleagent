@@ -33,7 +33,7 @@ services:
     volumes:
       - "${DEVICE_CONFIG_DIR:?DEVICE_CONFIG_DIR must be provisioned}:/app/config:ro"
       - "${VOICE_STATE_DIR:?VOICE_STATE_DIR must be provisioned}:/app/state:ro"
-      - /run/teleagent-voice-stack/voice-secrets:/run/secrets:ro
+      - /run/teleagent-isolated-voice-stack/voice-secrets:/run/secrets:ro
     command: ["node", "voice-runtime-preflight.js"]
 
   drachtio:
@@ -69,7 +69,7 @@ services:
       - /config:rw,noexec,nosuid,nodev,uid=${DRACHTIO_UID:?DRACHTIO_UID must resolve teleagent-drachtio},gid=${DRACHTIO_GID:?DRACHTIO_GID must resolve teleagent-drachtio},mode=0700,size=1048576
       - /tmp:rw,noexec,nosuid,nodev,uid=${DRACHTIO_UID:?DRACHTIO_UID must resolve teleagent-drachtio},gid=${DRACHTIO_GID:?DRACHTIO_GID must resolve teleagent-drachtio},mode=0700,size=16777216
     volumes:
-      - /run/teleagent-voice-stack/drachtio.conf.xml:/etc/drachtio.conf.xml:ro
+      - /run/teleagent-isolated-voice-stack/drachtio.conf.xml:/etc/drachtio.conf.xml:ro
     command: ["drachtio", "-f", "/etc/drachtio.conf.xml"]
     # Ports (for reference - host mode doesn't need port mapping):
     # - 5070/udp: fixed authenticated Asterisk trunk
@@ -118,7 +118,7 @@ services:
       - ./freeswitch/entrypoint.sh:/usr/local/bin/entrypoint-hermes-freeswitch.sh:ro
       - ./freeswitch/mrf.xml:/usr/local/freeswitch/conf/sip_profiles/mrf.xml:ro
       - ./freeswitch/switch.conf.xml:/usr/local/freeswitch/conf/autoload_configs/switch.conf.xml:ro
-      - /run/teleagent-voice-stack/freeswitch-event-socket.conf.xml:/usr/local/freeswitch/conf/autoload_configs/event_socket.conf.xml:ro
+      - /run/teleagent-isolated-voice-stack/freeswitch-event-socket.conf.xml:/usr/local/freeswitch/conf/autoload_configs/event_socket.conf.xml:ro
     command: ["freeswitch"]
     depends_on:
       voice-runtime-preflight:
@@ -239,7 +239,10 @@ services:
       # Systemd projects only the reviewed voice-app credentials. Each source
       # file is root:teleagent-voice 0440; the projection is ephemeral and the
       # agent/controller processes receive only their own public/verifier data.
-      - /run/teleagent-voice-stack/voice-secrets:/run/secrets:ro
+      - /run/teleagent-isolated-voice-stack/voice-secrets:/run/secrets:ro
+      - /run/teleagent-isolated-voice-stack/admission:/run/teleagent-media:ro
+      - /run/teleagent-voice-egress:/run/teleagent-voice-egress:ro
+      - /run/teleagent-isolated-voice-stack/control:/run/teleagent-voice-control
       - /run/teleagent-controller:/run/teleagent-controller:ro
     depends_on:
       - drachtio

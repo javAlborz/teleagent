@@ -34,7 +34,7 @@ function voiceInstallerFixture(t) {
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const systemd = path.join(directory, 'etc/systemd/system');
   const libexec = path.join(directory, 'usr/local/libexec');
-  const runtimeRoot = path.join(directory, 'run/teleagent-voice-stack');
+  const runtimeRoot = path.join(directory, 'run/teleagent-isolated-voice-stack');
   fs.mkdirSync(systemd, { recursive: true, mode: 0o755 });
   fs.mkdirSync(libexec, { recursive: true, mode: 0o755 });
   fs.mkdirSync(runtimeRoot, { recursive: true, mode: 0o700 });
@@ -115,7 +115,7 @@ function voiceInstallerFixture(t) {
     '#!/bin/bash',
     'set -euo pipefail',
     'printf \'%s\\n\' "$*" >>"$FAKE_DOCKER_LOG"',
-    'if [ "$*" = "container ls --all --no-trunc --quiet --filter label=com.docker.compose.project=teleagent-voice" ]; then',
+    'if [ "$*" = "container ls --all --no-trunc --quiet --filter label=com.docker.compose.project=teleagent-isolated-voice" ]; then',
     '  [ "${FAKE_DOCKER_LIST_FAILURE:-0}" = 0 ] || exit 70',
     '  if [ "${FAKE_DOCKER_OVERSIZED:-0}" = 1 ]; then /usr/bin/printf \'%09000d\' 0; exit 0; fi',
     '  if [ "${FAKE_DOCKER_INVALID:-0}" = 1 ]; then printf \'not-a-container-id\\n\'; exit 0; fi',
@@ -572,7 +572,7 @@ test('voice installer can only install or check a disabled stack and never provi
   assert.doesNotMatch(installer, /"\$systemctl_bin"\s+(?:start|enable|restart)\b/);
   assert.match(installer, /capture_docker 'voice project enumeration'/);
   assert.match(installer, /container rm --force/);
-  assert.match(installer, /label=com\.docker\.compose\.project=teleagent-voice/);
+  assert.match(installer, /label=com\.docker\.compose\.project=teleagent-isolated-voice/);
   assert.match(installer, /emergency cleanup requires the fixed host-owned entrypoint/);
   const installBody = /install_disabled\(\) \{([\s\S]*?)\n\}/u.exec(installer)?.[1] ?? '';
   const checkBody = /check_installed\(\) \{([\s\S]*?)\n\}/u.exec(installer)?.[1] ?? '';
@@ -657,9 +657,9 @@ test('host-owned emergency cleanup is exact, bounded, and independent of release
     [],
   );
   assert.deepEqual(fs.readFileSync(healthy.dockerCalls, 'utf8').trim().split('\n'), [
-    'container ls --all --no-trunc --quiet --filter label=com.docker.compose.project=teleagent-voice',
+    'container ls --all --no-trunc --quiet --filter label=com.docker.compose.project=teleagent-isolated-voice',
     `container rm --force ${first} ${second}`,
-    'container ls --all --no-trunc --quiet --filter label=com.docker.compose.project=teleagent-voice',
+    'container ls --all --no-trunc --quiet --filter label=com.docker.compose.project=teleagent-isolated-voice',
   ]);
 
   for (const [environment, message] of [

@@ -6,7 +6,7 @@ Guide for deploying Teleagent in production environments.
 > release pipeline, install the reviewed tree at `/opt/teleagent/current`, and
 > activate only through `teleagent-voice-stack.service`. The service accepts an
 > exact OCI digest from the root-owned
-> `/etc/teleagent-voice/voice-image.manifest.json` and runs Compose with
+> `/etc/teleagent-isolated-voice/voice-image.manifest.json` and runs Compose with
 > `--no-build --pull never`. Direct `docker compose up`, a local build context,
 > and split-host voice/controller operation are development or migration
 > history and are not supported production paths.
@@ -100,11 +100,11 @@ infrastructure-owned `teleagent-asterisk` peer. All four are non-root, use
 provider/owner identity. Resolve every explicit Compose UID/GID binding from
 those accounts; there is no default. Provision these host paths before start:
 
-- `/etc/teleagent-voice/config`: root:`teleagent-voice`, mode `0750`;
-- `/etc/teleagent-voice/config/devices.json`: root:`teleagent-voice`, mode `0440`;
-- `/etc/teleagent-voice/credentials`: root:`teleagent-voice`, mode `0750`;
+- `/etc/teleagent-isolated-voice/config`: root:`teleagent-voice`, mode `0750`;
+- `/etc/teleagent-isolated-voice/config/devices.json`: root:`teleagent-voice`, mode `0440`;
+- `/etc/teleagent-isolated-voice/credentials`: root:`teleagent-voice`, mode `0750`;
 - each projected voice/SIP credential: root:`teleagent-voice`, mode `0440`, one link;
-- `/var/lib/teleagent-voice`: the root of a dedicated 4–8 GiB filesystem,
+- `/var/lib/teleagent-isolated-voice`: the root of a dedicated 4–8 GiB filesystem,
   `teleagent-voice`:`teleagent-voice`, mode `0700`, with at least 512 MiB and
   20% free before activation.
 
@@ -118,7 +118,7 @@ mounts voice state read-only and is limited to 0.5 CPU, 256 MiB, no additional
 swap, and 64 processes. It also requires the state and configuration mounts to
 have distinct device IDs and verifies the 4–8 GiB state capacity/free-space
 reserve with `statfs`. Independently, the host launcher requires the exact
-`/var/lib/teleagent-voice` directory to be a canonical mountpoint on a device
+`/var/lib/teleagent-isolated-voice` directory to be a canonical mountpoint on a device
 different from its immediate `/var/lib` parent; a shared `/var` or `/srv`
 filesystem does not qualify. The host launcher has an independent 512
 MiB/128-task cgroup ceiling and rejects controller responses above 128 KiB.

@@ -37,6 +37,87 @@ test('deterministic projection binds every receiver address and preserves creden
   assert.doesNotMatch(Object.values(output.files).join(''), /127\.0\.0\.1|localhost|0\.0\.0\.0|rfc1918\.auto/u);
 });
 
+test('private Compose projection binds receiver files and environment without broad mounts', () => {
+  const { config, contract } = fixture('v2');
+  const projection = renderer.renderReceiverEndpoints(config, contract);
+  const runtimeRoot = '/run/teleagent-isolated-voice-stack';
+  const bind = (source, target, read_only = true) => ({ type: 'bind', source, target,
+    ...(read_only ? { read_only: true } : {}), bind: {} });
+  const document = { services: {
+    'voice-runtime-preflight': { network_mode: 'none', ulimits: { core: {} } },
+    drachtio: { network_mode: 'host', container_name: 'drachtio', ulimits: { core: {} }, volumes: [
+      bind(`${runtimeRoot}/drachtio.conf.xml`, '/etc/drachtio.conf.xml')] },
+    freeswitch: { network_mode: 'host', container_name: 'freeswitch', ulimits: { core: {} }, volumes: [
+      bind(`${contract.releaseRoot}/freeswitch/entrypoint.sh`, '/usr/local/bin/entrypoint-hermes-freeswitch.sh'),
+      bind(`${contract.releaseRoot}/freeswitch/mrf.xml`, '/usr/local/freeswitch/conf/sip_profiles/mrf.xml'),
+      bind(`${contract.releaseRoot}/freeswitch/switch.conf.xml`, '/usr/local/freeswitch/conf/autoload_configs/switch.conf.xml'),
+      bind(`${runtimeRoot}/freeswitch-event-socket.conf.xml`, '/usr/local/freeswitch/conf/autoload_configs/event_socket.conf.xml'),
+    ] },
+    'voice-app': { network_mode: 'host', container_name: 'voice-app', ulimits: { core: {} },
+      environment: { ...VOICE_APP_FIXED_ENV, WS_PORT: '' }, volumes: [
+        bind('/etc/teleagent-isolated-voice/config', '/app/config'),
+        bind('/var/lib/teleagent-isolated-voice', '/app/state', false),
+        bind(`${runtimeRoot}/voice-secrets`, '/run/secrets'),
+        bind(`${runtimeRoot}/admission`, '/run/teleagent-media'),
+        bind('/run/teleagent-voice-egress', '/run/teleagent-voice-egress'),
+        bind(`${runtimeRoot}/control`, '/run/teleagent-voice-control', false),
+        bind('/run/teleagent-controller', '/run/teleagent-controller'),
+      ] },
+  } };
+  const candidate = renderer.preparePrivateCompose(document, contract, projection);
+  assert.deepEqual(candidate.services['voice-app'].environment,
+    { ...document.services['voice-app'].environment, ...projection.voiceEnvironment });
+  assert.equal(candidate.services['voice-app'].network_mode,
+    contract.bootstrap.services.voice.networkMode);
+  assert.ok(Object.values(candidate.services).every((service) => service.ulimits.core === 0));
+  assert.deepEqual(candidate.services.freeswitch.volumes.map(({ target }) => target), [
+    '/usr/local/bin/entrypoint-hermes-freeswitch.sh',
+    '/usr/local/freeswitch/conf/sip_profiles/mrf.xml',
+    '/usr/local/freeswitch/conf/autoload_configs/switch.conf.xml',
+    '/usr/local/freeswitch/conf/autoload_configs/event_socket.conf.xml',
+    '/usr/local/freeswitch/conf/autoload_configs/acl.conf.xml',
+  ]);
+  assert.equal(candidate.services.freeswitch.volumes[1].source, `${runtimeRoot}/freeswitch-mrf.xml`);
+  assert.equal(candidate.services.freeswitch.volumes[2].source, `${runtimeRoot}/freeswitch-switch.conf.xml`);
+  assert.equal(candidate.services.freeswitch.volumes[4].source, `${runtimeRoot}/freeswitch-acl.conf.xml`);
+  assert.equal(document.services.freeswitch.volumes.length, 4);
+  for (const change of [
+    (x) => { x.services.freeswitch.volumes[1].source = '/etc/shadow'; },
+    (x) => { x.services.freeswitch.volumes.push(bind('/etc/shadow', '/tmp/shadow')); },
+    (x) => { x.services['voice-app'].volumes[1].read_only = true; },
+    (x) => { x.services['voice-app'].environment.WS_HOST = '0.0.0.0'; },
+  ]) {
+    const altered = structuredClone(document); change(altered);
+    assert.throws(() => renderer.preparePrivateCompose(altered, contract, projection));
+  }
+});
+
+test('private receiver files parse with escaped credentials and no template slots', () => {
+  const { config, contract } = fixture('v2');
+  const projection = renderer.renderReceiverEndpoints(config, contract);
+  const drachtioSecret = 'Abc12345'.repeat(4) + '&"<>';
+  const freeswitchSecret = 'Xyz98765'.repeat(4) + "'&<>";
+  const files = renderer.materializePrivateReceiverFiles(projection, drachtioSecret, freeswitchSecret);
+  assert.deepEqual(Object.keys(files).sort(), [
+    'drachtio.conf.xml', 'freeswitch-acl.conf.xml', 'freeswitch-event-socket.conf.xml',
+    'freeswitch-mrf.xml', 'freeswitch-switch.conf.xml',
+  ]);
+  assert.doesNotMatch(Object.values(files).join(''), /__[A-Z_]+__/u);
+  const result = spawnSync('/usr/bin/python3', ['-I', '-c',
+    "import json,sys,xml.etree.ElementTree as E\n" +
+    "v=json.load(sys.stdin);docs={k:E.fromstring(x) for k,x in v['files'].items()}\n" +
+    "assert docs['drachtio.conf.xml'].find('admin').attrib['secret']==v['drachtio']\n" +
+    "rows=docs['freeswitch-event-socket.conf.xml'].findall('.//param')\n" +
+    "assert [r.attrib['value'] for r in rows if r.attrib['name']=='password']==[v['freeswitch']]\n"], {
+    input: JSON.stringify({ files, drachtio: drachtioSecret, freeswitch: freeswitchSecret }),
+    encoding: 'utf8', timeout: 5000, maxBuffer: 65536,
+    env: { PATH: '/usr/bin:/bin', LANG: 'C.UTF-8' },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.throws(() => renderer.materializePrivateReceiverFiles(
+    { ...projection, projectionDigest: 'sha256:' + '0'.repeat(64) }, drachtioSecret, freeswitchSecret));
+});
+
 test('generated XML parses and pins SIP, ESL ACLs, RTP and bounded core settings', () => {
   const { config, contract } = fixture();
   const output = renderer.renderReceiverEndpoints(config, contract);
@@ -146,9 +227,9 @@ test('unreviewed template drift and incomplete runtime remain fail closed', () =
   assert.ok(output.remainingGates.includes('voice-reverse-esl-listener-and-flow'));
   assert.ok(output.remainingGates.includes('freeswitch-private-http-audio-listener-and-flow'));
   assert.throws(() => assertVoiceAppRuntimeEnvironment({ ...VOICE_APP_FIXED_ENV, ...output.voiceEnvironment }));
-  assert.throws(() => boundary.requireRuntimeIntegration(), { code: 'MEDIA_RUNTIME_UNCOMMISSIONED' });
   const source = fs.readFileSync(path.join(__dirname, '../../deploy/voice-stack/teleagent-voice-stack-launch.js'), 'utf8');
-  assert.match(source, /async function start\(\) \{\s*\/\/[\s\S]*?requireRuntimeIntegration\(\);/u);
+  assert.match(source, /async function start\(lifecycleFd\) \{\s*const receiverProjection = prepareProtectedReceiverEndpoints\(APP_ROOT, \{ lifecycleFd \}\);/u);
+  assert.match(source, /publishVoiceEgressAdmission\(startingState.activationGeneration, lifecycleFd\);\s*releaseHostVoiceStart\(startingState.activationGeneration, lifecycleFd\);/u);
 });
 
 test('protected entrypoint binds the fixed configuration to independent bootstrap admission', () => {
@@ -162,7 +243,7 @@ test('protected entrypoint binds the fixed configuration to independent bootstra
   boundary.loadAdmission = (release, stage, digest) => {
     admitted = true;
     assert.equal(release, contract.releaseRoot);
-    assert.equal(stage, 'bootstrap');
+    assert.equal(stage, 'bootstrap-app');
     assert.equal(digest, contract.bootstrap.configurationDigest);
     return contract;
   };
@@ -197,7 +278,22 @@ test('v2 adds only fixed reverse ESL and separate media HTTP with explicit consu
   assert.equal(output.readyToLaunch, false);
   assert.ok(output.remainingGates.includes('fixed-reverse-esl-consumer-and-peer-restriction'));
   assert.ok(output.remainingGates.includes('dedicated-private-http-consumer-and-playback-urls'));
-  assert.throws(() => boundary.requireRuntimeIntegration());
+  assert.equal(typeof boundary.requireRuntimeIntegration, 'undefined');
+});
+
+test('single-owner Tailnet v3 source-port policy preserves the exact receiver projection', () => {
+  const { config, contract } = fixture('v2');
+  const baseline = renderer.renderReceiverEndpoints(config, contract);
+  config.network.schema = 'teleagent.media-network-install.v3';
+  config.network.boundary.peers = [{ address: '100.101.120.26', sourcePorts: { start: 1024, end: 65535 } }];
+  contract.bootstrap.configurationDigest = boundary.digest(boundary.canonical(config));
+  const v3 = renderer.renderReceiverEndpoints(config, contract);
+  assert.deepEqual(v3.endpoints, baseline.endpoints);
+  assert.deepEqual(v3.voiceEnvironment, baseline.voiceEnvironment);
+  assert.equal(v3.readyToLaunch, false);
+  config.network.schema = 'teleagent.media-network-install.v4';
+  contract.bootstrap.configurationDigest = boundary.digest(boundary.canonical(config));
+  assert.throws(() => renderer.renderReceiverEndpoints(config, contract));
 });
 
 test('v1 never acquires v2 permissions and v2 forbids omissions, dynamic ports or broad tuples', () => {

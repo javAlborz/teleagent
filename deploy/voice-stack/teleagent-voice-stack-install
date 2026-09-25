@@ -129,7 +129,7 @@ run_systemctl() {
 
 target_unit=$(host_path /etc/systemd/system/teleagent-voice-stack.service)
 target_slice=$(host_path /etc/systemd/system/teleagent-voice-containers.slice)
-runtime_root=$(host_path /run/teleagent-voice-stack)
+runtime_root=$(host_path /run/teleagent-isolated-voice-stack)
 installed_entrypoint=$(host_path /usr/local/libexec/teleagent-voice-stack-install)
 
 require_root() {
@@ -176,7 +176,7 @@ list_voice_container_ids() {
   local -A seen=()
   voice_container_ids=()
   capture_docker 'voice project enumeration' container ls --all --no-trunc --quiet \
-    --filter label=com.docker.compose.project=teleagent-voice
+    --filter label=com.docker.compose.project=teleagent-isolated-voice
   if [ -n "$docker_output" ]; then
     while IFS= read -r identifier; do
       [[ "$identifier" =~ ^[0-9a-f]{64}$ ]] ||
