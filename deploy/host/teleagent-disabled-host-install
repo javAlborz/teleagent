@@ -6,7 +6,7 @@ export PATH
 unset ENV BASH_ENV CDPATH LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT GCONV_PATH \
   NODE_OPTIONS NODE_PATH PYTHONPATH PERL5LIB RUBYOPT
 umask 077
-ulimit -f 256
+ulimit -Sf 256
 
 name=teleagent-disabled-host-install
 root_prefix=
@@ -712,9 +712,15 @@ install_provider_cli() {
   assert_installed_file "$provider_installer"
   assert_installed_file "$provider_checker"
   mutation_guard
-  run_empty 'provider CLI install' "$node" "$installer" --install \
-    --claude-source "$gate_release_root/$claude_artifact" \
-    --codex-vendor-source "$gate_release_root/$codex_artifact"
+  # The two fixed CLI artifacts are larger than the aggregate's 256 KiB
+  # output-file limit. Lift only this child to a 300 MiB per-file ceiling;
+  # the parent and every other child keep the smaller limit.
+  (
+    ulimit -Sf 300000
+    run_empty 'provider CLI install' "$node" "$installer" --install \
+      --claude-source "$gate_release_root/$claude_artifact" \
+      --codex-vendor-source "$gate_release_root/$codex_artifact"
+  )
   run_exact 'PROVIDER_CLI_OK claude' 'Claude CLI credentialless check' \
     "$node" "$checker" --provider claude
   run_exact 'PROVIDER_CLI_OK codex' 'Codex CLI credentialless check' \

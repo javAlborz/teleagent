@@ -75,7 +75,8 @@ function componentSource({
     'esac\n';
 }
 
-function createFixture({ entrypointBarrier = false, fenceInstallOutput = '' } = {}) {
+function createFixture({ entrypointBarrier = false, fenceInstallOutput = '',
+  providerCliLargeStage = false } = {}) {
   const root = fs.mkdtempSync('/tmp/teleagent-disabled-host-install-test-');
   fs.chmodSync(root, 0o700);
   const log = path.join(root, 'commands.log');
@@ -196,7 +197,9 @@ function createFixture({ entrypointBarrier = false, fenceInstallOutput = '' } = 
     '    [ "$*" = --source-check ] || exit 77\n' +
     `    printf '%s\\n' SIP_GATEWAY_IDENTITY_SOURCE_OK ;;\n` +
     '  teleagent-provider-cli-install)\n' +
-    '    case "${1:-}:$#" in --install:5|--check:1) : ;; *) exit 77 ;; esac ;;\n' +
+    (providerCliLargeStage
+      ? `    case "${'${1:-}'}:$#" in --install:5) /usr/bin/head -c 393216 /dev/zero > ${JSON.stringify(path.join(root, 'test-assets/provider-cli-stage-probe'))} ;; --check:1) : ;; *) exit 77 ;; esac ;;\n`
+      : '    case "${1:-}:$#" in --install:5|--check:1) : ;; *) exit 77 ;; esac ;;\n') +
     '  teleagent-provider-cli-check)\n' +
     '    case "$*" in\n' +
     `      '--provider claude') printf '%s\\n' 'PROVIDER_CLI_OK claude' ;;\n` +
@@ -551,6 +554,18 @@ test('fresh handoff activates only the SIP fence before disabled workload instal
       'etc/teleagent/privileged-action/ENABLE',
       'etc/teleagent/realtime-sip-gateway/ENABLE',
     ]) assert.equal(fs.existsSync(path.join(fixture.root, sentinel)), false);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test('provider CLI can stage a file above the aggregate output limit', () => {
+  const fixture = createFixture({ providerCliLargeStage: true });
+  try {
+    fixture.installRuntime();
+    assertSuccess(fixture.run('--install-disabled'), 'TELEAGENT_HOST_INSTALLED_DISABLED');
+    assert.equal(fs.statSync(path.join(fixture.root,
+      'test-assets/provider-cli-stage-probe')).size, 393216);
   } finally {
     fixture.cleanup();
   }
