@@ -43,6 +43,11 @@ test('session broker, RPC socket, state DB, and tmux socket exclude provider ide
   const libexecUnit = source('teleagent-provider-libexec-install.service');
   const apparmorInstall = source('teleagent-provider-apparmor-install');
 
+  assert.match(libexecUnit,
+    /^ReadWritePaths=\/usr\/local\/libexec \/etc\/teleagent\/provider-runtime$/m);
+  assert.doesNotMatch(libexecUnit,
+    /^ReadOnlyPaths=.*\/usr\/local\/libexec/m);
+
   assert.match(service, /^User=teleagent-session-broker$/m);
   assert.match(service, /^Group=teleagent-session-broker$/m);
   assert.match(service,

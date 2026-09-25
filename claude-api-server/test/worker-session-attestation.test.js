@@ -80,6 +80,23 @@ test('recovery retires every legacy attestation and kills every provider pane', 
   assert.ok(calls.some((args) => args.includes('kill-pane') && args.includes('%42')));
 });
 
+test('an empty dedicated tmux server has no panes to recover', async (t) => {
+  const store = new WorkerSessionOperationStore();
+  t.after(() => store.close());
+  const manager = new WorkerSessionPaneManager({
+    store,
+    socketBoundary: () => true,
+    execFileImpl: async () => {
+      const error = new Error('Command failed: tmux list-panes: no current target');
+      error.stderr = 'no current target';
+      throw error;
+    },
+  });
+  assert.deepEqual(await manager.recover(), {
+    adopted: 0, retired: 0, removedUnknown: 0,
+  });
+});
+
 test('attested two-identity prepare and send need no cross-UID process visibility', async (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'attested-worker-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));

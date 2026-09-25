@@ -277,7 +277,7 @@ class WorkerSessionPaneManager {
       );
       return String(stdout || '').split('\n').map(parsePaneLine).filter(Boolean);
     } catch (error) {
-      if (/no server running|failed to connect|not found/i.test(`${error.message}\n${error.stderr || ''}`)) {
+      if (/no server running|failed to connect|not found|no current target|error connecting to .* \(No such file or directory\)/i.test(`${error.message}\n${error.stderr || ''}`)) {
         return [];
       }
       throw error;
