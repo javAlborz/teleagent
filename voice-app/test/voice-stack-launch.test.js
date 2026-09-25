@@ -32,6 +32,7 @@ const {
   parseCreatedContainerOwnership,
   requestJson,
   requireLifecycleLock,
+  retainedVoiceContainerForStop,
   renderTemplateContents,
   resolveVoiceIdentities,
   requireControllerReady,
@@ -268,7 +269,26 @@ test('stack shutdown refuses persisted-but-unquiesced panic and forced exits', (
   }
 });
 
-test('stop and recovery retain only the exact host handoff lock descriptor', () => {
+test('isolated stop selects only the durable voice container ID', () => {
+  const containerId = 'a'.repeat(64);
+  const state = { version: 3, containerOwnership: { services: [
+    { service: 'voice-app', containerId, imageId: `sha256:${'b'.repeat(64)}` },
+  ] } };
+  assert.deepEqual(retainedVoiceContainerForStop(state), {
+    containerId, imageId: `sha256:${'b'.repeat(64)}`,
+  });
+  for (const changed of [
+    { ...state, version: 2 },
+    { ...state, containerOwnership: null },
+    { ...state, containerOwnership: { services: [{ ...state.containerOwnership.services[0], containerId: 'voice-app' }] } },
+  ]) assert.throws(() => retainedVoiceContainerForStop(changed));
+  const source = fs.readFileSync(path.join(__dirname, '..', '..',
+    'deploy', 'voice-stack', 'teleagent-voice-stack-launch.js'), 'utf8');
+  const stopBody = source.slice(source.indexOf('async function stop()'), source.indexOf('function cleanup()'));
+  assert.match(stopBody, /'inspect', '--format', '\{\{\.State\.Status\}\} \{\{\.State\.ExitCode\}\}', ownedVoice\.containerId/u);
+});
+
+test('start, stop and recovery retain only the exact host handoff lock descriptor', () => {
   const lockMetadata = directoryMetadata({ dev: 701, ino: 902, mode: 0o700 });
   const filesystem = {
     fstatSync(descriptor) {
@@ -281,13 +301,13 @@ test('stop and recovery retain only the exact host handoff lock descriptor', () 
     },
   };
 
-  for (const operation of ['stop', 'recover']) {
+  for (const operation of ['start', 'stop', 'recover']) {
     const environment = { TELEAGENT_HANDOFF_LIFECYCLE_LOCK_FD: '17' };
     assert.equal(requireLifecycleLock(operation, { environment, filesystem }), 17);
     assert.equal(environment.TELEAGENT_HANDOFF_LIFECYCLE_LOCK_FD, undefined);
   }
 
-  for (const operation of ['start', 'cleanup']) {
+  for (const operation of ['cleanup']) {
     assert.equal(requireLifecycleLock(operation, { environment: {}, filesystem }), null);
     assert.throws(() => requireLifecycleLock(operation, {
       environment: { TELEAGENT_HANDOFF_LIFECYCLE_LOCK_FD: '17' },
@@ -307,10 +327,12 @@ test('voice lifecycle lock validation rejects missing, forged, and unsafe descri
   });
 
   for (const value of [undefined, '', '2', '03', '17x', '-3']) {
-    assert.throws(() => requireLifecycleLock('stop', {
-      environment: environment(value),
-      filesystem: filesystem(),
-    }), /did not retain the voice lifecycle lock/);
+    for (const operation of ['start', 'stop']) {
+      assert.throws(() => requireLifecycleLock(operation, {
+        environment: environment(value),
+        filesystem: filesystem(),
+      }), /did not retain the voice lifecycle lock/);
+    }
   }
   assert.throws(() => requireLifecycleLock('stop', {
     environment: environment('1000001'),
@@ -667,7 +689,7 @@ test('exact-project cleanup removes only the guarded Compose project and proves 
   };
   assert.equal(cleanupExactProject({ runCommand, environment: {} }), 1);
   assert.deepEqual(calls[1], ['container', 'rm', '--force', identifier]);
-  assert.ok(calls[0].includes('label=com.docker.compose.project=teleagent-voice'));
+  assert.ok(calls[0].includes('label=com.docker.compose.project=teleagent-isolated-voice'));
   assert.deepEqual(parseExactProjectContainerIds(`${identifier}\n`), [identifier]);
   assert.throws(() => parseExactProjectContainerIds('voice-app\n'), /listing is invalid/);
 });
@@ -675,7 +697,7 @@ test('exact-project cleanup removes only the guarded Compose project and proves 
 test('activation state is canonical, image-bound, generation-monotonic, and missing-safe', () => {
   const active = {
     version: 2,
-    project: 'teleagent-voice',
+    project: 'teleagent-isolated-voice',
     activationGeneration: 7,
     phase: 'active',
     previousPhase: 'starting',
@@ -717,7 +739,7 @@ test('activation state is canonical, image-bound, generation-monotonic, and miss
 
   const legacy = {
     version: 1,
-    project: 'teleagent-voice',
+    project: 'teleagent-isolated-voice',
     phase: 'inactive',
     previousPhase: 'stopping',
     panic: 'quiesced',
@@ -781,7 +803,7 @@ test('created container ownership binds all four full IDs before voice startup',
     ), /ownership|generation/);
   }
   const active = {
-    version: 3, project: 'teleagent-voice', activationGeneration: generation,
+    version: 3, project: 'teleagent-isolated-voice', activationGeneration: generation,
     phase: 'active', previousPhase: 'starting', panic: 'not_requested', cleanup: 'required',
     imageManifest: IMAGE_MANIFEST, panicOutcomeUnknownAt: null,
     interruptedStartRecoveredAt: null, updatedAt: '2026-08-26T12:34:56.789Z',

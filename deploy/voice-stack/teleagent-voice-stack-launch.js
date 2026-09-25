@@ -36,7 +36,9 @@ const INSTALLED_PROVIDER_MANIFEST = '/etc/teleagent/provider-runtime/provider-li
 const APPARMOR_PROFILES = '/sys/kernel/security/apparmor/profiles';
 const HANDOFF_LOCK = '/run/teleagent-staging-handoff.lock';
 const LIFECYCLE_LOCK_ENV = 'TELEAGENT_HANDOFF_LIFECYCLE_LOCK_FD';
-const PROJECT = 'teleagent-voice';
+// The live legacy containers carry the teleagent-voice project label. The
+// replacement must never enumerate or clean that project during pre-cutover.
+const PROJECT = 'teleagent-isolated-voice';
 const PROJECT_LABEL = `com.docker.compose.project=${PROJECT}`;
 const IMAGE_REVISION_LABEL = 'org.opencontainers.image.revision';
 const ACTIVATION_GENERATION_LABEL = 'com.teleagent.voice.activation-generation';
@@ -1609,9 +1611,10 @@ async function stop() {
   if (activationEvidenceError) throw activationEvidenceError;
   stoppingState = persistActivationState('stopping', { panic: 'quiesced', cleanup: 'required' });
   const imageManifest = stoppingState.imageManifest;
+  const ownedVoice = retainedVoiceContainerForStop(stoppingState);
   const environment = fixedDockerEnvironment(
     settings, imageManifest, stoppingState.activationGeneration,
-    stoppingState.containerOwnership?.services.find((row) => row.service === 'voice-app')?.imageId
+    ownedVoice.imageId
   );
   try {
     run(DOCKER, composeArgs('stop', '--timeout', '25', 'voice-app'), {
@@ -1619,7 +1622,7 @@ async function stop() {
       timeoutMs: 40000,
     });
     const inspection = run(DOCKER, [
-      'inspect', '--format', '{{.State.Status}} {{.State.ExitCode}}', 'voice-app',
+      'inspect', '--format', '{{.State.Status}} {{.State.ExitCode}}', ownedVoice.containerId,
     ], { capture: true, environment, timeoutMs: 10000 }).stdout.trim();
     assertVoiceExit(inspection);
     run(DOCKER, composeArgs('down', '--timeout', '10', '--remove-orphans'), {
@@ -1729,7 +1732,7 @@ function requireLifecycleLock(operation, {
   filesystem = fs,
 } = {}) {
   const value = environment[LIFECYCLE_LOCK_ENV];
-  if (!['stop', 'recover'].includes(operation)) {
+  if (!['start', 'stop', 'recover'].includes(operation)) {
     if (value !== undefined) refuse('the voice lifecycle lock was supplied to an unsupported operation');
     return null;
   }
@@ -1769,6 +1772,15 @@ function assertVoiceExit(inspection) {
     refuse('voice-app did not prove a clean, quiescent shutdown');
   }
   return true;
+}
+
+function retainedVoiceContainerForStop(state) {
+  const row = state?.containerOwnership?.services?.find((value) => value.service === 'voice-app');
+  if (state?.version !== 3 || !/^[a-f0-9]{64}$/u.test(row?.containerId || '') ||
+      !/^sha256:[a-f0-9]{64}$/u.test(row?.imageId || '')) {
+    refuse('the isolated voice container has no retained identity for stop');
+  }
+  return Object.freeze({ containerId: row.containerId, imageId: row.imageId });
 }
 
 async function main() {
@@ -1811,6 +1823,7 @@ module.exports = {
   resolveVoiceIdentities,
   requestJson,
   requireLifecycleLock,
+  retainedVoiceContainerForStop,
   renderTemplate,
   renderTemplateContents,
   requireControllerReady,
