@@ -52,6 +52,115 @@ esac
     exit 77
   }
 
+# One root-owned, exact provider selection controls the activation proof. An
+# absent or malformed selection cannot silently make a two-provider release
+# appear ready after checking only Codex.
+provider_mode_file=/etc/teleagent/provider-runtime/enabled-providers
+[ ! -L "$provider_mode_file" ] &&
+  [ "$(/usr/bin/readlink -f -- "$provider_mode_file")" = "$provider_mode_file" ] &&
+  [ "$(/usr/bin/stat -c '%u:%g:%a:%h' "$provider_mode_file")" = 0:0:444:1 ] || {
+  echo "provider activation mode metadata is unsafe" >&2
+  exit 77
+}
+if /usr/bin/printf 'codex\n' | /usr/bin/cmp -s - "$provider_mode_file"; then
+  active_providers=codex
+  provider_mode=codex
+elif /usr/bin/printf 'claude,codex\n' | /usr/bin/cmp -s - "$provider_mode_file"; then
+  active_providers='claude codex'
+  provider_mode=claude,codex
+else
+  echo "provider activation mode is invalid" >&2
+  exit 77
+fi
+controller_env=/etc/teleagent/controller/runtime.env
+[ ! -L "$controller_env" ] &&
+  [ "$(/usr/bin/readlink -f -- "$controller_env")" = "$controller_env" ] &&
+  [ "$(/usr/bin/stat -c '%u:%g:%a:%h' "$controller_env")" = 0:0:600:1 ] &&
+  [ "$(/usr/bin/grep -c '^AGENT_PROVIDERS=' "$controller_env")" -eq 1 ] &&
+  /usr/bin/grep -Fxq -- "AGENT_PROVIDERS=$provider_mode" "$controller_env" || {
+  echo "controller provider selection differs from activation mode" >&2
+  exit 77
+}
+voice_env=/etc/teleagent-voice/voice-app.env
+[ ! -L "$voice_env" ] &&
+  [ "$(/usr/bin/readlink -f -- "$voice_env")" = "$voice_env" ] &&
+  [ "$(/usr/bin/stat -c '%u:%g:%a:%h' "$voice_env")" = 0:0:600:1 ] &&
+  [ "$(/usr/bin/grep -c '^AGENT_PROVIDERS=' "$voice_env")" -eq 1 ] &&
+  /usr/bin/grep -Fxq -- "AGENT_PROVIDERS=$provider_mode" "$voice_env" || {
+  echo "voice provider selection differs from activation mode" >&2
+  exit 77
+}
+# Both OpenAI entrypoints must select the same reviewed project. Read the policy
+# as root-owned data through a no-follow descriptor and never print either file.
+codex_policy=/etc/teleagent/provider-egress/codex.json
+/usr/local/libexec/teleagent-node -e '
+const fs = require("node:fs");
+function readStable(filename, exactMode) {
+  if (fs.realpathSync(filename) !== filename) throw new Error("project path is replaceable");
+  const fd = fs.openSync(filename, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  try {
+    const before = fs.fstatSync(fd);
+    if (!before.isFile() || before.uid !== 0 ||
+        (exactMode !== null && before.gid !== 0) || before.nlink !== 1 ||
+        before.size < 1 || before.size > 65536 ||
+        (exactMode === null ? (before.mode & 0o7133) !== 0 :
+          (before.mode & 0o7777) !== exactMode)) {
+      throw new Error("project file metadata is unsafe");
+    }
+    const bytes = fs.readFileSync(fd);
+    const after = fs.fstatSync(fd);
+    if (bytes.length !== before.size) throw new Error("project file read was incomplete");
+    for (const name of ["dev", "ino", "mode", "uid", "gid", "nlink", "size", "mtimeMs", "ctimeMs"]) {
+      if (before[name] !== after[name]) throw new Error("project file changed during read");
+    }
+    return bytes.toString("utf8");
+  } finally { fs.closeSync(fd); }
+}
+const environment = readStable(process.argv[1], 0o600);
+const assignments = environment.split("\n").filter((line) => line.startsWith("OPENAI_PROJECT="));
+if (assignments.length !== 1) throw new Error("voice project binding is missing or repeated");
+const project = assignments[0].slice("OPENAI_PROJECT=".length);
+if (!/^proj_[A-Za-z0-9_-]{3,128}$/.test(project)) throw new Error("voice project binding is invalid");
+const policy = JSON.parse(readStable(process.argv[2], null));
+if (policy.version !== 1 || policy.provider !== "codex" || policy.openaiProjectId !== project) {
+  throw new Error("voice and Codex project bindings differ");
+}
+process.stdout.write("OPENAI_PROJECT_BINDING_OK\n");
+' "$voice_env" "$codex_policy" | /usr/bin/grep -qx OPENAI_PROJECT_BINDING_OK || {
+  echo "voice and Codex project bindings differ or are unsafe" >&2
+  exit 77
+}
+if [ "$provider_mode" = codex ]; then
+  for disabled_socket in \
+    /run/teleagent-provider-launch/claude.sock \
+    /run/teleagent-provider-egress/claude.sock \
+    /run/teleagent-provider-egress-control/claude.sock; do
+    if [ -e "$disabled_socket" ] || [ -L "$disabled_socket" ]; then
+      echo "disabled Claude provider socket is present" >&2
+      exit 77
+    fi
+  done
+  for disabled_path in \
+    /etc/teleagent/provider-egress-secrets/claude.api-key \
+    /etc/teleagent/provider-egress/claude.json; do
+    if [ -e "$disabled_path" ] || [ -L "$disabled_path" ]; then
+      echo "disabled Claude provider credential or policy is present" >&2
+      exit 77
+    fi
+  done
+  for disabled_unit in \
+    teleagent-provider-supervisor@claude.socket \
+    teleagent-provider-supervisor@claude.service \
+    teleagent-provider-egress@claude.socket \
+    teleagent-provider-egress-control@claude.socket \
+    teleagent-provider-egress@claude.service; do
+    if /usr/bin/systemctl is-active --quiet "$disabled_unit"; then
+      echo "disabled Claude provider unit is active" >&2
+      exit 77
+    fi
+  done
+fi
+
 broker=/run/teleagent-worker-session/broker.sock
 tmux_socket=/run/teleagent-worker-session/tmux.sock
 state_root=/var/lib/teleagent-worker-state
@@ -202,6 +311,7 @@ const otherHome = process.argv[2];
 const launcher = process.argv[3];
 const supervisorHome = process.argv[4];
 const authDenialProbe = process.argv[5];
+const providerMode = process.argv[6];
 const deniedSockets = [
   "/run/teleagent-worker-session/broker.sock",
   "/run/teleagent-worker-session/tmux.sock",
@@ -241,7 +351,10 @@ for (const pathname of deniedSockets) {
   const socket = net.createConnection({ path: pathname });
   socket.once("connect", () => { failed = true; socket.destroy(); });
   socket.once("error", (error) => {
-    if (!["EACCES", "EPERM"].includes(error.code)) failed = true;
+    if (!["EACCES", "EPERM"].includes(error.code) &&
+        !(providerMode === "codex" && pathname.endsWith("/claude.sock") && error.code === "ENOENT")) {
+      failed = true;
+    }
     if (--pending === 0) finish();
   });
 }
@@ -266,7 +379,7 @@ function finish() {
   process.stdout.write("EXPECTED_DENIAL\n");
 }
 setTimeout(() => process.exit(1), 2000).unref();
-' "$workspace" "$other_home" "$provider_launcher" "$supervisor_home" "$auth_denial_probe" \
+' "$workspace" "$other_home" "$provider_launcher" "$supervisor_home" "$auth_denial_probe" "$provider_mode" \
   | /usr/bin/grep -qx EXPECTED_DENIAL
 done
 
@@ -277,6 +390,7 @@ for supervisor_user in teleagent-claude-supervisor teleagent-codex-supervisor; d
   /usr/bin/sudo -n -u "$supervisor_user" /usr/local/libexec/teleagent-node -e '
 const fs = require("node:fs");
 const net = require("node:net");
+const providerMode = process.argv[2];
 const sockets = [
   "/run/teleagent-provider-launch/claude.sock",
   "/run/teleagent-provider-launch/codex.sock",
@@ -299,7 +413,10 @@ for (const pathname of sockets) {
   const socket = net.createConnection({ path: pathname });
   socket.once("connect", () => { failed = true; socket.destroy(); });
   socket.once("error", (error) => {
-    if (!["EACCES", "EPERM"].includes(error.code)) failed = true;
+    if (!["EACCES", "EPERM"].includes(error.code) &&
+        !(providerMode === "codex" && pathname.endsWith("/claude.sock") && error.code === "ENOENT")) {
+      failed = true;
+    }
     if (--pending === 0) {
       if (failed) process.exit(1);
       process.stdout.write("SUPERVISOR_ADMISSION_DENIED\n");
@@ -307,7 +424,7 @@ for (const pathname of sockets) {
   });
 }
 setTimeout(() => process.exit(1), 2000).unref();
-' "$auth_denial_probe" | /usr/bin/grep -qx SUPERVISOR_ADMISSION_DENIED
+' "$auth_denial_probe" "$provider_mode" | /usr/bin/grep -qx SUPERVISOR_ADMISSION_DENIED
 done
 
 # Shims receive only their matching data-plane egress group. Egress services
@@ -322,7 +439,9 @@ const net = require("node:net");
 const identity = process.argv[1];
 const provider = identity.includes("claude") ? "claude" : "codex";
 const isShim = identity.endsWith("-shim");
-const allowedSocket = isShim ? `/run/teleagent-provider-egress/${provider}.sock` : null;
+const providerMode = process.argv[3];
+const allowedSocket = isShim && (providerMode !== "codex" || provider === "codex")
+  ? `/run/teleagent-provider-egress/${provider}.sock` : null;
 const deniedSockets = [
   "/run/teleagent-provider-launch/claude.sock",
   "/run/teleagent-provider-launch/codex.sock",
@@ -355,7 +474,10 @@ for (const pathname of deniedSockets) {
   const socket = net.createConnection({ path: pathname });
   socket.once("connect", () => { failed = true; socket.destroy(); finish(); });
   socket.once("error", (error) => {
-    if (!["EACCES", "EPERM"].includes(error.code)) failed = true;
+    if (!["EACCES", "EPERM"].includes(error.code) &&
+        !(providerMode === "codex" && pathname.endsWith("/claude.sock") && error.code === "ENOENT")) {
+      failed = true;
+    }
     finish();
   });
 }
@@ -365,7 +487,8 @@ if (allowedSocket) {
   socket.once("error", () => { failed = true; finish(); });
 }
 setTimeout(() => process.exit(1), 2000).unref();
-' "$isolated_user" "$auth_denial_probe" | /usr/bin/grep -qx ISOLATED_ROLE_BOUNDARY_OK
+' "$isolated_user" "$auth_denial_probe" "$provider_mode" \
+  | /usr/bin/grep -qx ISOLATED_ROLE_BOUNDARY_OK
 done
 
 # The broker may traverse only the provider log projections. The synthetic
@@ -452,12 +575,14 @@ provider_plane_storage_attestation=$(
 
 # Activation pins CLI resume semantics. These read-only probes do not touch or
 # print credentials; unsupported versions leave the controller not ready.
-/usr/local/libexec/teleagent-provider-cli-check --provider claude \
-  | /usr/bin/grep -qx 'PROVIDER_CLI_OK claude'
+if [ "$provider_mode" = claude,codex ]; then
+  /usr/local/libexec/teleagent-provider-cli-check --provider claude \
+    | /usr/bin/grep -qx 'PROVIDER_CLI_OK claude'
+  /usr/bin/sudo -n -u teleagent-claude-worker /opt/teleagent/agent-tools/claude --help 2>&1 \
+    | /usr/bin/grep -q -- '--resume'
+fi
 /usr/local/libexec/teleagent-provider-cli-check --provider codex \
   | /usr/bin/grep -qx 'PROVIDER_CLI_OK codex'
-/usr/bin/sudo -n -u teleagent-claude-worker /opt/teleagent/agent-tools/claude --help 2>&1 \
-  | /usr/bin/grep -q -- '--resume'
 /usr/bin/sudo -n -u teleagent-codex-worker /opt/teleagent/agent-tools/codex resume --help 2>&1 \
   | /usr/bin/grep -q 'SESSION_ID'
 /usr/bin/grep -q 'NoNewPrivs' /usr/local/libexec/teleagent-provider-runtime
@@ -470,7 +595,7 @@ fi
 
 # Supervisors are Unix-only; only the credential egress identities receive
 # direct DNS/provider HTTPS, with every private control range denied.
-for provider in claude codex; do
+for provider in $active_providers; do
   /usr/bin/systemctl show "teleagent-provider-supervisor@${provider}.service" \
     -p RestrictAddressFamilies --value | /usr/bin/grep -qx 'AF_UNIX'
   /usr/bin/systemctl show "teleagent-provider-supervisor@${provider}.service" \
@@ -531,7 +656,7 @@ for protected_directory in $protected_directories; do
   created_probes="$created_probes $probe"
   probe_arguments="$probe_arguments $probe"
 done
-for provider in claude codex; do
+for provider in $active_providers; do
   supervisor_pid=$(/usr/bin/systemctl show "teleagent-provider-supervisor@${provider}.service" \
     -p MainPID --value)
   case "$supervisor_pid" in
@@ -552,12 +677,17 @@ done
 cleanup_supervisor_root_probes
 trap - EXIT INT TERM
 
-# This spends one minimal request per provider and is intentionally manual. It
+# This spends one minimal request per enabled provider and is intentionally manual. It
 # proves the real provider UID can authenticate and reach the public API from
 # the fenced cgroup; a source install must not silently claim readiness without
 # this canary.
-if [ "${TELEAGENT_PROVIDER_CANARY:-}" != I_UNDERSTAND_THIS_CALLS_BOTH_PROVIDERS ]; then
-  echo "set TELEAGENT_PROVIDER_CANARY=I_UNDERSTAND_THIS_CALLS_BOTH_PROVIDERS for activation" >&2
+if [ "$provider_mode" = codex ]; then
+  expected_canary_ack=I_UNDERSTAND_THIS_CALLS_CODEX
+else
+  expected_canary_ack=I_UNDERSTAND_THIS_CALLS_BOTH_PROVIDERS
+fi
+if [ "${TELEAGENT_PROVIDER_CANARY:-}" != "$expected_canary_ack" ]; then
+  echo "set TELEAGENT_PROVIDER_CANARY=$expected_canary_ack for activation" >&2
   exit 77
 fi
 host_socket_probe=/run/teleagent-provider-host-socket-probe.sock
@@ -618,7 +748,7 @@ done
 # Prove DAC and pathname visibility would permit both model identities to
 # connect without the model AppArmor profile. The provider runtime must then
 # observe an LSM denial for this exact same world-connectable socket.
-for provider in claude codex; do
+for provider in $active_providers; do
   /usr/bin/sudo -n -u "teleagent-${provider}-worker" \
     /usr/local/libexec/teleagent-node -e '
 const net = require("node:net");
@@ -631,9 +761,11 @@ socket.once("error", () => process.exit(1));
 setTimeout(() => process.exit(1), 2000).unref();
 ' "$visible_socket_probe" | /usr/bin/grep -qx VISIBLE_SOCKET_DAC_ALLOWED
 done
-/usr/bin/sudo -n -u "$controller_user" \
-  /usr/local/libexec/teleagent-provider-canary claude "$workspace" \
-  | /usr/bin/grep -Fx -- 'PROVIDER_CANARY_ATTESTED claude'
+if [ "$provider_mode" = claude,codex ]; then
+  /usr/bin/sudo -n -u "$controller_user" \
+    /usr/local/libexec/teleagent-provider-canary claude "$workspace" \
+    | /usr/bin/grep -Fx -- 'PROVIDER_CANARY_ATTESTED claude'
+fi
 /usr/bin/sudo -n -u "$controller_user" \
   /usr/local/libexec/teleagent-provider-canary codex "$workspace" \
   | /usr/bin/grep -Fx -- 'PROVIDER_CANARY_ATTESTED codex'

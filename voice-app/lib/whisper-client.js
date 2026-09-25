@@ -5,6 +5,8 @@
 
 const WaveFile = require("wavefile").WaveFile;
 const { loadLegacySpeechConfig, requireLegacySpeechConfig } = require('./legacy-speech-config');
+const axios = require('axios');
+const { speechRequestOptions } = require('./voice-egress-transport');
 
 const MAX_STT_AUDIO_BYTES = 10 * 1024 * 1024;
 const MAX_STT_RESPONSE_BYTES = 64 * 1024;
@@ -45,7 +47,14 @@ async function transcribe(audioBuffer, options = {}) {
   } = options;
 
   const config = requireLegacySpeechConfig();
-  const fetchImpl = options.fetchImpl || globalThis.fetch;
+  const fetchImpl = options.fetchImpl || (async (url, request) => {
+    const response = await axios({ method: 'POST', url, data: request.body, responseType: 'text',
+      transformResponse: [(data) => data], timeout: STT_TIMEOUT_MS,
+      maxBodyLength: MAX_STT_AUDIO_BYTES + 65536, maxContentLength: MAX_STT_RESPONSE_BYTES,
+      ...speechRequestOptions('stt', request.signal) });
+    return { ok: response.status >= 200 && response.status < 300, status: response.status,
+      headers: { get: (name) => response.headers[name] }, text: async () => response.data };
+  });
   if (typeof fetchImpl !== 'function') throw new Error('The local STT fetch client is unavailable');
   if (!Buffer.isBuffer(audioBuffer) || audioBuffer.length === 0 ||
       audioBuffer.length > MAX_STT_AUDIO_BYTES) {

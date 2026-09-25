@@ -658,10 +658,11 @@ class ExecutorTaskDispatcher {
   cancelCallTasks({
     callId,
     idempotencyKey = null,
+    scope = 'call',
     reason = 'call_canceled',
     source = 'controller',
   }) {
-    const result = this.store.cancelCallTasks({ callId, idempotencyKey, reason, source });
+    const result = this.store.cancelCallTasks({ callId, idempotencyKey, scope, reason, source });
     for (const taskId of result.taskIds) {
       const record = this.active.get(taskId);
       if (record) this._interruptRecord(record, reason);

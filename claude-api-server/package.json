@@ -18,5 +18,8 @@
     "node": ">=24.0.0"
   },
   "author": "NetworkChuck",
-  "license": "MIT"
+  "license": "MIT",
+  "overrides": {
+    "qs": "6.16.0"
+  }
 }

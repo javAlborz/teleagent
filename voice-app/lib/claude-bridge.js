@@ -3,7 +3,7 @@
  * HTTP client for fresh Claude/Codex jobs with Teleagent-owned correlation
  */
 
-const axios = require('axios');
+const axios = require('./controller-http-client');
 const crypto = require('node:crypto');
 const {
   AGENT_API_URL,
@@ -11,6 +11,7 @@ const {
   buildVoiceControlApiHeaders,
 } = require('./claude-api-config');
 const { looksLikePhoneDeployRequest } = require('../../lib/phone-deploy-intent');
+const { UNAVAILABLE, capabilitiesFromHealth } = require('./controller-capabilities');
 const {
   assertSensitiveAgentLoggingDisabled,
   summarizeSensitiveText,
@@ -208,6 +209,19 @@ function canceledExecutorResponse(task, code = 'CLAUDE_CANCELED') {
   };
 }
 
+function abortedExecutorWaitResponse(task, taskId) {
+  return {
+    success: false,
+    code: 'EXECUTOR_WAIT_ABORTED',
+    agentCode: 'EXECUTOR_WAIT_ABORTED',
+    error: 'The local wait ended without confirmation of remote task cancellation.',
+    userMessage: 'The wait ended, but the task may still be running. Its result needs reconciliation.',
+    reconciliation_required: true,
+    executorTaskId: task?.id || taskId,
+    idempotencyKey: task?.idempotencyKey || null,
+  };
+}
+
 function mapExecutorTaskResult(task) {
   if (!task || !task.terminal) return null;
   if (task.state === 'canceled') return canceledExecutorResponse(task);
@@ -310,8 +324,10 @@ async function waitForExecutorTask(existingTaskOrId, options = {}) {
   let lastError = null;
 
   while (Date.now() <= deadline) {
-    if (options.signal?.aborted) return canceledExecutorResponse(task);
     if (task?.terminal) return mapExecutorTaskResult(task);
+    // An AbortSignal belongs to this HTTP observer, not to the durable
+    // executor. Only a terminal executor record can establish cancellation.
+    if (options.signal?.aborted) return abortedExecutorWaitResponse(task, taskId);
 
     try {
       task = await getExecutorTask(taskId, {
@@ -338,6 +354,7 @@ async function waitForExecutorTask(existingTaskOrId, options = {}) {
     await wait(Math.min(pollIntervalMs, remaining), options.signal);
   }
 
+  if (options.signal?.aborted) return abortedExecutorWaitResponse(task, taskId);
   return {
     success: false,
     code: 'CLAUDE_TIMEOUT',
@@ -581,6 +598,7 @@ async function cancelSession(callId, options = {}) {
   const {
     sessionKey = callId,
     idempotencyKey = callId,
+    scope = 'call',
     resetSession = false,
     reason = 'cancel_session'
   } = options;
@@ -588,7 +606,7 @@ async function cancelSession(callId, options = {}) {
   try {
     const response = await axios.post(
       `${AGENT_API_URL}/voice-control/session/cancel`,
-      { callId, sessionKey, idempotencyKey, resetSession, reason },
+      { callId, sessionKey, idempotencyKey, scope, resetSession, reason },
       {
         timeout: 5000,
         headers: buildVoiceControlApiHeaders({ 'Content-Type': 'application/json' }),
@@ -834,6 +852,38 @@ async function isAvailable() {
   }
 }
 
+// Read-only, bounded scope proofs; never fall back to the general bearer,
+// follow a redirect, submit a job, or clear a panic to discover availability.
+async function getRuntimeCapabilities() {
+  const options = (headers) => ({
+    headers,
+    timeout: 1500,
+    signal: AbortSignal.timeout(1500),
+    maxRedirects: 0,
+    maxContentLength: 32768,
+    proxy: false,
+    validateStatus: (status) => status === 200 || status === 503,
+  });
+  try {
+    const operator = await axios.get(`${AGENT_API_URL}/operator/health`,
+      options(buildVoiceControlApiHeaders()));
+    const inspected = capabilitiesFromHealth(operator.data, null);
+    if (operator.status !== 200 && inspected.workerInspectionAvailable) return UNAVAILABLE;
+    if (!inspected.workerInspectionAvailable) return inspected;
+    try {
+      const executor = await axios.get(`${AGENT_API_URL}/executor/health`,
+        options(buildExecutorApiHeaders()));
+      return capabilitiesFromHealth(operator.data, executor.status === 200 ? executor.data : null);
+    } catch {
+      // A valid inspection scope never inherits executor authority, and an
+      // executor auth failure need not erase the valid read-only scope.
+      return inspected;
+    }
+  } catch {
+    return UNAVAILABLE;
+  }
+}
+
 module.exports = {
   query,
   queryDetailed,
@@ -853,5 +903,6 @@ module.exports = {
   prepareAgentSessionMessage,
   sendAgentSessionMessage,
   endSession,
+  getRuntimeCapabilities,
   isAvailable
 };

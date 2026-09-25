@@ -244,12 +244,19 @@ application identity check or launcher. Its empty-environment
 `--check-start-gate` cheaply revalidates current-boot approval, selected
 release/manifest identity, and installed runtime metadata without rescanning
 or content-hashing the release. Systemd snapshots the nonsecret, host-owned
-start gate into a private mode-`0400` service credential with `LoadCredential`;
-while holding a shared lock on the stable handoff inode,
+start gate into a private service credential with `LoadCredential`. The verifier
+accepts private mode `0400` or the exact root-owned `0440` projection with a
+single service-UID read ACL and no owning-group or other access.
+While holding a shared lock on the root-owned mode-`0700` handoff inode,
 the fixed host launcher then revalidates the snapshot plus the live approval,
 global boot gate, current selector, immutable release device/inode, component,
 service identity, and scrubbed environment before executing the exact
-release-root launcher and Node runtime. The descriptor is close-on-exec, and the
+release-root launcher and Node runtime. Non-root service units use the host's
+`--supervise-component` protocol: a minimal root parent forks trusted verifier
+code, the child drops to the fixed service identity, and both retain the lock
+until the child's close-on-exec barrier closes. The payload receives no lock
+descriptor. The parent forwards signals and preserves exit status. Root-only
+components keep their fixed direct interface. The descriptor is close-on-exec, and the
 serialized disabled host handoff holds the exclusive side of the same lock
 while validating and installing the already selected approved release. The
 root-only worker/provider/Realtime admission checks use closed profiles in the
@@ -278,7 +285,7 @@ chatty media process cannot fill the host filesystem through Docker logs.
 Drachtio and FreeSWITCH also run with read-only root filesystems; every vendor
 image `VOLUME` and writable runtime path is overridden by an explicit,
 size-capped, noexec/nosuid/nodev tmpfs. Activation additionally proves the exact
-`/var/lib/teleagent-voice` path is a canonical mountpoint whose device differs
+`/var/lib/teleagent-isolated-voice` path is a canonical mountpoint whose device differs
 from its immediate `/var/lib` parent, then requires that filesystem to be 4–8
 GiB with at least 512 MiB and 20% free. This hard boundary keeps the append-only
 SQLite ledger and media daemons from consuming the host root filesystem. The running
@@ -288,7 +295,7 @@ new durable work before the hard capacity is reached.
 The normal CLI delegates voice start and stop to that exact systemd unit; it
 does not invoke Compose directly or inherit an image selector into activation.
 The two Teleagent voice services use the exact `runtimeReference` in
-`/etc/teleagent-voice/voice-image.manifest.json`. This is the same canonical v2
+`/etc/teleagent-isolated-voice/voice-image.manifest.json`. This is the same canonical v2
 manifest emitted inside the immutable release: there is no caller-authored v1
 translation. The root-owned mode-0400 installed copy records the image config
 digest, reviewed source revision, target platform, and either an imported local
@@ -319,7 +326,7 @@ crossed offline/registry fields, duplicate member, extra member, or
 noncanonical encoding refuses startup before credential access.
 
 Before detached Compose startup, the gate durably records activation intent in
-the root-owned `/var/lib/teleagent-voice-stack` directory. The canonical state
+the root-owned `/var/lib/teleagent-isolated-voice-stack` directory. The canonical state
 binds the full reviewed image manifest to an `activationGeneration` that
 increments before every attempted activation; that same generation labels all
 four containers. A

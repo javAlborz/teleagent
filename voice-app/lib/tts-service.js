@@ -9,6 +9,7 @@ const path = require('path');
 const crypto = require('crypto');
 const logger = require('./logger');
 const { requireLegacySpeechConfig } = require('./legacy-speech-config');
+const { speechRequestOptions } = require('./voice-egress-transport');
 
 const DEFAULT_VOICE_ID = process.env.TTS_VOICE || 'af_bella';
 const ALLOWED_VOICE_IDS = new Set(
@@ -133,6 +134,7 @@ async function generateSpeech(text, voiceId = DEFAULT_VOICE_ID) {
       maxRedirects: 0,
       maxBodyLength: MAX_TTS_TEXT_BYTES,
       maxContentLength: MAX_TTS_AUDIO_BYTES,
+      ...speechRequestOptions('tts'),
     });
 
     const audioBuffer = Buffer.isBuffer(response.data)
@@ -165,10 +167,8 @@ async function generateSpeech(text, voiceId = DEFAULT_VOICE_ID) {
       textLength: text.length
     });
 
-    // Return HTTP URL (assumes audio-temp is served via HTTP)
-    // Format: http://localhost:PORT/audio/filename.mp3
-    // The HTTP server setup is handled elsewhere
-    const audioUrl = `http://127.0.0.1:3000/audio-files/${filename}`;
+    // FreeSWITCH fetches generated media from the admitted private receiver.
+    const audioUrl = require('./media-playback-urls').playbackUrl('audio-files', filename);
 
     return audioUrl;
 
@@ -249,6 +249,7 @@ async function getAvailableVoices() {
       timeout: TTS_TIMEOUT_MS,
       maxRedirects: 0,
       maxContentLength: 1024 * 1024,
+      ...speechRequestOptions('tts'),
     });
 
     const voices = normalizeVoiceList(response.data);

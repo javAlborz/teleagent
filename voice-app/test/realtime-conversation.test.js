@@ -21,6 +21,7 @@ const {
   runRealtimeConversation,
 } = require('../lib/realtime-conversation');
 const { VoiceStateStore } = require('../lib/voice-state-store');
+const { READY_CAPABILITIES } = require('./controller-capabilities-fixture');
 
 test('production conductor instructions expose read-only managed authority only', () => {
   const instructions = buildConductorInstructions({
@@ -193,7 +194,10 @@ function createCallFixture(t, {
   const approvalArmCalls = [];
   const approvalFailureCalls = [];
   let approvalOutstanding = activeJobs.some((job) => job.status === 'awaiting_approval');
-  jobBroker.agentBridge = { inspectOperator: async () => ({ success: true, result: {} }) };
+  jobBroker.agentBridge = {
+    getRuntimeCapabilities: async () => READY_CAPABILITIES,
+    inspectOperator: async () => ({ success: true, result: {} }),
+  };
   jobBroker.listProfiles = () => ['claude-opus', 'codex-terra'];
   jobBroker.listProfileDetails = () => [
     { profile: 'claude-opus', provider: 'claude', capability: 'admin' },
@@ -475,6 +479,53 @@ test('runtime transcription vocabulary includes live tmux conversation names', a
   assert.ok(options.transcriptionKeywords.includes('freestio'));
   assert.ok(options.transcriptionKeywords.includes('8player-tooling'));
   assert.match(options.transcriptionPrompt, /8player-tooling/);
+});
+
+test('unavailable controller leaves useful local voice tools and tmux hints without probing the inspector', async (t) => {
+  const fixture = createCallFixture(t);
+  delete fixture.jobBroker.agentBridge.getRuntimeCapabilities;
+  fixture.jobBroker.agentBridge.inspectOperator = async () => assert.fail('missing auth must not trigger inspection');
+  const keywords = await refreshRuntimeTranscriptionVocabulary(fixture.jobBroker.agentBridge, { force: true });
+  assert.ok(keywords.includes('tmux'));
+  assert.ok(keywords.includes('tmux sessions'));
+  await runRealtimeConversation(fixture.endpoint, fixture.dialog, 'call-no-controller', {
+    audioForkServer: fixture.audioForkServer, stateStore: fixture.stateStore,
+    jobBroker: fixture.jobBroker, callerId: '1001', openaiClientFactory: fixture.openaiClientFactory,
+  });
+  const options = fixture.getRealtimeClient().options;
+  assert.equal(options.capabilities.managedExecutionAvailable, false);
+  assert.ok(options.transcriptionKeywords.includes('tmux'));
+  assert.match(options.instructions, /Read-only managed agent work: unavailable/);
+  assert.match(options.instructions, /not proof that a provider process is running/);
+});
+
+test('dynamic keywords cannot invalidate the Realtime session with forbidden characters', async (t) => {
+  const fixture = createCallFixture(t);
+  fixture.jobBroker.agentBridge.inspectOperator = async () => ({ success: true, result: { sessions: [
+    { name: '<bad>' }, { name: 'bad\nkeyword' }, { name: 'normal-session' },
+  ] } });
+  const keywords = await refreshRuntimeTranscriptionVocabulary(fixture.jobBroker.agentBridge, { force: true });
+  assert.ok(keywords.includes('normal-session'));
+  assert.ok(keywords.includes('tmux'));
+  assert.ok(keywords.every((keyword) => !/[<>\r\n]/u.test(keyword)));
+});
+
+test('hangup during a capability probe releases media without opening a Realtime provider connection', async (t) => {
+  const fixture = createCallFixture(t);
+  let release;
+  fixture.jobBroker.agentBridge.getRuntimeCapabilities = () => new Promise((resolve) => { release = resolve; });
+  const call = runRealtimeConversation(fixture.endpoint, fixture.dialog, 'call-hangup-during-probe', {
+    audioForkServer: fixture.audioForkServer, stateStore: fixture.stateStore,
+    jobBroker: fixture.jobBroker, callerId: '1001', openaiClientFactory: fixture.openaiClientFactory,
+  });
+  while (!release) await new Promise((resolve) => setImmediate(resolve));
+  await fixture.dialog.destroy();
+  release(READY_CAPABILITIES);
+  const result = await call;
+  assert.equal(result.endReason, 'sip_dialog_destroyed');
+  assert.equal(fixture.getRealtimeClient(), undefined);
+  assert.equal(fixture.endpoint.forkStopped, true);
+  assert.equal(fixture.audioSession.closed, true);
 });
 
 test('Realtime call setup never waits for dynamic tmux vocabulary refresh', async (t) => {
@@ -1109,6 +1160,8 @@ test('user response debounce coalesces transcript tails and suppresses backchann
 });
 
 test('quiet-wait requests acknowledge with a tone and do not create a spoken response', async (t) => {
+  const admission = require('./helpers/media-runtime-fixture').runtimeFixture().load();
+  require('../lib/media-playback-urls').configureMediaPlayback(admission);
   const fixture = createCallFixture(t, {
     autoDestroyGreeting: false,
     activeJobs: [{ job_id: 'job-waiting', status: 'running' }],
@@ -1134,6 +1187,7 @@ test('quiet-wait requests acknowledge with a tone and do not create a spoken res
   assert.equal(realtime.discardedResponses, 1);
   assert.equal(realtime.queuedResponses.length, 0);
   assert.equal(fixture.endpoint.played.length, 1);
+  assert.equal(fixture.endpoint.played[0], 'http://10.254.0.14:3000/static/gotit-beep.wav');
   await fixture.dialog.destroy();
   await call;
 });

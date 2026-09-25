@@ -6,6 +6,7 @@ const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
+const { EventEmitter } = require('node:events');
 const test = require('node:test');
 
 const boundary = require('../../deploy/worker-session/teleagent-provider-boundary');
@@ -355,7 +356,7 @@ test('root provider preflights require bundled Node and the retained exact lock'
       ino: 13,
       uid: 0,
       gid: 0,
-      mode: 0o40755,
+      mode: 0o40700,
       isDirectory: () => true,
     };
     return {
@@ -380,6 +381,10 @@ test('root provider preflights require bundled Node and the retained exact lock'
     (input) => { input.invokedScript = '/usr/local/libexec/teleagent-provider-boundary'; },
     (input) => { input.environment.TELEAGENT_HANDOFF_LIFECYCLE_LOCK_FD = '1'; },
     (input) => { input.uid = 1000; },
+    (input) => {
+      const metadata = input.filesystem.lstatSync();
+      input.filesystem.lstatSync = () => ({ ...metadata, mode: 0o40755 });
+    },
     (input) => {
       input.filesystem = {
         ...input.filesystem,
@@ -592,6 +597,519 @@ test('global launch lock publication is crash-atomic at every commit phase', asy
   }
 });
 
+function launchTransactionFixture(t) {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'provider-launch-transaction-'));
+  fs.chmodSync(directory, 0o700);
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const options = { directory, uid: process.getuid(), gid: process.getgid() };
+  const lockPath = path.join(directory, '.global-provider-launch.lock');
+  const calls = [];
+  const launchIds = {
+    claude: 'launch_11111111111111111111111111111111',
+    codex: 'launch_22222222222222222222222222222222',
+  };
+  const defaultControl = async (frame) => frame.action === 'register'
+    ? { registered: true }
+    : { persisted: true, quiesced: true };
+  const defaultSpawn = () => {
+    const child = new EventEmitter();
+    queueMicrotask(() => child.emit('exit', 0, null));
+    return child;
+  };
+  const run = (provider, {
+    control = defaultControl,
+    spawnImpl = defaultSpawn,
+    operations = {},
+  } = {}) => {
+    const launchId = launchIds[provider];
+    return boundary.main([], {}, {
+      parseInput: () => ({
+        action: 'launch', provider, launchId, mode: 'managed', accessMode: 'read-only',
+        workspace: '/srv/teleagent-agent-workspaces/phone', taskId: 'job_boundary',
+        model: provider === 'claude' ? 'claude-sonnet-5' : 'gpt-5.6-luna',
+        reasoningEffort: provider === 'claude' ? 'high' : 'low',
+        routeKinds: ['inference'],
+      }),
+      randomCapability: () => 'a'.repeat(64),
+      control: (frame) => {
+        calls.push({ provider, action: frame.action, reason: frame.reason });
+        return control(frame);
+      },
+      spawnImpl: (...args) => {
+        calls.push({ provider, action: 'spawn' });
+        return spawnImpl(...args);
+      },
+      checkProviderCli: () => {},
+      launchOperations: {
+        hasCancellationTombstone: () => false,
+        assertProviderEnabled: () => {},
+        createGlobalLaunchLock: (id) => boundary.createGlobalLaunchLock(id, options),
+        assertResourceAdmission: async () => {},
+        validateProviderStorageIsolation: () => {},
+        assertGlobalProviderLaunchUnlocked: () => {},
+        validateWorkspaceAnchor: () => {},
+        validateProviderWorkspace: () => {},
+        createCapabilityFile: (id) => {
+          const filename = path.join(directory, `${id}.credential`);
+          fs.writeFileSync(filename, 'fixture-not-a-credential', { flag: 'wx', mode: 0o600 });
+          return filename;
+        },
+        createReadinessFile: (name, id) => {
+          const filename = path.join(directory, `${name}.${id}.provider-readiness.jsonl`);
+          fs.writeFileSync(filename, `${JSON.stringify({
+            version: 1, type: 'provider_planned', provider: name, launchId: id,
+          })}\n`, { flag: 'wx', mode: 0o600 });
+          return filename;
+        },
+        buildSystemdRunInvocation: () => ({
+          command: 'fixture-not-an-executable', args: [], unit: boundary.unitName(provider, launchId),
+        }),
+        waitQuiesced: async () => {
+          calls.push({ provider, action: 'cgroup-quiesced' });
+          return { quiesced: true };
+        },
+        removeCapabilityFile: (filename) => {
+          if (filename !== null) fs.unlinkSync(filename);
+        },
+        removeGlobalLaunchLock: (filename, id) => {
+          calls.push({ provider, action: 'release-lock' });
+          boundary.removeGlobalLaunchLock(filename, id, options);
+        },
+        ...operations,
+      },
+    });
+  };
+  return { directory, options, lockPath, calls, launchIds, run, defaultControl };
+}
+
+test('resource refusal releases a never-started fence without registering a capability', async (t) => {
+  const fixture = launchTransactionFixture(t);
+  await assert.rejects(fixture.run('claude', {
+    operations: { assertResourceAdmission: async () => { throw new Error('RESOURCE_HOST_HEADROOM'); } },
+  }), /RESOURCE_HOST_HEADROOM/);
+  assert.deepEqual(fixture.calls.map((call) => call.action), ['release-lock']);
+  assert.equal(fs.existsSync(fixture.lockPath), false);
+});
+
+test('pressure appearing during registration revokes before releasing the global fence', async (t) => {
+  const fixture = launchTransactionFixture(t);
+  let observations = 0;
+  await assert.rejects(fixture.run('claude', {
+    operations: { assertResourceAdmission: async () => {
+      assert.equal(fs.existsSync(fixture.lockPath), true);
+      observations += 1;
+      if (observations === 2) throw new Error('RESOURCE_MEMORY_PRESSURE');
+    } },
+  }), /RESOURCE_MEMORY_PRESSURE/);
+  assert.equal(observations, 2);
+  assert.deepEqual(fixture.calls.map((call) => call.action), ['register', 'revoke', 'release-lock']);
+  assert.equal(fs.existsSync(fixture.lockPath), false);
+});
+
+test('resource refusal with ambiguous capability cleanup keeps both providers fenced', async (t) => {
+  const fixture = launchTransactionFixture(t);
+  let observations = 0;
+  await assert.rejects(fixture.run('claude', {
+    control: async (frame) => frame.action === 'register'
+      ? { registered: true } : { persisted: true, quiesced: false },
+    operations: { assertResourceAdmission: async () => {
+      observations += 1;
+      if (observations === 2) throw new Error('RESOURCE_MEMORY_PRESSURE');
+    } },
+  }), /RESOURCE_MEMORY_PRESSURE/);
+  assert.equal(fs.existsSync(fixture.lockPath), true);
+  await assert.rejects(fixture.run('codex'), /global workspace lock/);
+  assert.deepEqual(fixture.calls.map((call) => call.action), ['register', 'revoke']);
+});
+
+test('cancellation during the final resource observation refuses model start', async (t) => {
+  const fixture = launchTransactionFixture(t);
+  let observations = 0;
+  let canceled = false;
+  await assert.rejects(fixture.run('claude', {
+    operations: {
+      assertResourceAdmission: async () => {
+        observations += 1;
+        if (observations === 2) canceled = true;
+      },
+      hasCancellationTombstone: () => canceled,
+    },
+  }), /canceled before start/);
+  assert.deepEqual(fixture.calls.map((call) => call.action), ['register', 'revoke', 'release-lock']);
+  assert.equal(fs.existsSync(fixture.lockPath), false);
+});
+
+test('uncertain model or egress cleanup retains the fence against a different provider', async (t) => {
+  const cases = [
+    ['populated cgroup', {
+      operations: { waitQuiesced: async () => ({ quiesced: false }) },
+    }],
+    ['unavailable cgroup status', {
+      operations: { waitQuiesced: async () => { throw new Error('fixture status unavailable'); } },
+    }],
+    ['truthy cgroup proof', {
+      operations: { waitQuiesced: async () => ({ quiesced: 'true' }) },
+    }],
+    ['synchronous spawn failure', {
+      spawnImpl: () => { throw new Error('fixture systemd submission uncertain'); },
+    }],
+    ['asynchronous spawn failure', {
+      spawnImpl: () => {
+        const child = new EventEmitter();
+        queueMicrotask(() => child.emit('error', new Error('fixture child error')));
+        return child;
+      },
+    }],
+    ...[
+      ['nonzero helper exit with absent unit', 1, null],
+      ['helper signal with absent unit', null, 'SIGTERM'],
+      ['missing helper exit status with absent unit', null, null],
+    ].map(([name, code, signal]) => [name, {
+      spawnImpl: () => {
+        const child = new EventEmitter();
+        queueMicrotask(() => child.emit('exit', code, signal));
+        return child;
+      },
+      operations: { waitQuiesced: async () => ({ exists: false, quiesced: true }) },
+    }]),
+    ...[
+      ['revocation transport failure', () => { throw new Error('fixture revoke unavailable'); }],
+      ['revocation not durable', () => ({ persisted: false, quiesced: true })],
+      ['egress not quiesced', () => ({ persisted: true, quiesced: false })],
+      ['malformed revocation proof', () => ({ persisted: 1, quiesced: 'true' })],
+      ['missing revocation proof', () => null],
+    ].map(([name, revoke]) => [name, {
+      control: async (frame) => frame.action === 'register' ? { registered: true } : revoke(),
+    }]),
+    ['lost registration reply and uncertain revocation', {
+      control: async (frame) => {
+        if (frame.action === 'register') throw new Error('fixture registration reply lost');
+        return { persisted: false, quiesced: false };
+      },
+    }],
+    ['invalid registration reply and uncertain revocation', {
+      control: async () => null,
+    }],
+    ['credential cleanup fails during interrupted launch', {
+      operations: {
+        waitQuiesced: async () => ({ quiesced: false }),
+        removeCapabilityFile: () => { throw new Error('fixture credential cleanup failed'); },
+      },
+    }],
+    ['credential cleanup alone fails after proven completion', {
+      operations: {
+        removeCapabilityFile: () => { throw new Error('fixture credential cleanup failed'); },
+      },
+    }, false],
+  ];
+  for (const [name, overrides, interruptedRevoke = true] of cases) {
+    await t.test(name, async (t) => {
+      const fixture = launchTransactionFixture(t);
+      await assert.rejects(fixture.run('claude', overrides));
+      assert.equal(fs.existsSync(fixture.lockPath), true, 'uncertainty must retain global admission');
+      const retained = fs.readFileSync(fixture.lockPath, 'utf8');
+      assert.equal(JSON.parse(retained).launchId, fixture.launchIds.claude);
+      await assert.rejects(fixture.run('codex'), /global workspace lock/);
+      assert.equal(fs.readFileSync(fixture.lockPath, 'utf8'), retained);
+      assert.equal(fixture.calls.some((call) => call.provider === 'codex'), false,
+        'the successor must reach neither provider registration nor systemd submission');
+      assert.equal(fixture.calls.some((call) => call.action === 'release-lock'), false);
+      assert.equal(fixture.calls.some((call) => call.action === 'revoke' &&
+        call.reason === 'interrupted'), interruptedRevoke,
+      'every attempted registration needs proven revocation, completed or interrupted');
+      if (!interruptedRevoke) {
+        assert.deepEqual(fixture.calls.map((call) => call.action), [
+          'register', 'spawn', 'cgroup-quiesced', 'revoke',
+        ]);
+        assert.equal(fixture.calls.at(-1).reason, 'completed');
+      }
+    });
+  }
+});
+
+test('proven cleanup admits a different provider without losing readiness evidence', async (t) => {
+  for (const name of ['normal completion', 'pre-registration rejection', 'lost registration reply',
+    'revocation retry succeeds', 'canceled before model submission']) {
+    await t.test(name, async (t) => {
+      const fixture = launchTransactionFixture(t);
+      let completionRevokes = 0;
+      let cancellationChecks = 0;
+      const overrides = {
+        control: async (frame) => {
+          if (name === 'lost registration reply' && frame.action === 'register') {
+            throw new Error('fixture registration reply lost');
+          }
+          if (name === 'revocation retry succeeds' && frame.reason === 'completed') {
+            completionRevokes += 1;
+            throw new Error('fixture first revoke reply lost');
+          }
+          return fixture.defaultControl(frame);
+        },
+        operations: {
+          validateProviderWorkspace: () => {
+            if (name === 'pre-registration rejection') throw new Error('fixture workspace rejected');
+          },
+          hasCancellationTombstone: () => {
+            cancellationChecks += 1;
+            return name === 'canceled before model submission' && cancellationChecks === 2;
+          },
+        },
+      };
+      if (name === 'normal completion') assert.equal(await fixture.run('claude', overrides), 0);
+      else await assert.rejects(fixture.run('claude', overrides));
+      assert.equal(fs.existsSync(fixture.lockPath), false);
+      if (name !== 'pre-registration rejection') {
+        assert.equal(fs.existsSync(path.join(fixture.directory,
+          `claude.${fixture.launchIds.claude}.provider-readiness.jsonl`)), true);
+        assert.equal(fs.existsSync(path.join(fixture.directory,
+          `${fixture.launchIds.claude}.credential`)), false);
+      }
+      if (name === 'revocation retry succeeds') assert.equal(completionRevokes, 1);
+      if (name === 'lost registration reply') {
+        assert.deepEqual(fixture.calls.map((call) => call.action), ['register', 'revoke', 'release-lock']);
+      }
+      assert.equal(await fixture.run('codex'), 0);
+      assert.equal(fs.existsSync(fixture.lockPath), false);
+      assert.ok(fixture.calls.some((call) => call.provider === 'codex' && call.action === 'spawn'));
+    });
+  }
+});
+
+function panicRecoveryFixture(fixture, overrides = {}) {
+  const directory = path.join(fixture.directory, 'systemd');
+  fs.mkdirSync(directory, { mode: 0o700 });
+  const events = [];
+  const quiesced = async () => ({ persisted: true, quiesced: true });
+  const recovery = () => boundary.panicAllProviderPlanes({
+    activationProviders: ['claude', 'codex'],
+    control: quiesced,
+    persistPanic: () => {
+      events.push('panic-persisted');
+      return { persisted: true };
+    },
+    runSystemctl: () => ({ status: 0, signal: null }),
+    stopUnit: quiesced,
+    inspectLaunchLock: () => JSON.parse(fs.readFileSync(fixture.lockPath, 'utf8')),
+    terminate: async (provider, launchId, terminationOptions) => boundary.terminateUnit(provider, launchId, {
+      ...terminationOptions,
+      persistTombstone: (unit) => {
+        const result = boundary.persistCancellationTombstone(unit, {
+          directory, uid: process.getuid(), reload: () => {},
+        });
+        events.push(`tombstone:${provider}:${launchId}`);
+        return result;
+      },
+      runSystemctl: () => ({ status: 0, signal: null }),
+      awaitQuiescence: quiesced,
+      inspectReadiness: (name, id, status) => boundary.inspectProviderReadiness(name, id, status, {
+        directory: fixture.directory, uid: process.getuid(),
+      }),
+      removeReadiness: (filename) => boundary.removeReadinessFile(
+        path.join(fixture.directory, path.basename(filename)), fixture.directory,
+      ),
+    }),
+    enumerateUnits: (provider) => {
+      events.push(`enumerate-empty:${provider}`);
+      return [];
+    },
+    recoverEgress: quiesced,
+    clearLaunchLock: (proof) => {
+      events.push('clear-lock');
+      return boundary.clearStaleGlobalLaunchLockAfterQuiescence({
+        ...fixture.options, ...proof, readStartTime: () => null,
+      });
+    },
+    ...overrides,
+  });
+  return { recovery, events, directory };
+}
+
+test('global panic fences delayed exact submissions even after empty enumeration', async (t) => {
+  const fixture = launchTransactionFixture(t);
+  await assert.rejects(fixture.run('claude', {
+    spawnImpl: () => { throw new Error('fixture submission reply lost'); },
+  }));
+  await assert.rejects(fixture.run('codex'), /global workspace lock/);
+  const panic = panicRecoveryFixture(fixture);
+  const recovered = await panic.recovery();
+  assert.equal(recovered.persisted, true);
+  assert.equal(recovered.quiesced, true);
+  assert.equal(recovered.launchCount, 0);
+  assert.equal(recovered.retainedLaunchCount, 2);
+  assert.equal(recovered.launchLockRecovery.removed, true);
+  assert.equal(fs.existsSync(fixture.lockPath), false);
+  assert.deepEqual(panic.events, [
+    'panic-persisted',
+    `tombstone:claude:${fixture.launchIds.claude}`,
+    `tombstone:codex:${fixture.launchIds.claude}`,
+    'enumerate-empty:claude', 'enumerate-empty:codex', 'clear-lock',
+  ]);
+  for (const provider of ['claude', 'codex']) {
+    const unit = boundary.unitName(provider, fixture.launchIds.claude);
+    assert.equal(boundary.hasCancellationTombstone(unit, { directory: panic.directory }), true,
+      'late exact submissions remain canceled after global admission recovery');
+    assert.equal(fs.readlinkSync(path.join(panic.directory, unit)), '/dev/null');
+  }
+  // Simulate the separately authorized removal of global panic, not an
+  // implicit unlock by recovery. Only the fresh launch identity can proceed.
+  assert.equal(await fixture.run('codex', {
+    operations: {
+      hasCancellationTombstone: (unit) =>
+        boundary.hasCancellationTombstone(unit, { directory: panic.directory }),
+    },
+  }), 0);
+});
+
+test('global recovery tolerates exact absent sibling and already-removed readiness, not unsafe evidence',
+  async (t) => {
+    for (const provider of ['claude', 'codex']) {
+      for (const scenario of ['normal', 'egress-retry', 'invalid', 'symlink', 'broad-mode']) {
+        await t.test(`${provider}: ${scenario}`, async (t) => {
+          const fixture = launchTransactionFixture(t);
+          await assert.rejects(fixture.run(provider, {
+            operations: { waitQuiesced: async () => ({ quiesced: false }) },
+          }));
+          const launchId = fixture.launchIds[provider];
+          const readiness = path.join(fixture.directory, `${provider}.${launchId}.provider-readiness.jsonl`);
+          if (scenario === 'invalid') fs.writeFileSync(readiness, 'not-json\n');
+          if (scenario === 'broad-mode') fs.chmodSync(readiness, 0o644);
+          if (scenario === 'symlink') {
+            fs.renameSync(readiness, `${readiness}.original`);
+            fs.symlinkSync(`${readiness}.original`, readiness);
+          }
+          let recoveringEgress = false;
+          const panic = panicRecoveryFixture(fixture, {
+            // A masked/stopped retained unit can still be enumerated and must
+            // be safe to terminate again after its readiness has been removed.
+            enumerateUnits: (name) => [boundary.unitName(name, launchId)],
+            recoverEgress: async () => ({
+              persisted: scenario !== 'egress-retry' || recoveringEgress,
+              quiesced: scenario !== 'egress-retry' || recoveringEgress,
+            }),
+          });
+          if (['invalid', 'symlink', 'broad-mode'].includes(scenario)) {
+            await assert.rejects(panic.recovery(), /readiness evidence is (unsafe|invalid)/);
+            assert.equal(fs.existsSync(fixture.lockPath), true);
+            const successor = provider === 'claude' ? 'codex' : 'claude';
+            await assert.rejects(fixture.run(successor), /global workspace lock/);
+            return;
+          }
+          if (scenario === 'egress-retry') {
+            assert.equal((await panic.recovery()).quiesced, false);
+            assert.equal(fs.existsSync(readiness), false);
+            assert.equal(fs.existsSync(fixture.lockPath), true);
+            recoveringEgress = true;
+          }
+          const result = await panic.recovery();
+          assert.equal(result.quiesced, true);
+          assert.equal(result.retainedLaunchCount, 2);
+          assert.equal(result.launchCount, 2);
+          assert.equal(fs.existsSync(readiness), false);
+          assert.equal(fs.existsSync(fixture.lockPath), false);
+        });
+      }
+    }
+  });
+
+test('failed global recovery never clears an uncertain launch fence', async (t) => {
+  for (const name of ['tombstone failure', 'retained egress active', 'supervisor active',
+    'supervisor proof malformed', 'enumeration failure', 'egress recovery failure',
+    'lock identity replaced', 'lock appears after empty snapshot', 'owner still live']) {
+    await t.test(name, async (t) => {
+      const fixture = launchTransactionFixture(t);
+      await assert.rejects(fixture.run('claude', {
+        operations: { waitQuiesced: async () => ({ quiesced: false }) },
+      }));
+      const overrides = {};
+      if (name === 'tombstone failure') {
+        overrides.terminate = async () => { throw new Error('fixture tombstone failed'); };
+      } else if (name === 'retained egress active') {
+        overrides.terminate = async () => ({ persisted: true, quiesced: false });
+      } else if (name.startsWith('supervisor')) {
+        overrides.stopUnit = async () => ({
+          quiesced: name === 'supervisor active' ? false : 'true',
+        });
+      } else if (name === 'enumeration failure') {
+        overrides.enumerateUnits = () => { throw new Error('fixture enumeration failed'); };
+      } else if (name === 'egress recovery failure') {
+        overrides.recoverEgress = async () => ({ persisted: false, quiesced: true });
+      } else if (name === 'lock appears after empty snapshot') {
+        overrides.inspectLaunchLock = () => {
+          const error = new Error('fixture lock initially absent');
+          error.code = 'ENOENT';
+          throw error;
+        };
+      } else if (name === 'lock identity replaced') {
+        overrides.recoverEgress = async () => {
+          const record = JSON.parse(fs.readFileSync(fixture.lockPath, 'utf8'));
+          fs.writeFileSync(fixture.lockPath, `${JSON.stringify({ ...record, startTime: '1' })}\n`);
+          return { persisted: true, quiesced: true };
+        };
+      } else if (name === 'owner still live') {
+        overrides.clearLaunchLock = (proof) => boundary.clearStaleGlobalLaunchLockAfterQuiescence({
+          ...fixture.options, ...proof,
+        });
+      }
+      const panic = panicRecoveryFixture(fixture, overrides);
+      if (['tombstone failure', 'enumeration failure'].includes(name)) {
+        await assert.rejects(panic.recovery());
+      } else {
+        assert.equal((await panic.recovery()).quiesced, false);
+      }
+      assert.equal(fs.existsSync(fixture.lockPath), true);
+      await assert.rejects(fixture.run('codex'), /global workspace lock/);
+      assert.equal(fixture.calls.some((call) => call.provider === 'codex'), false);
+    });
+  }
+});
+
+test('missing readiness is cleanup-only and never a never-started or retry-safe result', async (t) => {
+  const fixture = launchTransactionFixture(t);
+  const options = {
+    control: async () => ({ persisted: true, quiesced: true }),
+    persistTombstone: () => true,
+    runSystemctl: () => ({ status: 0 }),
+    awaitQuiescence: async () => ({ quiesced: true }),
+    inspectReadiness: (provider, launchId, status) => boundary.inspectProviderReadiness(
+      provider, launchId, status, { directory: fixture.directory, uid: process.getuid() },
+    ),
+    removeReadiness: (filename) => boundary.removeReadinessFile(
+      path.join(fixture.directory, path.basename(filename)), fixture.directory,
+    ),
+  };
+  const terminate = (overrides = {}) => boundary.terminateUnit('claude', fixture.launchIds.claude, {
+    ...options, ...overrides,
+  });
+  await assert.rejects(terminate(), { code: 'PROVIDER_READINESS_MISSING' });
+  await assert.rejects(terminate({ allowMissingReadinessForGlobalRecovery: 'true' }), {
+    code: 'PROVIDER_READINESS_MISSING',
+  });
+  const cleanup = await terminate({ allowMissingReadinessForGlobalRecovery: true });
+  assert.equal(cleanup.quiesced, true);
+  assert.equal(cleanup.providerHistoryUnavailable, true);
+  for (const key of ['providerExecutionAttempted', 'providerSpawnedEver', 'providerAlive', 'retrySafe']) {
+    assert.equal(Object.hasOwn(cleanup, key), false, `${key} must not fabricate absent history`);
+  }
+  for (const unproved of [
+    { control: async () => ({ persisted: false, quiesced: true }) },
+    { control: async () => ({ persisted: true, quiesced: false }) },
+    { runSystemctl: () => ({ status: 1 }) },
+    { awaitQuiescence: async () => ({ quiesced: false }) },
+  ]) {
+    await assert.rejects(terminate({ allowMissingReadinessForGlobalRecovery: true, ...unproved }), {
+      code: 'PROVIDER_READINESS_MISSING',
+    });
+  }
+  fs.chmodSync(fixture.directory, 0o777);
+  await assert.rejects(terminate({ allowMissingReadinessForGlobalRecovery: true }),
+    /root boundary directory is unsafe/);
+  fs.chmodSync(fixture.directory, 0o700);
+  assert.throws(() => boundary.parseControl([
+    '--action', 'terminate', '--provider', 'claude', '--launch-id', fixture.launchIds.claude,
+    '--allow-missing-readiness-for-global-recovery', 'true',
+  ], { SUDO_USER: 'teleagent-claude-supervisor' }, { uid: 0 }), /identity is invalid/);
+});
+
 test('global panic is authoritative at every provider launch commit boundary', () => {
   assert.throws(
     () => boundary.assertGlobalProviderLaunchUnlocked({ isLocked: () => true }),
@@ -795,6 +1313,7 @@ test('root recovery commits the global unlock only after both locked supervisors
   const state = { panic: true, recovery: false };
   const ok = { status: 0, signal: null, error: null, stdout: '' };
   const result = await boundary.unlockAllProviderPlanes({
+    activationProviders: ['claude', 'codex'],
     panicAll: async () => {
       order.push('panic-all');
       return { persisted: true, quiesced: true };
@@ -845,12 +1364,104 @@ test('root recovery commits the global unlock only after both locked supervisors
   assert.deepEqual(order.slice(-2), ['clear-recovery', 'clear-panic']);
 });
 
+test('Codex-only panic and unlock never restart Claude or require its egress broker', async () => {
+  const panicCommands = [];
+  const recovered = [];
+  const panic = await boundary.panicAllProviderPlanes({
+    activationProviders: ['codex'],
+    persistPanic: () => ({ persisted: true }),
+    runSystemctl: (args) => {
+      panicCommands.push(args.join(' '));
+      return { status: 0, signal: null, error: null };
+    },
+    stopUnit: async () => ({ quiesced: true }),
+    enumerateUnits: () => [],
+    recoverEgress: async (provider) => {
+      recovered.push(provider);
+      return { persisted: true, quiesced: true };
+    },
+    inspectLaunchLock: () => {
+      const error = new Error('absent');
+      error.code = 'ENOENT';
+      throw error;
+    },
+    clearLaunchLock: () => ({ proved: true, removed: false }),
+  });
+  assert.equal(panic.quiesced, true);
+  assert.deepEqual(recovered, ['codex']);
+  assert.equal(panic.egress.claude.disabled, true);
+  assert.ok(panicCommands.includes('stop teleagent-provider-egress@claude.socket'));
+  assert.ok(panicCommands.includes('stop teleagent-provider-egress-control@claude.socket'));
+
+  const unlockCommands = [];
+  const unlock = await boundary.unlockAllProviderPlanes({
+    activationProviders: ['codex'],
+    panicAll: async () => ({ persisted: true, quiesced: true }),
+    persistRecovery: () => ({ persisted: true }),
+    clearRecovery: () => ({ persisted: true }),
+    clearPanic: () => ({ persisted: true }),
+    runSystemctl: (args) => {
+      unlockCommands.push(args.join(' '));
+      return { status: 0, signal: null, error: null };
+    },
+    forceStop: async () => assert.fail('Codex-only unlock must not roll back'),
+    probe: async (provider) => ({
+      success: true, provider, ready: false, panicLocked: true,
+      boundaryRecovered: true, active: 0,
+    }),
+  });
+  assert.equal(unlock.success, true);
+  assert.ok(unlockCommands.some((command) => command ===
+    'start teleagent-provider-supervisor@codex.socket'));
+  assert.ok(unlockCommands.every((command) => !command.includes('@claude.')));
+});
+
+test('root provider activation mode accepts only a stable exact root-owned selection', () => {
+  const content = Buffer.from('codex\n');
+  const metadata = {
+    dev: 7, ino: 11, uid: 0, gid: 0, mode: 0o100444,
+    nlink: 1, size: content.length, mtimeMs: 2, ctimeMs: 3,
+    isFile: () => true, isSymbolicLink: () => false,
+  };
+  const filesystem = {
+    constants: fs.constants,
+    openSync: (filename, flags) => {
+      assert.equal(filename, '/etc/teleagent/provider-runtime/enabled-providers');
+      assert.notEqual(flags & fs.constants.O_NOFOLLOW, 0);
+      return 31;
+    },
+    fstatSync: () => metadata,
+    readFileSync: () => content,
+    closeSync: (descriptor) => assert.equal(descriptor, 31),
+  };
+  assert.deepEqual(boundary.readEnabledProviders({ filesystem }), ['codex']);
+  assert.throws(() => boundary.readEnabledProviders({
+    filesystem: { ...filesystem, readFileSync: () => Buffer.from('codex,claude\n') },
+  }), /activation mode is invalid/u);
+  assert.throws(() => boundary.readEnabledProviders({
+    filesystem: {
+      ...filesystem,
+      fstatSync: () => ({ ...metadata, mode: 0o100666 }),
+    },
+  }), /activation mode metadata is unsafe/u);
+});
+
+test('Codex-only activation refuses Claude launches before any model effect', () => {
+  assert.equal(boundary.assertProviderEnabled('codex', {
+    readProviders: () => ['codex'],
+  }), true);
+  assert.throws(() => boundary.assertProviderEnabled('claude', {
+    readProviders: () => ['codex'],
+  }), /provider is disabled by the root activation mode/u);
+});
+
 test('root recovery keeps panic locked and remasks when a supervisor is not locally locked', async () => {
   const commands = [];
   let panicCleared = false;
   let recoveryPending = false;
   let stopped = 0;
   const result = await boundary.unlockAllProviderPlanes({
+    activationProviders: ['claude', 'codex'],
     panicAll: async () => ({ persisted: true, quiesced: true }),
     persistRecovery: () => {
       recoveryPending = true;
@@ -1067,4 +1678,104 @@ test('provider recovery never treats systemd enumeration or status failure as qu
     ),
     /missing-unit status is inconsistent/
   );
+});
+
+test('termination cancels queued start jobs even when the cgroup is already empty', async () => {
+  let queuedStart = true;
+  let readinessRemoved = false;
+  const calls = [];
+  const unit = boundary.unitName('claude', 'launch_11111111111111111111111111111111');
+  const result = await boundary.terminateUnit('claude', 'launch_11111111111111111111111111111111', {
+    persistTombstone: (name) => {
+      assert.equal(name, unit);
+      calls.push('mask');
+      return true;
+    },
+    control: async () => ({ persisted: true, quiesced: true }),
+    runSystemctl: (args) => {
+      assert.equal(args.at(-1), unit);
+      calls.push(args[0]);
+      if (args[0] === 'stop') {
+        assert.ok(args.includes('--job-mode=replace'));
+        queuedStart = false;
+      }
+      return { status: 0, signal: null };
+    },
+    awaitQuiescence: async () => {
+      calls.push('empty-cgroup');
+      return { quiesced: true, activeState: 'inactive' };
+    },
+    inspectReadiness: () => ({}),
+    removeReadiness: () => { readinessRemoved = true; },
+  });
+  assert.equal(result.quiesced, true);
+  assert.equal(queuedStart, false, 'an empty cgroup does not mean there is no queued start job');
+  assert.equal(readinessRemoved, true);
+  assert.deepEqual(calls, ['mask', 'kill', 'stop', 'empty-cgroup']);
+});
+
+test('an unavailable stop proof cannot release termination or readiness evidence', async () => {
+  for (const stopResult of [null, undefined, { status: 1 }, { status: 0, signal: 'SIGTERM' },
+    { status: 0, error: new Error('fixture bus failure') }, { status: '0' }]) {
+    let readinessRemoved = false;
+    const result = await boundary.terminateUnit('claude', 'launch_11111111111111111111111111111111', {
+      persistTombstone: () => true,
+      control: async () => ({ persisted: true, quiesced: true }),
+      runSystemctl: (args) => args[0] === 'stop' ? stopResult : { status: 0 },
+      awaitQuiescence: async () => ({ quiesced: true }),
+      inspectReadiness: () => ({}),
+      removeReadiness: () => { readinessRemoved = true; },
+    });
+    assert.equal(result.persisted, true);
+    assert.equal(result.quiesced, false);
+    assert.equal(readinessRemoved, false);
+  }
+});
+
+test('termination retry requires its own successful stop proof', async () => {
+  for (const stopStatuses of [[0, 1], [1, 0]]) {
+    let stopCalls = 0;
+    let statusCalls = 0;
+    let readinessRemoved = false;
+    const result = await boundary.terminateUnit('claude', 'launch_11111111111111111111111111111111', {
+      persistTombstone: () => true,
+      control: async () => ({ persisted: true, quiesced: true }),
+      runSystemctl: (args) => ({ status: args[0] === 'stop' ? stopStatuses[stopCalls++] : 0 }),
+      awaitQuiescence: async () => ({ quiesced: ++statusCalls === 2 }),
+      inspectReadiness: () => ({}),
+      removeReadiness: () => { readinessRemoved = true; },
+    });
+    assert.equal(stopCalls, 2);
+    assert.equal(statusCalls, 2);
+    assert.equal(result.quiesced, stopStatuses[1] === 0);
+    assert.equal(readinessRemoved, stopStatuses[1] === 0);
+  }
+});
+
+test('only an unambiguous populated zero can prove cgroup quiescence', () => {
+  const unit = boundary.unitName('claude', 'launch_11111111111111111111111111111111');
+  const runSystemctl = () => ({
+    status: 0, signal: null,
+    stdout: 'LoadState=loaded\nActiveState=inactive\nSubState=dead\nControlGroup=/fixture\n',
+  });
+  for (const events of [
+    '', 'frozen 0\n', 'populated\n', 'populated 2\n', 'populated 00\n',
+    'populated false\n', 'populated 0', 'populated 0\r\n', 'populated 0\0\n',
+    'populated 0\npopulated 0\n', 'populated 0\npopulated 1\n',
+    'populated 0\nfrozen 0\nfrozen 0\n', 'populated 0\ninvalid\n',
+    'populated 0\n' + 'x'.repeat(4096), 'populated 1\nfrozen 0\n',
+  ]) {
+    const status = boundary.inspectUnit(unit, { runSystemctl, readCgroupEvents: () => events });
+    assert.equal(status.quiesced, false, `must not accept ${JSON.stringify(events.slice(0, 80))}`);
+    assert.equal(status.populated, true);
+  }
+  assert.equal(boundary.inspectUnit(unit, {
+    runSystemctl,
+    readCgroupEvents: () => { throw new Error('fixture read failed'); },
+  }).quiesced, false);
+  for (const events of ['populated 0\n', 'populated 0\nfrozen 0\n', 'frozen 0\npopulated 0\n']) {
+    const status = boundary.inspectUnit(unit, { runSystemctl, readCgroupEvents: () => events });
+    assert.equal(status.quiesced, true);
+    assert.equal(status.populated, false);
+  }
 });

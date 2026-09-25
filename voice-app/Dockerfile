@@ -39,9 +39,10 @@ COPY --from=dependencies /app/voice-app/node_modules ./node_modules
 COPY --chown=0:0 voice-app/ ./
 COPY --chown=0:0 lib /app/lib
 
-# Runtime-generated audio lives only in the private /tmp tmpfs. Static media is
-# baked into the read-only image and cannot be replaced through a host bind.
-RUN chmod -R go-w /app/voice-app/static
+# Root-owned runtime sources and dependencies are admission-checked. Remove
+# group/other write inherited from a shared source checkout as well as static
+# media; generated audio lives only in the private /tmp tmpfs.
+RUN chmod -R go-w /app
 
 # HTTP API port
 EXPOSE 3000

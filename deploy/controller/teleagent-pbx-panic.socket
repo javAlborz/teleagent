@@ -1,0 +1,18 @@
+[Unit]
+Description=Teleagent independent Asterisk panic listener
+ConditionPathExists=/etc/teleagent/controller/ENABLE
+ConditionPathExists=/etc/teleagent/worker-session/ENABLE
+
+[Socket]
+ListenStream=/run/teleagent-pbx-panic/panic.sock
+SocketUser=root
+SocketGroup=teleagent-asterisk
+SocketMode=0660
+DirectoryMode=0755
+FileDescriptorName=pbx-panic
+Accept=no
+Service=teleagent-agent-controller.service
+RemoveOnStop=yes
+
+# Deliberately dormant. Only the exact stop operation is dispatched from this
+# listener; PBX never receives the voice-control token or general listener.

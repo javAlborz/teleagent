@@ -1,6 +1,7 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
 const { once } = require('node:events');
 const fs = require('node:fs');
@@ -16,15 +17,22 @@ const {
   cleanupEvidenceDisposition,
   cleanupExactProject,
   cleanupRequiresPanicRecovery,
+  captureCreatedContainerOwnership,
+  fixedDockerEnvironment,
   normalizeActivationState,
+  normalizeContainerOwnership,
   normalizeVoiceImageManifest,
+  resolveVoiceImageId,
   parseDockerCgroupInfo,
   parseProcessIdentityStatus,
   parseVoiceContainerBoundary,
   parseVoiceEnvironmentFile,
+  selectedProviderChecks,
   parseExactProjectContainerIds,
+  parseCreatedContainerOwnership,
   requestJson,
   requireLifecycleLock,
+  retainedVoiceContainerForStop,
   renderTemplateContents,
   resolveVoiceIdentities,
   requireControllerReady,
@@ -41,6 +49,12 @@ const {
   MAX_CONTROL_RESPONSE_BYTES,
 } = require('../../deploy/voice-stack/teleagent-voice-stack-launch');
 const voiceAppRuntimeContract = require('../../lib/voice-app-runtime-env');
+
+test('voice startup checks only the configured agent providers', () => {
+  assert.deepEqual(selectedProviderChecks({ AGENT_PROVIDERS: 'codex' }), ['codex']);
+  assert.deepEqual(selectedProviderChecks({ AGENT_PROVIDERS: 'claude,codex' }), ['claude', 'codex']);
+  assert.throws(() => selectedProviderChecks({ AGENT_PROVIDERS: 'claude' }), /provider selection is invalid/);
+});
 
 const IMAGE_MANIFEST = Object.freeze({
   version: 2,
@@ -88,7 +102,7 @@ function hostStateFilesystem({ stateDevice = 200, stateSymlink = false,
   let stateReads = 0;
   return {
     lstatSync(filename) {
-      if (filename !== '/var/lib/teleagent-voice') return ancestors.get(filename);
+      if (filename !== '/var/lib/teleagent-isolated-voice') return ancestors.get(filename);
       stateReads += 1;
       return directoryMetadata({
         uid: 989,
@@ -163,8 +177,10 @@ test('root launcher closes fixed voice state/listener values against host overri
     'DRACHTIO_GID=988',
     'FREESWITCH_UID=987',
     'FREESWITCH_GID=987',
-    'DEVICE_CONFIG_DIR=/etc/teleagent-voice/config',
-    'VOICE_STATE_DIR=/var/lib/teleagent-voice',
+    'DEVICE_CONFIG_DIR=/etc/teleagent-isolated-voice/config',
+    'VOICE_STATE_DIR=/var/lib/teleagent-isolated-voice',
+    'AGENT_PROVIDERS=claude,codex',
+    'OPENAI_PROJECT=proj_fixture0001',
     '',
   ].join('\n');
   assert.deepEqual(parseVoiceEnvironmentFile(base, RUNTIME_IDENTITIES, voiceAppRuntimeContract), {
@@ -174,9 +190,29 @@ test('root launcher closes fixed voice state/listener values against host overri
     DRACHTIO_GID: '988',
     FREESWITCH_UID: '987',
     FREESWITCH_GID: '987',
-    DEVICE_CONFIG_DIR: '/etc/teleagent-voice/config',
-    VOICE_STATE_DIR: '/var/lib/teleagent-voice',
+    DEVICE_CONFIG_DIR: '/etc/teleagent-isolated-voice/config',
+    VOICE_STATE_DIR: '/var/lib/teleagent-isolated-voice',
+    AGENT_PROVIDERS: 'claude,codex',
+    OPENAI_PROJECT: 'proj_fixture0001',
   });
+  assert.throws(() => parseVoiceEnvironmentFile(
+    base.replace('AGENT_PROVIDERS=claude,codex', 'AGENT_PROVIDERS=claude'),
+    RUNTIME_IDENTITIES, voiceAppRuntimeContract,
+  ), /provider selection is invalid/);
+  assert.throws(() => parseVoiceEnvironmentFile(
+    base.replace('OPENAI_PROJECT=proj_fixture0001', 'OPENAI_PROJECT='),
+    RUNTIME_IDENTITIES, voiceAppRuntimeContract,
+  ), /OpenAI project binding is invalid/);
+  assert.throws(() => parseVoiceEnvironmentFile(
+    base.replace('VOICE_STATE_DIR=/var/lib/teleagent-isolated-voice',
+      'VOICE_STATE_DIR=/var/lib/teleagent-voice'),
+    RUNTIME_IDENTITIES, voiceAppRuntimeContract,
+  ), /identity or path contract drifted/);
+  assert.throws(() => parseVoiceEnvironmentFile(
+    base.replace('DEVICE_CONFIG_DIR=/etc/teleagent-isolated-voice/config',
+      'DEVICE_CONFIG_DIR=/etc/teleagent-voice/config'),
+    RUNTIME_IDENTITIES, voiceAppRuntimeContract,
+  ), /identity or path contract drifted/);
   for (const [name, values] of Object.entries({
     VOICE_STATE_DB_PATH: ['', '/app/state/voice-state.sqlite', '/tmp/voice-state.sqlite'],
     VOICE_APP_EXECUTION_LOCK_FILE: ['', '/app/state/voice-execution.lock.json', '/tmp/voice.lock'],
@@ -243,8 +279,43 @@ test('stack shutdown refuses persisted-but-unquiesced panic and forced exits', (
   }
 });
 
-test('stop and recovery retain only the exact host handoff lock descriptor', () => {
-  const lockMetadata = directoryMetadata({ dev: 701, ino: 902 });
+test('isolated stop selects only the durable voice container ID', () => {
+  const containerId = 'a'.repeat(64);
+  const state = { version: 3, containerOwnership: { services: [
+    { service: 'voice-app', containerId, imageId: `sha256:${'b'.repeat(64)}` },
+  ] } };
+  assert.deepEqual(retainedVoiceContainerForStop(state), {
+    containerId, imageId: `sha256:${'b'.repeat(64)}`,
+  });
+  for (const changed of [
+    { ...state, version: 2 },
+    { ...state, containerOwnership: null },
+    { ...state, containerOwnership: { services: [{ ...state.containerOwnership.services[0], containerId: 'voice-app' }] } },
+  ]) assert.throws(() => retainedVoiceContainerForStop(changed));
+  const source = fs.readFileSync(path.join(__dirname, '..', '..',
+    'deploy', 'voice-stack', 'teleagent-voice-stack-launch.js'), 'utf8');
+  const stopBody = source.slice(source.indexOf('async function stop()'), source.indexOf('function cleanup()'));
+  assert.match(stopBody, /'inspect', '--format', '\{\{\.State\.Status\}\} \{\{\.State\.ExitCode\}\}', ownedVoice\.containerId/u);
+});
+
+test('replacement runtime projection cannot reuse the live legacy runtime directory', () => {
+  const root = path.join(__dirname, '..', '..');
+  const launcher = fs.readFileSync(path.join(root, 'deploy/voice-stack/teleagent-voice-stack-launch.js'), 'utf8');
+  const compose = fs.readFileSync(path.join(root, 'docker-compose.yml'), 'utf8');
+  const installer = fs.readFileSync(path.join(root, 'deploy/voice-stack/teleagent-voice-stack-install'), 'utf8');
+  const unit = fs.readFileSync(path.join(root, 'deploy/voice-stack/teleagent-voice-stack.service'), 'utf8');
+  const runtime = '/run/teleagent-isolated-voice-stack';
+  assert.match(launcher, /const RUNTIME_ROOT = '\/run\/teleagent-isolated-voice-stack'/u);
+  assert.equal((compose.match(/\/run\/teleagent-isolated-voice-stack\//gu) || []).length, 6);
+  assert.ok(installer.includes(`runtime_root=$(host_path ${runtime})`));
+  assert.ok(unit.includes(`ReadWritePaths=${runtime} `));
+  for (const source of [launcher, compose, installer, unit]) {
+    assert.equal(source.includes('/run/teleagent-voice-stack'), false);
+  }
+});
+
+test('start, stop and recovery retain only the exact host handoff lock descriptor', () => {
+  const lockMetadata = directoryMetadata({ dev: 701, ino: 902, mode: 0o700 });
   const filesystem = {
     fstatSync(descriptor) {
       assert.equal(descriptor, 17);
@@ -256,13 +327,13 @@ test('stop and recovery retain only the exact host handoff lock descriptor', () 
     },
   };
 
-  for (const operation of ['stop', 'recover']) {
+  for (const operation of ['start', 'stop', 'recover']) {
     const environment = { TELEAGENT_HANDOFF_LIFECYCLE_LOCK_FD: '17' };
     assert.equal(requireLifecycleLock(operation, { environment, filesystem }), 17);
     assert.equal(environment.TELEAGENT_HANDOFF_LIFECYCLE_LOCK_FD, undefined);
   }
 
-  for (const operation of ['start', 'cleanup']) {
+  for (const operation of ['cleanup']) {
     assert.equal(requireLifecycleLock(operation, { environment: {}, filesystem }), null);
     assert.throws(() => requireLifecycleLock(operation, {
       environment: { TELEAGENT_HANDOFF_LIFECYCLE_LOCK_FD: '17' },
@@ -272,7 +343,7 @@ test('stop and recovery retain only the exact host handoff lock descriptor', () 
 });
 
 test('voice lifecycle lock validation rejects missing, forged, and unsafe descriptors', () => {
-  const safe = directoryMetadata({ dev: 701, ino: 902 });
+  const safe = directoryMetadata({ dev: 701, ino: 902, mode: 0o700 });
   const environment = (value) => value === undefined ? {} : {
     TELEAGENT_HANDOFF_LIFECYCLE_LOCK_FD: value,
   };
@@ -282,10 +353,12 @@ test('voice lifecycle lock validation rejects missing, forged, and unsafe descri
   });
 
   for (const value of [undefined, '', '2', '03', '17x', '-3']) {
-    assert.throws(() => requireLifecycleLock('stop', {
-      environment: environment(value),
-      filesystem: filesystem(),
-    }), /did not retain the voice lifecycle lock/);
+    for (const operation of ['start', 'stop']) {
+      assert.throws(() => requireLifecycleLock(operation, {
+        environment: environment(value),
+        filesystem: filesystem(),
+      }), /did not retain the voice lifecycle lock/);
+    }
   }
   assert.throws(() => requireLifecycleLock('stop', {
     environment: environment('1000001'),
@@ -303,6 +376,7 @@ test('voice lifecycle lock validation rejects missing, forged, and unsafe descri
     [safe, directoryMetadata({ dev: 701, ino: 902, uid: 1 })],
     [safe, directoryMetadata({ dev: 701, ino: 902, gid: 1 })],
     [safe, directoryMetadata({ dev: 701, ino: 902, mode: 0o775 })],
+    [safe, directoryMetadata({ dev: 701, ino: 902, mode: 0o755 })],
   ]) {
     assert.throws(() => requireLifecycleLock('recover', {
       environment: environment('17'),
@@ -324,9 +398,9 @@ test('failed stack start never clears panic evidence after Compose activation wa
     path.join(__dirname, '..', '..', 'deploy', 'voice-stack', 'teleagent-voice-stack-launch.js'),
     'utf8',
   );
-  const startBody = source.slice(source.indexOf('async function start()'),
+  const startBody = source.slice(source.indexOf('async function start(lifecycleFd)'),
     source.indexOf('async function stop()'));
-  assert.ok(startBody.indexOf('activationAttempted = true') < startBody.indexOf("composeArgs('create'"));
+  assert.ok(startBody.indexOf('activationAttempted = true') < startBody.indexOf("privateComposeArgs('create'"));
   assert.match(startBody, /startFailureDisposition\(activationAttempted\)/);
   assert.doesNotMatch(startBody,
     /catch \(error\)[\s\S]*rollbackStartedStack\(environment\)[\s\S]*persistActivationState\('inactive'/);
@@ -408,7 +482,8 @@ test('voice activation authenticates exact authority-disabled controller health 
     request: async (options) => {
       assert.equal(options.method, 'GET');
       assert.equal(options.pathname, '/operator/health');
-      assert.equal(options.port, 3333);
+      assert.equal(options.socketPath, '/run/teleagent-controller/controller.sock');
+      assert.equal(options.port, undefined);
       assert.equal(options.token, 'controller-readiness-token-32-bytes');
       return { status: 200, body: exactHealth };
     },
@@ -441,7 +516,8 @@ test('voice activation authenticates executor readiness and erases its token', a
     request: async (options) => {
       assert.equal(options.method, 'GET');
       assert.equal(options.pathname, '/executor/health');
-      assert.equal(options.port, 3333);
+      assert.equal(options.socketPath, '/run/teleagent-controller/controller.sock');
+      assert.equal(options.port, undefined);
       assert.equal(options.token, 'executor-readiness-token-32-bytes--');
       return {
         status: 200,
@@ -488,7 +564,7 @@ test('wrapper never puts credentials in Docker argv or inherited environment', (
   assert.doesNotMatch(source, /composeArgs\([^)]*(?:secret|token|password)/i);
   assert.match(source, /--env-file', '\/dev\/null'/);
   assert.match(source, /--no-build', '--pull', 'never'/);
-  assert.match(source, /assertPanicQuiesced\(panic\)[\s\S]*assertVoiceExit\(inspection\)[\s\S]*composeArgs\('down'/);
+  assert.match(source, /assertPanicQuiesced\(panic\)[\s\S]*assertVoiceExit\(inspection\)[\s\S]*privateComposeArgs\('down'/);
   assert.match(source, /requireControllerReady\(controllerControlToken\)/);
   assert.match(source, /requireExecutorReady\(executorReadinessToken\)/);
   assert.match(source, /body\?\.phoneAuthority\?\.mode !== 'read_only'/);
@@ -501,19 +577,30 @@ test('wrapper never puts credentials in Docker argv or inherited environment', (
   assert.match(source, /persistActivationState\('panic_outcome_unknown'/);
   assert.doesNotMatch(source, /Preserve containers and projected credentials/);
 
-  const startBody = source.slice(source.indexOf('async function start()'),
+  const startBody = source.slice(source.indexOf('async function start(lifecycleFd)'),
     source.indexOf('async function stop()'));
   for (const [before, after] of [
     ['activationRequiresRecovery(readActivationState())', 'cleanupExactProject()'],
-    ['verifyVoiceImage(imageManifest)', 'readCredentialSet(identity)'],
-    ["persistActivationState('starting'", "composeArgs('create'"],
-    ['beginActivation: true', "composeArgs('create'"],
-    ['requireActiveUnit(CONTAINER_SLICE)', "composeArgs('create'"],
-    ['requireDockerCgroupBoundary()', "composeArgs('create'"],
-    ["composeArgs('create'", 'verifyExactProjectContainerBoundary('],
-    ['verifyExactProjectContainerBoundary(', "composeArgs('up'"],
-    ["composeArgs('up'", 'verifyRunningProjectProcessIdentities(identities'],
+    ['verifyVoiceImage(imageManifest, { imageId })', 'readCredentialSet(identity)'],
+    ["persistActivationState('starting'", "privateComposeArgs('create'"],
+    ['beginActivation: true', "privateComposeArgs('create'"],
+    ['requireActiveUnit(CONTAINER_SLICE)', "privateComposeArgs('create'"],
+    ['requireDockerCgroupBoundary()', "privateComposeArgs('create'"],
+    ['prepareHostRuntimeAdmission(startingState.activationGeneration, lifecycleFd)',
+      "privateComposeArgs('create'"],
+    ['projectPrivateCompose(contract, receiverProjection, environment)', "privateComposeArgs('create'"],
+    ["privateComposeArgs('create'", 'verifyExactProjectContainerBoundary('],
+    ['verifyExactProjectContainerBoundary(', "privateComposeArgs('up'"],
+    ["privateComposeArgs('up'", 'verifyRunningProjectProcessIdentities(identities'],
     ['verifyRunningProjectProcessIdentities(identities', 'waitForHealth()'],
+    ['publishRunningContainerAdmission(ownership, lifecycleFd)',
+      'publishReceiverRuntimeAdmission(startingState.activationGeneration, lifecycleFd)'],
+    ['publishReceiverRuntimeAdmission(startingState.activationGeneration, lifecycleFd)',
+      'publishVoiceEgressAdmission(startingState.activationGeneration, lifecycleFd)'],
+    ['publishVoiceEgressAdmission(startingState.activationGeneration, lifecycleFd)',
+      'releaseHostVoiceStart(startingState.activationGeneration, lifecycleFd)'],
+    ['releaseHostVoiceStart(startingState.activationGeneration, lifecycleFd)',
+      'await waitForHealth()'],
     ['await waitForHealth()', "persistActivationState('active'"],
     ['resolveVoiceIdentities()', 'verifyBoundedHostStateFilesystem(identity)'],
     ['verifyBoundedHostStateFilesystem(identity)', 'readEnvironmentFile(identities)'],
@@ -570,7 +657,9 @@ test('voice image release manifest is canonical, immutable, and resolved before 
           `${IMAGE_MANIFEST.sourceRevision}\n`,
     };
   };
-  assert.equal(verifyVoiceImage(IMAGE_MANIFEST, { runCommand, environment: {} }), true);
+  assert.equal(verifyVoiceImage(IMAGE_MANIFEST, {
+    runCommand, environment: {}, imageId: IMAGE_MANIFEST.configDigest,
+  }), true);
   assert.deepEqual(calls.map((args) => args.slice(0, 3)), [
     ['image', 'inspect', '--format'],
     ['image', 'inspect', '--format'],
@@ -578,8 +667,49 @@ test('voice image release manifest is canonical, immutable, and resolved before 
   ]);
   assert.throws(() => verifyVoiceImage(IMAGE_MANIFEST, {
     environment: {},
+    imageId: IMAGE_MANIFEST.configDigest,
     runCommand: () => ({ status: 0, stdout: 'sha256:unreviewed\n' }),
   }), /resolved voice image ID differs/);
+  const promotedCalls = [];
+  assert.equal(verifyVoiceImage(PROMOTED_IMAGE_MANIFEST, {
+    environment: {},
+    runCommand: (_filename, args) => {
+      promotedCalls.push(args);
+      return {
+        status: 0,
+        stdout: args.includes('{{.Id}}') ? `${PROMOTED_IMAGE_MANIFEST.configDigest}\n` :
+          args.includes('{{.Os}}/{{.Architecture}}') ? `${PROMOTED_IMAGE_MANIFEST.platform}\n` :
+            `${PROMOTED_IMAGE_MANIFEST.sourceRevision}\n`,
+      };
+    },
+  }), true);
+  assert.ok(promotedCalls.every((args) =>
+    args.at(-1) === PROMOTED_IMAGE_MANIFEST.registryReference));
+});
+
+test('offline image ID is derived from the reviewed OCI archive and config bytes', () => {
+  const config = Buffer.from('{"revision":"reviewed"}');
+  const configDigest = `sha256:${crypto.createHash('sha256').update(config).digest('hex')}`;
+  const image = Buffer.from(JSON.stringify({ schemaVersion: 2, config: { digest: configDigest } }));
+  const imageId = `sha256:${crypto.createHash('sha256').update(image).digest('hex')}`;
+  const index = Buffer.from(JSON.stringify({ schemaVersion: 2, manifests: [{
+    mediaType: 'application/vnd.oci.image.manifest.v1+json', digest: imageId,
+    platform: { os: 'linux', architecture: 'amd64' },
+  }] }));
+  const members = new Map([
+    ['index.json', index],
+    [`blobs/sha256/${imageId.slice(7)}`, image],
+    [`blobs/sha256/${configDigest.slice(7)}`, config],
+  ]);
+  const manifest = { ...IMAGE_MANIFEST, configDigest, runtimeReference: configDigest };
+  const readMember = (name) => members.get(name);
+  assert.equal(resolveVoiceImageId(manifest, { readMember }), imageId);
+  assert.throws(() => resolveVoiceImageId(manifest, {
+    readMember: (name) => name === 'index.json' ? index : Buffer.from('{}'),
+  }), /digest differs|binding differs/);
+  assert.throws(() => resolveVoiceImageId(manifest, {
+    readMember: (name) => name === 'index.json' ? Buffer.from('{}') : members.get(name),
+  }), /lacks one OCI image manifest/);
 });
 
 test('exact-project cleanup removes only the guarded Compose project and proves zero', () => {
@@ -596,7 +726,7 @@ test('exact-project cleanup removes only the guarded Compose project and proves 
   };
   assert.equal(cleanupExactProject({ runCommand, environment: {} }), 1);
   assert.deepEqual(calls[1], ['container', 'rm', '--force', identifier]);
-  assert.ok(calls[0].includes('label=com.docker.compose.project=teleagent-voice'));
+  assert.ok(calls[0].includes('label=com.docker.compose.project=teleagent-isolated-voice'));
   assert.deepEqual(parseExactProjectContainerIds(`${identifier}\n`), [identifier]);
   assert.throws(() => parseExactProjectContainerIds('voice-app\n'), /listing is invalid/);
 });
@@ -604,7 +734,7 @@ test('exact-project cleanup removes only the guarded Compose project and proves 
 test('activation state is canonical, image-bound, generation-monotonic, and missing-safe', () => {
   const active = {
     version: 2,
-    project: 'teleagent-voice',
+    project: 'teleagent-isolated-voice',
     activationGeneration: 7,
     phase: 'active',
     previousPhase: 'starting',
@@ -646,7 +776,7 @@ test('activation state is canonical, image-bound, generation-monotonic, and miss
 
   const legacy = {
     version: 1,
-    project: 'teleagent-voice',
+    project: 'teleagent-isolated-voice',
     phase: 'inactive',
     previousPhase: 'stopping',
     panic: 'quiesced',
@@ -664,6 +794,100 @@ test('activation state is canonical, image-bound, generation-monotonic, and miss
   assert.equal(cleanupRequiresPanicRecovery(normalizedLegacy), true);
   assert.equal(activationRequiresRecovery(null), true);
   assert.equal(cleanupRequiresPanicRecovery(null), true);
+});
+
+test('created container ownership binds all four full IDs before voice startup', () => {
+  const generation = 9;
+  const services = ['voice-runtime-preflight', 'drachtio', 'freeswitch', 'voice-app'];
+  const ids = ['a', 'b', 'c', 'd'].map((character) => character.repeat(64));
+  const imageIds = [
+    `sha256:${'1'.repeat(64)}`, `sha256:${'2'.repeat(64)}`,
+    `sha256:${'3'.repeat(64)}`, IMAGE_MANIFEST.configDigest,
+  ];
+  const inspection = services.map((service, index) =>
+    `${ids[index]}\t${service}\t${generation}\t${imageIds[index]}`
+  ).join('\n') + '\n';
+  const expected = parseCreatedContainerOwnership(
+    inspection, ids, generation, IMAGE_MANIFEST.configDigest
+  );
+  assert.deepEqual(expected.services.map((row) => row.service), [...services].sort());
+  assert.deepEqual(expected.services.map((row) => row.containerId).sort(), [...ids].sort());
+  assert.deepEqual(normalizeContainerOwnership(
+    expected, generation, IMAGE_MANIFEST.configDigest
+  ), expected);
+  const calls = [];
+  assert.deepEqual(captureCreatedContainerOwnership(generation, IMAGE_MANIFEST.configDigest, {
+    environment: {},
+    runCommand: (_filename, args) => {
+      calls.push(args);
+      return args[1] === 'ls'
+        ? { status: 0, stdout: `${ids.join('\n')}\n` }
+        : { status: 0, stdout: inspection };
+    },
+  }), expected);
+  assert.deepEqual(calls[1].slice(-4), ids);
+  for (const invalid of [
+    inspection.replace(`\t${generation}\t`, '\t8\t'),
+    inspection.replace(`${ids[0]}\t`, `${ids[1]}\t`),
+    inspection.replace(`\tvoice-app\t${generation}\t${IMAGE_MANIFEST.configDigest}`,
+      `\tvoice-app\t${generation}\tsha256:${'4'.repeat(64)}`),
+    inspection.replace('voice-runtime-preflight', 'voice-app'),
+    inspection.trimEnd(),
+    inspection + '\n',
+  ]) {
+    assert.throws(() => parseCreatedContainerOwnership(
+      invalid, ids, generation, IMAGE_MANIFEST.configDigest
+    ), /ownership|generation/);
+  }
+  const active = {
+    version: 3, project: 'teleagent-isolated-voice', activationGeneration: generation,
+    phase: 'active', previousPhase: 'starting', panic: 'not_requested', cleanup: 'required',
+    imageManifest: IMAGE_MANIFEST, panicOutcomeUnknownAt: null,
+    interruptedStartRecoveredAt: null, updatedAt: '2026-08-26T12:34:56.789Z',
+    containerOwnership: expected,
+  };
+  assert.deepEqual(normalizeActivationState(`${JSON.stringify(active)}\n`), active);
+  const priorImageId = `sha256:${'5'.repeat(64)}`;
+  const upgraded = {
+    ...active,
+    containerOwnership: {
+      ...expected,
+      services: expected.services.map((row) => row.service === 'voice-app' ?
+        { ...row, imageId: priorImageId } : row),
+    },
+  };
+  assert.deepEqual(normalizeActivationState(`${JSON.stringify(upgraded)}\n`), upgraded);
+  assert.equal(fixedDockerEnvironment({}, IMAGE_MANIFEST, generation, priorImageId)
+    .TELEAGENT_VOICE_IMAGE, priorImageId);
+  assert.equal(activationRequiresRecovery({ ...active, phase: 'inactive', cleanup: 'proved' }), false);
+  assert.throws(() => normalizeActivationState(`${JSON.stringify({
+    ...active, containerOwnership: null,
+  })}\n`), /lack retained ownership/);
+  const source = fs.readFileSync(
+    path.join(__dirname, '..', '..', 'deploy', 'voice-stack', 'teleagent-voice-stack-launch.js'), 'utf8'
+  );
+  assert.ok(source.indexOf('persistCreatedContainerOwnership(ownership);') >
+    source.indexOf("privateComposeArgs('create'"));
+  assert.ok(source.indexOf('persistCreatedContainerOwnership(ownership);') <
+    source.indexOf("privateComposeArgs('up'"));
+  assert.ok(source.indexOf('publishCreatedContainerAdmission(ownership, lifecycleFd);') >
+    source.indexOf('persistCreatedContainerOwnership(ownership);'));
+  assert.ok(source.indexOf('publishCreatedContainerAdmission(ownership, lifecycleFd);') <
+    source.indexOf("privateComposeArgs('up'"));
+  assert.ok(source.indexOf('publishRunningContainerAdmission(ownership, lifecycleFd);') >
+    source.indexOf("privateComposeArgs('up'"));
+  assert.ok(source.indexOf('publishRunningContainerAdmission(ownership, lifecycleFd);') <
+    source.indexOf('await waitForHealth()'));
+  const stopBody = source.slice(source.indexOf('async function stop() {'),
+    source.indexOf('function cleanup() {'));
+  assert.match(stopBody, /privateComposeArgs\('stop'/u);
+  assert.match(stopBody, /privateComposeArgs\('down'/u);
+  assert.doesNotMatch(stopBody, /run\(DOCKER, composeArgs\(/u);
+  assert.match(stopBody, /pathname: '\/api\/voice-control\/stop',\s*socketPath: CONTROL_SOCKET/u);
+  const healthBody = source.slice(source.indexOf('async function waitForHealth()'),
+    source.indexOf('function requireActiveUnit('));
+  assert.match(healthBody, /socketPath: CONTROL_SOCKET/u);
+  assert.doesNotMatch(healthBody, /host: '127\.0\.0\.1'/u);
 });
 
 test('activation state replacement is file-synced, renamed, then directory-synced', () => {
@@ -831,7 +1055,8 @@ test('offline recovery initializes missing state and retains partial or unavaila
       successEvents.push('controller-panic');
       assert.equal(options.method, 'POST');
       assert.equal(options.pathname, '/voice-control/stop');
-      assert.equal(options.port, 3333);
+      assert.equal(options.socketPath, '/run/teleagent-controller/controller.sock');
+      assert.equal(options.port, undefined);
       assert.equal(successEvents.indexOf('containers-zero') <
         successEvents.indexOf('controller-panic'), true);
       return { status: 200, body: { success: true } };
@@ -963,6 +1188,9 @@ test('dormant systemd gate binds the private voice identity and every prerequisi
   assert.match(unit, /^MemorySwapMax=0$/m);
   assert.match(unit, /^TasksMax=128$/m);
   assert.match(unit, /^IOWeight=50$/m);
+  assert.match(unit, /^ReadOnlyPaths=.*\/etc\/teleagent-isolated-voice(?:\s|$)/m);
+  assert.match(unit, /^ReadWritePaths=.*\/var\/lib\/teleagent-isolated-voice$/m);
+  assert.doesNotMatch(unit, /^ReadWritePaths=.*\/var\/lib\/teleagent-voice(?:\s|$)/m);
   assert.doesNotMatch(unit, /^Environment=.*(?:TOKEN|PASSWORD|SECRET|KEY)=/m);
   assert.doesNotMatch(unit, /^\[Install\]$/m);
   assert.doesNotMatch(containerSlice, /^\[Install\]$/m);
@@ -983,11 +1211,12 @@ test('dormant systemd gate binds the private voice identity and every prerequisi
     /^u teleagent-freeswitch - "Teleagent private FreeSWITCH peer" \/nonexistent \/usr\/sbin\/nologin$/m);
   assert.doesNotMatch(sysusers, /^u teleagent-asterisk /m);
   assert.match(tmpfiles,
-    /^d \/etc\/teleagent-voice\/credentials 0750 root teleagent-voice -$/m);
+    /^d \/etc\/teleagent-isolated-voice\/credentials 0750 root teleagent-voice -$/m);
   assert.match(tmpfiles,
-    /^d \/var\/lib\/teleagent-voice 0700 teleagent-voice teleagent-voice -$/m);
-  assert.match(tmpfiles, /^d \/var\/lib\/teleagent-voice-stack 0700 root root -$/m);
-  assert.match(tmpfiles, /^d \/run\/teleagent-voice-stack 0700 root root -$/m);
+    /^d \/var\/lib\/teleagent-isolated-voice 0700 teleagent-voice teleagent-voice -$/m);
+  assert.match(tmpfiles, /^d \/var\/lib\/teleagent-isolated-voice-stack 0700 root root -$/m);
+  assert.doesNotMatch(tmpfiles, /^d \/(?:etc|var\/lib)\/teleagent-voice(?:\/| )/m);
+  assert.match(tmpfiles, /^d \/run\/teleagent-isolated-voice-stack 0700 root root -$/m);
   assert.equal((compose.match(/image: "\$\{TELEAGENT_VOICE_IMAGE:\?/g) || []).length, 2);
   assert.match(compose, /user: "\$\{DRACHTIO_UID:\?[^}]+}:\$\{DRACHTIO_GID:\?[^}]+}"/);
   assert.match(compose, /user: "\$\{FREESWITCH_UID:\?[^}]+}:\$\{FREESWITCH_GID:\?[^}]+}"/);

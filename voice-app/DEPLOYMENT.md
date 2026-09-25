@@ -6,7 +6,7 @@ Guide for deploying Teleagent in production environments.
 > release pipeline, install the reviewed tree at `/opt/teleagent/current`, and
 > activate only through `teleagent-voice-stack.service`. The service accepts an
 > exact OCI digest from the root-owned
-> `/etc/teleagent-voice/voice-image.manifest.json` and runs Compose with
+> `/etc/teleagent-isolated-voice/voice-image.manifest.json` and runs Compose with
 > `--no-build --pull never`. Direct `docker compose up`, a local build context,
 > and split-host voice/controller operation are development or migration
 > history and are not supported production paths.
@@ -30,7 +30,7 @@ no-network credential preflight, and an optional agent bridge:
               ┌───────────────────────────────┐
               │     claude-api-server         │
               │   (Claude/Codex CLI bridge)   │
-              │     Port 3333                 │
+              │     Protected Unix socket     │
               └───────────────────────────────┘
 ```
 
@@ -63,7 +63,7 @@ registration credentials live only in the mode-`0600` device configuration.
 | 8021 | TCP | FreeSWITCH ESL control | Same-host loopback only |
 | 3000 | TCP | Voice app HTTP API | Inbound (optional) |
 | 3001 | TCP | FreeSWITCH AudioFork callback | Same-host loopback only |
-| 3333 | TCP | Agent API server | Internal |
+| `/run/teleagent-controller/controller.sock` | Unix | Agent API server | Root-owned, voice group only |
 | 30000-30100 | UDP | Asterisk/FreeSWITCH RTP | Same-host loopback only |
 
 ### Firewall Rules
@@ -100,11 +100,11 @@ infrastructure-owned `teleagent-asterisk` peer. All four are non-root, use
 provider/owner identity. Resolve every explicit Compose UID/GID binding from
 those accounts; there is no default. Provision these host paths before start:
 
-- `/etc/teleagent-voice/config`: root:`teleagent-voice`, mode `0750`;
-- `/etc/teleagent-voice/config/devices.json`: root:`teleagent-voice`, mode `0440`;
-- `/etc/teleagent-voice/credentials`: root:`teleagent-voice`, mode `0750`;
+- `/etc/teleagent-isolated-voice/config`: root:`teleagent-voice`, mode `0750`;
+- `/etc/teleagent-isolated-voice/config/devices.json`: root:`teleagent-voice`, mode `0440`;
+- `/etc/teleagent-isolated-voice/credentials`: root:`teleagent-voice`, mode `0750`;
 - each projected voice/SIP credential: root:`teleagent-voice`, mode `0440`, one link;
-- `/var/lib/teleagent-voice`: the root of a dedicated 4–8 GiB filesystem,
+- `/var/lib/teleagent-isolated-voice`: the root of a dedicated 4–8 GiB filesystem,
   `teleagent-voice`:`teleagent-voice`, mode `0700`, with at least 512 MiB and
   20% free before activation.
 
@@ -118,7 +118,7 @@ mounts voice state read-only and is limited to 0.5 CPU, 256 MiB, no additional
 swap, and 64 processes. It also requires the state and configuration mounts to
 have distinct device IDs and verifies the 4–8 GiB state capacity/free-space
 reserve with `statfs`. Independently, the host launcher requires the exact
-`/var/lib/teleagent-voice` directory to be a canonical mountpoint on a device
+`/var/lib/teleagent-isolated-voice` directory to be a canonical mountpoint on a device
 different from its immediate `/var/lib` parent; a shared `/var` or `/srv`
 filesystem does not qualify. The host launcher has an independent 512
 MiB/128-task cgroup ceiling and rejects controller responses above 128 KiB.
@@ -233,7 +233,7 @@ environment):
 | `EXTERNAL_IP` | Server LAN IP for RTP routing |
 | `DRACHTIO_SECRET` | Required unique 32-128 character random Drachtio control secret; copied examples fail closed |
 | `FREESWITCH_SECRET` | Required unique 32-128 character random FreeSWITCH control secret; must differ from every scoped credential |
-| `AGENT_API_URL` | URL to claude-api-server (`CLAUDE_API_URL` is a compatibility alias) |
+| `AGENT_API_URL` | Fixed compatibility HTTP origin; the client always uses the protected Unix socket. `CLAUDE_API_URL` is retired. |
 | `AGENT_API_BIND_HOST` | Controller bind host; defaults to `127.0.0.1` |
 | `AGENT_API_NON_LOOPBACK_ENABLED` | Explicit reviewed opt-in required for a split-host non-loopback controller bind |
 | `AGENT_API_TOKEN` | Controller-only bearer for general `/ask`, `/ask-structured`, and legacy non-phone lifecycle routes. Compose strips it and `CLAUDE_API_TOKEN` from `voice-app`. |
@@ -410,7 +410,7 @@ key before relying on this disabled boundary.
 ### Network Security
 
 - Voice app API (port 3000) should not be publicly exposed without authentication
-- Agent API server (port 3333) should only be accessible from the voice server
+- The production agent API uses only its root-owned Unix listener and scoped bearers
 - Every Claude/Codex profile is read-only from production voice; no profile or
   extension grants deployment or privileged authority
 - Non-read-only `phone-*` bridge requests and existing tmux delivery are
@@ -490,9 +490,9 @@ of those services affects the legacy extensions but not Realtime extensions.
 
 ### API Server Connection Issues
 
-1. Verify API server is running: `curl http://API_IP:3333/health`
-2. Check firewall allows port 3333
-3. Verify URL in voice server config matches API server
+1. Check both controller socket units and the controller service.
+2. Verify health: `sudo curl --unix-socket /run/teleagent-controller/controller.sock http://localhost/health`.
+3. Verify the voice container's read-only socket-directory mount and distinct scoped credentials. There is no TCP fallback.
 
 ## Backup and Recovery
 

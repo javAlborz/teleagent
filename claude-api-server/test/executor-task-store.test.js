@@ -461,6 +461,65 @@ test('a worker may preserve a verified success that wins the cancellation race',
   );
 });
 
+test('task-scoped cancellation cannot stop a later turn in the same call', (t) => {
+  const fixture = createFixture(t);
+  const store = fixture.open();
+  const previous = store.submitTask({
+    idempotencyKey: 'turn-one', callId: 'shared-call', request: { prompt: 'first' },
+  }).task;
+  const claim = store.claimNext({ workerId: 'fixture-worker' });
+  store.completeTask({
+    taskId: previous.id, workerId: 'fixture-worker', leaseToken: claim.leaseToken,
+    result: { success: true },
+  });
+  const next = store.submitTask({
+    idempotencyKey: 'turn-two', callId: 'shared-call', request: { prompt: 'second' },
+  }).task;
+  const cancellation = store.cancelCallTasks({
+    callId: 'shared-call', idempotencyKey: 'turn-one', scope: 'task',
+  });
+  assert.deepEqual(cancellation.taskIds, []);
+  assert.equal(cancellation.reservation.idempotencyKey, 'turn-one');
+  assert.equal(store.getTask(previous.id).state, 'completed');
+  assert.equal(store.getTask(next.id).state, 'queued');
+  const nextCancellation = store.cancelCallTasks({
+    callId: 'shared-call', idempotencyKey: 'turn-two', scope: 'task',
+  });
+  assert.deepEqual(nextCancellation.taskIds, [next.id]);
+  assert.equal(store.getTask(next.id).state, 'canceled');
+});
+
+test('task-scoped cancellation reserves only the exact unsubmitted turn and survives reopening', (t) => {
+  const fixture = createFixture(t);
+  const store = fixture.open();
+  const other = store.submitTask({
+    idempotencyKey: 'other-turn', callId: 'shared-call', voiceOrigin: true,
+    request: { prompt: 'unrelated turn' },
+  }).task;
+  store.cancelCallTasks({ callId: 'shared-call', idempotencyKey: 'not-submitted', scope: 'task' });
+  store.close();
+  const reopened = fixture.open();
+  assert.equal(reopened.getTask(other.id).state, 'queued');
+  const canceled = reopened.submitTask({
+    idempotencyKey: 'not-submitted', callId: 'shared-call', voiceOrigin: true,
+    request: { prompt: 'must not run' },
+  }).task;
+  assert.equal(canceled.state, 'canceled');
+  assert.equal(canceled.attempt, 0);
+});
+
+test('invalid cancellation scope or a missing task key cannot change tasks', (t) => {
+  const fixture = createFixture(t);
+  const store = fixture.open();
+  const task = store.submitTask({
+    idempotencyKey: 'must-remain-queued', callId: 'shared-call', request: { prompt: 'keep' },
+  }).task;
+  for (const args of [{ scope: 'task' }, { scope: 'everything', idempotencyKey: task.idempotencyKey }]) {
+    expectStoreError('INVALID_ARGUMENT', () => store.cancelCallTasks({ callId: 'shared-call', ...args }));
+    assert.equal(store.getTask(task.id).state, 'queued');
+  }
+});
+
 test('a cancellation reservation wins before submission and materializes a terminal task', (t) => {
   const fixture = createFixture(t);
   const store = fixture.open();

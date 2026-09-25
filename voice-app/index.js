@@ -3,11 +3,22 @@
  * Main entry point - v9 with Multi-Extension + Device API Support
  */
 
-if (process.env.NODE_ENV !== 'production') require("dotenv").config();
+var mediaRuntimeModule = require("../lib/media-receiver-runtime");
+var hostStartGeneration = null;
 var voiceAppRuntimeContract = require("../lib/voice-app-runtime-env");
+var mediaReceiverRuntime = null;
 var fixedRuntimeEnvironment = null;
 try {
-  fixedRuntimeEnvironment = voiceAppRuntimeContract.assertVoiceAppRuntimeEnvironment(process.env);
+  hostStartGeneration = mediaRuntimeModule.awaitHostStart();
+  if (process.env.NODE_ENV !== 'production') require("dotenv").config();
+  mediaReceiverRuntime = mediaRuntimeModule.loadMediaReceiverRuntime();
+  if (mediaReceiverRuntime.generation !== hostStartGeneration) {
+    throw new Error('host start generation differs from independent media admission');
+  }
+  fixedRuntimeEnvironment = voiceAppRuntimeContract.assertVoiceAppRuntimeEnvironment(process.env, mediaReceiverRuntime);
+  var voiceEgressRuntime = require("../lib/voice-egress-runtime").loadVoiceEgressRuntime(mediaReceiverRuntime);
+  require("./lib/voice-egress-transport").configureVoiceEgress(voiceEgressRuntime);
+  require("./lib/media-playback-urls").configureMediaPlayback(mediaReceiverRuntime);
 } catch (error) {
   console.error("[CONFIG] Voice state/listener boundary failed: " + error.message);
   process.exit(1);
@@ -19,6 +30,9 @@ var Mrf = require("drachtio-fsmrf");
 var httpServerModule = require("./lib/http-server");
 var createHttpServer = httpServerModule.createHttpServer;
 var cleanupOldFiles = httpServerModule.cleanupOldFiles;
+var createIsolatedMediaHttp = require("./lib/isolated-media-http").createIsolatedMediaHttp;
+var createIsolatedControlHttp = require("./lib/isolated-control-http").createIsolatedControlHttp;
+var mediaStartupFence = require("./lib/isolated-media-http").createMediaStartupFence();
 var audioForkModule = require("./lib/audio-fork");
 var assertAudioForkDebugSafe = audioForkModule.assertAudioForkDebugSafe;
 var AudioForkServer = audioForkModule.AudioForkServer;
@@ -110,8 +124,19 @@ var config = {
 };
 
 try {
-  config.media_endpoints = loadMediaControlEndpoints(process.env);
+  config.media_endpoints = loadMediaControlEndpoints(process.env, mediaReceiverRuntime);
+  var receiverProjection = mediaReceiverRuntime.projection;
+  config.http_host = receiverProjection.controlHttp.host;
+  config.http_port = receiverProjection.controlHttp.port;
+  config.ws_host = receiverProjection.audioForkOptions.host;
+  config.ws_connect_host = receiverProjection.audioForkOptions.connectHost;
+  config.ws_port = receiverProjection.audioForkOptions.port;
+  config.ws_non_loopback_enabled = receiverProjection.audioForkOptions.allowNonLoopback;
+  config.ws_allowed_peers = receiverProjection.audioForkOptions.allowedPeers;
   config.legacy_speech = loadLegacySpeechConfig(process.env);
+  if (config.legacy_speech.enabled !== voiceEgressRuntime.speechEnabled) {
+    throw new Error("Legacy speech differs from independent egress admission");
+  }
   config.realtime_endpoint = loadRealtimeEndpointConfig(process.env);
   config.drachtio.host = config.media_endpoints.drachtio.host;
   config.drachtio.port = config.media_endpoints.drachtio.port;
@@ -162,10 +187,11 @@ try {
 var srf = new Srf();
 var mediaServer = null;
 var httpServer = null;
+var isolatedMediaHttp = null;
+var isolatedControlHttp = null;
 var audioForkServer = null;
 var drachtioConnected = false;
 var freeswitchConnected = false;
-var isReady = false;
 var voiceStateStore = null;
 var stateCapacityGuard = null;
 var agentJobBroker = null;
@@ -236,7 +262,8 @@ var mrf = new Mrf(srf);
 function connectToFreeswitch() {
   return mrf.connect(buildFreeswitchConnectionOptions(
     config.freeswitch,
-    config.freeswitch.secret
+    config.freeswitch.secret,
+    mediaReceiverRuntime
   ));
 }
 
@@ -262,7 +289,8 @@ connectWithRetry(connectToFreeswitch, {
 });
 
 // Initialize servers
-function initializeServers() {
+async function initializeServers(assertStartupActive) {
+  assertStartupActive();
   var fs = require("fs");
   if (!fs.existsSync(config.audio_dir)) {
     fs.mkdirSync(config.audio_dir, { recursive: true });
@@ -312,6 +340,13 @@ function initializeServers() {
   // HTTP server for TTS audio
   httpServer = createHttpServer(config.audio_dir, config.http_port, config.http_host);
   console.log("[" + new Date().toISOString() + "] HTTP Server started on " + config.http_host + ":" + config.http_port);
+  isolatedMediaHttp = createIsolatedMediaHttp(mediaReceiverRuntime, {
+    audioDir: config.audio_dir,
+    staticDir: require("node:path").join(__dirname, "static")
+  });
+  isolatedMediaHttp.server.on("error", function() { void shutdown("MEDIA_HTTP_FAILURE"); });
+  await isolatedMediaHttp.ready;
+  assertStartupActive();
 
   // WebSocket server for audio fork
   audioForkServer = new AudioForkServer(config.audio_fork);
@@ -393,6 +428,10 @@ function initializeServers() {
 
   // Finalize HTTP server
   httpServer.finalize();
+  isolatedControlHttp = createIsolatedControlHttp(httpServer.app);
+  isolatedControlHttp.server.on('error', function() { void shutdown('CONTROL_SOCKET_FAILURE'); });
+  await isolatedControlHttp.ready;
+  assertStartupActive();
 
   // Cleanup old files periodically
   setInterval(function() {
@@ -401,53 +440,55 @@ function initializeServers() {
 }
 
 // Check ready state
-function checkReadyState() {
-  if (drachtioConnected && freeswitchConnected && !isReady) {
-    isReady = true;
-    console.log("\n[" + new Date().toISOString() + "] READY Voice interface is fully connected!");
-    console.log("=".repeat(64) + "\n");
-
-    initializeServers();
-
-    // Register SIP INVITE handler
-    srf.invite(function(req, res) {
-      // Authenticate the Asterisk trunk before the call enters the active-call
-      // registry or any caller/thread/media/approval state is created.
-      var inboundAdmission = config.sip_trunk_security.inboundAuthenticator
-        .authenticateInvite(req, res);
-      if (!inboundAdmission) return;
-      void inboundCallRegistry.dispatch(req, res, function(inboundOperation) {
-        return handleInvite(req, res, {
-          audioForkServer: audioForkServer,
-          mediaServer: mediaServer,
-          deviceRegistry: deviceRegistry,
-          config: config,
-          whisperClient: whisperClient,
-          claudeBridge: claudeBridge,
-          ttsService: ttsService,
-          voiceStateStore: voiceStateStore,
-          agentJobBroker: agentJobBroker,
-          wsPort: config.ws_port,
-          inboundTrunkAuthenticator: config.sip_trunk_security.inboundAuthenticator,
-          inboundAdmission: inboundAdmission,
-          stateCapacityGuard: stateCapacityGuard,
-          signal: inboundOperation.signal,
-          onResources: inboundOperation.onResources
+async function checkReadyState() {
+  if (drachtioConnected && freeswitchConnected) {
+    try {
+      await mediaStartupFence.run(initializeServers, function() {
+        // Register SIP INVITE handler
+        srf.invite(function(req, res) {
+          // Authenticate the Asterisk trunk before the call enters the active-call
+          // registry or any caller/thread/media/approval state is created.
+          var inboundAdmission = config.sip_trunk_security.inboundAuthenticator
+            .authenticateInvite(req, res);
+          if (!inboundAdmission) return;
+          void inboundCallRegistry.dispatch(req, res, function(inboundOperation) {
+            return handleInvite(req, res, {
+              audioForkServer: audioForkServer,
+              mediaServer: mediaServer,
+              deviceRegistry: deviceRegistry,
+              config: config,
+              whisperClient: whisperClient,
+              claudeBridge: claudeBridge,
+              ttsService: ttsService,
+              voiceStateStore: voiceStateStore,
+              agentJobBroker: agentJobBroker,
+              wsPort: config.ws_port,
+              inboundTrunkAuthenticator: config.sip_trunk_security.inboundAuthenticator,
+              inboundAdmission: inboundAdmission,
+              stateCapacityGuard: stateCapacityGuard,
+              signal: inboundOperation.signal,
+              onResources: inboundOperation.onResources
+            });
+          }).catch(function(err) {
+            console.error("[" + new Date().toISOString() + "] CALL Error: " + err.message);
+          });
         });
-      }).catch(function(err) {
-        console.error("[" + new Date().toISOString() + "] CALL Error: " + err.message);
-      });
-    });
-    inboundCallRegistry.startAccepting();
+        inboundCallRegistry.startAccepting();
 
-    console.log("[" + new Date().toISOString() + "] SIP INVITE handler registered");
-    console.log("[" + new Date().toISOString() + "] Multi-extension voice interface ready!");
+        console.log("\n[" + new Date().toISOString() + "] READY Voice interface is fully connected!");
+        console.log("=".repeat(64) + "\n");
+        console.log("[" + new Date().toISOString() + "] SIP INVITE handler registered");
+        console.log("[" + new Date().toISOString() + "] Multi-extension voice interface ready!");
+      });
+    } catch { await shutdown("MEDIA_STARTUP_FAILURE"); }
   }
 }
 
 // Graceful shutdown
 var shutdownPromise = null;
 function shutdown(signal) {
+  mediaStartupFence.stop();
+  require("./lib/voice-egress-transport").stopVoiceEgress();
   if (shutdownPromise) return shutdownPromise;
   shutdownPromise = (async function() {
     console.log("\n[" + new Date().toISOString() + "] Received " + signal + ", shutting down...");
@@ -476,6 +517,8 @@ function shutdown(signal) {
       if (!httpServer || !httpServer.server) return resolve(true);
       httpServer.server.close(function() { resolve(true); });
     });
+    var isolatedMediaClosed = isolatedMediaHttp ? isolatedMediaHttp.close() : Promise.resolve(true);
+    var isolatedControlClosed = isolatedControlHttp ? isolatedControlHttp.close() : Promise.resolve(true);
     var audioForkClosed = Promise.resolve(true);
     if (audioForkServer?.wss) {
       var audioForkListener = audioForkServer.wss;
@@ -495,7 +538,8 @@ function shutdown(signal) {
     var inboundDrain = drainResults[2];
     var transportClosures = await Promise.all([
       Promise.race([
-        httpClosed,
+        Promise.all([httpClosed, isolatedMediaClosed, isolatedControlClosed])
+          .then(function(values) { return values.every(Boolean); }),
         new Promise(function(resolve) { setTimeout(function() { resolve(false); }, 2000); })
       ]),
       Promise.race([

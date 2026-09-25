@@ -230,7 +230,7 @@ function createFixture({ entrypointBarrier = false, fenceInstallOutput = '' } = 
     'var/lib/teleagent-control',
     'var/lib/teleagent-privileged-action',
     'var/lib/teleagent-sip-gateway',
-    'var/lib/teleagent-voice',
+    'var/lib/teleagent-isolated-voice',
     'srv/teleagent-agent-workspaces',
   ]) mkdir(path.join(root, stateRoot), 0o700);
 
@@ -286,7 +286,7 @@ function createFixture({ entrypointBarrier = false, fenceInstallOutput = '' } = 
     '/var/lib/teleagent-control 202',
     '/var/lib/teleagent-privileged-action 203',
     '/var/lib/teleagent-sip-gateway 204',
-    '/var/lib/teleagent-voice 205',
+    '/var/lib/teleagent-isolated-voice 205',
     '/srv/teleagent-agent-workspaces 206',
     '',
   ].join('\n'), 0o600);
@@ -297,7 +297,9 @@ function createFixture({ entrypointBarrier = false, fenceInstallOutput = '' } = 
   fs.symlinkSync(`releases/${releaseId}`, currentSelector);
   fs.chmodSync(releaseRoot, 0o555);
   const releaseMetadata = fs.statSync(releaseRoot, { bigint: true });
-  const gate = `{"version":1,"application":"teleagent","releaseId":"${releaseId}",` +
+  const gate = `{"version":3,"application":"teleagent",` +
+    `"verifierProtocolGeneration":2,"verifierSha256":"sha256:${'a'.repeat(64)}",` +
+    `"verifierSourcePolicySha256":"sha256:${'b'.repeat(64)}","releaseId":"${releaseId}",` +
     `"manifestSha256":"sha256:${digest}","sourceRevision":"${REVISION}",` +
     `"currentTarget":"/opt/teleagent/releases/${releaseId}",` +
     `"releaseDevice":${releaseMetadata.dev},"releaseInode":${releaseMetadata.ino},` +
@@ -413,7 +415,9 @@ function createFixture({ entrypointBarrier = false, fenceInstallOutput = '' } = 
       fs.writeFileSync(promotedManifestPath, promotedManifest);
       fs.chmodSync(promotedManifestPath, 0o444);
       const promotedMetadata = fs.statSync(promotedRoot, { bigint: true });
-      const promotedGate = `{"version":1,"application":"teleagent",` +
+      const promotedGate = `{"version":3,"application":"teleagent",` +
+        `"verifierProtocolGeneration":2,"verifierSha256":"sha256:${'a'.repeat(64)}",` +
+        `"verifierSourcePolicySha256":"sha256:${'b'.repeat(64)}",` +
         `"releaseId":"${promotedId}","manifestSha256":"sha256:${promotedDigest}",` +
         `"sourceRevision":"${promotedRevision}",` +
         `"currentTarget":"/opt/teleagent/releases/${promotedId}",` +
@@ -604,7 +608,7 @@ test('missing gate and shared workload devices refuse before installation', () =
       '/var/lib/teleagent-control 201',
       '/var/lib/teleagent-privileged-action 203',
       '/var/lib/teleagent-sip-gateway 204',
-      '/var/lib/teleagent-voice 205',
+      '/var/lib/teleagent-isolated-voice 205',
       '/srv/teleagent-agent-workspaces 206',
     ]);
     const result = shared.run('--install-disabled');
@@ -629,7 +633,7 @@ test('missing gate and shared workload devices refuse before installation', () =
         '/var/lib/teleagent-control 202',
         '/var/lib/teleagent-privileged-action 203',
         '/var/lib/teleagent-sip-gateway 204',
-        '/var/lib/teleagent-voice 205',
+        '/var/lib/teleagent-isolated-voice 205',
         `/srv/teleagent-agent-workspaces ${workspaceDevice}`,
       ]);
       const result = collision.run('--install-disabled');
@@ -652,7 +656,7 @@ test('missing gate and shared workload devices refuse before installation', () =
       '/var/lib/teleagent-control 202',
       '/var/lib/teleagent-privileged-action 203',
       '/var/lib/teleagent-sip-gateway 204',
-      '/var/lib/teleagent-voice 205',
+      '/var/lib/teleagent-isolated-voice 205',
       '/srv/teleagent-agent-workspaces 206',
     ]);
     const result = providerCollision.run('--install-disabled');
@@ -675,6 +679,30 @@ test('global gate metadata matches the host-owned public-read contract exactly',
       const result = fixture.run('--source-check');
       assertRefusal(result);
       assert.match(result.stderr, message);
+      assert.deepEqual(fixture.lines(), []);
+    } finally {
+      fixture.cleanup();
+    }
+  }
+});
+
+test('older or altered verifier gate generation refuses before source execution', () => {
+  for (const [from, to] of [
+    ['"version":3', '"version":1'],
+    ['"verifierProtocolGeneration":2', '"verifierProtocolGeneration":3'],
+    [`"verifierSha256":"sha256:${'a'.repeat(64)}"`, '"verifierSha256":"sha256:bad"'],
+  ]) {
+    const fixture = createFixture();
+    try {
+      const gatePath = path.join(fixture.root, 'run/teleagent-release-gate/verified.json');
+      const original = fs.readFileSync(gatePath, 'utf8');
+      assert.ok(original.includes(from));
+      fs.chmodSync(gatePath, 0o600);
+      fs.writeFileSync(gatePath, original.replace(from, to));
+      fs.chmodSync(gatePath, 0o444);
+      const result = fixture.run('--source-check');
+      assertRefusal(result);
+      assert.match(result.stderr, /release gate schema is invalid/u);
       assert.deepEqual(fixture.lines(), []);
     } finally {
       fixture.cleanup();

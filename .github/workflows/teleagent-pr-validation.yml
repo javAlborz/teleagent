@@ -30,6 +30,50 @@ jobs:
           clean: true
           persist-credentials: false
 
+      - name: Observe hosted runner build capacity
+        shell: /usr/bin/bash --noprofile --norc -euo pipefail {0}
+        run: |
+          python3 -I - <<'PY'
+          import datetime
+          import json
+          import os
+
+          def capacity(path):
+              value = os.statvfs(path)
+              return {
+                  "totalBytes": value.f_blocks * value.f_frsize,
+                  "availableBytes": value.f_bavail * value.f_frsize,
+                  "availableInodes": value.f_favail,
+              }
+
+          print(json.dumps({
+              "purpose": "capacity-observation-not-release-admission",
+              "observedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+              "availableCpus": len(os.sched_getaffinity(0)),
+              "runnerTemp": capacity(os.environ["RUNNER_TEMP"]),
+              "workspace": capacity(os.environ["GITHUB_WORKSPACE"]),
+              "releaseFreeSpaceGuardBytes": 15 * 1024 ** 3,
+          }, sort_keys=True))
+          PY
+
+      - name: Test inert hosted kernel probe guards
+        shell: /usr/bin/bash --noprofile --norc -euo pipefail {0}
+        run: /usr/bin/python3 -I -B -m unittest discover -s scripts/ci -p 'test_hosted_kernel_probe.py'
+
+      - name: Observe isolated hosted kernel primitives
+        timeout-minutes: 2
+        shell: /usr/bin/bash --noprofile --norc -euo pipefail {0}
+        env:
+          CI_PROBE_REVISION: ${{ github.sha }}
+        run: |
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = Linux
+          sudo -n -- /usr/bin/env -i \
+            PATH=/usr/bin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 \
+            GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted RUNNER_OS=Linux \
+            CI_PROBE_REVISION="$CI_PROBE_REVISION" \
+            /usr/bin/python3 -I -B scripts/ci/hosted-kernel-probe.py --run-hosted
+
       - name: Install Node 24
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:

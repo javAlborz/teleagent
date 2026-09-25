@@ -1,8 +1,8 @@
 [Unit]
 Description=Teleagent private durable agent controller
 Documentation=file:/opt/teleagent/current/docs/CONTROLLER-DEPLOYMENT.md
-Requires=teleagent-worker-session.service teleagent-provider-model-apparmor.service teleagent-provider-supervisor@claude.socket teleagent-provider-supervisor@codex.socket
-After=local-fs.target network-online.target teleagent-worker-session.service teleagent-provider-model-apparmor.service teleagent-provider-supervisor@claude.socket teleagent-provider-supervisor@codex.socket
+Requires=teleagent-agent-controller.socket teleagent-pbx-panic.socket teleagent-worker-session.service teleagent-provider-model-apparmor.service teleagent-provider-supervisor@codex.socket
+After=local-fs.target network-online.target teleagent-agent-controller.socket teleagent-pbx-panic.socket teleagent-worker-session.service teleagent-provider-model-apparmor.service teleagent-provider-supervisor@codex.socket
 Wants=network-online.target
 ConditionPathExists=/etc/teleagent/controller/ENABLE
 ConditionPathExists=/etc/teleagent/worker-session/ENABLE
@@ -10,6 +10,7 @@ ConditionPathIsMountPoint=/var/lib/teleagent-control
 
 [Service]
 Type=simple
+Sockets=teleagent-agent-controller.socket teleagent-pbx-panic.socket
 User=teleagent-control
 Group=teleagent-control
 UMask=0077
@@ -19,8 +20,7 @@ Environment=HOME=/var/lib/teleagent-control
 Environment=PATH=/opt/teleagent/agent-tools:/usr/bin:/bin
 Environment=LANG=C.UTF-8
 Environment=LC_ALL=C.UTF-8
-Environment=PORT=3333
-Environment=AGENT_API_BIND_HOST=127.0.0.1
+Environment=AGENT_API_TRANSPORT=systemd-unix
 Environment=AGENT_API_NON_LOOPBACK_ENABLED=false
 Environment=TELEAGENT_CONTROLLER_STATE_BOUNDARY=required
 Environment=EXECUTOR_TASK_DB_PATH=/var/lib/teleagent-control/executor-tasks.sqlite
@@ -29,7 +29,7 @@ LoadCredential=teleagent-release-gate:/run/teleagent-release-gate/verified.json
 UnsetEnvironment=LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT GCONV_PATH NODE_OPTIONS NODE_PATH NODE_EXTRA_CA_CERTS NODE_TLS_REJECT_UNAUTHORIZED NODE_USE_ENV_PROXY SSLKEYLOGFILE SSL_CERT_FILE SSL_CERT_DIR HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy OPENAI_API_KEY ANTHROPIC_API_KEY CLAUDE_API_KEY CLAUDE_API_TOKEN CODEX_API_KEY API_KEY API_TOKEN AUTH_TOKEN ACCESS_TOKEN PROVIDER_TOKEN PROVIDER_SECRET
 UnsetEnvironment=VOICE_APPROVAL_KEY_ID VOICE_APPROVAL_PUBLIC_KEY_FILE PRIVILEGED_ACTION_API_TOKEN PRIVILEGED_ACTION_PROXY_ENABLED PRIVILEGED_ACTION_PROXY_SOCKET_PATH PRIVILEGED_ACTION_PROXY_TIMEOUT_MS
 ExecStartPre=+/usr/bin/env -i HOME=/var/empty PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 /usr/local/libexec/verify-teleagent-release-closure --check-start-gate
-ExecStart=/usr/bin/python3 -I /usr/local/libexec/verify-teleagent-release-closure --start-component agent-controller ${CREDENTIALS_DIRECTORY}/teleagent-release-gate
+ExecStart=!/usr/bin/python3 -I /usr/local/libexec/verify-teleagent-release-closure --supervise-component agent-controller ${CREDENTIALS_DIRECTORY}/teleagent-release-gate
 Restart=on-failure
 RestartSec=2s
 KillMode=control-group
@@ -53,7 +53,7 @@ LimitCORE=0
 
 NoNewPrivileges=yes
 AmbientCapabilities=
-CapabilityBoundingSet=
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_SETPCAP CAP_KILL
 PrivateDevices=yes
 PrivateIPC=yes
 PrivateTmp=yes
@@ -67,18 +67,17 @@ ProtectKernelTunables=yes
 ProtectClock=yes
 ProtectHostname=yes
 ProtectProc=invisible
-ProcSubset=pid
+ProcSubset=all
 RestrictNamespaces=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes
 RestrictRealtime=yes
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictAddressFamilies=AF_UNIX
 IPAddressDeny=any
-IPAddressAllow=localhost
 SystemCallArchitectures=native
 ReadOnlyPaths=/opt/teleagent/releases /opt/teleagent/agent-tools /usr/local/libexec /etc/teleagent/controller
 ReadWritePaths=/var/lib/teleagent-control
-InaccessiblePaths=/opt/teleagent/current/.env /opt/teleagent/current/voice-app/.env /var/lib/teleagent-worker-state /var/lib/teleagent-privileged-action /var/lib/teleagent-voice /var/lib/teleagent-voice-stack /srv/teleagent-agent-workspaces /etc/teleagent-voice /etc/teleagent/privileged-action /etc/teleagent/provider-egress-secrets /run/teleagent-provider-egress /run/teleagent-provider-egress-control /run/teleagent-privileged-action /run/teleagent-voice-stack
+InaccessiblePaths=/opt/teleagent/current/.env /opt/teleagent/current/voice-app/.env /var/lib/teleagent-worker-state /var/lib/teleagent-privileged-action /var/lib/teleagent-voice /var/lib/teleagent-isolated-voice /var/lib/teleagent-voice-stack /var/lib/teleagent-isolated-voice-stack /srv/teleagent-agent-workspaces /etc/teleagent-voice /etc/teleagent-isolated-voice /etc/teleagent/privileged-action /etc/teleagent/provider-egress-secrets /run/teleagent-provider-egress /run/teleagent-provider-egress-control /run/teleagent-privileged-action /run/teleagent-voice-stack /run/teleagent-isolated-voice-stack
 
 # Deliberately dormant: no [Install] section. A root operator must provision the
 # dedicated state filesystem, exact runtime environment, both ENABLE sentinels,

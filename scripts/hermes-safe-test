@@ -40,9 +40,9 @@ lock_file="$runtime_directory/teleagent-hermes-safe-test.lock"
 
 exec flock --exclusive --wait "$timeout_seconds" "$lock_file" env \
   HERMES_DEV_TEST_CPU_QUOTA=100% \
-  HERMES_DEV_TEST_MEMORY_MAX=1536M \
-  HERMES_DEV_TEST_MEMORY_SWAP_MAX=128M \
-  HERMES_DEV_TEST_TASKS_MAX=192 \
+  HERMES_DEV_TEST_MEMORY_MAX=512M \
+  HERMES_DEV_TEST_MEMORY_SWAP_MAX=0 \
+  HERMES_DEV_TEST_TASKS_MAX=128 \
   hermes-dev-test \
     timeout --signal=TERM --kill-after=10s "${timeout_seconds}s" \
     nice -n 15 ionice -c 3 \

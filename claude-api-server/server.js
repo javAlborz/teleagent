@@ -15,6 +15,9 @@
  */
 
 const express = require('express');
+const http = require('node:http');
+const { controllerListenOptions, CONTROLLER_SOCKET } = require('./controller-listener');
+const { pbxPanicListenOptions, createPbxPanicRequestGate } = require('./pbx-panic-listener');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
 const fs = require('fs');
@@ -157,6 +160,11 @@ loadEnvFile(path.join(__dirname, '..', '.env'));
 
 const HOME = process.env.HOME || os.homedir() || '/root';
 const app = express();
+// Scope selection below uses exact path spelling. Configure the router before
+// its first middleware so case or a trailing slash cannot select a handler
+// under a different credential scope.
+app.enable('case sensitive routing');
+app.enable('strict routing');
 const PORT = process.env.PORT || 3333;
 const BIND_HOST = String(
   process.env.AGENT_API_BIND_HOST || process.env.CLAUDE_API_BIND_HOST || '127.0.0.1'
@@ -281,6 +289,8 @@ let executorTaskDispatcher = null;
 let serverReady = false;
 let shutdownRequested = false;
 let httpServer = null;
+let pbxPanicServer = null;
+let pbxPanicGate = null;
 let shutdownPromise = null;
 let executorStoreClosed = false;
 let workerSessionHealthTimer = null;
@@ -1827,7 +1837,7 @@ function isOperatorPath(requestPath) {
 app.use((req, res, next) => {
   const localPanicStop = req.method === 'POST' &&
     req.path === '/voice-control/stop' &&
-    isLoopbackRequest(req);
+    (isLoopbackRequest(req) || pbxPanicGate?.isPbxPanicRequest(req) === true);
 
   if (req.path === '/' || req.path === '/health' || localPanicStop) {
     return next();
@@ -4051,15 +4061,20 @@ app.post('/ask-structured', async (req, res) => {
  *   {
  *     "callId": "call-uuid",
  *     "sessionKey": "optional-stable-session-uuid",
+ *     "scope": "task",
+ *     "idempotencyKey": "exact-durable-turn-key",
  *     "resetSession": false,
  *     "reason": "dtmf_cancel"
  *   }
+ * Task scope requires an explicit key and cannot reset or cancel the whole
+ * session. Omitted scope retains the legacy whole-call cancellation contract.
  */
 function handleCancelSession(req, res) {
   const {
     callId,
     sessionKey,
     idempotencyKey = callId,
+    scope = 'call',
     resetSession = false,
     reason = 'cancel_session'
   } = req.body || {};
@@ -4073,7 +4088,20 @@ function handleCancelSession(req, res) {
     });
   }
 
-  const result = cancelActiveRequests(callId, {
+  const exactIdentifier = (value) => typeof value === 'string' && value.length > 0 &&
+    value.length <= 200 && value.trim() === value && !/[\u0000-\u001F\u007F]/u.test(value);
+  if (!['call', 'task'].includes(scope) || (scope === 'task' &&
+      (!exactIdentifier(callId) || !exactIdentifier(req.body?.idempotencyKey) || resetSession !== false))) {
+    return res.status(400).json({
+      success: false,
+      code: 'INVALID_CANCELLATION_SCOPE',
+      error: 'Task scope requires exact call and task keys and cannot reset the session.',
+    });
+  }
+
+  // The dispatcher interrupts only records selected by the durable task key.
+  // A late turn cancellation must never reach the whole-call request bucket.
+  let result = scope === 'task' ? null : cancelActiveRequests(callId, {
     sessionKey: resolvedSessionKey,
     resetSession: !!resetSession,
     reason
@@ -4081,9 +4109,18 @@ function handleCancelSession(req, res) {
   const executorTasks = executorTaskDispatcher.cancelCallTasks({
     callId,
     idempotencyKey,
+    scope,
     reason,
     source: 'cancel_session',
   });
+  if (scope === 'task') {
+    result = {
+      active: executorTasks.taskIds.length > 0,
+      canceledCount: executorTasks.taskIds.length,
+      requestIds: [],
+      resetSession: false,
+    };
+  }
 
   console.log(
     `[${timestamp}] SESSION CANCELED: callLinked=yes sessionKey=${valuePresence(resolvedSessionKey)} active=${result.active} canceled=${result.canceledCount} resetSession=${result.resetSession} reason=${reason}`
@@ -4093,6 +4130,7 @@ function handleCancelSession(req, res) {
     success: true,
     callId,
     sessionKey: resolvedSessionKey,
+    scope,
     ...result,
     executorTasks,
   });
@@ -4107,7 +4145,8 @@ app.post('/voice-control/session/cancel', handleCancelSession);
  * POST /voice-control/stop
  *
  * Fail-closed emergency stop for every phone-originated agent request. Asterisk
- * may call this endpoint without the bearer token only over loopback. The stop
+ * uses a separate root-owned, stop-only Unix listener in production. Direct
+ * development starts also accept loopback panic without a bearer. The stop
  * is persistent and idempotent; it does not affect ordinary terminal/API work.
  */
 app.post('/voice-control/stop', async (req, res) => {
@@ -4377,10 +4416,8 @@ app.get('/', (req, res) => {
   });
 });
 
-function listenForRequests() {
+function listenOn(candidate, options) {
   return new Promise((resolve, reject) => {
-    const candidate = app.listen(PORT, BIND_HOST);
-    httpServer = candidate;
     const onError = (error) => {
       candidate.removeListener('listening', onListening);
       reject(error);
@@ -4391,11 +4428,25 @@ function listenForRequests() {
     };
     candidate.once('error', onError);
     candidate.once('listening', onListening);
+    candidate.listen(options);
   });
 }
 
-function beginHttpShutdown() {
-  if (!httpServer) return Promise.resolve({ closed: true, error: null });
+async function listenForRequests() {
+  const options = controllerListenOptions({ port: PORT, host: BIND_HOST });
+  const panicOptions = process.env.AGENT_API_TRANSPORT === 'systemd-unix' ? pbxPanicListenOptions() : null;
+  if (panicOptions) {
+    pbxPanicGate = createPbxPanicRequestGate(app);
+    pbxPanicServer = http.createServer(pbxPanicGate.dispatch);
+    await listenOn(pbxPanicServer, panicOptions);
+  }
+  if (shutdownRequested) return;
+  httpServer = http.createServer(app);
+  await listenOn(httpServer, options);
+}
+
+function closeHttpListener(server) {
+  if (!server) return Promise.resolve({ closed: true, error: null });
   return new Promise((resolve) => {
     let settled = false;
     const finish = (error = null) => {
@@ -4405,11 +4456,16 @@ function beginHttpShutdown() {
       resolve({ closed: !error, error });
     };
     try {
-      httpServer.close(finish);
+      server.close(finish);
     } catch (error) {
       finish(error);
     }
   });
+}
+
+async function beginHttpShutdown() {
+  const results = await Promise.all([closeHttpListener(httpServer), closeHttpListener(pbxPanicServer)]);
+  return { closed: results.every((result) => result.closed), error: results.find((result) => result.error)?.error || null };
 }
 
 function settleWithin(promise, timeoutMs) {
@@ -4466,8 +4522,8 @@ async function startServer() {
     console.log('='.repeat(64));
     console.log('Teleagent HTTP Agent Bridge');
     console.log('='.repeat(64));
-    console.log(`\nListening on: http://${BIND_HOST}:${PORT}`);
-    console.log(`Health check: http://localhost:${PORT}/health`);
+    console.log(`\nListening on: ${process.env.AGENT_API_TRANSPORT === 'systemd-unix' ?
+      CONTROLLER_SOCKET : `http://${BIND_HOST}:${PORT}`}`);
     console.log(`Agent API auth: ${AGENT_API_TOKEN ? 'enabled' : 'unavailable'}`);
     console.log(`Executor API auth: ${EXECUTOR_API_TOKEN ? 'enabled' : 'unavailable'}`);
     console.log(`Voice control API auth: ${VOICE_CONTROL_TOKEN ? 'enabled' : 'unavailable'}`);
@@ -4552,6 +4608,7 @@ function shutdown(signal, { exitCode = 0 } = {}) {
     let http = await settleWithin(httpDrain, 2500);
     if (!http.settled) {
       httpServer?.closeAllConnections?.();
+      pbxPanicServer?.closeAllConnections?.();
       http = await settleWithin(httpDrain, 500);
     }
     if (!http.settled || !http.value?.closed) {
