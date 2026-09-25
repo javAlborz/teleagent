@@ -14,7 +14,7 @@ validated distinct /30 links. Unknown/missing fields, reordered services,
 missing flows, broad port intervals, shared addresses or mismatched generations
 refuse before output.
 
-`prepareProtectedReceiverEndpoints(releaseRoot)` reads only fixed root-protected
+`prepareProtectedReceiverEndpoints(releaseRoot, { lifecycleFd })` reads only fixed root-protected
 `/etc/teleagent-media/docker-network.json`, requires canonical JSON, and obtains
 independent bootstrap admission through the existing protected application
 boundary module. The authority must validate the complete external edge and
