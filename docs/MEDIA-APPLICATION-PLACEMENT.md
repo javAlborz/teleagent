@@ -64,7 +64,7 @@ retain the shared lifecycle fence across the eventual caller's mutation.
 Echoing request arguments or accepting caller-selected images is not admission.
 The returned JSON is a checked observation, not a transferable authorization.
 
-`verifyProtectedPlacement(releaseRoot, fullContainerIds, stage)` is the concrete
+`verifyProtectedPlacement(releaseRoot, fullContainerIds, stage, { lifecycleFd })` is the concrete
 read-only operation for `created`, `running` and `restart`. It uses the exact
 local Docker socket and protected empty Docker client configuration, then
 submits the full observation digest to the authority. Automatic container or

@@ -316,16 +316,16 @@ function inspectDocker(containerId) {
     '/etc/teleagent-media/docker-client', 'inspect', '--type', 'container', '--format', INSPECT, containerId]));
 }
 
-function verifyProtectedPlacement(releaseRoot, placements, stage) {
+function verifyProtectedPlacement(releaseRoot, placements, stage, { lifecycleFd = null } = {}) {
   const inputDigest = digest(canonical(placements));
-  const contract = loadAdmission(releaseRoot, stage, inputDigest);
+  const contract = loadAdmission(releaseRoot, stage, inputDigest, { lifecycleFd });
   const observation = verifyPlacement(contract, placements, {
     stage, inspect: inspectDocker,
-    anchorCheck: () => loadAdmission(releaseRoot, stage, inputDigest).bootstrap,
+    anchorCheck: () => loadAdmission(releaseRoot, stage, inputDigest, { lifecycleFd }).bootstrap,
   });
   // Admission must bind this particular evidence and retain the lifecycle
   // fence through the caller's eventual mutation, not a reusable JSON token.
-  const admitted = loadAdmission(releaseRoot, stage, digest(canonical(observation)));
+  const admitted = loadAdmission(releaseRoot, stage, digest(canonical(observation)), { lifecycleFd });
   need(canonical(admitted) === canonical(contract));
   return observation;
 }
