@@ -1,6 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { ADMISSION_FILE, START_FIFO, REQUIRED_SOURCES, canonical, digest, awaitHostStart,
@@ -52,6 +53,10 @@ test('host start fence requires a root-owned FIFO and one exact generation', () 
     [Buffer.from(`${generation}\n`), { isFIFO: () => false }],
     [Buffer.from(`${generation}\n`), { mode: 0o010660 }],
   ]) assert.throws(() => awaitHostStart({ io: createIo(payload, altered), gid: 987 }));
+  const entrypoint = fs.readFileSync(path.join(__dirname, '../index.js'), 'utf8');
+  assert.ok(entrypoint.indexOf('hostStartGeneration = mediaRuntimeModule.awaitHostStart();') <
+    entrypoint.indexOf('mediaReceiverRuntime = mediaRuntimeModule.loadMediaReceiverRuntime();'));
+  assert.doesNotMatch(entrypoint, /NODE_ENV === 'production'\) hostStartGeneration/u);
 });
 
 test('runtime admission binds actual sources, private clients and fixed native reverse ESL options', () => {

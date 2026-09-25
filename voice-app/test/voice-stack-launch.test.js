@@ -296,7 +296,7 @@ test('replacement runtime projection cannot reuse the live legacy runtime direct
   const unit = fs.readFileSync(path.join(root, 'deploy/voice-stack/teleagent-voice-stack.service'), 'utf8');
   const runtime = '/run/teleagent-isolated-voice-stack';
   assert.match(launcher, /const RUNTIME_ROOT = '\/run\/teleagent-isolated-voice-stack'/u);
-  assert.equal((compose.match(/\/run\/teleagent-isolated-voice-stack\//gu) || []).length, 4);
+  assert.equal((compose.match(/\/run\/teleagent-isolated-voice-stack\//gu) || []).length, 5);
   assert.ok(installer.includes(`runtime_root=$(host_path ${runtime})`));
   assert.ok(unit.includes(`ReadWritePaths=${runtime} `));
   for (const source of [launcher, compose, installer, unit]) {

@@ -11,9 +11,9 @@ var mediaReceiverRuntime = null;
 var fixedRuntimeEnvironment = null;
 try {
   fixedRuntimeEnvironment = voiceAppRuntimeContract.assertVoiceAppRuntimeEnvironment(process.env);
-  if (process.env.NODE_ENV === 'production') hostStartGeneration = mediaRuntimeModule.awaitHostStart();
+  hostStartGeneration = mediaRuntimeModule.awaitHostStart();
   mediaReceiverRuntime = mediaRuntimeModule.loadMediaReceiverRuntime();
-  if (hostStartGeneration !== null && mediaReceiverRuntime.generation !== hostStartGeneration) {
+  if (mediaReceiverRuntime.generation !== hostStartGeneration) {
     throw new Error('host start generation differs from independent media admission');
   }
   var voiceEgressRuntime = require("../lib/voice-egress-runtime").loadVoiceEgressRuntime(mediaReceiverRuntime);
