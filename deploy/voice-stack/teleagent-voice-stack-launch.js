@@ -24,6 +24,8 @@ const ACTIVATION_ROOT = '/var/lib/teleagent-voice-stack';
 const ACTIVATION_STATE = `${ACTIVATION_ROOT}/activation-state.json`;
 const WRAPPER = `${APP_ROOT}/deploy/voice-stack/teleagent-voice-stack-launch.js`;
 const DOCKER = '/usr/bin/docker';
+const TAR = '/usr/bin/tar';
+const VOICE_IMAGE_ARCHIVE = `${APP_ROOT}/artifacts/voice/voice-image.docker.tar`;
 const IDENTITY_VERIFIER = '/usr/local/libexec/verify-voice-stack-identity';
 const SYSTEMCTL = '/usr/bin/systemctl';
 const SIP_FENCE = '/usr/local/libexec/teleagent-sip-local-peer-fence';
@@ -133,7 +135,8 @@ function fixedDockerEnvironment(settings = {}, imageManifest = null, activationG
     DOCKER_CONFIG: `${RUNTIME_ROOT}/docker-config`,
     LANG: 'C.UTF-8',
     LC_ALL: 'C.UTF-8',
-    ...(imageManifest ? { TELEAGENT_VOICE_IMAGE: imageManifest.runtimeReference } : {}),
+    ...(imageManifest ? { TELEAGENT_VOICE_IMAGE: imageManifest.registryReference ||
+      resolveVoiceImageId(imageManifest) } : {}),
     ...(activationGeneration === null ? {} : {
       TELEAGENT_VOICE_ACTIVATION_GENERATION: String(activationGeneration),
     }),
@@ -285,25 +288,85 @@ function readVoiceImageManifest() {
   return normalizeVoiceImageManifest(fs.readFileSync(VOICE_IMAGE_MANIFEST));
 }
 
+function resolveVoiceImageId(manifest, {
+  archivePath = VOICE_IMAGE_ARCHIVE,
+  readMember = null,
+} = {}) {
+  if (manifest.registryReference !== null) return manifest.configDigest;
+  if (manifest.runtimeReference !== manifest.configDigest) {
+    refuse('the offline voice image reference differs from its reviewed config');
+  }
+  if (readMember === null) inspectRootPath(archivePath, { mode: 0o444, nlink: 1 });
+  const member = readMember || ((name) => {
+    const result = spawnSync(TAR, ['--extract', '--to-stdout', '--file', archivePath, '--', name], {
+      encoding: null,
+      env: { PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C' },
+      maxBuffer: 65536,
+      timeout: 10000,
+    });
+    if (result.error || result.status !== 0 || !Buffer.isBuffer(result.stdout) ||
+        result.stdout.length < 2 || result.stdout.length > 65536) {
+      refuse('the reviewed voice archive identity member is unavailable');
+    }
+    return result.stdout;
+  });
+  const parse = (data) => {
+    if (!Buffer.isBuffer(data) || data.length < 2 || data.length > 65536) {
+      refuse('the reviewed voice archive identity member is invalid');
+    }
+    try { return JSON.parse(data.toString('utf8')); } catch {
+      refuse('the reviewed voice archive identity member is not JSON');
+    }
+  };
+  const index = parse(member('index.json'));
+  if (index?.schemaVersion !== 2 || !Array.isArray(index.manifests) ||
+      index.manifests.length !== 1) {
+    refuse('the reviewed voice archive lacks one OCI image manifest');
+  }
+  const descriptor = index.manifests[0];
+  const imageId = descriptor?.digest;
+  if (descriptor?.mediaType !== 'application/vnd.oci.image.manifest.v1+json' ||
+      descriptor?.platform?.os !== 'linux' || descriptor?.platform?.architecture !== 'amd64' ||
+      !/^sha256:[a-f0-9]{64}$/u.test(imageId) || imageId === manifest.configDigest) {
+    refuse('the reviewed voice archive OCI image identity is invalid');
+  }
+  const imageBytes = member(`blobs/sha256/${imageId.slice(7)}`);
+  if (`sha256:${crypto.createHash('sha256').update(imageBytes).digest('hex')}` !== imageId) {
+    refuse('the reviewed voice archive OCI image digest differs');
+  }
+  const image = parse(imageBytes);
+  if (image?.schemaVersion !== 2 || image?.config?.digest !== manifest.configDigest) {
+    refuse('the reviewed voice archive OCI config binding differs');
+  }
+  const configBytes = member(`blobs/sha256/${manifest.configDigest.slice(7)}`);
+  if (`sha256:${crypto.createHash('sha256').update(configBytes).digest('hex')}` !==
+      manifest.configDigest) {
+    refuse('the reviewed voice archive config digest differs');
+  }
+  return imageId;
+}
+
 function verifyVoiceImage(manifest, {
   runCommand = run,
   environment = fixedDockerEnvironment(),
+  imageId = resolveVoiceImageId(manifest),
 } = {}) {
+  const imageReference = manifest.registryReference || imageId;
   const identity = runCommand(DOCKER, [
-    'image', 'inspect', '--format', '{{.Id}}', manifest.runtimeReference,
+    'image', 'inspect', '--format', '{{.Id}}', imageReference,
   ], { capture: true, environment, timeoutMs: 10000 });
-  if (identity.status !== 0 || identity.stdout.trim() !== manifest.configDigest) {
+  if (identity.status !== 0 || identity.stdout.trim() !== imageId) {
     refuse('the resolved voice image ID differs from the reviewed manifest');
   }
   const revision = runCommand(DOCKER, [
     'image', 'inspect', '--format', `{{index .Config.Labels "${IMAGE_REVISION_LABEL}"}}`,
-    manifest.runtimeReference,
+    imageReference,
   ], { capture: true, environment, timeoutMs: 10000 });
   if (revision.status !== 0 || revision.stdout.trim() !== manifest.sourceRevision) {
     refuse('the resolved voice image source revision differs from the reviewed manifest');
   }
   const platform = runCommand(DOCKER, [
-    'image', 'inspect', '--format', '{{.Os}}/{{.Architecture}}', manifest.runtimeReference,
+    'image', 'inspect', '--format', '{{.Os}}/{{.Architecture}}', imageReference,
   ], { capture: true, environment, timeoutMs: 10000 });
   if (platform.status !== 0 || platform.stdout.trim() !== manifest.platform) {
     refuse('the resolved voice image platform differs from the reviewed manifest');
@@ -611,7 +674,7 @@ function normalizeLegacyActivationState(state, text) {
   return Object.freeze({ ...state });
 }
 
-function normalizeActivationState(source) {
+function normalizeActivationState(source, { resolveImageId = resolveVoiceImageId } = {}) {
   const text = Buffer.isBuffer(source) ? source.toString('utf8') : String(source);
   if (Buffer.byteLength(text) > 8192 || /\r|\0/u.test(text)) {
     refuse('the durable voice activation state has invalid encoding');
@@ -654,7 +717,7 @@ function normalizeActivationState(source) {
   if (state.version === 3) {
     if (state.containerOwnership !== null) {
       normalizeContainerOwnership(state.containerOwnership, state.activationGeneration,
-        imageManifest?.configDigest);
+        imageManifest && resolveImageId(imageManifest));
     } else if (state.phase === 'active') {
       refuse('active voice containers lack retained ownership');
     }
@@ -1208,7 +1271,7 @@ function persistCreatedContainerOwnership(ownership) {
     refuse('created voice container ownership has no single starting transaction');
   }
   normalizeContainerOwnership(ownership, previous.activationGeneration,
-    previous.imageManifest.configDigest);
+    resolveVoiceImageId(previous.imageManifest));
   const updated = { ...previous, updatedAt: new Date().toISOString(), containerOwnership: ownership };
   normalizeActivationState(`${JSON.stringify(updated)}\n`);
   atomicWriteActivationState(updated);
@@ -1382,7 +1445,8 @@ async function start() {
   removeRuntimeProjection();
 
   const imageManifest = readVoiceImageManifest();
-  verifyVoiceImage(imageManifest);
+  const imageId = resolveVoiceImageId(imageManifest);
+  verifyVoiceImage(imageManifest, { imageId });
   requireActiveUnit('teleagent-sip-local-peer-fence.service');
   requireActiveUnit('teleagent-agent-controller.service');
   requireActiveUnit('teleagent-agent-controller.socket');
@@ -1431,11 +1495,11 @@ async function start() {
       startingState.activationGeneration, identities, { environment }
     );
     const ownership = captureCreatedContainerOwnership(
-      startingState.activationGeneration, imageManifest.configDigest, { environment }
+      startingState.activationGeneration, imageId, { environment }
     );
     persistCreatedContainerOwnership(ownership);
     if (JSON.stringify(captureCreatedContainerOwnership(
-      startingState.activationGeneration, imageManifest.configDigest, { environment }
+      startingState.activationGeneration, imageId, { environment }
     )) !== JSON.stringify(ownership)) {
       refuse('created voice container identities changed before start');
     }
@@ -1443,7 +1507,7 @@ async function start() {
     // separately inspected create phase.
     run(DOCKER, composeArgs('up', '--detach', '--no-build', '--pull', 'never'), { environment });
     if (JSON.stringify(captureCreatedContainerOwnership(
-      startingState.activationGeneration, imageManifest.configDigest, { environment }
+      startingState.activationGeneration, imageId, { environment }
     )) !== JSON.stringify(ownership)) {
       refuse('Compose replaced a retained voice container identity during start');
     }
@@ -1725,6 +1789,7 @@ module.exports = {
   normalizeActivationState,
   normalizeContainerOwnership,
   normalizeVoiceImageManifest,
+  resolveVoiceImageId,
   parseDockerCgroupInfo,
   parseVoiceEnvironmentFile,
   selectedProviderChecks,

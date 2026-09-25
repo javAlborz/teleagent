@@ -1,6 +1,7 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
 const { once } = require('node:events');
 const fs = require('node:fs');
@@ -20,6 +21,7 @@ const {
   normalizeActivationState,
   normalizeContainerOwnership,
   normalizeVoiceImageManifest,
+  resolveVoiceImageId,
   parseDockerCgroupInfo,
   parseProcessIdentityStatus,
   parseVoiceContainerBoundary,
@@ -530,7 +532,7 @@ test('wrapper never puts credentials in Docker argv or inherited environment', (
     source.indexOf('async function stop()'));
   for (const [before, after] of [
     ['activationRequiresRecovery(readActivationState())', 'cleanupExactProject()'],
-    ['verifyVoiceImage(imageManifest)', 'readCredentialSet(identity)'],
+    ['verifyVoiceImage(imageManifest, { imageId })', 'readCredentialSet(identity)'],
     ["persistActivationState('starting'", "composeArgs('create'"],
     ['beginActivation: true', "composeArgs('create'"],
     ['requireActiveUnit(CONTAINER_SLICE)', "composeArgs('create'"],
@@ -595,7 +597,9 @@ test('voice image release manifest is canonical, immutable, and resolved before 
           `${IMAGE_MANIFEST.sourceRevision}\n`,
     };
   };
-  assert.equal(verifyVoiceImage(IMAGE_MANIFEST, { runCommand, environment: {} }), true);
+  assert.equal(verifyVoiceImage(IMAGE_MANIFEST, {
+    runCommand, environment: {}, imageId: IMAGE_MANIFEST.configDigest,
+  }), true);
   assert.deepEqual(calls.map((args) => args.slice(0, 3)), [
     ['image', 'inspect', '--format'],
     ['image', 'inspect', '--format'],
@@ -603,8 +607,49 @@ test('voice image release manifest is canonical, immutable, and resolved before 
   ]);
   assert.throws(() => verifyVoiceImage(IMAGE_MANIFEST, {
     environment: {},
+    imageId: IMAGE_MANIFEST.configDigest,
     runCommand: () => ({ status: 0, stdout: 'sha256:unreviewed\n' }),
   }), /resolved voice image ID differs/);
+  const promotedCalls = [];
+  assert.equal(verifyVoiceImage(PROMOTED_IMAGE_MANIFEST, {
+    environment: {},
+    runCommand: (_filename, args) => {
+      promotedCalls.push(args);
+      return {
+        status: 0,
+        stdout: args.includes('{{.Id}}') ? `${PROMOTED_IMAGE_MANIFEST.configDigest}\n` :
+          args.includes('{{.Os}}/{{.Architecture}}') ? `${PROMOTED_IMAGE_MANIFEST.platform}\n` :
+            `${PROMOTED_IMAGE_MANIFEST.sourceRevision}\n`,
+      };
+    },
+  }), true);
+  assert.ok(promotedCalls.every((args) =>
+    args.at(-1) === PROMOTED_IMAGE_MANIFEST.registryReference));
+});
+
+test('offline image ID is derived from the reviewed OCI archive and config bytes', () => {
+  const config = Buffer.from('{"revision":"reviewed"}');
+  const configDigest = `sha256:${crypto.createHash('sha256').update(config).digest('hex')}`;
+  const image = Buffer.from(JSON.stringify({ schemaVersion: 2, config: { digest: configDigest } }));
+  const imageId = `sha256:${crypto.createHash('sha256').update(image).digest('hex')}`;
+  const index = Buffer.from(JSON.stringify({ schemaVersion: 2, manifests: [{
+    mediaType: 'application/vnd.oci.image.manifest.v1+json', digest: imageId,
+    platform: { os: 'linux', architecture: 'amd64' },
+  }] }));
+  const members = new Map([
+    ['index.json', index],
+    [`blobs/sha256/${imageId.slice(7)}`, image],
+    [`blobs/sha256/${configDigest.slice(7)}`, config],
+  ]);
+  const manifest = { ...IMAGE_MANIFEST, configDigest, runtimeReference: configDigest };
+  const readMember = (name) => members.get(name);
+  assert.equal(resolveVoiceImageId(manifest, { readMember }), imageId);
+  assert.throws(() => resolveVoiceImageId(manifest, {
+    readMember: (name) => name === 'index.json' ? index : Buffer.from('{}'),
+  }), /digest differs|binding differs/);
+  assert.throws(() => resolveVoiceImageId(manifest, {
+    readMember: (name) => name === 'index.json' ? Buffer.from('{}') : members.get(name),
+  }), /lacks one OCI image manifest/);
 });
 
 test('exact-project cleanup removes only the guarded Compose project and proves zero', () => {
@@ -640,7 +685,9 @@ test('activation state is canonical, image-bound, generation-monotonic, and miss
     interruptedStartRecoveredAt: null,
     updatedAt: '2026-08-26T12:34:56.789Z',
   };
-  assert.deepEqual(normalizeActivationState(`${JSON.stringify(active)}\n`), active);
+  assert.deepEqual(normalizeActivationState(`${JSON.stringify(active)}\n`, {
+    resolveImageId: () => IMAGE_MANIFEST.configDigest,
+  }), active);
   assert.equal(activationGenerationForTransition(active, false), 7);
   assert.equal(activationGenerationForTransition(active, true), 8);
   assert.equal(activationGenerationForTransition(null, true), 1);
@@ -741,7 +788,9 @@ test('created container ownership binds all four full IDs before voice startup',
     interruptedStartRecoveredAt: null, updatedAt: '2026-08-26T12:34:56.789Z',
     containerOwnership: expected,
   };
-  assert.deepEqual(normalizeActivationState(`${JSON.stringify(active)}\n`), active);
+  assert.deepEqual(normalizeActivationState(`${JSON.stringify(active)}\n`, {
+    resolveImageId: () => IMAGE_MANIFEST.configDigest,
+  }), active);
   assert.equal(activationRequiresRecovery({ ...active, phase: 'inactive', cleanup: 'proved' }), false);
   assert.throws(() => normalizeActivationState(`${JSON.stringify({
     ...active, containerOwnership: null,
