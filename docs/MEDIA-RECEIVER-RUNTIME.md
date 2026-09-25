@@ -7,12 +7,12 @@ constructing a secret-bearing client. The host must send exactly one canonical
 requires the subsequently loaded protected runtime record to name that same
 generation. The FIFO and record directory are intended to be mounted read-only
 from `/run/teleagent-isolated-voice-stack/admission`. An absent FIFO leaves the
-production entrypoint closed, and the launcher still refuses activation.
+voice entrypoint closed in every mode, and the launcher still refuses activation.
 The admitted v2 projection supplies
 Drachtio control, FreeSWITCH ESL and fixed reverse ESL, audiofork, generated TTS,
 beeps and hold-music URLs. The launcher still refuses activation unconditionally.
-No record writer, authority mint, Compose change, credential, Docker operation
-or live commissioning is supplied by this change.
+No host record writer, authority mint, credential, Docker operation or live
+commissioning is supplied by this entrypoint change.
 
 ## Independent admission input
 
