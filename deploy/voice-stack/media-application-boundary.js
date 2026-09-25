@@ -137,7 +137,7 @@ function command(executable, args, { lifecycleFd = null } = {}) {
 
 function loadAdmission(releaseRoot, stage, evidenceDigest,
   { io = fs, run = command, lifecycleFd = null } = {}) {
-  need(['bootstrap', 'created', 'running', 'restart'].includes(stage) && sha(evidenceDigest));
+  need(['bootstrap', 'bootstrap-app', 'created', 'running', 'restart'].includes(stage) && sha(evidenceDigest));
   const source = protectedFile(CONTRACT, io);
   const bootId = io.readFileSync(BOOT, 'utf8').trim();
   const parsed = JSON.parse(source);

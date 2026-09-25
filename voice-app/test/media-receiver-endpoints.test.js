@@ -240,7 +240,7 @@ test('protected entrypoint binds the fixed configuration to independent bootstra
   boundary.loadAdmission = (release, stage, digest) => {
     admitted = true;
     assert.equal(release, contract.releaseRoot);
-    assert.equal(stage, 'bootstrap');
+    assert.equal(stage, 'bootstrap-app');
     assert.equal(digest, contract.bootstrap.configurationDigest);
     return contract;
   };

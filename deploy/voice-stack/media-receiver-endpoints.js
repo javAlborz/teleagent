@@ -188,7 +188,7 @@ function prepareProtectedReceiverEndpoints(releaseRoot, { lifecycleFd = null } =
   const config = JSON.parse(text);
   refuse(text.trim() === boundary.canonical(config));
   const configDigest = boundary.digest(boundary.canonical(config));
-  const contract = boundary.loadAdmission(releaseRoot, 'bootstrap', configDigest, { lifecycleFd });
+  const contract = boundary.loadAdmission(releaseRoot, 'bootstrap-app', configDigest, { lifecycleFd });
   // The host authority validates the entire infra config, external boundary,
   // current boot and independent provenance. This renderer validates and uses
   // its receiver topology; matching the whole-config digest prevents splicing.
