@@ -1,4 +1,6 @@
 [Unit]
+After=teleagent-provider.slice teleagent-voice.slice teleagent-media.slice teleagent-recovery.slice
+Requires=teleagent-provider.slice teleagent-voice.slice teleagent-media.slice teleagent-recovery.slice
 Description=Teleagent isolated %i provider launch supervisor
 Requires=teleagent-provider-model-apparmor.service teleagent-provider-supervisor@%i.socket teleagent-provider-egress@%i.socket teleagent-provider-egress-control@%i.socket
 After=local-fs.target teleagent-provider-model-apparmor.service teleagent-provider-supervisor@%i.socket teleagent-provider-egress@%i.socket teleagent-provider-egress-control@%i.socket
@@ -6,8 +8,17 @@ RequiresMountsFor=/var/lib/teleagent-provider-plane
 ConditionPathExists=/etc/teleagent/worker-session/ENABLE
 
 [Service]
-Type=simple
 Slice=teleagent-provider.slice
+CPUAccounting=yes
+CPUQuota=25%
+CPUQuotaPeriodSec=100ms
+MemoryAccounting=yes
+MemoryHigh=402653184
+MemoryMax=536870912
+MemorySwapMax=0
+TasksAccounting=yes
+TasksMax=128
+Type=simple
 User=teleagent-%i-supervisor
 Group=teleagent-%i-supervisor
 UMask=0077
@@ -26,11 +37,6 @@ RestartSec=2s
 KillMode=control-group
 TimeoutStopSec=30s
 LimitCORE=0
-MemoryHigh=384M
-MemoryMax=512M
-MemorySwapMax=0
-TasksMax=128
-CPUQuota=25%
 CPUWeight=100
 IOAccounting=yes
 IOWeight=100

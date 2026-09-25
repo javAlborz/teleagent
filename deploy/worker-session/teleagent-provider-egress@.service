@@ -1,4 +1,6 @@
 [Unit]
+After=teleagent-provider.slice teleagent-voice.slice teleagent-media.slice teleagent-recovery.slice
+Requires=teleagent-provider.slice teleagent-voice.slice teleagent-media.slice teleagent-recovery.slice
 Description=Teleagent credential-holding %i provider egress broker
 Requires=teleagent-provider-egress@%i.socket teleagent-provider-egress-control@%i.socket
 After=local-fs.target network-online.target teleagent-provider-egress@%i.socket teleagent-provider-egress-control@%i.socket
@@ -9,8 +11,17 @@ ConditionPathExists=/etc/teleagent/provider-egress-secrets/%i.api-key
 ConditionPathExists=/run/systemd/resolve/resolv.conf
 
 [Service]
-Type=simple
 Slice=teleagent-provider.slice
+CPUAccounting=yes
+CPUQuota=25%
+CPUQuotaPeriodSec=100ms
+MemoryAccounting=yes
+MemoryHigh=402653184
+MemoryMax=536870912
+MemorySwapMax=0
+TasksAccounting=yes
+TasksMax=128
+Type=simple
 User=teleagent-%i-egress
 Group=teleagent-%i-egress
 Sockets=teleagent-provider-egress@%i.socket teleagent-provider-egress-control@%i.socket
@@ -53,11 +64,6 @@ RestartSec=2s
 KillMode=control-group
 TimeoutStopSec=20s
 LimitCORE=0
-MemoryHigh=384M
-MemoryMax=512M
-MemorySwapMax=0
-TasksMax=128
-CPUQuota=25%
 CPUWeight=100
 IOAccounting=yes
 IOWeight=100

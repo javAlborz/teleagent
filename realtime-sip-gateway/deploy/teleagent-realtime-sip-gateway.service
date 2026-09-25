@@ -1,6 +1,8 @@
 [Unit]
 Description=Teleagent OpenAI Realtime native-SIP dormant canary
 Documentation=file:/opt/teleagent/current/realtime-sip-gateway/README.md
+Requires=teleagent-voice.slice
+After=teleagent-voice.slice
 After=network-online.target
 Wants=network-online.target
 RequiresMountsFor=/var/lib/teleagent-sip-gateway
@@ -16,6 +18,7 @@ ConditionPathIsMountPoint=/var/lib/teleagent-sip-gateway
 
 [Service]
 Type=simple
+Slice=teleagent-voice.slice
 User=teleagent-sip-gateway
 Group=teleagent-sip-gateway
 SupplementaryGroups=

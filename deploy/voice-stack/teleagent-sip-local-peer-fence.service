@@ -1,9 +1,21 @@
 [Unit]
+After=teleagent-voice.slice teleagent-media.slice teleagent-recovery.slice
+Requires=teleagent-voice.slice teleagent-media.slice teleagent-recovery.slice
 Description=Bind local Teleagent SIP and media hops to exact non-root peers
 Documentation=file:/opt/teleagent/current/docs/TELEAGENT-SIP-LOCAL-PEER-FENCE.md
 Before=teleagent-voice-stack.service
 
 [Service]
+Slice=teleagent-voice.slice
+CPUAccounting=yes
+CPUQuota=25%
+CPUQuotaPeriodSec=100ms
+MemoryAccounting=yes
+MemoryHigh=25165824
+MemoryMax=33554432
+MemorySwapMax=0
+TasksAccounting=yes
+TasksMax=16
 Type=simple
 ExecStartPre=/usr/local/libexec/verify-voice-stack-identity --installed-check
 ExecStart=/usr/local/libexec/teleagent-sip-local-peer-fence monitor

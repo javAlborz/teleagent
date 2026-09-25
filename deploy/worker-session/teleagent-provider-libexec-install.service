@@ -1,9 +1,21 @@
 [Unit]
+After=teleagent-provider.slice teleagent-voice.slice teleagent-media.slice teleagent-recovery.slice
+Requires=teleagent-provider.slice teleagent-voice.slice teleagent-media.slice teleagent-recovery.slice
 Description=Install reviewed Teleagent provider libexec closure
 Before=teleagent-provider-model-apparmor.service teleagent-provider-supervisor@claude.socket teleagent-provider-supervisor@codex.socket
 ConditionPathExists=/etc/teleagent/worker-session/ENABLE
 
 [Service]
+Slice=teleagent-provider.slice
+CPUAccounting=yes
+CPUQuota=50%
+CPUQuotaPeriodSec=100ms
+MemoryAccounting=yes
+MemoryHigh=100663296
+MemoryMax=134217728
+MemorySwapMax=0
+TasksAccounting=yes
+TasksMax=32
 Type=oneshot
 LoadCredential=teleagent-release-gate:/run/teleagent-release-gate/verified.json
 ExecStartPre=+/usr/bin/env -i HOME=/var/empty PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 /usr/local/libexec/verify-teleagent-release-closure --check-start-gate

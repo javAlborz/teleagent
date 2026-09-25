@@ -1,17 +1,19 @@
 [Unit]
+StopWhenUnneeded=no
 Description=Aggregate resource boundary for the Teleagent provider plane
 ConditionPathExists=/etc/teleagent/worker-session/ENABLE
 
 [Slice]
 CPUAccounting=yes
 CPUQuota=250%
-CPUWeight=25
+CPUQuotaPeriodSec=100ms
 MemoryAccounting=yes
-MemoryHigh=5G
-MemoryMax=6G
+MemoryHigh=4831838208
+MemoryMax=5368709120
 MemorySwapMax=0
 TasksAccounting=yes
 TasksMax=1024
+CPUWeight=25
 IOAccounting=yes
 IOWeight=25
 

@@ -1,4 +1,6 @@
 [Unit]
+After=teleagent-provider.slice teleagent-voice.slice teleagent-media.slice teleagent-recovery.slice
+Requires=teleagent-provider.slice teleagent-voice.slice teleagent-media.slice teleagent-recovery.slice
 Description=Teleagent guarded voice and SIP stack
 Documentation=file:/opt/teleagent/current/docs/PHONE-AGENT-ARCHITECTURE.md
 Requires=docker.service teleagent-sip-local-peer-fence.service teleagent-agent-controller.service
@@ -11,6 +13,16 @@ After=teleagent-voice-containers.slice
 Wants=network-online.target
 
 [Service]
+Slice=teleagent-voice.slice
+CPUAccounting=yes
+CPUQuota=100%
+CPUQuotaPeriodSec=100ms
+MemoryAccounting=yes
+MemoryHigh=201326592
+MemoryMax=268435456
+MemorySwapMax=0
+TasksAccounting=yes
+TasksMax=64
 Type=oneshot
 RemainAfterExit=yes
 User=root
@@ -25,11 +37,6 @@ ExecStopPost=/usr/bin/python3 -I /usr/local/libexec/verify-teleagent-release-clo
 TimeoutStartSec=120s
 TimeoutStopSec=150s
 KillMode=control-group
-CPUQuota=100%
-MemoryHigh=384M
-MemoryMax=512M
-MemorySwapMax=0
-TasksMax=128
 IOWeight=50
 NoNewPrivileges=yes
 CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER

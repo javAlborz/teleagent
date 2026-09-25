@@ -1,4 +1,6 @@
 [Unit]
+After=teleagent-provider.slice teleagent-voice.slice teleagent-media.slice teleagent-recovery.slice
+Requires=teleagent-provider.slice teleagent-voice.slice teleagent-media.slice teleagent-recovery.slice
 Description=Teleagent isolated workspace and tmux session broker
 Documentation=file:/opt/teleagent/current/docs/WORKER-SESSION-BROKER.md
 Requires=teleagent-worker-session.socket
@@ -7,6 +9,16 @@ RequiresMountsFor=/var/lib/teleagent-worker-state /var/lib/teleagent-provider-pl
 ConditionPathExists=/etc/teleagent/worker-session/ENABLE
 
 [Service]
+Slice=teleagent.slice
+CPUAccounting=yes
+CPUQuota=50%
+CPUQuotaPeriodSec=100ms
+MemoryAccounting=yes
+MemoryHigh=201326592
+MemoryMax=268435456
+MemorySwapMax=0
+TasksAccounting=yes
+TasksMax=64
 Type=simple
 User=teleagent-session-broker
 Group=teleagent-session-broker
@@ -33,11 +45,6 @@ RestartSec=2s
 KillMode=control-group
 TimeoutStopSec=20s
 LimitCORE=0
-MemoryHigh=384M
-MemoryMax=512M
-MemorySwapMax=0
-TasksMax=128
-CPUQuota=50%
 CPUWeight=100
 IOAccounting=yes
 IOWeight=100

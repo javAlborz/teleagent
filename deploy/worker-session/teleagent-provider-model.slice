@@ -1,17 +1,19 @@
 [Unit]
+StopWhenUnneeded=no
 Description=Aggregate resource boundary for Teleagent provider model launches
 ConditionPathExists=/etc/teleagent/worker-session/ENABLE
 
 [Slice]
 CPUAccounting=yes
 CPUQuota=200%
-CPUWeight=25
+CPUQuotaPeriodSec=100ms
 MemoryAccounting=yes
-MemoryHigh=3G
-MemoryMax=4G
+MemoryHigh=3221225472
+MemoryMax=4294967296
 MemorySwapMax=0
 TasksAccounting=yes
 TasksMax=768
+CPUWeight=25
 IOAccounting=yes
 IOWeight=25
 
