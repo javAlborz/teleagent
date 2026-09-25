@@ -77,7 +77,7 @@ test('docker compose generation', async (t) => {
 
     const compose = generateDockerCompose(config);
 
-    assert.match(compose, /\/run\/teleagent-voice-stack\/drachtio\.conf\.xml:\/etc\/drachtio\.conf\.xml:ro/);
+    assert.match(compose, /\/run\/teleagent-isolated-voice-stack\/drachtio\.conf\.xml:\/etc\/drachtio\.conf\.xml:ro/);
     assert.match(compose, /command: \["drachtio", "-f", "\/etc\/drachtio\.conf\.xml"\]/);
     assert.doesNotMatch(compose, /--(?:secret|contact|external-ip)\b/);
     assert.match(
@@ -491,7 +491,7 @@ test('docker compose generation', async (t) => {
     assert.doesNotMatch(compose, /voice-app\/static:\/app\/static/);
     assert.match(compose, /AGENT_API_TOKEN: ""/);
     assert.match(compose, /CLAUDE_API_TOKEN: ""/);
-    assert.match(compose, /\/run\/teleagent-voice-stack\/voice-secrets:\/run\/secrets:ro/);
+    assert.match(compose, /\/run\/teleagent-isolated-voice-stack\/voice-secrets:\/run\/secrets:ro/);
     assert.doesNotMatch(voiceEnvironment.service, /^    env_file:/m);
     assert.deepEqual(
       [...voiceEnvironment.entries.keys()].sort(),

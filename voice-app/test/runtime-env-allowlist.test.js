@@ -160,7 +160,7 @@ test('canonical Compose exposes exactly the reviewed voice-app runtime environme
 
   assert.match(
     service,
-    /\/run\/teleagent-voice-stack\/voice-secrets:\/run\/secrets:ro/
+    /\/run\/teleagent-isolated-voice-stack\/voice-secrets:\/run\/secrets:ro/
   );
   assert.doesNotMatch(service, /voice-app\/audio:\/app\/audio/);
   assert.doesNotMatch(service, /voice-app\/static:\/app\/static/);
