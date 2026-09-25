@@ -209,16 +209,20 @@ test('host contract ownership and exact independent admission are mandatory', ()
   const io = { lstatSync: metadata, fstatSync: metadata, openSync: (filename) => filename, closeSync() {},
     readFileSync(filename) { return filename === '/proc/sys/kernel/random/boot_id' ? BOOT : files[filename]; } };
   const evidence = `sha256:${'a'.repeat(64)}`;
-  const run = (executable, args) => {
+  const run = (executable, args, options) => {
     assert.equal(executable, boundary.AUTHORITY);
+    assert.deepEqual(options, { lifecycleFd: 7 });
     assert.deepEqual(args, ['--admit-media-application', 'running', boundary.digest(files[boundary.CONTRACT]), BOOT, RELEASE, evidence]);
     return JSON.stringify({ schema: 'teleagent.media-application-admission.v1', stage: 'running',
       contractDigest: args[2], bootId: BOOT, releaseRoot: RELEASE, evidenceDigest: evidence });
   };
-  assert.deepEqual(boundary.loadAdmission(RELEASE, 'running', evidence, { io, run }), contract);
-  assert.throws(() => boundary.loadAdmission(RELEASE, 'running', evidence, { io, run: () => '{}' }));
+  assert.deepEqual(boundary.loadAdmission(RELEASE, 'running', evidence,
+    { io, run, lifecycleFd: 7 }), contract);
+  assert.throws(() => boundary.loadAdmission(RELEASE, 'running', evidence,
+    { io, run: () => '{}', lifecycleFd: 7 }));
   files[boundary.CONTRACT] += ' '; // trailing space does not change canonical content
-  assert.deepEqual(boundary.loadAdmission(RELEASE, 'running', evidence, { io, run }), contract);
+  assert.deepEqual(boundary.loadAdmission(RELEASE, 'running', evidence,
+    { io, run, lifecycleFd: 7 }), contract);
   unsafe = true;
   assert.throws(() => boundary.loadAdmission(RELEASE, 'running', evidence, { io, run: () => assert.fail('unsafe authority executed') }));
 });

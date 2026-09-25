@@ -182,12 +182,12 @@ function renderReceiverEndpoints(networkConfig, applicationContract) {
   return freeze({ ...projection, projectionDigest: boundary.digest(boundary.canonical(projection)) });
 }
 
-function prepareProtectedReceiverEndpoints(releaseRoot) {
+function prepareProtectedReceiverEndpoints(releaseRoot, { lifecycleFd = null } = {}) {
   const text = boundary.protectedFile(NETWORK_CONFIG);
   const config = JSON.parse(text);
   refuse(text.trim() === boundary.canonical(config));
   const configDigest = boundary.digest(boundary.canonical(config));
-  const contract = boundary.loadAdmission(releaseRoot, 'bootstrap', configDigest);
+  const contract = boundary.loadAdmission(releaseRoot, 'bootstrap', configDigest, { lifecycleFd });
   // The host authority validates the entire infra config, external boundary,
   // current boot and independent provenance. This renderer validates and uses
   // its receiver topology; matching the whole-config digest prevents splicing.

@@ -121,14 +121,16 @@ function protectedFile(filename, io = fs) {
   } finally { io.closeSync(fd); }
 }
 
-function command(executable, args) {
+function command(executable, args, { lifecycleFd = null } = {}) {
+  need(Number.isSafeInteger(lifecycleFd) && lifecycleFd >= 3);
   const result = spawnSync(executable, args, { encoding: 'utf8', env: CLEAN_ENV, timeout: 15000,
-    killSignal: 'SIGKILL', maxBuffer: 262144, stdio: ['ignore', 'pipe', 'pipe'] });
+    killSignal: 'SIGKILL', maxBuffer: 262144, stdio: ['ignore', 'pipe', 'pipe', lifecycleFd] });
   need(!result.error && result.status === 0);
   return result.stdout;
 }
 
-function loadAdmission(releaseRoot, stage, evidenceDigest, { io = fs, run = command } = {}) {
+function loadAdmission(releaseRoot, stage, evidenceDigest,
+  { io = fs, run = command, lifecycleFd = null } = {}) {
   need(['bootstrap', 'created', 'running', 'restart'].includes(stage) && sha(evidenceDigest));
   const source = protectedFile(CONTRACT, io);
   const bootId = io.readFileSync(BOOT, 'utf8').trim();
@@ -143,7 +145,8 @@ function loadAdmission(releaseRoot, stage, evidenceDigest, { io = fs, run = comm
   // The authority independently checks installed source/tool/image/credential
   // closure, global pending journals and retained lifecycle admission. It must
   // never merely echo these arguments. No implementation is supplied here.
-  const response = run(AUTHORITY, ['--admit-media-application', stage, contractDigest, bootId, releaseRoot, evidenceDigest]);
+  const response = run(AUTHORITY, ['--admit-media-application', stage, contractDigest, bootId, releaseRoot, evidenceDigest],
+    { lifecycleFd });
   need(canonical(JSON.parse(response)) === canonical(expected));
   return contract;
 }
