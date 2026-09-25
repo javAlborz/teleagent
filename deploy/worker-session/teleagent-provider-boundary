@@ -1926,6 +1926,8 @@ async function unlockAllProviderPlanes({
   clearRecovery = clearGlobalProviderRecovery,
   clearPanic = clearGlobalProviderPanic,
   probe = probeProviderSupervisor,
+  probeAttempts = 5,
+  probeRetryMs = 250,
 } = {}) {
   let selectedBefore;
   try { selectedBefore = activationProviders ?? readProviders(); }
@@ -1982,8 +1984,23 @@ async function unlockAllProviderPlanes({
   }
   for (const provider of enabledProviders) {
     let health;
-    try { health = await probe(provider); }
-    catch { return rollback('PROVIDER_RESTART_HEALTH_FAILED'); }
+    // systemctl start confirms the process entered its start unit, while the
+    // supervisor still has to complete its own root boundary recovery before
+    // its inherited socket can answer health. Keep the global panic and
+    // recovery marker in place throughout this bounded readiness window.
+    let observed = false;
+    for (let attempt = 0; attempt < probeAttempts; attempt += 1) {
+      try {
+        health = await probe(provider);
+        observed = true;
+        break;
+      } catch {
+        if (attempt + 1 < probeAttempts) {
+          await new Promise((resolve) => setTimeout(resolve, probeRetryMs));
+        }
+      }
+    }
+    if (!observed) return rollback('PROVIDER_RESTART_HEALTH_FAILED');
     if (!isLockedSupervisorHealth(provider, health)) {
       return rollback('PROVIDER_RESTART_NOT_LOCKED');
     }

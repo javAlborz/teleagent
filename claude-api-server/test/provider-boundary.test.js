@@ -1364,6 +1364,53 @@ test('root recovery commits the global unlock only after both locked supervisors
   assert.deepEqual(order.slice(-2), ['clear-recovery', 'clear-panic']);
 });
 
+test('root recovery waits for the newly started supervisor socket while panic stays locked', async () => {
+  let attempts = 0;
+  let panicLocked = true;
+  const result = await boundary.unlockAllProviderPlanes({
+    activationProviders: ['codex'],
+    panicAll: async () => ({ persisted: true, quiesced: true }),
+    persistRecovery: () => ({ persisted: true }),
+    clearRecovery: () => ({ persisted: true }),
+    clearPanic: () => { panicLocked = false; return { persisted: true }; },
+    runSystemctl: () => ({ status: 0, signal: null, error: null }),
+    forceStop: async () => assert.fail('successful recovery must not roll back'),
+    probeAttempts: 3,
+    probeRetryMs: 1,
+    probe: async () => {
+      assert.equal(panicLocked, true);
+      attempts += 1;
+      if (attempts < 3) throw new Error('supervisor socket is still starting');
+      return { success: true, provider: 'codex', ready: false,
+        panicLocked: true, boundaryRecovered: true, active: 0 };
+    },
+  });
+  assert.equal(result.success, true);
+  assert.equal(attempts, 3);
+  assert.equal(panicLocked, false);
+});
+
+test('root recovery remains fenced when supervisor health never arrives', async () => {
+  let panicCleared = false;
+  let stopCount = 0;
+  const result = await boundary.unlockAllProviderPlanes({
+    activationProviders: ['codex'],
+    panicAll: async () => ({ persisted: true, quiesced: true }),
+    persistRecovery: () => ({ persisted: true }),
+    clearRecovery: () => ({ persisted: true }),
+    clearPanic: () => { panicCleared = true; return { persisted: true }; },
+    runSystemctl: () => ({ status: 0, signal: null, error: null }),
+    forceStop: async () => { stopCount += 1; return { quiesced: true }; },
+    probeAttempts: 2,
+    probeRetryMs: 1,
+    probe: async () => { throw new Error('supervisor socket unavailable'); },
+  });
+  assert.equal(result.success, false);
+  assert.equal(result.code, 'PROVIDER_RESTART_HEALTH_FAILED');
+  assert.equal(panicCleared, false);
+  assert.equal(stopCount, 1);
+});
+
 test('Codex-only panic and unlock never restart Claude or require its egress broker', async () => {
   const panicCommands = [];
   const recovered = [];
