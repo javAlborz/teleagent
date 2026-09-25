@@ -37,6 +37,58 @@ test('deterministic projection binds every receiver address and preserves creden
   assert.doesNotMatch(Object.values(output.files).join(''), /127\.0\.0\.1|localhost|0\.0\.0\.0|rfc1918\.auto/u);
 });
 
+test('private Compose projection binds receiver files and environment without broad mounts', () => {
+  const { config, contract } = fixture('v2');
+  const projection = renderer.renderReceiverEndpoints(config, contract);
+  const runtimeRoot = '/run/teleagent-isolated-voice-stack';
+  const bind = (source, target, read_only = true) => ({ type: 'bind', source, target,
+    ...(read_only ? { read_only: true } : {}), bind: {} });
+  const document = { services: {
+    'voice-runtime-preflight': { network_mode: 'none' },
+    drachtio: { network_mode: 'host', container_name: 'drachtio', volumes: [
+      bind(`${runtimeRoot}/drachtio.conf.xml`, '/etc/drachtio.conf.xml')] },
+    freeswitch: { network_mode: 'host', container_name: 'freeswitch', volumes: [
+      bind(`${contract.releaseRoot}/freeswitch/entrypoint.sh`, '/usr/local/bin/entrypoint-hermes-freeswitch.sh'),
+      bind(`${contract.releaseRoot}/freeswitch/mrf.xml`, '/usr/local/freeswitch/conf/sip_profiles/mrf.xml'),
+      bind(`${contract.releaseRoot}/freeswitch/switch.conf.xml`, '/usr/local/freeswitch/conf/autoload_configs/switch.conf.xml'),
+      bind(`${runtimeRoot}/freeswitch-event-socket.conf.xml`, '/usr/local/freeswitch/conf/autoload_configs/event_socket.conf.xml'),
+    ] },
+    'voice-app': { network_mode: 'host', container_name: 'voice-app',
+      environment: { ...VOICE_APP_FIXED_ENV, WS_PORT: '' }, volumes: [
+        bind('/etc/teleagent-isolated-voice/config', '/app/config'),
+        bind('/var/lib/teleagent-isolated-voice', '/app/state', false),
+        bind(`${runtimeRoot}/voice-secrets`, '/run/secrets'),
+        bind(`${runtimeRoot}/admission`, '/run/teleagent-media'),
+        bind('/run/teleagent-controller', '/run/teleagent-controller'),
+      ] },
+  } };
+  const candidate = renderer.preparePrivateCompose(document, contract, projection);
+  assert.deepEqual(candidate.services['voice-app'].environment,
+    { ...document.services['voice-app'].environment, ...projection.voiceEnvironment });
+  assert.equal(candidate.services['voice-app'].network_mode,
+    contract.bootstrap.services.voice.networkMode);
+  assert.deepEqual(candidate.services.freeswitch.volumes.map(({ target }) => target), [
+    '/usr/local/bin/entrypoint-hermes-freeswitch.sh',
+    '/usr/local/freeswitch/conf/sip_profiles/mrf.xml',
+    '/usr/local/freeswitch/conf/autoload_configs/switch.conf.xml',
+    '/usr/local/freeswitch/conf/autoload_configs/event_socket.conf.xml',
+    '/usr/local/freeswitch/conf/autoload_configs/acl.conf.xml',
+  ]);
+  assert.equal(candidate.services.freeswitch.volumes[1].source, `${runtimeRoot}/freeswitch-mrf.xml`);
+  assert.equal(candidate.services.freeswitch.volumes[2].source, `${runtimeRoot}/freeswitch-switch.conf.xml`);
+  assert.equal(candidate.services.freeswitch.volumes[4].source, `${runtimeRoot}/freeswitch-acl.conf.xml`);
+  assert.equal(document.services.freeswitch.volumes.length, 4);
+  for (const change of [
+    (x) => { x.services.freeswitch.volumes[1].source = '/etc/shadow'; },
+    (x) => { x.services.freeswitch.volumes.push(bind('/etc/shadow', '/tmp/shadow')); },
+    (x) => { x.services['voice-app'].volumes[1].read_only = true; },
+    (x) => { x.services['voice-app'].environment.WS_HOST = '0.0.0.0'; },
+  ]) {
+    const altered = structuredClone(document); change(altered);
+    assert.throws(() => renderer.preparePrivateCompose(altered, contract, projection));
+  }
+});
+
 test('generated XML parses and pins SIP, ESL ACLs, RTP and bounded core settings', () => {
   const { config, contract } = fixture();
   const output = renderer.renderReceiverEndpoints(config, contract);

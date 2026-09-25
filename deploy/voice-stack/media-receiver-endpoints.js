@@ -9,6 +9,7 @@ const {
   validateReceiverSafeSipMediaTopology,
 } = require('../../lib/sip-media-boundary-contract');
 const boundary = require('./media-application-boundary');
+const { VOICE_APP_FIXED_ENV } = require('../../lib/voice-app-runtime-env');
 
 const NETWORK_CONFIG = '/etc/teleagent-media/docker-network.json';
 const SOURCE_PATHS = Object.freeze({
@@ -194,5 +195,66 @@ function prepareProtectedReceiverEndpoints(releaseRoot, { lifecycleFd = null } =
   return renderReceiverEndpoints(config, contract);
 }
 
+function preparePrivateCompose(document, contract, projection) {
+  refuse(projection?.releaseRoot === contract?.releaseRoot &&
+    projection?.privateHttpAudio && projection?.reverseEsl &&
+    projection?.readyToLaunch === false);
+  const { projectionDigest, ...unsigned } = projection;
+  refuse(projectionDigest === boundary.digest(boundary.canonical(unsigned)));
+  const candidate = boundary.exactComposeCandidate(document, contract);
+  const runtimeRoot = '/run/teleagent-isolated-voice-stack';
+  const bind = (source, target) => ({ type: 'bind', source, target, read_only: true, bind: {} });
+  const exactBind = (volume, source, target, readOnly = true) => {
+    const keys = readOnly ? 'bind read_only source target type' : 'bind source target type';
+    refuse(volume && Object.keys(volume).sort().join(' ') === keys &&
+      volume.type === 'bind' && volume.source === source && volume.target === target &&
+      (readOnly ? volume.read_only === true : !Object.hasOwn(volume, 'read_only')) &&
+      Object.keys(volume.bind || {}).length === 0);
+  };
+  const drachtio = candidate.services.drachtio;
+  refuse(Array.isArray(drachtio.volumes) && drachtio.volumes.length === 1);
+  exactBind(drachtio.volumes[0], `${runtimeRoot}/drachtio.conf.xml`, '/etc/drachtio.conf.xml');
+  const freeswitch = candidate.services.freeswitch;
+  refuse(Array.isArray(freeswitch.volumes) && freeswitch.volumes.length === 4);
+  const existing = [
+    [`${contract.releaseRoot}/freeswitch/entrypoint.sh`, '/usr/local/bin/entrypoint-hermes-freeswitch.sh', null],
+    [`${contract.releaseRoot}/freeswitch/mrf.xml`, '/usr/local/freeswitch/conf/sip_profiles/mrf.xml',
+      `${runtimeRoot}/freeswitch-mrf.xml`],
+    [`${contract.releaseRoot}/freeswitch/switch.conf.xml`, '/usr/local/freeswitch/conf/autoload_configs/switch.conf.xml',
+      `${runtimeRoot}/freeswitch-switch.conf.xml`],
+    [`${runtimeRoot}/freeswitch-event-socket.conf.xml`,
+      '/usr/local/freeswitch/conf/autoload_configs/event_socket.conf.xml', null],
+  ];
+  for (const [index, [source, target, replacement]] of existing.entries()) {
+    exactBind(freeswitch.volumes[index], source, target);
+    if (replacement) freeswitch.volumes[index] = bind(replacement, target);
+  }
+  freeswitch.volumes.push(bind(`${runtimeRoot}/freeswitch-acl.conf.xml`,
+    '/usr/local/freeswitch/conf/autoload_configs/acl.conf.xml'));
+  const voice = candidate.services['voice-app'];
+  refuse(Array.isArray(voice.volumes) && voice.volumes.length === 5 &&
+    voice.environment && Object.getPrototypeOf(voice.environment) === Object.prototype);
+  for (const [source, target, readOnly] of [
+    ['/etc/teleagent-isolated-voice/config', '/app/config', true],
+    ['/var/lib/teleagent-isolated-voice', '/app/state', false],
+    [`${runtimeRoot}/voice-secrets`, '/run/secrets', true],
+    [`${runtimeRoot}/admission`, '/run/teleagent-media', true],
+    ['/run/teleagent-controller', '/run/teleagent-controller', true],
+  ]) {
+    const match = voice.volumes.find((volume) => volume?.target === target);
+    exactBind(match, source, target, readOnly);
+  }
+  for (const [key, value] of Object.entries(projection.voiceEnvironment)) {
+    refuse(Object.hasOwn(voice.environment, key) &&
+      (key === 'WS_PORT' ? ['', value].includes(voice.environment[key]) :
+        voice.environment[key] === VOICE_APP_FIXED_ENV[key]));
+    voice.environment[key] = value;
+  }
+  refuse(voice.environment.HTTP_HOST === '127.0.0.1' &&
+    voice.environment.OUTBOUND_API_NON_LOOPBACK_ENABLED === 'false' &&
+    voice.environment.VOICE_PRIVILEGED_ACTIONS_ENABLED === 'false');
+  return candidate;
+}
+
 module.exports = { NETWORK_CONFIG, SOURCE_PATHS, REMAINING_GATES, replaceExactly,
-  renderReceiverEndpoints, prepareProtectedReceiverEndpoints };
+  renderReceiverEndpoints, prepareProtectedReceiverEndpoints, preparePrivateCompose };
