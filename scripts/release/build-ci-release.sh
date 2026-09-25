@@ -159,8 +159,13 @@ git archive --format=tar --output="${source_archive}" "${source_revision}"
 extract_source() {
   local staging_root=$1
   mkdir -m 0700 -- "${staging_root}"
-  tar --extract --file="${source_archive}" --directory="${staging_root}" \
-    --no-same-owner --no-same-permissions
+  (
+    # git archive records reviewed 0644/0755 source modes. The builder's
+    # private umask must not turn them into 0600/0700 when tests inspect units.
+    umask 022
+    tar --extract --file="${source_archive}" --directory="${staging_root}" \
+      --no-same-owner --no-same-permissions
+  )
 }
 
 run_lifecycle_sandbox() {
@@ -187,6 +192,7 @@ run_lifecycle_sandbox() {
       cli/node_modules
       claude-api-server/node_modules
       voice-app/node_modules
+      voice-app/audio-temp
       privileged-action-broker/node_modules
       realtime-sip-gateway/node_modules
     )
