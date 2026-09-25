@@ -77,6 +77,7 @@ VOICE_AND_HOST_SOURCE_PATHS = (
     "deploy/voice-stack/freeswitch-event-socket.conf.xml.template",
     "deploy/voice-stack/media-application-boundary.js",
     "deploy/voice-stack/media-receiver-endpoints.js",
+    "deploy/voice-stack/render-media-receiver-projection.js",
     "deploy/voice-stack/teleagent-sip-local-peer-fence",
     "deploy/voice-stack/teleagent-sip-local-peer-fence-install",
     "deploy/voice-stack/teleagent-sip-local-peer-fence.bundle",
@@ -436,7 +437,7 @@ class CiReleaseTests(unittest.TestCase):
             | sip_sources
         )
         self.assertEqual(BOUND_SOURCE_PATHS, tuple(sorted(expected)))
-        self.assertEqual(len(BOUND_SOURCE_PATHS), 147)
+        self.assertEqual(len(BOUND_SOURCE_PATHS), 148)
         self.assertIn("deploy/voice-stack/media-application-boundary.js", BOUND_SOURCE_PATHS)
         self.assertIn("lib/worker-inspection-contract.js", BOUND_SOURCE_PATHS)
         self.assertEqual(len(BOUND_SOURCE_PATHS), len(set(BOUND_SOURCE_PATHS)))

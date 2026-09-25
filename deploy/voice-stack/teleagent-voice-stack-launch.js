@@ -974,6 +974,36 @@ function prepareHostRuntimeAdmission(activationGeneration, lifecycleFd) {
   }
 }
 
+function publishReceiverRuntimeAdmission(activationGeneration, lifecycleFd) {
+  if (!Number.isSafeInteger(activationGeneration) || activationGeneration < 1 ||
+      !Number.isSafeInteger(lifecycleFd) || lifecycleFd < 3) {
+    refuse('receiver runtime publication has no activation generation or lifecycle lock');
+  }
+  inspectRootPath(MEDIA_RUNTIME_PREPARER, { mode: 0o555, nlink: 1 });
+  const result = spawnSync(MEDIA_RUNTIME_PREPARER,
+    ['publish-receiver', String(activationGeneration)], {
+      encoding: 'utf8', timeout: 30000, maxBuffer: 4096,
+      env: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C', LC_ALL: 'C' },
+      stdio: ['ignore', 'pipe', 'pipe', lifecycleFd],
+    });
+  if (result.error || result.status !== 0 ||
+      Buffer.byteLength(result.stdout || '') > 1024) {
+    refuse('independent receiver runtime publication refused');
+  }
+  let published;
+  try { published = JSON.parse(result.stdout); } catch {
+    refuse('independent receiver runtime publication is unreadable');
+  }
+  if (!published || Object.keys(published).sort().join(' ') !==
+      'generation phase receiverDigest startReleased' ||
+      published.phase !== 'receiver-published' ||
+      published.generation !== activationGeneration ||
+      !/^sha256:[a-f0-9]{64}$/u.test(published.receiverDigest) ||
+      published.startReleased !== false) {
+    refuse('independent receiver runtime publication has unexpected evidence');
+  }
+}
+
 function publishContainerAdmission(ownership, lifecycleFd, stage) {
   if (!Number.isSafeInteger(lifecycleFd) || lifecycleFd < 3 ||
       !['created', 'running'].includes(stage) ||
@@ -1640,6 +1670,7 @@ async function start(lifecycleFd) {
     }
     verifyRunningProjectProcessIdentities(identities, { environment });
     publishRunningContainerAdmission(ownership, lifecycleFd);
+    publishReceiverRuntimeAdmission(startingState.activationGeneration, lifecycleFd);
     await waitForHealth();
     verifyRunningProjectProcessIdentities(identities, { environment });
     verifyExactProjectContainerBoundary(
