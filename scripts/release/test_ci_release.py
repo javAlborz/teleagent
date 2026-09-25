@@ -819,8 +819,15 @@ class CiReleaseTests(unittest.TestCase):
         self.assertNotIn("NODE_PATH", sandbox)
         self.assertIn("cyclonedx-json@1.6", builder)
         self.assertIn("list(BOUND_SOURCE_PATHS)", support)
+        for tool in ("systemctl", "journalctl"):
+            allowed = f"--mount type=bind,src=/usr/bin/true,dst=/usr/bin/{tool},readonly"
+            self.assertIn(allowed, builder)
+            for line in builder.splitlines():
+                stripped = line.strip()
+                if tool in stripped and not stripped.startswith("#"):
+                    self.assertEqual(stripped, allowed)
         for forbidden in (
-            "docker push", "docker compose", "systemctl", "kubectl", "scp ", "ssh ", "sudo ",
+            "docker push", "docker compose", "kubectl", "scp ", "ssh ", "sudo ",
         ):
             self.assertNotIn(forbidden, builder)
 
