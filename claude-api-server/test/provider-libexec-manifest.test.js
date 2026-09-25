@@ -70,4 +70,15 @@ test('provider libexec manifest pins the complete reviewed install closure', () 
 
   assert.equal(hasModelProfile, true, 'the enforced model profile must be digest-pinned');
   assert.deepEqual([...requiredTargets], [], 'the pinned provider CLI gate must be in the closure');
+
+  const verifier = fs.readFileSync(path.join(
+    ROOT, 'deploy', 'worker-session', 'verify-worker-session-boundary'), 'utf8');
+  const expected = verifier.match(/expected_libexec_targets='([^']+)'/);
+  assert.ok(expected, 'activation verifier must pin the libexec target set');
+  assert.deepEqual(expected[1].split('\n'), [...targets].sort(),
+    'activation verifier must accept exactly the reviewed manifest targets');
+  assert.match(verifier, /\[ "\$mode" != 0555 \]/,
+    'activation verifier must accept the reviewed read-only executable mode');
+  assert.ok(fs.statSync(path.join(ROOT, 'voice-app', 'audio')).isDirectory(),
+    'supervisor namespace requires the deployed legacy audio directory');
 });

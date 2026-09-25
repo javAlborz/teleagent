@@ -363,7 +363,10 @@ for (const pathname of deniedFiles) {
     fs.accessSync(pathname, fs.constants.R_OK | fs.constants.X_OK);
     failed = true;
   } catch (error) {
-    if (!["EACCES", "EPERM"].includes(error.code)) failed = true;
+    // The other provider HOME may never have been provisioned. Absence still
+    // denies this identity access; the synthetic root-owned probe must exist.
+    if (!["EACCES", "EPERM"].includes(error.code) &&
+        !(pathname === otherHome && error.code === "ENOENT")) failed = true;
   }
 }
 for (const pathname of deniedWrites) {
@@ -527,7 +530,9 @@ teleagent-provider-egress-credential-check
 teleagent-provider-egress-shim
 teleagent-provider-libexec-install
 teleagent-provider-model.apparmor
-teleagent-provider-runtime'
+teleagent-provider-runtime
+teleagent-resource-admission
+teleagent-resource-topology-watch'
 actual_libexec_targets=$(/usr/bin/awk '{print $3}' "$libexec_manifest" | LC_ALL=C /usr/bin/sort)
 if [ "$actual_libexec_targets" != "$expected_libexec_targets" ]; then
   echo "provider libexec manifest closure is incomplete" >&2
@@ -535,7 +540,7 @@ if [ "$actual_libexec_targets" != "$expected_libexec_targets" ]; then
 fi
 while IFS=' ' read -r digest _source target mode extra; do
   if [ -n "${extra:-}" ] || [ "${#digest}" -ne 64 ] ||
-     { [ "$mode" != 0755 ] && [ "$mode" != 0444 ]; } ||
+     { [ "$mode" != 0755 ] && [ "$mode" != 0555 ] && [ "$mode" != 0444 ]; } ||
      [ "$(/usr/bin/basename "$target")" != "$target" ]; then
     echo "provider libexec manifest entry is invalid" >&2
     exit 77
