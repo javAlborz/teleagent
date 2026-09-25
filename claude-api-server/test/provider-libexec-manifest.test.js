@@ -81,4 +81,6 @@ test('provider libexec manifest pins the complete reviewed install closure', () 
     'activation verifier must accept the reviewed read-only executable mode');
   assert.ok(fs.statSync(path.join(ROOT, 'voice-app', 'audio')).isDirectory(),
     'supervisor namespace requires the deployed legacy audio directory');
+  assert.ok(verifier.includes(String.raw`process.stdout.write("VISIBLE_SOCKET_DAC_ALLOWED\n");`),
+    'the provider socket probe must emit a newline for its exact line check');
 });
