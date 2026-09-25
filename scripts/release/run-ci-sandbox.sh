@@ -88,5 +88,5 @@ python3 /work/scripts/release/ci_release_support.py prune-native --staging-root 
 (
   cd -- /work/realtime-sip-gateway
   node --input-type=module -e \
-    'await import("better-sqlite3"); await import("openai"); await import("ws"); process.stdout.write("realtime-sip-runtime-ok\\n")'
+    'const { default: Database } = await import("better-sqlite3"); const db = new Database(":memory:"); db.exec("create table smoke(n integer)"); db.close(); await import("openai"); await import("ws"); process.stdout.write("realtime-sip-runtime-ok\\n")'
 )
