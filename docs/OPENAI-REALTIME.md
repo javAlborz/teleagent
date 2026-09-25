@@ -233,7 +233,7 @@ OPENAI_SAFETY_IDENTIFIER_SALT=replace-with-random-secret
 VOICE_INSPECTION_ROOTS=/var/lib/teleagent-control
 VOICE_APP_UID=<id -u teleagent-voice>
 VOICE_APP_GID=<id -g teleagent-voice>
-VOICE_STATE_DIR=/var/lib/teleagent-voice
+VOICE_STATE_DIR=/var/lib/teleagent-isolated-voice
 VOICE_AGENT_RECENT_OUTPUT_MS=5000
 ```
 

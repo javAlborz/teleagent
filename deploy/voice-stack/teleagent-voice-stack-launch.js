@@ -15,13 +15,13 @@ const IMMUTABLE_RELEASE_ROOT = /^\/opt\/teleagent\/releases\/sha256-[a-f0-9]{64}
 // permits it for a live start, stop, cleanup, or recovery operation.
 const APP_ROOT = process.env.TELEAGENT_RELEASE_ROOT || '/opt/teleagent/current';
 const COMPOSE_FILE = `${APP_ROOT}/docker-compose.yml`;
-const ENV_FILE = '/etc/teleagent-voice/voice-app.env';
-const VOICE_IMAGE_MANIFEST = '/etc/teleagent-voice/voice-image.manifest.json';
-const CREDENTIAL_ROOT = '/etc/teleagent-voice/credentials';
+const ENV_FILE = '/etc/teleagent-isolated-voice/voice-app.env';
+const VOICE_IMAGE_MANIFEST = '/etc/teleagent-isolated-voice/voice-image.manifest.json';
+const CREDENTIAL_ROOT = '/etc/teleagent-isolated-voice/credentials';
 const RUNTIME_ROOT = '/run/teleagent-isolated-voice-stack';
 const RUNTIME_SECRET_ROOT = `${RUNTIME_ROOT}/voice-secrets`;
 const CONTROLLER_SOCKET = '/run/teleagent-controller/controller.sock';
-const ACTIVATION_ROOT = '/var/lib/teleagent-voice-stack';
+const ACTIVATION_ROOT = '/var/lib/teleagent-isolated-voice-stack';
 const ACTIVATION_STATE = `${ACTIVATION_ROOT}/activation-state.json`;
 const WRAPPER = `${APP_ROOT}/deploy/voice-stack/teleagent-voice-stack-launch.js`;
 const DOCKER = '/usr/bin/docker';
@@ -56,7 +56,7 @@ const VOICE_SERVICES = Object.freeze([
 ]);
 const RUNNING_VOICE_SERVICES = Object.freeze(['drachtio', 'freeswitch', 'voice-app']);
 const MAX_CONTROL_RESPONSE_BYTES = 128 * 1024;
-const HOST_STATE_ROOT = '/var/lib/teleagent-voice';
+const HOST_STATE_ROOT = '/var/lib/teleagent-isolated-voice';
 const HOST_STATE_PARENT = '/var/lib';
 const GIB = 1024n * 1024n * 1024n;
 const MIB = 1024n * 1024n;
@@ -542,8 +542,8 @@ function parseVoiceEnvironmentFile(source, identities, runtimeContract) {
   }
   const expectedIdentities = composeIdentitySettings(identities);
   if (Object.entries(expectedIdentities).some(([name, value]) => settings[name] !== value) ||
-      settings.DEVICE_CONFIG_DIR !== '/etc/teleagent-voice/config' ||
-      settings.VOICE_STATE_DIR !== '/var/lib/teleagent-voice') {
+      settings.DEVICE_CONFIG_DIR !== '/etc/teleagent-isolated-voice/config' ||
+      settings.VOICE_STATE_DIR !== HOST_STATE_ROOT) {
     refuse('the voice environment identity or path contract drifted');
   }
   if (!['codex', 'claude,codex'].includes(settings.AGENT_PROVIDERS)) {

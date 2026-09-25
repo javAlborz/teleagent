@@ -230,7 +230,7 @@ function createFixture({ entrypointBarrier = false, fenceInstallOutput = '' } = 
     'var/lib/teleagent-control',
     'var/lib/teleagent-privileged-action',
     'var/lib/teleagent-sip-gateway',
-    'var/lib/teleagent-voice',
+    'var/lib/teleagent-isolated-voice',
     'srv/teleagent-agent-workspaces',
   ]) mkdir(path.join(root, stateRoot), 0o700);
 
@@ -286,7 +286,7 @@ function createFixture({ entrypointBarrier = false, fenceInstallOutput = '' } = 
     '/var/lib/teleagent-control 202',
     '/var/lib/teleagent-privileged-action 203',
     '/var/lib/teleagent-sip-gateway 204',
-    '/var/lib/teleagent-voice 205',
+    '/var/lib/teleagent-isolated-voice 205',
     '/srv/teleagent-agent-workspaces 206',
     '',
   ].join('\n'), 0o600);
@@ -608,7 +608,7 @@ test('missing gate and shared workload devices refuse before installation', () =
       '/var/lib/teleagent-control 201',
       '/var/lib/teleagent-privileged-action 203',
       '/var/lib/teleagent-sip-gateway 204',
-      '/var/lib/teleagent-voice 205',
+      '/var/lib/teleagent-isolated-voice 205',
       '/srv/teleagent-agent-workspaces 206',
     ]);
     const result = shared.run('--install-disabled');
@@ -633,7 +633,7 @@ test('missing gate and shared workload devices refuse before installation', () =
         '/var/lib/teleagent-control 202',
         '/var/lib/teleagent-privileged-action 203',
         '/var/lib/teleagent-sip-gateway 204',
-        '/var/lib/teleagent-voice 205',
+        '/var/lib/teleagent-isolated-voice 205',
         `/srv/teleagent-agent-workspaces ${workspaceDevice}`,
       ]);
       const result = collision.run('--install-disabled');
@@ -656,7 +656,7 @@ test('missing gate and shared workload devices refuse before installation', () =
       '/var/lib/teleagent-control 202',
       '/var/lib/teleagent-privileged-action 203',
       '/var/lib/teleagent-sip-gateway 204',
-      '/var/lib/teleagent-voice 205',
+      '/var/lib/teleagent-isolated-voice 205',
       '/srv/teleagent-agent-workspaces 206',
     ]);
     const result = providerCollision.run('--install-disabled');

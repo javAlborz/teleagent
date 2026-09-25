@@ -102,7 +102,7 @@ function hostStateFilesystem({ stateDevice = 200, stateSymlink = false,
   let stateReads = 0;
   return {
     lstatSync(filename) {
-      if (filename !== '/var/lib/teleagent-voice') return ancestors.get(filename);
+      if (filename !== '/var/lib/teleagent-isolated-voice') return ancestors.get(filename);
       stateReads += 1;
       return directoryMetadata({
         uid: 989,
@@ -177,8 +177,8 @@ test('root launcher closes fixed voice state/listener values against host overri
     'DRACHTIO_GID=988',
     'FREESWITCH_UID=987',
     'FREESWITCH_GID=987',
-    'DEVICE_CONFIG_DIR=/etc/teleagent-voice/config',
-    'VOICE_STATE_DIR=/var/lib/teleagent-voice',
+    'DEVICE_CONFIG_DIR=/etc/teleagent-isolated-voice/config',
+    'VOICE_STATE_DIR=/var/lib/teleagent-isolated-voice',
     'AGENT_PROVIDERS=claude,codex',
     'OPENAI_PROJECT=proj_fixture0001',
     '',
@@ -190,8 +190,8 @@ test('root launcher closes fixed voice state/listener values against host overri
     DRACHTIO_GID: '988',
     FREESWITCH_UID: '987',
     FREESWITCH_GID: '987',
-    DEVICE_CONFIG_DIR: '/etc/teleagent-voice/config',
-    VOICE_STATE_DIR: '/var/lib/teleagent-voice',
+    DEVICE_CONFIG_DIR: '/etc/teleagent-isolated-voice/config',
+    VOICE_STATE_DIR: '/var/lib/teleagent-isolated-voice',
     AGENT_PROVIDERS: 'claude,codex',
     OPENAI_PROJECT: 'proj_fixture0001',
   });
@@ -203,6 +203,16 @@ test('root launcher closes fixed voice state/listener values against host overri
     base.replace('OPENAI_PROJECT=proj_fixture0001', 'OPENAI_PROJECT='),
     RUNTIME_IDENTITIES, voiceAppRuntimeContract,
   ), /OpenAI project binding is invalid/);
+  assert.throws(() => parseVoiceEnvironmentFile(
+    base.replace('VOICE_STATE_DIR=/var/lib/teleagent-isolated-voice',
+      'VOICE_STATE_DIR=/var/lib/teleagent-voice'),
+    RUNTIME_IDENTITIES, voiceAppRuntimeContract,
+  ), /identity or path contract drifted/);
+  assert.throws(() => parseVoiceEnvironmentFile(
+    base.replace('DEVICE_CONFIG_DIR=/etc/teleagent-isolated-voice/config',
+      'DEVICE_CONFIG_DIR=/etc/teleagent-voice/config'),
+    RUNTIME_IDENTITIES, voiceAppRuntimeContract,
+  ), /identity or path contract drifted/);
   for (const [name, values] of Object.entries({
     VOICE_STATE_DB_PATH: ['', '/app/state/voice-state.sqlite', '/tmp/voice-state.sqlite'],
     VOICE_APP_EXECUTION_LOCK_FILE: ['', '/app/state/voice-execution.lock.json', '/tmp/voice.lock'],
@@ -1169,10 +1179,11 @@ test('dormant systemd gate binds the private voice identity and every prerequisi
     /^u teleagent-freeswitch - "Teleagent private FreeSWITCH peer" \/nonexistent \/usr\/sbin\/nologin$/m);
   assert.doesNotMatch(sysusers, /^u teleagent-asterisk /m);
   assert.match(tmpfiles,
-    /^d \/etc\/teleagent-voice\/credentials 0750 root teleagent-voice -$/m);
+    /^d \/etc\/teleagent-isolated-voice\/credentials 0750 root teleagent-voice -$/m);
   assert.match(tmpfiles,
-    /^d \/var\/lib\/teleagent-voice 0700 teleagent-voice teleagent-voice -$/m);
-  assert.match(tmpfiles, /^d \/var\/lib\/teleagent-voice-stack 0700 root root -$/m);
+    /^d \/var\/lib\/teleagent-isolated-voice 0700 teleagent-voice teleagent-voice -$/m);
+  assert.match(tmpfiles, /^d \/var\/lib\/teleagent-isolated-voice-stack 0700 root root -$/m);
+  assert.doesNotMatch(tmpfiles, /^d \/(?:etc|var\/lib)\/teleagent-voice(?:\/| )/m);
   assert.match(tmpfiles, /^d \/run\/teleagent-isolated-voice-stack 0700 root root -$/m);
   assert.equal((compose.match(/image: "\$\{TELEAGENT_VOICE_IMAGE:\?/g) || []).length, 2);
   assert.match(compose, /user: "\$\{DRACHTIO_UID:\?[^}]+}:\$\{DRACHTIO_GID:\?[^}]+}"/);

@@ -285,7 +285,7 @@ chatty media process cannot fill the host filesystem through Docker logs.
 Drachtio and FreeSWITCH also run with read-only root filesystems; every vendor
 image `VOLUME` and writable runtime path is overridden by an explicit,
 size-capped, noexec/nosuid/nodev tmpfs. Activation additionally proves the exact
-`/var/lib/teleagent-voice` path is a canonical mountpoint whose device differs
+`/var/lib/teleagent-isolated-voice` path is a canonical mountpoint whose device differs
 from its immediate `/var/lib` parent, then requires that filesystem to be 4–8
 GiB with at least 512 MiB and 20% free. This hard boundary keeps the append-only
 SQLite ledger and media daemons from consuming the host root filesystem. The running
@@ -295,7 +295,7 @@ new durable work before the hard capacity is reached.
 The normal CLI delegates voice start and stop to that exact systemd unit; it
 does not invoke Compose directly or inherit an image selector into activation.
 The two Teleagent voice services use the exact `runtimeReference` in
-`/etc/teleagent-voice/voice-image.manifest.json`. This is the same canonical v2
+`/etc/teleagent-isolated-voice/voice-image.manifest.json`. This is the same canonical v2
 manifest emitted inside the immutable release: there is no caller-authored v1
 translation. The root-owned mode-0400 installed copy records the image config
 digest, reviewed source revision, target platform, and either an imported local
@@ -326,7 +326,7 @@ crossed offline/registry fields, duplicate member, extra member, or
 noncanonical encoding refuses startup before credential access.
 
 Before detached Compose startup, the gate durably records activation intent in
-the root-owned `/var/lib/teleagent-voice-stack` directory. The canonical state
+the root-owned `/var/lib/teleagent-isolated-voice-stack` directory. The canonical state
 binds the full reviewed image manifest to an `activationGeneration` that
 increments before every attempted activation; that same generation labels all
 four containers. A
