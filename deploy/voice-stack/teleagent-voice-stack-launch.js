@@ -23,6 +23,8 @@ const CREDENTIAL_ROOT = '/etc/teleagent-isolated-voice/credentials';
 const RUNTIME_ROOT = '/run/teleagent-isolated-voice-stack';
 const PRIVATE_COMPOSE_FILE = `${RUNTIME_ROOT}/private-compose.json`;
 const RUNTIME_SECRET_ROOT = `${RUNTIME_ROOT}/voice-secrets`;
+const CONTROL_ROOT = `${RUNTIME_ROOT}/control`;
+const CONTROL_SOCKET = `${CONTROL_ROOT}/control.sock`;
 const CONTROLLER_SOCKET = '/run/teleagent-controller/controller.sock';
 const ACTIVATION_ROOT = '/var/lib/teleagent-isolated-voice-stack';
 const ACTIVATION_STATE = `${ACTIVATION_ROOT}/activation-state.json`;
@@ -892,6 +894,10 @@ function projectRuntime(identities, credentials, projection) {
       atomicReplaceFile(`${RUNTIME_ROOT}/${name}`, contents,
         { mode: 0o440, uid: 0, gid });
     }
+    if (fs.existsSync(CONTROL_ROOT)) refuse('a prior voice control projection still exists');
+    fs.mkdirSync(CONTROL_ROOT, { mode: 0o700 });
+    fs.chownSync(CONTROL_ROOT, identity.uid, identity.gid);
+    fs.chmodSync(CONTROL_ROOT, 0o700);
     ensureDockerConfigDirectory();
   } catch (error) {
     fs.rmSync(staging, { recursive: true, force: true });
@@ -1271,7 +1277,8 @@ async function waitForHealth() {
   const deadline = Date.now() + 30000;
   while (Date.now() < deadline) {
     try {
-      const health = await requestJson({ method: 'GET', pathname: '/api/realtime-health', timeoutMs: 1000 });
+      const health = await requestJson({ method: 'GET', pathname: '/api/realtime-health',
+        socketPath: CONTROL_SOCKET, timeoutMs: 1000 });
       if (health.status === 200 && health.body?.status === 'healthy' && health.body?.configured === true) return;
     } catch { /* bounded retry */ }
     await new Promise((resolve) => setTimeout(resolve, 250));
@@ -1290,6 +1297,7 @@ function requireActiveUnit(unit) {
 
 function removeRuntimeProjection() {
   fs.rmSync(`${RUNTIME_ROOT}/admission`, { recursive: true, force: true });
+  fs.rmSync(CONTROL_ROOT, { recursive: true, force: true });
   fs.rmSync(RUNTIME_SECRET_ROOT, { recursive: true, force: true });
   for (const filename of [
     `${RUNTIME_ROOT}/drachtio.conf.xml`,
@@ -1771,6 +1779,7 @@ async function stop() {
     panic = await requestJson({
       method: 'POST',
       pathname: '/api/voice-control/stop',
+      socketPath: CONTROL_SOCKET,
       token: tokenBuffer.toString('utf8'),
       body: { source: 'teleagent_voice_stack', reason: 'systemd_voice_stack_stop' },
       timeoutMs: 15000,

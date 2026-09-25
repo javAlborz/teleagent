@@ -60,6 +60,7 @@ test('private Compose projection binds receiver files and environment without br
         bind(`${runtimeRoot}/voice-secrets`, '/run/secrets'),
         bind(`${runtimeRoot}/admission`, '/run/teleagent-media'),
         bind('/run/teleagent-voice-egress', '/run/teleagent-voice-egress'),
+        bind(`${runtimeRoot}/control`, '/run/teleagent-voice-control', false),
         bind('/run/teleagent-controller', '/run/teleagent-controller'),
       ] },
   } };

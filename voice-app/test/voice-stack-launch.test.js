@@ -306,7 +306,7 @@ test('replacement runtime projection cannot reuse the live legacy runtime direct
   const unit = fs.readFileSync(path.join(root, 'deploy/voice-stack/teleagent-voice-stack.service'), 'utf8');
   const runtime = '/run/teleagent-isolated-voice-stack';
   assert.match(launcher, /const RUNTIME_ROOT = '\/run\/teleagent-isolated-voice-stack'/u);
-  assert.equal((compose.match(/\/run\/teleagent-isolated-voice-stack\//gu) || []).length, 5);
+  assert.equal((compose.match(/\/run\/teleagent-isolated-voice-stack\//gu) || []).length, 6);
   assert.ok(installer.includes(`runtime_root=$(host_path ${runtime})`));
   assert.ok(unit.includes(`ReadWritePaths=${runtime} `));
   for (const source of [launcher, compose, installer, unit]) {
@@ -881,6 +881,11 @@ test('created container ownership binds all four full IDs before voice startup',
   assert.match(stopBody, /privateComposeArgs\('stop'/u);
   assert.match(stopBody, /privateComposeArgs\('down'/u);
   assert.doesNotMatch(stopBody, /run\(DOCKER, composeArgs\(/u);
+  assert.match(stopBody, /pathname: '\/api\/voice-control\/stop',\s*socketPath: CONTROL_SOCKET/u);
+  const healthBody = source.slice(source.indexOf('async function waitForHealth()'),
+    source.indexOf('function requireActiveUnit('));
+  assert.match(healthBody, /socketPath: CONTROL_SOCKET/u);
+  assert.doesNotMatch(healthBody, /host: '127\.0\.0\.1'/u);
 });
 
 test('activation state replacement is file-synced, renamed, then directory-synced', () => {

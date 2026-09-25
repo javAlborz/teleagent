@@ -31,6 +31,7 @@ var httpServerModule = require("./lib/http-server");
 var createHttpServer = httpServerModule.createHttpServer;
 var cleanupOldFiles = httpServerModule.cleanupOldFiles;
 var createIsolatedMediaHttp = require("./lib/isolated-media-http").createIsolatedMediaHttp;
+var createIsolatedControlHttp = require("./lib/isolated-control-http").createIsolatedControlHttp;
 var mediaStartupFence = require("./lib/isolated-media-http").createMediaStartupFence();
 var audioForkModule = require("./lib/audio-fork");
 var assertAudioForkDebugSafe = audioForkModule.assertAudioForkDebugSafe;
@@ -187,6 +188,7 @@ var srf = new Srf();
 var mediaServer = null;
 var httpServer = null;
 var isolatedMediaHttp = null;
+var isolatedControlHttp = null;
 var audioForkServer = null;
 var drachtioConnected = false;
 var freeswitchConnected = false;
@@ -426,6 +428,10 @@ async function initializeServers(assertStartupActive) {
 
   // Finalize HTTP server
   httpServer.finalize();
+  isolatedControlHttp = createIsolatedControlHttp(httpServer.app);
+  isolatedControlHttp.server.on('error', function() { void shutdown('CONTROL_SOCKET_FAILURE'); });
+  await isolatedControlHttp.ready;
+  assertStartupActive();
 
   // Cleanup old files periodically
   setInterval(function() {
@@ -512,6 +518,7 @@ function shutdown(signal) {
       httpServer.server.close(function() { resolve(true); });
     });
     var isolatedMediaClosed = isolatedMediaHttp ? isolatedMediaHttp.close() : Promise.resolve(true);
+    var isolatedControlClosed = isolatedControlHttp ? isolatedControlHttp.close() : Promise.resolve(true);
     var audioForkClosed = Promise.resolve(true);
     if (audioForkServer?.wss) {
       var audioForkListener = audioForkServer.wss;
@@ -531,7 +538,8 @@ function shutdown(signal) {
     var inboundDrain = drainResults[2];
     var transportClosures = await Promise.all([
       Promise.race([
-        Promise.all([httpClosed, isolatedMediaClosed]).then(function(values) { return values.every(Boolean); }),
+        Promise.all([httpClosed, isolatedMediaClosed, isolatedControlClosed])
+          .then(function(values) { return values.every(Boolean); }),
         new Promise(function(resolve) { setTimeout(function() { resolve(false); }, 2000); })
       ]),
       Promise.race([
