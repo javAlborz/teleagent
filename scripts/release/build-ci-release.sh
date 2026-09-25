@@ -371,7 +371,7 @@ assemble_release() {
       --output "cyclonedx-json@1.6=${raw_release_sbom}"
   python3 "${support_script}" normalize-sbom --source "${raw_release_sbom}" \
     --destination "${staging_root}/artifacts/sbom/teleagent-release.cdx.json" \
-    --forbid-path "${work_root}"
+    --forbid-path "${work_root}" --release-root "${staging_root}"
   python3 "${support_script}" write-build-input --destination "${build_input}" \
     --revision "${source_revision}" --tree "${source_tree}"
   python3 "${support_script}" strip-metadata --root "${staging_root}"

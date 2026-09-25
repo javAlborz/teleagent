@@ -619,6 +619,33 @@ class CiReleaseTests(unittest.TestCase):
                     forbidden_paths=(str(root),),
                 )
 
+            first_release = root / "first" / "release"
+            second_release = root / "second" / "release"
+            first_raw = dict(base, metadata={"component": {
+                "name": "dir:" + str(first_release),
+                "evidence": str(first_release / "voice-app"),
+            }})
+            second_raw = dict(base, metadata={"component": {
+                "name": "dir:" + str(second_release),
+                "evidence": str(second_release / "voice-app"),
+            }})
+            first_source.write_text(json.dumps(first_raw), encoding="utf-8")
+            second_source.write_text(json.dumps(second_raw), encoding="utf-8")
+            first_normalized = root / "first-release.cdx.json"
+            second_normalized = root / "second-release.cdx.json"
+            normalize_cyclonedx(first_source, first_normalized,
+                                 forbidden_paths=(str(root),), release_root=first_release)
+            normalize_cyclonedx(second_source, second_normalized,
+                                 forbidden_paths=(str(root),), release_root=second_release)
+            self.assertEqual(first_normalized.read_bytes(), second_normalized.read_bytes())
+            self.assertIn(b"/teleagent-release/voice-app", first_normalized.read_bytes())
+
+            first_raw["metadata"]["component"]["outside"] = str(root / "outside")
+            first_source.write_text(json.dumps(first_raw), encoding="utf-8")
+            with self.assertRaisesRegex(CiReleaseError, "ephemeral staging path"):
+                normalize_cyclonedx(first_source, root / "escaped.cdx.json",
+                                     forbidden_paths=(str(root),), release_root=first_release)
+
     def test_native_pruning_covers_api_and_privileged_broker_trees(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             staging = Path(temporary)
