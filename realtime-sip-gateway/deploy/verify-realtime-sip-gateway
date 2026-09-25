@@ -685,7 +685,9 @@ export function verifyInitializedStateFiles({
   if (marker.state_root !== stateRoot
       || marker.database_path !== databasePath
       || marker.singleton_path !== singletonPath
-      || BigInt(marker.state_dev) !== BigInt(device)
+      // A loop-mounted filesystem can receive a different kernel device number
+      // after remount. The current root and both files must still share one
+      // device; inode and birth time bind each file to the retained marker.
       || BigInt(marker.database_ino) !== numericBigInt(database.ino)
       || BigInt(marker.database_birthtime_ns) !== numericBigInt(database.birthtimeNs)
       || BigInt(marker.singleton_ino) !== numericBigInt(singleton.ino)

@@ -76,6 +76,19 @@ test('reinstall preserves an initialized nonempty ledger and exact inode attesta
   assert.equal(statSync(context.databasePath).ino, before.ino);
 });
 
+test('a remounted loop device preserves the same initialized files', (t) => {
+  const context = stateFixture(t);
+  initializeStateFiles(context.options);
+  const original = statSync(context.databasePath);
+  const marker = readFileSync(context.markerPath, 'utf8');
+  chmodSync(context.markerPath, 0o600);
+  writeFileSync(context.markerPath, marker.replace(/^state_dev=\d+$/mu, 'state_dev=999999'));
+  chmodSync(context.markerPath, 0o444);
+  const preserved = initializeStateFiles(context.options);
+  assert.equal(preserved.created, false);
+  assert.equal(statSync(context.databasePath).ino, original.ino);
+});
+
 test('reinstall safely completes a crash-published two-link marker', (t) => {
   const context = stateFixture(t);
   initializeStateFiles(context.options);

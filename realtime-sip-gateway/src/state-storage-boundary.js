@@ -179,7 +179,8 @@ export function inspectSipStateInitialization({
       || marker.state_root !== SIP_STATE_ROOT
       || marker.database_path !== SIP_STATE_DATABASE
       || marker.singleton_path !== SIP_STATE_SINGLETON
-      || BigInt(marker.state_dev) !== numeric(root.dev)
+      // The recorded device number is ephemeral across loop remounts. Keep
+      // current-device agreement and the marker's inode/birth-time bindings.
       || numeric(database.dev) !== numeric(root.dev)
       || numeric(singleton.dev) !== numeric(root.dev)
       || BigInt(marker.database_ino) !== numeric(database.ino)
