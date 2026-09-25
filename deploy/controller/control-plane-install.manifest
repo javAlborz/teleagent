@@ -1,4 +1,4 @@
-f3b16ef69859de8646d5ee6fc1057cf7cd64dac9fe6abcb226d5ed8f7e1c5c6c 0644 deploy/controller/teleagent-agent-controller.service /etc/systemd/system/teleagent-agent-controller.service
+c7302fd5eb254b3a94c2094c1f0151caf5b2dbe7ed57892016f1f38e841dcb16 0644 deploy/controller/teleagent-agent-controller.service /etc/systemd/system/teleagent-agent-controller.service
 d5278015560bacdd621066069a48afdf7a7c0231b05b76fcfef4e852bdc6195b 0644 deploy/controller/teleagent-agent-controller.socket /etc/systemd/system/teleagent-agent-controller.socket
 fb58ea8ad0a37976ccb17149d74d9730bc708917f5176dfa824dffdc19cf06f7 0644 deploy/controller/teleagent-pbx-panic.socket /etc/systemd/system/teleagent-pbx-panic.socket
 8934ab3941995dcab58998744a7e82fc1cd9969c8bcba2d32d7759060ddf03ca 0644 deploy/controller/teleagent-agent-controller.tmpfiles /etc/tmpfiles.d/teleagent-agent-controller.conf

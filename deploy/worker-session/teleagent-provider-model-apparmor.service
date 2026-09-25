@@ -1,4 +1,6 @@
 [Unit]
+After=teleagent-provider.slice teleagent-voice.slice teleagent-media.slice teleagent-recovery.slice
+Requires=teleagent-provider.slice teleagent-voice.slice teleagent-media.slice teleagent-recovery.slice
 Description=Load the enforced Teleagent model-only AppArmor profile
 Requires=teleagent-provider-libexec-install.service
 After=teleagent-provider-libexec-install.service
@@ -6,6 +8,16 @@ Before=teleagent-provider-supervisor@claude.service teleagent-provider-superviso
 ConditionPathExists=/etc/teleagent/worker-session/ENABLE
 
 [Service]
+Slice=teleagent-provider.slice
+CPUAccounting=yes
+CPUQuota=25%
+CPUQuotaPeriodSec=100ms
+MemoryAccounting=yes
+MemoryHigh=100663296
+MemoryMax=134217728
+MemorySwapMax=0
+TasksAccounting=yes
+TasksMax=32
 Type=oneshot
 ExecStart=/usr/local/libexec/teleagent-provider-apparmor-install install
 RemainAfterExit=yes

@@ -1,4 +1,6 @@
 [Unit]
+After=teleagent-provider.slice teleagent-voice.slice teleagent-media.slice teleagent-recovery.slice
+Requires=teleagent-provider.slice teleagent-voice.slice teleagent-media.slice teleagent-recovery.slice
 Description=Teleagent private durable agent controller
 Documentation=file:/opt/teleagent/current/docs/CONTROLLER-DEPLOYMENT.md
 Requires=teleagent-agent-controller.socket teleagent-pbx-panic.socket teleagent-worker-session.service teleagent-provider-model-apparmor.service teleagent-provider-supervisor@codex.socket
@@ -9,6 +11,16 @@ ConditionPathExists=/etc/teleagent/worker-session/ENABLE
 ConditionPathIsMountPoint=/var/lib/teleagent-control
 
 [Service]
+Slice=teleagent.slice
+CPUAccounting=yes
+CPUQuota=200%
+CPUQuotaPeriodSec=100ms
+MemoryAccounting=yes
+MemoryHigh=671088640
+MemoryMax=805306368
+MemorySwapMax=0
+TasksAccounting=yes
+TasksMax=128
 Type=simple
 Sockets=teleagent-agent-controller.socket teleagent-pbx-panic.socket
 User=teleagent-control
@@ -36,15 +48,7 @@ KillMode=control-group
 TimeoutStopSec=30s
 OOMPolicy=kill
 
-CPUAccounting=yes
-CPUQuota=200%
 CPUWeight=50
-MemoryAccounting=yes
-MemoryHigh=2G
-MemoryMax=3G
-MemorySwapMax=0
-TasksAccounting=yes
-TasksMax=512
 IOAccounting=yes
 IOWeight=50
 LimitNOFILE=4096

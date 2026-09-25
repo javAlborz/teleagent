@@ -6,13 +6,14 @@ StopWhenUnneeded=yes
 [Slice]
 CPUAccounting=yes
 CPUQuota=300%
-CPUWeight=50
+CPUQuotaPeriodSec=100ms
 MemoryAccounting=yes
-MemoryHigh=2560M
-MemoryMax=3G
+MemoryHigh=2684354560
+MemoryMax=3221225472
 MemorySwapMax=0
 TasksAccounting=yes
 TasksMax=1024
+CPUWeight=50
 IOAccounting=yes
 IOWeight=50
 
