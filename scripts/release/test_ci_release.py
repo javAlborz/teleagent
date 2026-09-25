@@ -655,10 +655,12 @@ class CiReleaseTests(unittest.TestCase):
             first_raw = dict(base, metadata={"component": {
                 "name": "dir:" + str(first_release),
                 "evidence": str(first_release / "voice-app"),
+                "bom-ref": "run-specific-root-1",
             }})
             second_raw = dict(base, metadata={"component": {
                 "name": "dir:" + str(second_release),
                 "evidence": str(second_release / "voice-app"),
+                "bom-ref": "run-specific-root-2",
             }})
             first_source.write_text(json.dumps(first_raw), encoding="utf-8")
             second_source.write_text(json.dumps(second_raw), encoding="utf-8")
@@ -670,6 +672,13 @@ class CiReleaseTests(unittest.TestCase):
                                  forbidden_paths=(str(root),), release_root=second_release)
             self.assertEqual(first_normalized.read_bytes(), second_normalized.read_bytes())
             self.assertIn(b"/teleagent-release/voice-app", first_normalized.read_bytes())
+            self.assertNotIn("bom-ref", json.loads(first_normalized.read_text())["metadata"]["component"])
+
+            referenced = dict(first_raw, dependencies=[{"ref": "run-specific-root-1"}])
+            first_source.write_text(json.dumps(referenced), encoding="utf-8")
+            with self.assertRaisesRegex(CiReleaseError, "used elsewhere"):
+                normalize_cyclonedx(first_source, root / "referenced.cdx.json",
+                                     forbidden_paths=(str(root),), release_root=first_release)
 
             first_raw["metadata"]["component"]["outside"] = str(root / "outside")
             first_source.write_text(json.dumps(first_raw), encoding="utf-8")

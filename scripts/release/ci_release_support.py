@@ -424,6 +424,16 @@ def _contains_forbidden_path(value: Any, forbidden: Sequence[str]) -> bool:
     return False
 
 
+def _contains_exact_string(value: Any, expected: str) -> bool:
+    if isinstance(value, str):
+        return value == expected
+    if isinstance(value, list):
+        return any(_contains_exact_string(item, expected) for item in value)
+    if isinstance(value, dict):
+        return any(_contains_exact_string(item, expected) for item in value.values())
+    return False
+
+
 def _sort_cyclonedx(document: dict[str, Any]) -> None:
     for key in ("components", "services", "vulnerabilities"):
         values = document.get(key)
@@ -474,6 +484,15 @@ def normalize_cyclonedx(
         document = normalize_release_location(document)
         if replacements[0] == 0:
             raise _error("release SBOM has no assembly location to normalize")
+        # Syft gives the scanned directory a fresh bom-ref each run. CycloneDX
+        # 1.6 makes this field optional. Remove it only when nothing else in
+        # the BOM refers to its exact value, preserving graph relationships.
+        release_metadata = document.get("metadata")
+        component = release_metadata.get("component") if isinstance(release_metadata, dict) else None
+        if isinstance(component, dict) and "bom-ref" in component:
+            root_ref = component.pop("bom-ref")
+            if type(root_ref) is not str or not root_ref or _contains_exact_string(document, root_ref):
+                raise _error("release SBOM root reference is invalid or used elsewhere")
     if _contains_forbidden_path(document, forbidden_paths):
         raise _error("generated SBOM embeds an ephemeral staging path")
     _sort_cyclonedx(document)
