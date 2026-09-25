@@ -322,6 +322,7 @@ build_voice_image() {
   current_image_tag="${requested_image_tag}"
   timeout --signal=TERM --kill-after=30s 1800s \
     docker build --pull --no-cache --platform linux/amd64 \
+      --build-arg "SOURCE_DATE_EPOCH=${source_date_epoch}" \
       --build-arg "TELEAGENT_SOURCE_REVISION=${source_revision}" \
       --tag "${requested_image_tag}" --file voice-app/Dockerfile .
   local inspection="${work_root}/image-inspection.json"

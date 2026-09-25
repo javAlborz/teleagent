@@ -822,6 +822,7 @@ class CiReleaseTests(unittest.TestCase):
         self.assertIn("GITHUB_REF:-}", builder)
         self.assertIn("git archive --format=tar", builder)
         self.assertIn("docker build --pull --no-cache --platform linux/amd64", builder)
+        self.assertIn('--build-arg "SOURCE_DATE_EPOCH=${source_date_epoch}"', builder)
         self.assertIn("TELEAGENT_SOURCE_REVISION", builder)
         self.assertIn("--scanners vuln,secret", builder)
         self.assertIn("--severity HIGH,CRITICAL --exit-code 1", builder)
