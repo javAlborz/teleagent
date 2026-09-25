@@ -127,6 +127,7 @@ esac
 
 current_container_name=''
 current_image_tag=''
+current_builder_name=''
 cleanup() {
   local status=$?
   trap - EXIT INT TERM
@@ -137,6 +138,10 @@ cleanup() {
   if [[ -n "${current_image_tag}" ]]; then
     timeout --signal=TERM --kill-after=10s 30s \
       docker image rm --force -- "${current_image_tag}" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "${current_builder_name}" ]]; then
+    timeout --signal=TERM --kill-after=10s 60s \
+      docker buildx rm --force "${current_builder_name}" >/dev/null 2>&1 || true
   fi
   if [[ -d "${work_root}" ]]; then
     chmod -R u+w -- "${work_root}" >/dev/null 2>&1 || true
@@ -301,6 +306,18 @@ export TRIVY_CACHE_DIR="${work_root}/trivy-cache"
 export DOCKER_BUILDKIT=1
 export SOURCE_DATE_EPOCH="${source_date_epoch}"
 
+# The Docker driver does not expose the timestamp-rewriting image exporter.
+# Use a separate, digest-pinned BuildKit daemon for both clean image builds.
+readonly buildkit_image='moby/buildkit@sha256:a461e7f0ce921972028acfbed628d45663d83e67ac1230722c2b34cf72760a0d'
+readonly release_builder="teleagent-release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+if docker buildx inspect "${release_builder}" >/dev/null 2>&1; then
+  fail 'the exact temporary release builder already exists on the CI guest'
+fi
+current_builder_name="${release_builder}"
+timeout --signal=TERM --kill-after=30s 300s \
+  docker buildx create --name "${release_builder}" --driver docker-container \
+    --driver-opt "image=${buildkit_image}" --bootstrap >/dev/null
+
 install_staged_dependencies() {
   local staging_root=$1
   local round=$2
@@ -320,11 +337,22 @@ build_voice_image() {
     fail 'the exact temporary voice image tag already exists on the CI guest'
   fi
   current_image_tag="${requested_image_tag}"
+  image_build_count=$((image_build_count + 1))
+  local image_archive="${work_root}/voice-build-${image_build_count}.docker.tar"
+  [[ ! -e "${image_archive}" && ! -L "${image_archive}" ]] \
+    || fail 'the exact temporary voice image archive already exists'
   timeout --signal=TERM --kill-after=30s 1800s \
-    docker build --pull --no-cache --platform linux/amd64 \
+    docker buildx build --builder "${release_builder}" \
+      --pull --no-cache --platform linux/amd64 --provenance=false \
       --build-arg "SOURCE_DATE_EPOCH=${source_date_epoch}" \
       --build-arg "TELEAGENT_SOURCE_REVISION=${source_revision}" \
-      --tag "${requested_image_tag}" --file voice-app/Dockerfile .
+      --tag "${requested_image_tag}" --file voice-app/Dockerfile \
+      --output "type=docker,dest=${image_archive},rewrite-timestamp=true" .
+  [[ -s "${image_archive}" && ! -L "${image_archive}" ]] \
+    || fail 'the timestamp-rewritten voice image archive is absent'
+  timeout --signal=TERM --kill-after=15s 300s \
+    docker load --input "${image_archive}" >/dev/null
+  rm -- "${image_archive}"
   local inspection="${work_root}/image-inspection.json"
   docker image inspect -- "${requested_image_tag}" > "${inspection}"
   local image_id
@@ -385,6 +413,7 @@ assemble_release() {
 }
 
 readonly image_tag="teleagent-voice-release:${source_revision}"
+image_build_count=0
 built_config_digest=''
 build_voice_image "${image_tag}"
 readonly first_config_digest="${built_config_digest}"
