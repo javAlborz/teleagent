@@ -164,6 +164,31 @@ test('namespace scan detects a foreign thread even when its process leader is el
   escaped = false; missing = true; assert.throws(() => boundary.verifyTasks(contract, {}, io));
 });
 
+test('namespace scan retries only disappearing proc entries with a fixed bound', () => {
+  const contract = fixture();
+  const anchors = Object.values(contract.bootstrap.services);
+  let races = 0;
+  const io = { readdirSync(filename) {
+    if (filename === '/proc') return anchors.map((anchor) => String(anchor.pid));
+    if (races > 0) { races -= 1; throw Object.assign(new Error('exited during scan'), { code: 'ENOENT' }); }
+    return [filename.split('/')[2]];
+  }, statSync(filename) {
+    const pid = Number(filename.split('/')[2]);
+    return { dev: 4, ino: 1000 + pid - 100 };
+  }, readFileSync(filename) {
+    const pid = Number(filename.split('/')[2]);
+    const anchor = anchors.find((value) => value.pid === pid);
+    return `0::/teleagent.slice/teleagent-media.slice/docker-${anchor.containerId}.scope`;
+  } };
+  races = 4;
+  assert.equal(Object.keys(boundary.verifyTasks(contract, {}, io)).length, 4);
+  races = 5;
+  assert.throws(() => boundary.verifyTasks(contract, {}, io), { code: 'ENOENT' });
+  races = 0;
+  io.readdirSync = () => { throw new Error('unreadable /proc'); };
+  assert.throws(() => boundary.verifyTasks(contract, {}, io), /unreadable \/proc/u);
+});
+
 test('missing authority and unfinished runtime cannot fall back to legacy host networking', () => {
   assert.throws(() => boundary.loadAdmission(RELEASE, 'bootstrap', `sha256:${'0'.repeat(64)}`, {
     io: { lstatSync() { throw new Error('absent host authority'); } }, run() { assert.fail('must not execute'); },

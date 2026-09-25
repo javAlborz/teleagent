@@ -222,7 +222,7 @@ function kernelLimits(cgroup, limits, io = fs) {
   }
 }
 
-function verifyTasks(contract, placements, io = fs) {
+function verifyTasksOnce(contract, placements, io) {
   const expected = new Map();
   const admittedCgroups = new Map();
   for (const peer of PEERS) {
@@ -259,6 +259,19 @@ function verifyTasks(contract, placements, io = fs) {
   }
   for (const value of expected.values()) need(value.tasks.some((task) => task.pid === value.anchor.pid && task.tid === value.anchor.pid));
   return Object.fromEntries([...expected].map(([namespace, value]) => [namespace, value.tasks.sort((a, b) => a.tid - b.tid)]));
+}
+
+function verifyTasks(contract, placements, io = fs) {
+  // A process can exit between the /proc listing and its task read on a busy
+  // host. Retry the complete inventory a fixed number of times; any stable
+  // foreign task, privilege mismatch or unreadable non-racy state still fails.
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    try { return verifyTasksOnce(contract, placements, io); }
+    catch (error) {
+      if (!['ENOENT', 'ENOTDIR', 'ESRCH'].includes(error.code) || attempt === 4) throw error;
+    }
+  }
+  need(false);
 }
 
 function verifyPlacement(contract, placements, { inspect, anchorCheck, io = fs, stage = 'running' } = {}) {
