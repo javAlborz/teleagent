@@ -9,7 +9,7 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
 const CONTRACT = '/etc/teleagent-media/application-launch.json';
-const AUTHORITY = '/usr/local/libexec/verify-teleagent-media-activation';
+const AUTHORITY = '/usr/local/libexec/verify-teleagent-media-application';
 const BOOT = '/proc/sys/kernel/random/boot_id';
 const SOURCE_DIGEST = 'sha256:36dada2904ba928ef6189a8a1de5545876690f3cb2eecec8c36c37c1eb8c75dd';
 const SERVICES = Object.freeze(['drachtio', 'freeswitch', 'voice-app']);
