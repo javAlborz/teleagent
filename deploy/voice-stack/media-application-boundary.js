@@ -142,9 +142,9 @@ function loadAdmission(releaseRoot, stage, evidenceDigest,
   const contractDigest = digest(source);
   const expected = { schema: 'teleagent.media-application-admission.v1', stage, contractDigest, bootId,
     releaseRoot, evidenceDigest };
-  // The authority independently checks installed source/tool/image/credential
-  // closure, global pending journals and retained lifecycle admission. It must
-  // never merely echo these arguments. No implementation is supplied here.
+  // The separately managed host verifier admits only a read-only bootstrap.
+  // Created, running and restart admission still require a retained lifecycle
+  // transaction; it must never merely echo these arguments.
   const response = run(AUTHORITY, ['--admit-media-application', stage, contractDigest, bootId, releaseRoot, evidenceDigest],
     { lifecycleFd });
   need(canonical(JSON.parse(response)) === canonical(expected));
