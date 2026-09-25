@@ -279,7 +279,7 @@ root-owned single-link mode-`0444` file
 or `claude,codex`, followed by one newline. The controller's root-owned
 `/etc/teleagent/controller/runtime.env` must contain exactly the matching
 `AGENT_PROVIDERS=` assignment. The root-owned
-`/etc/teleagent-voice/voice-app.env` must also contain the same
+`/etc/teleagent-isolated-voice/voice-app.env` must also contain the same
 `AGENT_PROVIDERS=` assignment and a valid `OPENAI_PROJECT=proj_...` assignment.
 The voice launcher checks both before starting Compose, and Compose passes them
 to the voice app. The worker activation verifier also checks that the voice

@@ -12,7 +12,7 @@ const verifier = fs.readFileSync(path.join(
 const binding = verifier.match(/codex_policy=\/etc\/teleagent\/provider-egress\/codex\.json\n\/usr\/local\/libexec\/teleagent-node -e '\n([\s\S]*?)\n' "\$voice_env" "\$codex_policy"/u);
 assert.ok(binding, 'installed verifier must execute the reviewed project-binding check');
 
-const VOICE = '/etc/teleagent-voice/voice-app.env';
+const VOICE = '/etc/teleagent-isolated-voice/voice-app.env';
 const POLICY = '/etc/teleagent/provider-egress/codex.json';
 const PROJECT = 'proj_fixture0001';
 
