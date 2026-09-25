@@ -5,13 +5,13 @@
 
 var mediaRuntimeModule = require("../lib/media-receiver-runtime");
 var hostStartGeneration = null;
-if (process.env.NODE_ENV !== 'production') require("dotenv").config();
 var voiceAppRuntimeContract = require("../lib/voice-app-runtime-env");
 var mediaReceiverRuntime = null;
 var fixedRuntimeEnvironment = null;
 try {
-  fixedRuntimeEnvironment = voiceAppRuntimeContract.assertVoiceAppRuntimeEnvironment(process.env);
   hostStartGeneration = mediaRuntimeModule.awaitHostStart();
+  if (process.env.NODE_ENV !== 'production') require("dotenv").config();
+  fixedRuntimeEnvironment = voiceAppRuntimeContract.assertVoiceAppRuntimeEnvironment(process.env);
   mediaReceiverRuntime = mediaRuntimeModule.loadMediaReceiverRuntime();
   if (mediaReceiverRuntime.generation !== hostStartGeneration) {
     throw new Error('host start generation differs from independent media admission');

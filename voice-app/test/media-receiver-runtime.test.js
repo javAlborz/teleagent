@@ -56,6 +56,8 @@ test('host start fence requires a root-owned FIFO and one exact generation', () 
   const entrypoint = fs.readFileSync(path.join(__dirname, '../index.js'), 'utf8');
   assert.ok(entrypoint.indexOf('hostStartGeneration = mediaRuntimeModule.awaitHostStart();') <
     entrypoint.indexOf('mediaReceiverRuntime = mediaRuntimeModule.loadMediaReceiverRuntime();'));
+  assert.ok(entrypoint.indexOf('hostStartGeneration = mediaRuntimeModule.awaitHostStart();') <
+    entrypoint.indexOf('require("dotenv").config()'));
   assert.doesNotMatch(entrypoint, /NODE_ENV === 'production'\) hostStartGeneration/u);
 });
 
