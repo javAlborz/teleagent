@@ -440,6 +440,7 @@ def normalize_cyclonedx(
     destination: Path,
     *,
     forbidden_paths: Sequence[str] = (),
+    release_root: Path | None = None,
 ) -> None:
     document = _load_json(source, "generated SBOM")
     if document.get("bomFormat") != "CycloneDX" or document.get("specVersion") != "1.6":
@@ -448,6 +449,29 @@ def normalize_cyclonedx(
     metadata = document.get("metadata")
     if isinstance(metadata, dict):
         metadata.pop("timestamp", None)
+    if release_root is not None:
+        root = str(release_root)
+        if not release_root.is_absolute() or release_root.name != "release" or not any(
+            root.startswith(forbidden.rstrip("/") + "/") for forbidden in forbidden_paths
+        ):
+            raise _error("SBOM release root is outside the private assembly")
+        replacements = [0]
+
+        def normalize_release_location(value: Any) -> Any:
+            if isinstance(value, str) and root in value:
+                if value.count(root) != 1:
+                    raise _error("SBOM repeats an ephemeral release root")
+                replacements[0] += 1
+                return value.replace(root, "/teleagent-release")
+            if isinstance(value, dict):
+                return {key: normalize_release_location(child) for key, child in value.items()}
+            if isinstance(value, list):
+                return [normalize_release_location(child) for child in value]
+            return value
+
+        document = normalize_release_location(document)
+        if replacements[0] == 0:
+            raise _error("release SBOM has no assembly location to normalize")
     if _contains_forbidden_path(document, forbidden_paths):
         raise _error("generated SBOM embeds an ephemeral staging path")
     _sort_cyclonedx(document)
@@ -683,6 +707,7 @@ def parser() -> argparse.ArgumentParser:
     sbom.add_argument("--source", required=True, type=Path)
     sbom.add_argument("--destination", required=True, type=Path)
     sbom.add_argument("--forbid-path", action="append", default=[])
+    sbom.add_argument("--release-root", type=Path)
 
     voice = commands.add_parser("write-voice-manifest")
     voice.add_argument("--destination", required=True, type=Path)
@@ -721,7 +746,9 @@ def main(argv: list[str] | None = None) -> int:
             strip_extended_metadata(arguments.root)
         elif arguments.command == "normalize-sbom":
             normalize_cyclonedx(
-                arguments.source, arguments.destination, forbidden_paths=arguments.forbid_path
+                arguments.source, arguments.destination,
+                forbidden_paths=arguments.forbid_path,
+                release_root=arguments.release_root,
             )
         elif arguments.command == "write-voice-manifest":
             write_voice_manifest(arguments.destination, arguments.revision, arguments.config_digest)
