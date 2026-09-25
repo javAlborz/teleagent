@@ -177,7 +177,11 @@ run_lifecycle_sandbox() {
     || fail 'lifecycle sandbox mount path contains an unsupported delimiter'
 
   local module_paths=()
+  local tmpfs_options=rw,nosuid,nodev,noexec,size=1073741824,mode=1777
   if [[ "${mode}" == test ]]; then
+    # Several integration tests execute fixture scripts from os.tmpdir().
+    # This mount exists only in the throwaway, unprivileged test container.
+    tmpfs_options=rw,nosuid,nodev,exec,size=1073741824,mode=1777
     module_paths=(
       node_modules
       cli/node_modules
@@ -212,7 +216,7 @@ run_lifecycle_sandbox() {
     --ulimit core=0
     --ulimit nofile=4096:4096
     --ulimit nproc=256:256
-    --tmpfs /tmp:rw,nosuid,nodev,noexec,size=1073741824,mode=1777
+    --tmpfs "/tmp:${tmpfs_options}"
     --mount "type=bind,src=${staging_root},dst=/work,readonly"
     --entrypoint /usr/bin/env
   )
