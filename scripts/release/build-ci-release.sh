@@ -353,7 +353,7 @@ build_voice_image() {
   timeout --signal=TERM --kill-after=15s 300s \
     docker load --input "${image_archive}" >/dev/null
   rm -- "${image_archive}"
-  local inspection="${work_root}/image-inspection.json"
+  local inspection="${work_root}/image-inspection-${image_build_count}.json"
   docker image inspect -- "${requested_image_tag}" > "${inspection}"
   local image_id
   image_id="$(jq -er '.[0].Id' "${inspection}")"
@@ -431,8 +431,18 @@ current_image_tag=''
 
 build_voice_image "${image_tag}"
 readonly second_config_digest="${built_config_digest}"
-[[ "${second_config_digest}" == "${first_config_digest}" ]] \
-  || fail 'two clean voice-image builds produced different OCI config digests'
+if [[ "${second_config_digest}" != "${first_config_digest}" ]]; then
+  # Only emit the two config IDs, creation times, and layer diff IDs. Never
+  # print the raw inspect objects, which contain runtime environment and Cmd.
+  jq -n \
+    --slurpfile first "${work_root}/image-inspection-1.json" \
+    --slurpfile second "${work_root}/image-inspection-2.json" \
+    '($first[0][0]) as $a | ($second[0][0]) as $b |
+     {firstConfigDigest: $a.Id, secondConfigDigest: $b.Id,
+      firstCreated: $a.Created, secondCreated: $b.Created,
+      firstLayers: $a.RootFS.Layers, secondLayers: $b.RootFS.Layers}' >&2
+  fail 'two clean voice-image builds produced different OCI config digests'
+fi
 assemble_release second "${image_tag}" "${second_config_digest}"
 
 python3 "${support_script}" compare \

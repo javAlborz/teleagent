@@ -828,6 +828,8 @@ class CiReleaseTests(unittest.TestCase):
         self.assertIn("--pull --no-cache --platform linux/amd64 --provenance=false", builder)
         self.assertIn("rewrite-timestamp=true", builder)
         self.assertIn('docker load --input "${image_archive}"', builder)
+        self.assertIn('image-inspection-${image_build_count}.json', builder)
+        self.assertIn('firstLayers: $a.RootFS.Layers, secondLayers: $b.RootFS.Layers', builder)
         self.assertIn('--build-arg "SOURCE_DATE_EPOCH=${source_date_epoch}"', builder)
         self.assertIn("TELEAGENT_SOURCE_REVISION", builder)
         self.assertIn("--scanners vuln,secret", builder)
