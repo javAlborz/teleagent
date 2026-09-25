@@ -1390,6 +1390,27 @@ test('root recovery waits for the newly started supervisor socket while panic st
   assert.equal(panicLocked, false);
 });
 
+test('root recovery remains fenced when supervisor health never arrives', async () => {
+  let panicCleared = false;
+  let stopCount = 0;
+  const result = await boundary.unlockAllProviderPlanes({
+    activationProviders: ['codex'],
+    panicAll: async () => ({ persisted: true, quiesced: true }),
+    persistRecovery: () => ({ persisted: true }),
+    clearRecovery: () => ({ persisted: true }),
+    clearPanic: () => { panicCleared = true; return { persisted: true }; },
+    runSystemctl: () => ({ status: 0, signal: null, error: null }),
+    forceStop: async () => { stopCount += 1; return { quiesced: true }; },
+    probeAttempts: 2,
+    probeRetryMs: 1,
+    probe: async () => { throw new Error('supervisor socket unavailable'); },
+  });
+  assert.equal(result.success, false);
+  assert.equal(result.code, 'PROVIDER_RESTART_HEALTH_FAILED');
+  assert.equal(panicCleared, false);
+  assert.equal(stopCount, 1);
+});
+
 test('Codex-only panic and unlock never restart Claude or require its egress broker', async () => {
   const panicCommands = [];
   const recovered = [];
