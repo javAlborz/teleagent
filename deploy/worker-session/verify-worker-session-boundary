@@ -81,7 +81,7 @@ controller_env=/etc/teleagent/controller/runtime.env
   echo "controller provider selection differs from activation mode" >&2
   exit 77
 }
-voice_env=/etc/teleagent-voice/voice-app.env
+voice_env=/etc/teleagent-isolated-voice/voice-app.env
 [ ! -L "$voice_env" ] &&
   [ "$(/usr/bin/readlink -f -- "$voice_env")" = "$voice_env" ] &&
   [ "$(/usr/bin/stat -c '%u:%g:%a:%h' "$voice_env")" = 0:0:600:1 ] &&
