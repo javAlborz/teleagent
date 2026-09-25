@@ -17,9 +17,10 @@ The module implements concrete preparation and verification operations:
   `/etc/teleagent-media/application-launch.json`. Every ancestor and final file
   must be root-owned, not writable by group/others, and free of symlink aliases;
   the file has one link and bounded size. Canonical JSON excludes duplicates.
-- Require the separate protected `/usr/local/libexec/verify-teleagent-media-activation`
-  to admit the release, exact file digest, stage and evidence digest. No
-  implementation, approval record, configuration or sentinel is fabricated.
+- Require the separate protected `/usr/local/libexec/verify-teleagent-media-application`
+  to admit the release, exact file digest, stage and evidence digest. Its
+  installed implementation currently admits only bootstrap; created, running,
+  restart and cutover remain refused.
 - Produce a complete resolved Compose candidate whose three running voice
   services use `network_mode: container:<full anchor ID>`, exact local image
   IDs, explicit host user namespaces and disabled container health checks.
