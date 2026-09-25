@@ -944,43 +944,56 @@ function projectPrivateCompose(contract, projection, environment) {
   });
 }
 
-function publishCreatedContainerAdmission(ownership, lifecycleFd) {
+function publishContainerAdmission(ownership, lifecycleFd, stage) {
   if (!Number.isSafeInteger(lifecycleFd) || lifecycleFd < 3 ||
+      !['created', 'running'].includes(stage) ||
       !Number.isSafeInteger(ownership?.activationGeneration) ||
       ownership.activationGeneration < 1 || !Array.isArray(ownership.services) ||
       ownership.services.length !== VOICE_SERVICES.length) {
-    refuse('created media admission has no retained ownership or lifecycle lock');
+    refuse('media placement admission has no retained ownership or lifecycle lock');
   }
   inspectRootPath(MEDIA_APPLICATION_PUBLISHER, { mode: 0o555, nlink: 1 });
   const result = spawnSync(MEDIA_APPLICATION_PUBLISHER,
-    ['created', String(ownership.activationGeneration)], {
+    [stage, String(ownership.activationGeneration)], {
       encoding: 'utf8', timeout: 30000, maxBuffer: 8192,
       env: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C', LC_ALL: 'C' },
       stdio: ['ignore', 'pipe', 'pipe', lifecycleFd],
     });
   if (result.error || result.status !== 0 ||
       Buffer.byteLength(result.stdout || '') > 4096) {
-    refuse('independent created media admission refused');
+    refuse('independent media placement admission refused');
   }
   let admitted;
   try { admitted = JSON.parse(result.stdout); } catch {
-    refuse('independent created media admission is unreadable');
+    refuse('independent media placement admission is unreadable');
   }
-  if (!admitted || Object.keys(admitted).sort().join(' ') !==
-      'applicationStarted contractDigest observationDigest phase sandboxPlacementAdmitted' ||
-      admitted.phase !== 'created' || admitted.applicationStarted !== false ||
-      admitted.sandboxPlacementAdmitted !== true ||
+  const expectedKeys = stage === 'created' ?
+    'applicationStarted contractDigest observationDigest phase sandboxPlacementAdmitted' :
+    'applicationStarted contractDigest observationDigest phase processPlacementAdmitted runtimePublished';
+  if (!admitted || Object.keys(admitted).sort().join(' ') !== expectedKeys ||
+      admitted.phase !== stage ||
+      admitted.applicationStarted !== (stage === 'running') ||
+      (stage === 'created' ? admitted.sandboxPlacementAdmitted !== true :
+        admitted.processPlacementAdmitted !== true || admitted.runtimePublished !== false) ||
       !/^sha256:[a-f0-9]{64}$/u.test(admitted.contractDigest) ||
       !/^sha256:[a-f0-9]{64}$/u.test(admitted.observationDigest)) {
-    refuse('independent created media admission has unexpected evidence');
+    refuse('independent media placement admission has unexpected evidence');
   }
   const placements = Object.fromEntries(ownership.services
     .filter((row) => row.service !== 'voice-runtime-preflight')
     .map((row) => [row.service, row.containerId]));
-  verifyProtectedPlacement(APP_ROOT, placements, 'created', {
+  verifyProtectedPlacement(APP_ROOT, placements, stage, {
     lifecycleFd, hostEvidenceDigest: admitted.observationDigest,
   });
   return admitted.observationDigest;
+}
+
+function publishCreatedContainerAdmission(ownership, lifecycleFd) {
+  return publishContainerAdmission(ownership, lifecycleFd, 'created');
+}
+
+function publishRunningContainerAdmission(ownership, lifecycleFd) {
+  return publishContainerAdmission(ownership, lifecycleFd, 'running');
 }
 
 function requestJson({
@@ -1594,6 +1607,7 @@ async function start(lifecycleFd) {
       refuse('Compose replaced a retained voice container identity during start');
     }
     verifyRunningProjectProcessIdentities(identities, { environment });
+    publishRunningContainerAdmission(ownership, lifecycleFd);
     await waitForHealth();
     verifyRunningProjectProcessIdentities(identities, { environment });
     verifyExactProjectContainerBoundary(
