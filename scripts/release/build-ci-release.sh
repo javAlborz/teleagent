@@ -350,6 +350,10 @@ build_voice_image() {
       --output "type=docker,dest=${image_archive},rewrite-timestamp=true" .
   [[ -s "${image_archive}" && ! -L "${image_archive}" ]] \
     || fail 'the timestamp-rewritten voice image archive is absent'
+  local exported_config_digest
+  exported_config_digest="$(python3 "${support_script}" inspect-voice-archive \
+    --archive "${image_archive}" --revision "${source_revision}")" \
+    || fail 'the voice export has no valid OCI config subject'
   timeout --signal=TERM --kill-after=15s 300s \
     docker load --input "${image_archive}" >/dev/null
   rm -- "${image_archive}"
@@ -358,13 +362,13 @@ build_voice_image() {
   local image_id
   image_id="$(jq -er '.[0].Id' "${inspection}")"
   [[ "${image_id}" =~ ^sha256:[a-f0-9]{64}$ ]] \
-    || fail 'the built voice image has no exact OCI config digest'
+    || fail 'the loaded voice image has no exact Docker image ID'
   [[ "$(jq -er '.[0].Os + "/" + .[0].Architecture' "${inspection}")" == linux/amd64 ]] \
     || fail 'the built voice image platform drifted'
   [[ "$(jq -er '.[0].Config.Labels["org.opencontainers.image.revision"]' \
        "${inspection}")" == "${source_revision}" ]] \
     || fail 'the built voice image source-revision label drifted'
-  built_config_digest="${image_id}"
+  built_config_digest="${exported_config_digest}"
 }
 
 assemble_release() {
@@ -384,6 +388,10 @@ assemble_release() {
   mkdir -p -- "${staging_root}/artifacts/voice" "${staging_root}/artifacts/sbom"
   docker image save --output \
     "${staging_root}/artifacts/voice/voice-image.docker.tar" "${requested_image_tag}"
+  [[ "$(python3 "${support_script}" inspect-voice-archive \
+      --archive "${staging_root}/artifacts/voice/voice-image.docker.tar" \
+      --revision "${source_revision}")" == "${config_digest}" ]] \
+    || fail "${round} saved voice image has a different OCI config subject"
   python3 "${support_script}" write-voice-manifest \
     --destination "${staging_root}/artifacts/voice/voice-image.manifest.json" \
     --revision "${source_revision}" --config-digest "${config_digest}"
@@ -438,9 +446,11 @@ if [[ "${second_config_digest}" != "${first_config_digest}" ]]; then
     --slurpfile first "${work_root}/image-inspection-1.json" \
     --slurpfile second "${work_root}/image-inspection-2.json" \
     '($first[0][0]) as $a | ($second[0][0]) as $b |
-     {firstConfigDigest: $a.Id, secondConfigDigest: $b.Id,
+     {firstDockerImageId: $a.Id, secondDockerImageId: $b.Id,
       firstCreated: $a.Created, secondCreated: $b.Created,
       firstLayers: $a.RootFS.Layers, secondLayers: $b.RootFS.Layers}' >&2
+  printf 'first OCI config digest: %s\nsecond OCI config digest: %s\n' \
+    "${first_config_digest}" "${second_config_digest}" >&2
   fail 'two clean voice-image builds produced different OCI config digests'
 fi
 assemble_release second "${image_tag}" "${second_config_digest}"

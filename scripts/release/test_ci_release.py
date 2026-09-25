@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import re
 import stat
 import sys
 import tempfile
+import tarfile
 import unittest
 from pathlib import Path
 
@@ -19,6 +21,7 @@ from ci_release_support import (
     CiReleaseError,
     PROMOTION_BLOCKERS,
     compare_and_publish,
+    inspect_voice_archive,
     load_ci_config,
     normalize_cyclonedx,
     prune_native_modules,
@@ -574,6 +577,25 @@ class CiReleaseTests(unittest.TestCase):
             with self.assertRaisesRegex(CiReleaseError, "revision or config digest"):
                 write_voice_manifest(Path(temporary) / "bad.json", REVISION, "latest")
 
+    def test_voice_archive_uses_config_bytes_not_docker_image_id(self) -> None:
+        config = {"os": "linux", "architecture": "amd64", "config": {
+            "Labels": {"org.opencontainers.image.revision": REVISION}}}
+        config_bytes = json.dumps(config, separators=(",", ":")).encode("ascii")
+        digest = hashlib.sha256(config_bytes).hexdigest()
+        with tempfile.TemporaryDirectory() as temporary:
+            archive_path = Path(temporary) / "voice.docker.tar"
+            with tarfile.open(archive_path, "w") as archive:
+                for name, data in (
+                    ("manifest.json", json.dumps([{"Config": f"blobs/sha256/{digest}"}]).encode()),
+                    (f"blobs/sha256/{digest}", config_bytes),
+                ):
+                    member = tarfile.TarInfo(name)
+                    member.size = len(data)
+                    archive.addfile(member, io.BytesIO(data))
+            self.assertEqual(inspect_voice_archive(archive_path, REVISION), f"sha256:{digest}")
+            with self.assertRaisesRegex(CiReleaseError, "source revision differs"):
+                inspect_voice_archive(archive_path, "b" * 40)
+
     def test_sbom_normalization_removes_only_ephemeral_identity_deterministically(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -827,6 +849,10 @@ class CiReleaseTests(unittest.TestCase):
         self.assertIn('docker buildx build --builder "${release_builder}"', builder)
         self.assertIn("--pull --no-cache --platform linux/amd64 --provenance=false", builder)
         self.assertIn("rewrite-timestamp=true", builder)
+        self.assertIn("inspect-voice-archive", builder)
+        dockerfile = (REPOSITORY_ROOT / "voice-app/Dockerfile").read_text("utf-8")
+        self.assertIn("apk add --no-cache --no-scripts --upgrade", dockerfile)
+        self.assertIn("rm -f /var/log/apk.log", dockerfile)
         self.assertIn('docker load --input "${image_archive}"', builder)
         self.assertIn('image-inspection-${image_build_count}.json', builder)
         self.assertIn('firstLayers: $a.RootFS.Layers, secondLayers: $b.RootFS.Layers', builder)

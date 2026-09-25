@@ -16,6 +16,7 @@ import re
 import shutil
 import stat
 import sys
+import tarfile
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -502,6 +503,56 @@ def write_voice_manifest(destination: Path, revision: str, config_digest: str) -
     destination.chmod(0o444)
 
 
+def inspect_voice_archive(archive_path: Path, revision: str) -> str:
+    """Read the OCI config digest from the archive, never Docker's image ID.
+
+    With Docker's containerd image store, `docker image inspect .Id` may be the
+    manifest digest. The archive's Config member is the actual config subject.
+    """
+    if not REVISION_RE.fullmatch(revision):
+        raise _error("voice archive source revision is invalid")
+    metadata = archive_path.lstat()
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1 or not (
+        0 < metadata.st_size <= 300_000_000
+    ):
+        raise _error("voice image archive has invalid metadata")
+    try:
+        with tarfile.open(archive_path, mode="r:") as archive:
+            manifest_member = archive.getmember("manifest.json")
+            if not manifest_member.isfile() or not (0 < manifest_member.size <= 65536):
+                raise _error("voice archive Docker manifest is invalid")
+            manifest = json.load(archive.extractfile(manifest_member))
+            if type(manifest) is not list or len(manifest) != 1 or type(manifest[0]) is not dict:
+                raise _error("voice archive must contain one Docker image")
+            config_path = manifest[0].get("Config")
+            if type(config_path) is not str or not re.fullmatch(
+                r"(?:blobs/sha256/[a-f0-9]{64}|[a-f0-9]{64}\.json)", config_path
+            ):
+                raise _error("voice archive config path is invalid")
+            config_member = archive.getmember(config_path)
+            if not config_member.isfile() or not (0 < config_member.size <= 1048576):
+                raise _error("voice archive config member is invalid")
+            config_bytes = archive.extractfile(config_member).read()
+    except (KeyError, tarfile.TarError, json.JSONDecodeError) as exc:
+        raise _error("voice archive manifest or config cannot be read") from exc
+    digest = hashlib.sha256(config_bytes).hexdigest()
+    if digest != config_path.rsplit("/", 1)[-1].removesuffix(".json"):
+        raise _error("voice archive config content differs from its filename")
+    try:
+        config = json.loads(config_bytes)
+        valid = (
+            type(config) is dict
+            and config.get("os") == "linux"
+            and config.get("architecture") == "amd64"
+            and config["config"]["Labels"]["org.opencontainers.image.revision"] == revision
+        )
+    except (KeyError, TypeError, json.JSONDecodeError):
+        valid = False
+    if not valid:
+        raise _error("voice archive platform or source revision differs")
+    return f"sha256:{digest}"
+
+
 def write_build_input(destination: Path, revision: str, tree: str) -> None:
     if not REVISION_RE.fullmatch(revision) or not REVISION_RE.fullmatch(tree):
         raise _error("build-input source identity is invalid")
@@ -714,6 +765,10 @@ def parser() -> argparse.ArgumentParser:
     voice.add_argument("--revision", required=True)
     voice.add_argument("--config-digest", required=True)
 
+    inspect_voice = commands.add_parser("inspect-voice-archive")
+    inspect_voice.add_argument("--archive", required=True, type=Path)
+    inspect_voice.add_argument("--revision", required=True)
+
     build_input = commands.add_parser("write-build-input")
     build_input.add_argument("--destination", required=True, type=Path)
     build_input.add_argument("--revision", required=True)
@@ -752,6 +807,8 @@ def main(argv: list[str] | None = None) -> int:
             )
         elif arguments.command == "write-voice-manifest":
             write_voice_manifest(arguments.destination, arguments.revision, arguments.config_digest)
+        elif arguments.command == "inspect-voice-archive":
+            print(inspect_voice_archive(arguments.archive, arguments.revision))
         elif arguments.command == "write-build-input":
             write_build_input(arguments.destination, arguments.revision, arguments.tree)
         elif arguments.command == "compare":
