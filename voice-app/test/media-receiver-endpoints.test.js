@@ -44,16 +44,16 @@ test('private Compose projection binds receiver files and environment without br
   const bind = (source, target, read_only = true) => ({ type: 'bind', source, target,
     ...(read_only ? { read_only: true } : {}), bind: {} });
   const document = { services: {
-    'voice-runtime-preflight': { network_mode: 'none' },
-    drachtio: { network_mode: 'host', container_name: 'drachtio', volumes: [
+    'voice-runtime-preflight': { network_mode: 'none', ulimits: { core: {} } },
+    drachtio: { network_mode: 'host', container_name: 'drachtio', ulimits: { core: {} }, volumes: [
       bind(`${runtimeRoot}/drachtio.conf.xml`, '/etc/drachtio.conf.xml')] },
-    freeswitch: { network_mode: 'host', container_name: 'freeswitch', volumes: [
+    freeswitch: { network_mode: 'host', container_name: 'freeswitch', ulimits: { core: {} }, volumes: [
       bind(`${contract.releaseRoot}/freeswitch/entrypoint.sh`, '/usr/local/bin/entrypoint-hermes-freeswitch.sh'),
       bind(`${contract.releaseRoot}/freeswitch/mrf.xml`, '/usr/local/freeswitch/conf/sip_profiles/mrf.xml'),
       bind(`${contract.releaseRoot}/freeswitch/switch.conf.xml`, '/usr/local/freeswitch/conf/autoload_configs/switch.conf.xml'),
       bind(`${runtimeRoot}/freeswitch-event-socket.conf.xml`, '/usr/local/freeswitch/conf/autoload_configs/event_socket.conf.xml'),
     ] },
-    'voice-app': { network_mode: 'host', container_name: 'voice-app',
+    'voice-app': { network_mode: 'host', container_name: 'voice-app', ulimits: { core: {} },
       environment: { ...VOICE_APP_FIXED_ENV, WS_PORT: '' }, volumes: [
         bind('/etc/teleagent-isolated-voice/config', '/app/config'),
         bind('/var/lib/teleagent-isolated-voice', '/app/state', false),
@@ -67,6 +67,7 @@ test('private Compose projection binds receiver files and environment without br
     { ...document.services['voice-app'].environment, ...projection.voiceEnvironment });
   assert.equal(candidate.services['voice-app'].network_mode,
     contract.bootstrap.services.voice.networkMode);
+  assert.ok(Object.values(candidate.services).every((service) => service.ulimits.core === 0));
   assert.deepEqual(candidate.services.freeswitch.volumes.map(({ target }) => target), [
     '/usr/local/bin/entrypoint-hermes-freeswitch.sh',
     '/usr/local/freeswitch/conf/sip_profiles/mrf.xml',

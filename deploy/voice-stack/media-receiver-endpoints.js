@@ -279,6 +279,15 @@ function preparePrivateCompose(document, contract, projection) {
   refuse(voice.environment.HTTP_HOST === '127.0.0.1' &&
     voice.environment.OUTBOUND_API_NON_LOOPBACK_ENABLED === 'false' &&
     voice.environment.VOICE_PRIVILEGED_ACTIONS_ENABLED === 'false');
+  // Docker Compose normalizes the source's `ulimits: { core: 0 }` to
+  // `{ core: {} }` in `config --format json`, but rejects that normalized
+  // object when it is consumed as a Compose file. Reassert the reviewed
+  // fixed zero limit before serializing the private candidate.
+  for (const service of Object.values(candidate.services)) {
+    exactKeys(service.ulimits, 'core');
+    exactKeys(service.ulimits.core, '');
+    service.ulimits.core = 0;
+  }
   return candidate;
 }
 

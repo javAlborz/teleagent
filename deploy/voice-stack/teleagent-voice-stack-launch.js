@@ -7,7 +7,9 @@ const http = require('node:http');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { requireRuntimeIntegration } = require('./media-application-boundary');
-const { prepareProtectedReceiverEndpoints, materializePrivateReceiverFiles } = require('./media-receiver-endpoints');
+const { prepareProtectedReceiverEndpoints, preparePrivateCompose,
+  materializePrivateReceiverFiles } = require('./media-receiver-endpoints');
+const { loadAdmission } = require('./media-application-boundary');
 
 const IMMUTABLE_RELEASE_ROOT = /^\/opt\/teleagent\/releases\/sha256-[a-f0-9]{64}$/u;
 // Unit starts receive this from the infrastructure-owned release launcher.
@@ -19,6 +21,7 @@ const ENV_FILE = '/etc/teleagent-isolated-voice/voice-app.env';
 const VOICE_IMAGE_MANIFEST = '/etc/teleagent-isolated-voice/voice-image.manifest.json';
 const CREDENTIAL_ROOT = '/etc/teleagent-isolated-voice/credentials';
 const RUNTIME_ROOT = '/run/teleagent-isolated-voice-stack';
+const PRIVATE_COMPOSE_FILE = `${RUNTIME_ROOT}/private-compose.json`;
 const RUNTIME_SECRET_ROOT = `${RUNTIME_ROOT}/voice-secrets`;
 const CONTROLLER_SOCKET = '/run/teleagent-controller/controller.sock';
 const ACTIVATION_ROOT = '/var/lib/teleagent-isolated-voice-stack';
@@ -912,6 +915,34 @@ function composeArgs(...args) {
   return ['compose', '--project-name', PROJECT, '--env-file', '/dev/null', '--file', COMPOSE_FILE, ...args];
 }
 
+function privateComposeArgs(...args) {
+  return ['compose', '--project-name', PROJECT, '--env-file', '/dev/null',
+    '--file', PRIVATE_COMPOSE_FILE, ...args];
+}
+
+function projectPrivateCompose(contract, projection, environment) {
+  const normalized = run(DOCKER, composeArgs('config', '--format', 'json'), {
+    capture: true, environment, timeoutMs: 15000,
+  });
+  if (Buffer.byteLength(normalized.stdout || '') > 262144) {
+    refuse('the normalized voice Compose input is unbounded');
+  }
+  let candidate;
+  try {
+    candidate = preparePrivateCompose(JSON.parse(normalized.stdout), contract, projection);
+  } catch {
+    refuse('the isolated voice Compose projection is invalid');
+  }
+  const serialized = `${JSON.stringify(candidate)}\n`;
+  if (Buffer.byteLength(serialized) > 262144) {
+    refuse('the isolated voice Compose projection is unbounded');
+  }
+  atomicReplaceFile(PRIVATE_COMPOSE_FILE, serialized, { mode: 0o444, uid: 0, gid: 0 });
+  run(DOCKER, privateComposeArgs('config', '--quiet'), {
+    environment, timeoutMs: 15000,
+  });
+}
+
 function requestJson({
   method,
   pathname,
@@ -1122,6 +1153,7 @@ function removeRuntimeProjection() {
     `${RUNTIME_ROOT}/freeswitch-acl.conf.xml`,
     `${RUNTIME_ROOT}/freeswitch-mrf.xml`,
     `${RUNTIME_ROOT}/freeswitch-switch.conf.xml`,
+    PRIVATE_COMPOSE_FILE,
   ]) fs.rmSync(filename, { force: true });
 }
 
@@ -1419,7 +1451,7 @@ function cleanupExactProject({
 
 function rollbackStartedStack(environment) {
   try {
-    run(DOCKER, composeArgs('down', '--timeout', '10', '--remove-orphans'), {
+    run(DOCKER, privateComposeArgs('down', '--timeout', '10', '--remove-orphans'), {
       environment,
       capture: true,
       allowFailure: true,
@@ -1493,11 +1525,13 @@ async function start(lifecycleFd) {
   try {
     const credentials = readCredentialSet(identity);
     projectRuntime(identities, credentials, receiverProjection);
-    run(DOCKER, composeArgs('config', '--quiet'), { environment });
+    const contract = loadAdmission(APP_ROOT, 'bootstrap-app',
+      receiverProjection.configurationDigest, { lifecycleFd });
+    projectPrivateCompose(contract, receiverProjection, environment);
     // Container creation is the first activating Docker mutation. Inspect the
     // immutable configured identities before any service process may start.
     activationAttempted = true;
-    run(DOCKER, composeArgs('create', '--no-build', '--pull', 'never'), { environment });
+    run(DOCKER, privateComposeArgs('create', '--no-build', '--pull', 'never'), { environment });
     verifyExactProjectContainerBoundary(
       startingState.activationGeneration, identities, { environment }
     );
@@ -1512,7 +1546,7 @@ async function start(lifecycleFd) {
     }
     // `up` retains Compose's preflight completion dependency after the
     // separately inspected create phase.
-    run(DOCKER, composeArgs('up', '--detach', '--no-build', '--pull', 'never'), { environment });
+    run(DOCKER, privateComposeArgs('up', '--detach', '--no-build', '--pull', 'never'), { environment });
     if (JSON.stringify(captureCreatedContainerOwnership(
       startingState.activationGeneration, imageId, { environment }
     )) !== JSON.stringify(ownership)) {

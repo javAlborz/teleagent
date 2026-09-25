@@ -400,7 +400,7 @@ test('failed stack start never clears panic evidence after Compose activation wa
   );
   const startBody = source.slice(source.indexOf('async function start(lifecycleFd)'),
     source.indexOf('async function stop()'));
-  assert.ok(startBody.indexOf('activationAttempted = true') < startBody.indexOf("composeArgs('create'"));
+  assert.ok(startBody.indexOf('activationAttempted = true') < startBody.indexOf("privateComposeArgs('create'"));
   assert.match(startBody, /startFailureDisposition\(activationAttempted\)/);
   assert.doesNotMatch(startBody,
     /catch \(error\)[\s\S]*rollbackStartedStack\(environment\)[\s\S]*persistActivationState\('inactive'/);
@@ -582,13 +582,14 @@ test('wrapper never puts credentials in Docker argv or inherited environment', (
   for (const [before, after] of [
     ['activationRequiresRecovery(readActivationState())', 'cleanupExactProject()'],
     ['verifyVoiceImage(imageManifest, { imageId })', 'readCredentialSet(identity)'],
-    ["persistActivationState('starting'", "composeArgs('create'"],
-    ['beginActivation: true', "composeArgs('create'"],
-    ['requireActiveUnit(CONTAINER_SLICE)', "composeArgs('create'"],
-    ['requireDockerCgroupBoundary()', "composeArgs('create'"],
-    ["composeArgs('create'", 'verifyExactProjectContainerBoundary('],
-    ['verifyExactProjectContainerBoundary(', "composeArgs('up'"],
-    ["composeArgs('up'", 'verifyRunningProjectProcessIdentities(identities'],
+    ["persistActivationState('starting'", "privateComposeArgs('create'"],
+    ['beginActivation: true', "privateComposeArgs('create'"],
+    ['requireActiveUnit(CONTAINER_SLICE)', "privateComposeArgs('create'"],
+    ['requireDockerCgroupBoundary()', "privateComposeArgs('create'"],
+    ['projectPrivateCompose(contract, receiverProjection, environment)', "privateComposeArgs('create'"],
+    ["privateComposeArgs('create'", 'verifyExactProjectContainerBoundary('],
+    ['verifyExactProjectContainerBoundary(', "privateComposeArgs('up'"],
+    ["privateComposeArgs('up'", 'verifyRunningProjectProcessIdentities(identities'],
     ['verifyRunningProjectProcessIdentities(identities', 'waitForHealth()'],
     ['await waitForHealth()', "persistActivationState('active'"],
     ['resolveVoiceIdentities()', 'verifyBoundedHostStateFilesystem(identity)'],
@@ -856,9 +857,9 @@ test('created container ownership binds all four full IDs before voice startup',
     path.join(__dirname, '..', '..', 'deploy', 'voice-stack', 'teleagent-voice-stack-launch.js'), 'utf8'
   );
   assert.ok(source.indexOf('persistCreatedContainerOwnership(ownership);') >
-    source.indexOf("composeArgs('create'"));
+    source.indexOf("privateComposeArgs('create'"));
   assert.ok(source.indexOf('persistCreatedContainerOwnership(ownership);') <
-    source.indexOf("composeArgs('up'"));
+    source.indexOf("privateComposeArgs('up'"));
 });
 
 test('activation state replacement is file-synced, renamed, then directory-synced', () => {
