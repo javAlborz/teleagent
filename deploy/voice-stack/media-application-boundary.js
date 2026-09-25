@@ -162,6 +162,12 @@ function exactComposeCandidate(document, contract) {
   keys(document.services, 'drachtio freeswitch voice-app voice-runtime-preflight');
   const candidate = structuredClone(document);
   need(candidate.services['voice-runtime-preflight'].network_mode === 'none');
+  need(!candidate.services['voice-runtime-preflight'].container_name &&
+    !candidate.services['voice-runtime-preflight'].userns_mode);
+  candidate.services['voice-runtime-preflight'].container_name = 'teleagent-isolated-voice-preflight';
+  candidate.services['voice-runtime-preflight'].image = contract.workloads['voice-app'].imageId;
+  candidate.services['voice-runtime-preflight'].userns_mode = 'host';
+  candidate.services['voice-runtime-preflight'].healthcheck = { disable: true };
   for (const service of SERVICES) {
     const config = candidate.services[service];
     need(config && FORBIDDEN.every((name) => !(name in config)) &&

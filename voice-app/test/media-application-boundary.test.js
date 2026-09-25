@@ -90,6 +90,10 @@ test('candidate selects exact IDs and keeps commands, credentials and all FreeSW
   };
   const contract = fixture();
   const result = boundary.exactComposeCandidate(original, contract);
+  assert.equal(result.services['voice-runtime-preflight'].container_name, 'teleagent-isolated-voice-preflight');
+  assert.equal(result.services['voice-runtime-preflight'].image, contract.workloads['voice-app'].imageId);
+  assert.equal(result.services['voice-runtime-preflight'].userns_mode, 'host');
+  assert.deepEqual(result.services['voice-runtime-preflight'].healthcheck, { disable: true });
   for (const service of Object.keys(IDS)) {
     assert.match(result.services[service].network_mode, /^container:[a-f0-9]{64}$/u);
     assert.equal(result.services[service].userns_mode, 'host');
