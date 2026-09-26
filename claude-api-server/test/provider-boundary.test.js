@@ -121,7 +121,16 @@ test('boundary invocation creates a private, bounded, credential-fed transient c
   assert.match(joined, /TemporaryFileSystem=\/srv\/teleagent-agent-workspaces:ro,nodev,nosuid/);
   assert.match(joined,
     /BindReadOnlyPaths=\/run\/teleagent-provider-egress\/claude\.sock:\/run\/teleagent-provider-egress\/claude\.sock/);
-  assert.match(joined, /InaccessiblePaths=.*\/var\/run/);
+  assert.doesNotMatch(joined, /InaccessiblePaths=.*\/var\/run/);
+  const denied = invocation.args.find((arg) => arg.startsWith('InaccessiblePaths='))
+    .slice('InaccessiblePaths='.length).split(' ');
+  assert.deepEqual(denied.filter((entry) => /^-?\/run\//u.test(entry)), [
+    '-/run/teleagent-worker-session', '-/run/teleagent-provider-launch',
+    '-/run/teleagent-provider-egress-control', '-/run/teleagent-privileged-action',
+  ]);
+  for (const mandatory of ['/opt/teleagent/current', '/var/lib/teleagent-control',
+    '/var/lib/teleagent-worker-state', '/var/lib/teleagent-privileged-action',
+    '/etc/teleagent/provider-egress-secrets']) assert.ok(denied.includes(mandatory));
   assert.match(joined, /-\/srv\/teleagent-agent-workspaces\/phone\/\.codex/);
   assert.match(joined, /-\/srv\/teleagent-agent-workspaces\/phone\/\.claude/);
   assert.doesNotMatch(joined, /ReadOnlyPaths=.*\/run\/teleagent-provider-egress(?:\s|$)/);
@@ -138,6 +147,7 @@ test('boundary invocation creates a private, bounded, credential-fed transient c
   assert.match(joined, /LimitCORE=0/);
   assert.match(joined, /CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_SETPCAP CAP_KILL/);
   assert.match(joined, /SystemCallFilter=~io_uring_setup io_uring_enter io_uring_register/);
+  assert.match(joined, /SystemCallErrorNumber=EPERM/);
   assert.doesNotMatch(joined, /CAP_CHOWN/);
   assert.match(joined, /LoadCredential=provider-launch-capability:/);
   assert.match(joined, /BindPaths=.*provider-readiness\.jsonl/);
@@ -1010,6 +1020,74 @@ test('global recovery tolerates exact absent sibling and already-removed readine
       }
     }
   });
+
+test('Codex-only recovery fences retained identities without contacting a disabled broker', async (t) => {
+  for (const provider of ['claude', 'codex']) {
+    for (const scenario of ['stopped', 'data-socket-failed', 'control-socket-failed',
+      'service-active', 'service-proof-malformed']) {
+      await t.test(`${provider}: ${scenario}`, async (t) => {
+        const fixture = launchTransactionFixture(t);
+        await assert.rejects(fixture.run(provider, {
+          operations: { waitQuiesced: async () => ({ quiesced: false }) },
+        }));
+        const stopped = [];
+        const controlCalls = [];
+        const panic = panicRecoveryFixture(fixture, {
+          activationProviders: ['codex'],
+          runSystemctl: (args) => {
+            stopped.push(args.join(' '));
+            const failedUnit = scenario === 'data-socket-failed'
+              ? 'teleagent-provider-egress@claude.socket'
+              : scenario === 'control-socket-failed'
+                ? 'teleagent-provider-egress-control@claude.socket' : null;
+            return { status: args[0] === 'stop' && args[1] === failedUnit ? 1 : 0 };
+          },
+          stopUnit: async (unit) => {
+            stopped.push(`quiesce ${unit}`);
+            if (unit === 'teleagent-provider-egress@claude.service') {
+              return { quiesced: scenario === 'service-active' ? false
+                : scenario === 'service-proof-malformed' ? 'true' : true };
+            }
+            return { quiesced: true };
+          },
+          control: async (request) => {
+            assert.equal(request.provider, 'codex', 'disabled broker must not be contacted');
+            assert.ok(stopped.includes('stop teleagent-provider-egress@claude.socket'));
+            assert.ok(stopped.includes('stop teleagent-provider-egress-control@claude.socket'));
+            assert.ok(stopped.includes('quiesce teleagent-provider-egress@claude.service'));
+            controlCalls.push(request);
+            return { persisted: true, quiesced: true };
+          },
+          enumerateUnits: (name) => [boundary.unitName(name, fixture.launchIds[provider])],
+          recoverEgress: async (name) => {
+            assert.equal(name, 'codex', 'disabled broker must not be started');
+            return { persisted: true, quiesced: true };
+          },
+        });
+        if (scenario !== 'stopped') {
+          // Missing sibling history may throw; either form must retain the
+          // durable global fence when disabled-plane shutdown is unproved.
+          try { assert.equal((await panic.recovery()).quiesced, false); }
+          catch (error) { assert.equal(error.code, 'PROVIDER_READINESS_MISSING'); }
+          assert.equal(fs.existsSync(fixture.lockPath), true);
+          return;
+        }
+        const result = await panic.recovery();
+        assert.equal(result.quiesced, true);
+        assert.equal(result.retainedLaunchCount, 2);
+        assert.equal(result.launchCount, 2);
+        assert.equal(result.egress.claude.disabled, true);
+        assert.equal(fs.existsSync(fixture.lockPath), false);
+        assert.equal(controlCalls.length, 2);
+        for (const name of ['claude', 'codex']) {
+          assert.equal(boundary.hasCancellationTombstone(
+            boundary.unitName(name, fixture.launchIds[provider]), { directory: panic.directory },
+          ), true);
+        }
+      });
+    }
+  }
+});
 
 test('failed global recovery never clears an uncertain launch fence', async (t) => {
   for (const name of ['tombstone failure', 'retained egress active', 'supervisor active',
@@ -1896,5 +1974,29 @@ test('only an unambiguous populated zero can prove cgroup quiescence', () => {
     const status = boundary.inspectUnit(unit, { runSystemctl, readCgroupEvents: () => events });
     assert.equal(status.quiesced, true);
     assert.equal(status.populated, false);
+  }
+});
+
+
+test('private runtime alias refuses a separate tree, substituted link, or writable parent', () => {
+  const directory = { isDirectory: () => true, uid: 0, mode: 0o755 };
+  const alias = { isSymbolicLink: () => true, uid: 0 };
+  const lstat = (name) => name === '/var/run' ? alias : directory;
+  for (const target of ['/run', '../run']) {
+    assert.equal(boundary.assertPrivateRuntimeAlias({ lstat, readlink: () => target }), true);
+  }
+  for (const target of ['/tmp/run', 'run', '/run/other']) {
+    assert.throws(() => boundary.assertPrivateRuntimeAlias({ lstat, readlink: () => target }),
+      /private runtime alias is unsafe/);
+  }
+  for (const changedPath of ['/var', '/run', '/var/run']) {
+    for (const change of [{ uid: 1000 }, { mode: 0o777 },
+      { isDirectory: () => false, isSymbolicLink: () => false }]) {
+      if (changedPath === '/var/run' && change.mode) continue; // symlink modes are not access checks
+      assert.throws(() => boundary.assertPrivateRuntimeAlias({
+        lstat: (name) => ({ ...lstat(name), ...(name === changedPath ? change : {}) }),
+        readlink: () => '/run',
+      }), /private runtime alias (parent )?is unsafe/);
+    }
   }
 });
