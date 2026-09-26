@@ -321,3 +321,88 @@ test('placement refuses escaped workload tasks and init disappearance after kern
   escapedChild = false; missingInit = true;
   assert.throws(() => boundary.verifyPlacement(contract, IDS, options));
 });
+
+test('missing namespace skips only a stable pinned dead task', (t) => {
+  const directory = fs.mkdtempSync('/tmp/teleagent-dead-task-');
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const task = path.join(directory, '123');
+  fs.mkdirSync(path.join(task, 'ns'), { recursive: true });
+  const taskStat = (state = 'Z', ticks = '1234', tid = '123') =>
+    `${tid} (odd ) process) ${[state, ...Array(18).fill('0'), ticks].join(' ')}\n`;
+  for (const state of ['Z', 'X']) {
+    fs.writeFileSync(path.join(task, 'stat'), taskStat(state));
+    assert.equal(boundary.namespaceTaskInfo(task), null);
+  }
+  for (const source of [taskStat('R'), taskStat('S'), taskStat('D'), taskStat('T'),
+    taskStat('Z', '0'), taskStat('Z', '1234', '999'), 'malformed', 'x'.repeat(8193)]) {
+    fs.writeFileSync(path.join(task, 'stat'), source);
+    assert.throws(() => boundary.namespaceTaskInfo(task), { code: 'MEDIA_APPLICATION_REFUSED' });
+  }
+  fs.unlinkSync(path.join(task, 'stat'));
+  assert.throws(() => boundary.namespaceTaskInfo(task), { code: 'ENOENT' });
+  fs.writeFileSync(path.join(task, 'ns/net'), '');
+  assert.equal(boundary.namespaceTaskInfo(task).ino, fs.statSync(path.join(task, 'ns/net')).ino);
+});
+
+test('dead task identity reuse, directory replacement and namespace reappearance refuse', (t) => {
+  const directory = fs.mkdtempSync('/tmp/teleagent-dead-task-race-');
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  for (const mutation of ['identity', 'directory', 'namespace']) {
+    const task = path.join(directory, mutation, '123');
+    fs.mkdirSync(path.join(task, 'ns'), { recursive: true });
+    fs.writeFileSync(path.join(task, 'stat'), `123 (dead) Z ${Array(18).fill('0').join(' ')} 1234\n`);
+    let reads = 0;
+    const io = { ...fs, readSync(...args) {
+      reads += 1;
+      if (reads === 2 && mutation === 'identity') {
+        fs.writeFileSync(path.join(task, 'stat'), `123 (dead) Z ${Array(18).fill('0').join(' ')} 1235\n`);
+      }
+      const result = fs.readSync(...args);
+      if (reads === 2 && mutation === 'directory') {
+        fs.renameSync(task, `${task}-retired`); fs.mkdirSync(task);
+      }
+      if (reads === 1 && mutation === 'namespace') fs.writeFileSync(path.join(task, 'ns/net'), '');
+      return result;
+    } };
+    assert.throws(() => boundary.namespaceTaskInfo(task, io), { code: 'MEDIA_APPLICATION_REFUSED' });
+  }
+});
+
+test('namespace permission failure never invokes the dead-task exception', () => {
+  assert.throws(() => boundary.namespaceTaskInfo('/proc/123/task/123', {
+    statSync() { throw Object.assign(new Error('access denied'), { code: 'EACCES' }); },
+    openSync() { assert.fail('must not attempt a dead task proof'); },
+  }), { code: 'EACCES' });
+});
+
+test('dead unrelated task cannot hide a missing required anchor', (t) => {
+  const directory = fs.mkdtempSync('/tmp/teleagent-dead-task-inventory-');
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const dead = path.join(directory, '999');
+  fs.mkdirSync(path.join(dead, 'ns'), { recursive: true });
+  fs.writeFileSync(path.join(dead, 'stat'), `999 (dead) Z ${Array(18).fill('0').join(' ')} 1234\n`);
+  const contract = fixture();
+  const anchors = Object.values(contract.bootstrap.services);
+  let omitAnchor = false;
+  const map = (filename) => filename.replace('/proc/999/task/999', dead);
+  const io = { ...fs,
+    readdirSync(filename) {
+      if (filename === '/proc') return [...anchors.slice(omitAnchor ? 1 : 0).map((x) => String(x.pid)), '999'];
+      return [filename.split('/')[2]];
+    },
+    statSync(filename) {
+      if (filename.startsWith('/proc/999/') || filename.startsWith('/proc/self/fd/')) return fs.statSync(map(filename));
+      const anchor = anchors.find((x) => String(x.pid) === filename.split('/')[2]);
+      return { dev: anchor.namespaceDevice, ino: anchor.namespaceInode };
+    },
+    openSync(filename, flags) { return fs.openSync(map(filename), flags); },
+    lstatSync(filename) { return fs.lstatSync(map(filename)); },
+    readFileSync(filename) {
+      const anchor = anchors.find((x) => String(x.pid) === filename.split('/')[2]);
+      return `0::/teleagent.slice/teleagent-media.slice/docker-${anchor.containerId}.scope`;
+    },
+  };
+  assert.equal(Object.keys(boundary.verifyTasks(contract, {}, io)).length, 4);
+  omitAnchor = true;
+  assert.throws(() => boundary.verifyTasks(contract, {}, io), { code: 'MEDIA_APPLICATION_REFUSED' });
+});

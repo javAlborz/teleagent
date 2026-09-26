@@ -219,6 +219,24 @@ reason
 `receiver-safe-sip-media-network-boundary-and-asterisk-rtp-attestation-are-not-implemented`
 must remain present until staging proves the installed infrastructure boundary.
 
+The pinned root voice launcher performs host namespace observation and publishes
+root-owned media admission records. Its systemd sandbox therefore permits host
+process metadata and boot identity reads, `CAP_SYS_PTRACE`, `CAP_SYS_ADMIN` and
+`CAP_NET_ADMIN`, mount/network namespace entry, and netlink. The last two
+capabilities support the fixed `ip netns exec` and nftables readbacks; they are
+not granted to the phone workloads. Writes remain restricted to the fixed
+isolated runtime/state directories and the media contract/journal directories.
+The protected provider credentials and worker state remain inaccessible. Hermes
+read-only admission passed under these exact sandbox settings; the preceding
+proc/capability restrictions denied every nonroot anchor namespace before start.
+
+The application's separate complete namespace inventory omits a missing
+namespace only after pinning the task directory and verifying an unchanged Z/X
+state with the same nonzero start time twice. A live, unreadable, reused or
+replaced task still refuses admission, and every required anchor must remain
+present. This matches the host and PBX observer policy without relying on a
+retry to repair a persistent dead task.
+
 The voice stack has no autonomous Docker restart policy. A systemd-owned gate
 starts it only after the local SIP fence, split provider plane, controller,
 distinct media identities, non-authority credentials, and configuration are

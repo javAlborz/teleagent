@@ -39,7 +39,9 @@ TimeoutStopSec=150s
 KillMode=control-group
 IOWeight=50
 NoNewPrivileges=yes
-CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER
+# Only the pinned root launcher receives these host observation capabilities.
+# Workload containers retain their separate nonroot, capability-free profiles.
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SYS_PTRACE CAP_SYS_ADMIN CAP_NET_ADMIN
 PrivateDevices=yes
 PrivateTmp=yes
 ProtectSystem=strict
@@ -50,17 +52,18 @@ ProtectKernelModules=yes
 ProtectKernelTunables=yes
 ProtectClock=yes
 ProtectHostname=yes
-ProtectProc=invisible
-ProcSubset=pid
+ProtectProc=default
+ProcSubset=all
 RestrictRealtime=yes
-RestrictNamespaces=yes
+RestrictNamespaces=net mnt
 RestrictSUIDSGID=yes
 LockPersonality=yes
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 ReadOnlyPaths=/opt/teleagent/releases /etc/teleagent-isolated-voice /etc/teleagent/provider-runtime
 ReadOnlyPaths=/usr/local/libexec /sys/kernel/security/apparmor/profiles
 ReadWritePaths=/run/teleagent-isolated-voice-stack /var/lib/teleagent-isolated-voice
 ReadWritePaths=/var/lib/teleagent-isolated-voice-stack
+ReadWritePaths=/etc/teleagent-media /var/lib/teleagent-media
 InaccessiblePaths=/etc/teleagent/provider-egress-secrets /etc/teleagent/privileged-action
 InaccessiblePaths=/var/lib/teleagent-provider-plane /var/lib/teleagent-worker-state
 

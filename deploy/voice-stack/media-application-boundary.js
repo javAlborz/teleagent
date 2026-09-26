@@ -241,6 +241,45 @@ function kernelLimits(cgroup, limits, io = fs) {
   }
 }
 
+function deadTaskIdentity(taskDirectory, taskId, io) {
+  const descriptor = io.openSync(`${taskDirectory}/stat`, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  let source;
+  try {
+    const bytes = Buffer.alloc(8193);
+    const count = io.readSync(descriptor, bytes, 0, bytes.length, 0);
+    need(count > 0 && count <= 8192);
+    source = bytes.subarray(0, count).toString('utf8');
+  } finally { io.closeSync(descriptor); }
+  const separator = source.lastIndexOf(') ');
+  const fields = separator < 0 ? [] : source.slice(separator + 2).trim().split(/\s+/u);
+  need(source.startsWith(`${taskId} (`) && separator > 0 && fields.length >= 20 &&
+    ['Z', 'X'].includes(fields[0]) && /^[1-9][0-9]*$/u.test(fields[19]));
+  return `${taskId}:${fields[0]}:${fields[19]}`;
+}
+
+function namespaceTaskInfo(task, io = fs) {
+  try { return io.statSync(`${task}/ns/net`); }
+  catch (error) { if (error.code !== 'ENOENT') throw error; }
+  // Hold the task directory across both dead-identity reads. Missing or
+  // unreadable live tasks are never silently omitted from the inventory.
+  const taskId = path.basename(task);
+  need(/^[1-9][0-9]*$/u.test(taskId));
+  const descriptor = io.openSync(task, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+  try {
+    const before = io.fstatSync(descriptor);
+    const pinned = `/proc/self/fd/${descriptor}`;
+    const first = deadTaskIdentity(pinned, taskId, io);
+    let absent = false;
+    try { io.statSync(`${pinned}/ns/net`); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; absent = true; }
+    need(absent && first === deadTaskIdentity(pinned, taskId, io));
+    const after = io.lstatSync(task);
+    need(before.isDirectory() && after.isDirectory() &&
+      before.dev === after.dev && before.ino === after.ino);
+    return null;
+  } finally { io.closeSync(descriptor); }
+}
+
 function verifyTasksOnce(contract, placements, io) {
   const expected = new Map();
   const admittedCgroups = new Map();
@@ -256,7 +295,8 @@ function verifyTasksOnce(contract, placements, io) {
   for (const processId of io.readdirSync('/proc').filter((value) => /^[1-9][0-9]*$/u.test(value))) {
     for (const taskId of io.readdirSync(`/proc/${processId}/task`)) {
       const task = `/proc/${processId}/task/${taskId}`;
-      const namespace = io.statSync(`${task}/ns/net`);
+      const namespace = namespaceTaskInfo(task, io);
+      if (namespace === null) continue;
       const namespaceKey = `${namespace.dev}:${namespace.ino}`;
       const cgroup = io.readFileSync(`${task}/cgroup`, 'utf8').trim();
       need(![...admittedCgroups.keys()].some((scope) => cgroup.startsWith(`${scope}/`)));
@@ -352,4 +392,4 @@ function verifyProtectedPlacement(releaseRoot, placements, stage, {
 
 module.exports = { CONTRACT, AUTHORITY, INSPECT, SOURCE_DIGEST, LIMITS, canonical, digest, validateContract,
   protectedFile, loadAdmission, exactComposeCandidate, profile, validateDocker, startTicks, kernelProcess,
-  kernelLimits, verifyTasks, verifyPlacement, verifyProtectedPlacement };
+  kernelLimits, namespaceTaskInfo, verifyTasks, verifyPlacement, verifyProtectedPlacement };
