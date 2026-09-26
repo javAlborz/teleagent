@@ -696,7 +696,7 @@ if [ "${TELEAGENT_PROVIDER_CANARY:-}" != "$expected_canary_ack" ]; then
   exit 77
 fi
 host_socket_probe=/run/teleagent-provider-host-socket-probe.sock
-visible_socket_probe="$workspace/.teleagent-visible-host-socket-probe.sock"
+visible_socket_probe=/run/teleagent-visible-host-socket-probe.sock
 if [ -e "$host_socket_probe" ] || [ -L "$host_socket_probe" ]; then
   echo "provider host socket probe path already exists" >&2
   exit 77

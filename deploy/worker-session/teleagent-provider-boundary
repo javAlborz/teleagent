@@ -1572,6 +1572,10 @@ function buildSystemdRunInvocation(input) {
       ? [`BindReadOnlyPaths=${input.workspace}:${input.workspace}`]
       : [`BindPaths=${input.workspace}:${input.workspace}`]),
     `BindReadOnlyPaths=${input.spec.egressSocket}:${input.spec.egressSocket}`,
+    // Optional root-created activation fixture. Keep it outside the workspace,
+    // whose admission contract rejects every socket. The model profile must
+    // deny connecting even when this exact harmless socket is visible.
+    'BindReadOnlyPaths=-/run/teleagent-visible-host-socket-probe.sock',
     `BindPaths=${input.readinessPath}:${input.readinessPath}`,
     // /run is an empty read-only tmpfs with only the explicit bindings above.
     // Its host-only denial targets are absent when systemd applies the list.

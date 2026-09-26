@@ -96,13 +96,15 @@ if (networkDevices.length !== 1 || networkDevices[0] !== 'lo' ||
     fs.readFileSync('/sys/class/net/lo/type', 'utf8').trim() !== '772') {
   fail('provider runtime network namespace is not loopback-only');
 }
-const ipv4Routes = fs.readFileSync('/proc/net/route', 'utf8').trim().split('\n').slice(1);
+// ProcSubset=pid hides the top-level /proc/net alias. The process view
+// remains available and observes this launch's private network namespace.
+const ipv4Routes = fs.readFileSync('/proc/self/net/route', 'utf8').trim().split('\n').slice(1);
 if (ipv4Routes.some((line) => {
   const fields = line.trim().split(/\s+/);
   return fields[1] === '00000000' && fields[0] !== 'lo';
 })) fail('provider runtime has an external IPv4 route');
 let ipv6Routes = '';
-try { ipv6Routes = fs.readFileSync('/proc/net/ipv6_route', 'utf8'); }
+try { ipv6Routes = fs.readFileSync('/proc/self/net/ipv6_route', 'utf8'); }
 catch { /* IPv6 may be disabled entirely */ }
 if (ipv6Routes.split('\n').some((line) => {
   const fields = line.trim().split(/\s+/);
@@ -140,17 +142,13 @@ const relative = path.relative(WORKSPACE_ROOT, workspace);
 if (!relative || relative.startsWith('..') || path.isAbsolute(relative) ||
     !/^[A-Za-z0-9_./-]+$/.test(workspace)) fail('workspace is outside the shared root');
 
-// The activation verifier projects this world-connectable host socket through
-// the selected workspace. Unlike the separate /run probe, mount namespacing
-// cannot hide it. A child inheriting the enforced model profile must receive
-// an LSM denial; otherwise pathname AF_UNIX access is not actually fenced.
-const visibleUnixSocketProbe = path.join(
-  workspace,
-  '.teleagent-visible-host-socket-probe.sock'
-);
+// The activation verifier creates this root-owned, world-connectable socket
+// outside the workspace. Its explicit projection into private /run proves
+// that AppArmor denies a visible socket independently of mount isolation.
+const visibleUnixSocketProbe = '/run/teleagent-visible-host-socket-probe.sock';
 if (fs.existsSync(visibleUnixSocketProbe)) {
   const metadata = fs.lstatSync(visibleUnixSocketProbe);
-  if (!metadata.isSocket() || metadata.isSymbolicLink() ||
+  if (!metadata.isSocket() || metadata.isSymbolicLink() || metadata.uid !== 0 ||
       (metadata.mode & 0o777) !== 0o777) {
     fail('visible host Unix socket probe metadata is unsafe');
   }

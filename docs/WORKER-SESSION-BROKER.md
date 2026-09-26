@@ -30,6 +30,22 @@ boundaries:
    enforces conservative durable request/token budgets, strips untrusted auth,
    and revokes every launch capability on restart or shutdown.
 
+The model profile permits anonymous stream socketpairs for Node child-process
+I/O. Abstract Unix connection/listener operations remain denied.
+AppArmor checks pathname sockets through file-write permissions, so model
+writes are limited to its private `/tmp`, the admitted workspace, and standard
+terminal devices. The private mounts and pre-launch rejection of workspace
+sockets are part of this boundary; the profile must not be used alone against
+an arbitrary host workspace. See the [AppArmor Unix socket rules](https://apparmor.net/man/3.0/apparmor.d/#unix-socket-rules).
+
+The attended activation verifier creates a root-owned world-connectable socket
+at `/run/teleagent-visible-host-socket-probe.sock`. An optional read-only bind
+projects this exact fixture into the private runtime. The verifier first proves
+the worker UID can connect without the model profile; the model runtime then
+requires an AppArmor denial. The fixture stays outside the socket-free
+workspace. Its listener and path are removed on verifier exit. Route checks use
+`/proc/self/net` so they inspect the launch namespace with `ProcSubset=pid`.
+
 Both provider worker identities are mandatory:
 
 ```dotenv
