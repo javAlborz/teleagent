@@ -11,6 +11,9 @@ const FIXED_WORKSPACE = '/srv/teleagent-agent-workspaces/phone';
 const EMPTY_MCP = '/etc/teleagent/provider-runtime/empty-mcp.json';
 const EMPTY_SETTINGS = '/etc/teleagent/provider-runtime/empty-settings.json';
 const CANARY_RESPONSE = 'PROVIDER_CANARY_OK';
+// Exact startup notice emitted by the pinned v0.149.1 CLI for our fixed sandbox
+// setting. This is not a successful turn and does not excuse any other error.
+const CODEX_LANDLOCK_NOTICE = '`[features].use_legacy_landlock` is deprecated and will be removed soon. (Remove this setting to stop opting into the legacy Linux sandbox behavior.)';
 const MAX_COMBINED_OUTPUT_BYTES = 16 * 1024;
 // Includes bounded root preflight, one minimal model turn, and completion.
 const CANARY_DEADLINE_MS = 90 * 1000;
@@ -135,6 +138,7 @@ function parseCodexCanaryOutput(stdout) {
   let turnStarted = false;
   let finalMessages = 0;
   let turnCompleted = false;
+  let startupNoticeSeen = false;
   const itemLifecycles = new Map();
   const validIdentity = (value) => (
     typeof value === 'string' &&
@@ -167,6 +171,16 @@ function parseCodexCanaryOutput(stdout) {
     }
     if (event.type === 'item.started' || event.type === 'item.updated' ||
         event.type === 'item.completed') {
+      if (event.type === 'item.completed' && threadStarted && !turnStarted &&
+          !startupNoticeSeen && event.item && !Array.isArray(event.item) &&
+          Object.keys(event).sort().join(',') === 'item,type' &&
+          Object.keys(event.item).sort().join(',') === 'id,message,type' &&
+          validIdentity(event.item.id) && event.item.type === 'error' &&
+          event.item.message === CODEX_LANDLOCK_NOTICE) {
+        startupNoticeSeen = true;
+        itemLifecycles.set(event.item.id, { type: 'error', completed: true });
+        continue;
+      }
       if (!turnStarted || !event.item || typeof event.item !== 'object') {
         throw new Error('Codex canary item evidence was malformed');
       }
