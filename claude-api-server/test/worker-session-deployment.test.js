@@ -122,6 +122,7 @@ test('session broker, RPC socket, state DB, and tmux socket exclude provider ide
   assert.doesNotMatch(providerService, /\/var\/lib\/teleagent-%i-supervisor/);
   assert.match(providerService, /^LimitCORE=0$/m);
   assert.match(providerService, /^Slice=teleagent-provider\.slice$/m);
+  assert.match(providerService, /^MemoryHigh=469762048$/m);
   assert.match(providerService, /^MemoryMax=536870912$/m);
   assert.match(providerService, /^MemorySwapMax=0$/m);
   assert.match(providerService, /^CPUQuota=25%$/m);

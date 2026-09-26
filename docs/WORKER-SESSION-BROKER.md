@@ -45,6 +45,15 @@ proof before promotion. Launch callers cannot override this feature selection.
 The egress broker accepts the observed `functions` namespace only for `exec`
 custom-tool continuations; unobserved namespace/name pairs remain denied.
 
+The supervisor's soft memory limit is 448 MiB within its unchanged 512 MiB
+hard cap, zero-swap setting, and aggregate provider pool. Its launch-time CLI
+integrity check now reads the additional 58 MB companion. The old 384 MiB
+soft limit induced reclaim pressure during that check and resource admission
+refused the launch. An actual-supervisor help-only probe passed with 448 MiB;
+its temporary override was removed and the legacy phone restored. This is
+startup evidence only, not successful provider inference or phone acceptance.
+The global memory-pressure thresholds remain unchanged.
+
 Same-profile process metadata reads let the runtime record its child PID and
 start time before acknowledging spawn. Ptrace attachment/control and metadata
 access to other profiles are not granted.
