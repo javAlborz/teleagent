@@ -735,6 +735,7 @@ class CiReleaseTests(unittest.TestCase):
             payloads = {
                 "claude": b"fixture-claude-binary",
                 "codex-vendor": b"fixture-codex-vendor-binary",
+                "codex-code-mode-host": b"fixture-code-mode-host-binary",
             }
             config = load_ci_config(CONFIG)
             for artifact_id, payload in payloads.items():
@@ -757,6 +758,10 @@ class CiReleaseTests(unittest.TestCase):
                 provider_record(
                     "codex-vendor", "codex", "/opt/teleagent/agent-tools/codex-vendor", None,
                     payloads["codex-vendor"],
+                ),
+                provider_record(
+                    "codex-code-mode-host", "codex", "/opt/teleagent/agent-tools/codex-code-mode-host", None,
+                    payloads["codex-code-mode-host"],
                 ),
             ]
             manifest = root / "provider-cli.manifest.json"

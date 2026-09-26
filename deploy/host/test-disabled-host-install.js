@@ -182,6 +182,7 @@ function createFixture({ entrypointBarrier = false, fenceInstallOutput = '',
     ['realtime-sip-gateway/deploy/verify-realtime-sip-gateway', '# fixture SIP verifier\n'],
     ['artifacts/provider-cli/claude', 'fixture claude bytes\n'],
     ['artifacts/provider-cli/codex-vendor', 'fixture codex bytes\n'],
+    ['artifacts/provider-cli/codex-code-mode-host', 'fixture code mode host bytes\n'],
   ]);
   for (const [relative, contents] of sources) {
     writeFile(path.join(releaseRoot, relative), contents, 0o555);
@@ -198,8 +199,8 @@ function createFixture({ entrypointBarrier = false, fenceInstallOutput = '',
     `    printf '%s\\n' SIP_GATEWAY_IDENTITY_SOURCE_OK ;;\n` +
     '  teleagent-provider-cli-install)\n' +
     (providerCliLargeStage
-      ? `    case "${'${1:-}'}:$#" in --install:5) /usr/bin/head -c 393216 /dev/zero > ${JSON.stringify(path.join(root, 'test-assets/provider-cli-stage-probe'))} ;; --check:1) : ;; *) exit 77 ;; esac ;;\n`
-      : '    case "${1:-}:$#" in --install:5|--check:1) : ;; *) exit 77 ;; esac ;;\n') +
+      ? `    case "${'${1:-}'}:$#" in --install:7) /usr/bin/head -c 393216 /dev/zero > ${JSON.stringify(path.join(root, 'test-assets/provider-cli-stage-probe'))} ;; --check:1) : ;; *) exit 77 ;; esac ;;\n`
+      : '    case "${1:-}:$#" in --install:7|--check:1) : ;; *) exit 77 ;; esac ;;\n') +
     '  teleagent-provider-cli-check)\n' +
     '    case "$*" in\n' +
     `      '--provider claude') printf '%s\\n' 'PROVIDER_CLI_OK claude' ;;\n` +

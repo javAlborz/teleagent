@@ -46,6 +46,7 @@ sip_installer_source=realtime-sip-gateway/deploy/teleagent-realtime-sip-gateway-
 voice_installer_source=deploy/voice-stack/teleagent-voice-stack-install
 claude_artifact=artifacts/provider-cli/claude
 codex_artifact=artifacts/provider-cli/codex-vendor
+codex_code_host_artifact=artifacts/provider-cli/codex-code-mode-host
 
 worker_installed=/usr/local/libexec/teleagent-worker-session-install
 provider_installer=/usr/local/libexec/teleagent-provider-cli-install
@@ -440,7 +441,7 @@ assert_release_sources() {
   for relative in \
     "$host_installer_source" "$worker_source" "$controller_source" "$sip_fence_source" \
     "$voice_verifier_source" "$sip_verifier_source" "$sip_installer_source" \
-    "$voice_installer_source" "$claude_artifact" "$codex_artifact"; do
+    "$voice_installer_source" "$claude_artifact" "$codex_artifact" "$codex_code_host_artifact"; do
     assert_release_file "$gate_release_root" "$relative" 555
   done
 }
@@ -719,7 +720,8 @@ install_provider_cli() {
     ulimit -Sf 300000
     run_empty 'provider CLI install' "$node" "$installer" --install \
       --claude-source "$gate_release_root/$claude_artifact" \
-      --codex-vendor-source "$gate_release_root/$codex_artifact"
+      --codex-vendor-source "$gate_release_root/$codex_artifact" \
+      --codex-code-mode-host-source "$gate_release_root/$codex_code_host_artifact"
   )
   run_exact 'PROVIDER_CLI_OK claude' 'Claude CLI credentialless check' \
     "$node" "$checker" --provider claude

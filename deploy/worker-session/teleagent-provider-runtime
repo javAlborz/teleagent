@@ -241,6 +241,9 @@ if (provider === 'claude' && mode === 'managed') {
     fail('persistent Claude provider sessions are disabled');
   }
 } else if (provider === 'codex') {
+  if (providerArgs.some(argument => /^--(?:enable|disable)(?:=|$)/.test(argument))) {
+    fail('Codex provider features cannot be overridden by a launch');
+  }
   if (mode === 'managed') {
     for (const flag of ['--ignore-user-config', '--ignore-rules', '--strict-config']) {
       requireExactFlag(providerArgs, flag);
@@ -256,6 +259,9 @@ if (provider === 'claude' && mode === 'managed') {
     index += 1;
   }
   providerArgs = [
+    // The pinned CLI's Landlock mode works inside the existing outer namespace
+    // restrictions. Never grant nested namespace/mount capabilities to tools.
+    '-c', 'features.use_legacy_landlock=true',
     '-c', 'model_provider="teleagent-egress"',
     '-c', 'model_providers.teleagent-egress.name="Teleagent bounded egress"',
     '-c', `model_providers.teleagent-egress.base_url="${spec.baseUrl}"`,

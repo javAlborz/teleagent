@@ -6,6 +6,8 @@
 # and standard terminal devices. Mount isolation and workspace admission are
 # required together with this profile.
 profile teleagent-provider-model flags=(attach_disconnected,mediate_deleted) {
+  # Landlock opens the root directory when installing its read-only rules.
+  / r,
   /** rixm,
   owner /tmp/** rwkl,
   /srv/teleagent-agent-workspaces/phone/{,**} rwkl,

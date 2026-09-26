@@ -188,11 +188,12 @@ def load_ci_config(filename: Path | None = None) -> dict[str, Any]:
     }:
         raise _error("release CI Trivy input is not the reviewed 0.72.0 artifact")
     provider_files = _require_keys(
-        config["providerFiles"], ("claude", "codex-vendor"), "release CI provider files"
+        config["providerFiles"], ("claude", "codex-vendor", "codex-code-mode-host"), "release CI provider files"
     )
     if provider_files != {
         "claude": "claude-2.1.246",
         "codex-vendor": "codex-vendor-0.149.1",
+        "codex-code-mode-host": "codex-code-mode-host-0.149.1",
     }:
         raise _error("release CI provider filenames drifted")
     return config
@@ -221,7 +222,7 @@ def _provider_records(manifest_path: Path) -> dict[str, dict[str, Any]]:
     _require_keys(document, ("version", "artifacts"), "provider CLI manifest")
     if document["version"] != 1 or type(document["artifacts"]) is not list:
         raise _error("provider CLI manifest version or artifacts are invalid")
-    expected_ids = ("claude", "codex-wrapper", "codex-vendor")
+    expected_ids = ("claude", "codex-wrapper", "codex-vendor", "codex-code-mode-host")
     if len(document["artifacts"]) != len(expected_ids):
         raise _error("provider CLI manifest artifact set is incomplete")
     records: dict[str, dict[str, Any]] = {}
@@ -300,12 +301,14 @@ def stage_provider_artifacts(
     sources = {
         "claude": input_root / config["providerFiles"]["claude"],
         "codex-vendor": input_root / config["providerFiles"]["codex-vendor"],
+        "codex-code-mode-host": input_root / config["providerFiles"]["codex-code-mode-host"],
     }
     destinations = {
         "claude": staging_root / "artifacts/provider-cli/claude",
         "codex-vendor": staging_root / "artifacts/provider-cli/codex-vendor",
+        "codex-code-mode-host": staging_root / "artifacts/provider-cli/codex-code-mode-host",
     }
-    for artifact_id in ("claude", "codex-vendor"):
+    for artifact_id in ("claude", "codex-vendor", "codex-code-mode-host"):
         verify_provider_file(
             sources[artifact_id],
             records[artifact_id],
@@ -329,7 +332,7 @@ def check_provider_inputs(
     records = _provider_records(manifest_path)
     config = load_ci_config()
     _assert_provider_ancestry(input_root, trusted_uid, trusted_gid)
-    for artifact_id in ("claude", "codex-vendor"):
+    for artifact_id in ("claude", "codex-vendor", "codex-code-mode-host"):
         verify_provider_file(
             input_root / config["providerFiles"][artifact_id],
             records[artifact_id],
@@ -613,6 +616,7 @@ def write_build_input(destination: Path, revision: str, tree: str) -> None:
                 {"id": "claude", "path": "artifacts/provider-cli/claude"},
                 {"id": "codex-wrapper", "path": "deploy/worker-session/teleagent-codex-cli-wrapper"},
                 {"id": "codex-vendor", "path": "artifacts/provider-cli/codex-vendor"},
+                {"id": "codex-code-mode-host", "path": "artifacts/provider-cli/codex-code-mode-host"},
             ],
         },
         "voiceImage": {
