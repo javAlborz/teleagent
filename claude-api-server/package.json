@@ -10,7 +10,7 @@
     "lint:fix": "cd .. && eslint claude-api-server/ --fix"
   },
   "dependencies": {
-    "better-sqlite3": "12.11.1",
+    "better-sqlite3": "13.0.3",
     "express": "^4.22.2",
     "node-pty": "1.1.0"
   },

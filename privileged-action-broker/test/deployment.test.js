@@ -86,7 +86,7 @@ test('root broker unit is dormant, bounded, package-local, and least-privileged'
     path.join(ROOT, 'privileged-action-broker', 'package.json'),
     'utf8',
   ));
-  assert.equal(packageDefinition.dependencies['better-sqlite3'], '12.11.1');
+  assert.equal(packageDefinition.dependencies['better-sqlite3'], '13.0.3');
 });
 
 test('broker verifies exact state before singleton acquisition and SQLite construction', () => {
