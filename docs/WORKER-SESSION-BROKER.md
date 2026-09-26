@@ -367,9 +367,14 @@ remaining OpenAI/Anthropic project balance. Provider billing dashboards remain
 authoritative. The durable SQLite ledger reserves request bytes plus the
 maximum output tokens and an envelope for every admitted request, including
 failed upstream requests. It charges those reserved tokens at a fixed
-conservative ceiling of $30 per million for Claude and $45 per million for
-Codex, with a hard policy ceiling of $5 in reserved cost per provider per UTC
-day. The gate rejects multimodal content, hosted tools, and caller-selected
+conservative ceiling of $30 per million for Claude. Codex reserves $3 per
+million for GPT-5.6 Luna, $27 for Terra, and $45 for Sol, with a hard policy
+ceiling of $5 in reserved cost per provider per UTC day. Historical cost rows
+retain their original reservations; a rate change never refunds or rewrites
+them. Codex requests always forward the reserved `max_output_tokens` limit,
+including when the CLI omitted it. Explicit token limits must be positive
+JSON integers within policy, not strings, fractions, null, or zero. The gate
+rejects multimodal content, hosted tools, and caller-selected
 premium service tiers. Codex requests explicitly use the OpenAI `default`
 service tier so a project-wide Fast setting cannot silently change their
 price. Those rates cover the admitted standard text traffic. A
@@ -378,11 +383,16 @@ provider at 200,000 reserved tokens per UTC day. No local ledger guarantees a
 provider invoice ceiling: verify current model rates, project/workspace
 credential binding, and provider-side monthly hard limits before activating
 either credential. Recheck these fixed rates if the allowed models or provider
-prices change. The September 23, 2026 rate review used the providers'
+prices change. The September 26, 2026 Codex rate review and September 23 Claude
+review used the providers'
 [Claude pricing](https://platform.claude.com/docs/en/about-claude/pricing)
 and [OpenAI API pricing](https://developers.openai.com/api/docs/pricing);
-the fixed allowances deliberately exceed standard text-token rates for the
-allowed models at that review.
+the Codex ceilings are at least 1.5 times each model's highest standard
+long-context output or cache-write token rate. Status reports expose those
+per-model ceilings alongside the provider-wide maximum. The unchanged
+200,000-token daily reservation cap remains independent of cost: inexpensive
+models can still exhaust that conservative token allowance. These bounds do
+not promise unlimited phone queries.
 
 For the first account-bound, Codex-only pilot, use the owner-selected OpenAI
 `phone` project and its approved $10 monthly limit with standard processing.

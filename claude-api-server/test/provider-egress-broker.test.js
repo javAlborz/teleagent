@@ -540,6 +540,52 @@ test('input reservations use a worst-case byte bound plus output and fixed frami
   );
 });
 
+test('Codex forwards the exact reserved output bound and rejects ambiguous limits', () => {
+  const selectedPolicy = policy();
+  const base = { model: 'gpt-5.6-sol', reasoning: { effort: 'high' }, input: 'bounded' };
+  for (const limit of [undefined, 1, 64, selectedPolicy.maxOutputTokens]) {
+    const body = { ...base };
+    if (limit !== undefined) body.max_output_tokens = limit;
+    const parsed = parseRequestBody(Buffer.from(JSON.stringify(body)), 'codex', selectedPolicy, 'inference');
+    const forwarded = JSON.parse(parsed.canonicalBuffer);
+    assert.equal(forwarded.max_output_tokens, limit ?? selectedPolicy.maxOutputTokens);
+    assert.equal(parsed.outputTokens, forwarded.max_output_tokens);
+    assert.equal(parsed.reservedTokens, parsed.requestBytes + forwarded.max_output_tokens + TOKEN_RESERVATION_ENVELOPE);
+    assert.equal(forwarded.service_tier, 'default');
+  }
+  for (const limit of [0, -1, 1.5, '64', '64junk', null, true, {}, [], 4097, 1e100]) {
+    assert.throws(() => parseRequestBody(Buffer.from(JSON.stringify({ ...base, max_output_tokens: limit })),
+      'codex', selectedPolicy, 'inference'), { code: 'PROVIDER_EGRESS_OUTPUT_DENIED' });
+  }
+});
+
+for (const [model, rate] of [['gpt-5.6-luna', 3], ['gpt-5.6-terra', 27], ['gpt-5.6-sol', 45]]) {
+  test(`${model} reserves its conservative rate without repricing historical rows`, (t) => {
+    const { db, policy: selectedPolicy } = harness(t);
+    selectedPolicy.allowedModels = [model];
+    selectedPolicy.maxDailyReservedCostMicroUsd = 18_000 + rate * 100;
+    register(db, selectedPolicy, { model, maxRequests: 3, maxReservedTokens: 1000 });
+    const reserve = (id, tokens) => reserveBudget(db, selectedPolicy, {
+      reservationId: id, launchId: LAUNCH_ID, capability: CAPABILITY, model,
+      routeKind: 'inference', reasoningEffort: REASONING_EFFORT_BY_MODEL[model],
+      requestBytes: 10, reservedTokens: tokens,
+    });
+    reserve('historical', 400);
+    // A row written by the previous fixed-$45 policy must remain fully charged.
+    db.prepare('UPDATE provider_egress_cost_reservations SET reserved_cost_micro_usd = 18000 WHERE reservation_id = ?').run('historical');
+    reserve('current', 100);
+    assert.throws(() => reserve('over_limit', 1), { code: 'PROVIDER_EGRESS_COST_BUDGET_EXHAUSTED' });
+    const status = budgetStatus(db, selectedPolicy);
+    assert.equal(status.usedReservedCostMicroUsd, 18_000 + rate * 100);
+    assert.equal(status.remainingReservedCostMicroUsd, 0);
+    assert.equal(status.costRateMicroUsdPerToken, 45);
+    assert.deepEqual(status.costRatesMicroUsdPerToken, { [model]: rate });
+    assert.equal(status.usedRequests, 2);
+    assert.equal(status.usedReservedTokens, 500);
+    assert.equal(db.prepare('SELECT reserved_cost_micro_usd AS cost FROM provider_egress_cost_reservations WHERE reservation_id = ?').get('historical').cost, 18_000);
+  });
+}
+
 test('provider-hosted search, MCP, computer, container, and background work are denied before spend', async (t) => {
   const { db, policy: selectedPolicy } = harness(t);
   register(db, selectedPolicy);
@@ -1101,7 +1147,7 @@ test('Codex exact responses inject the bearer while uncaptured compaction stays 
     route: '/v1/responses', headers,
     body: {
       model: 'gpt-5.6-sol', reasoning: { effort: 'high' },
-      max_output_tokens: 200, input: 'not persisted',
+      input: 'not persisted',
     },
   });
   assert.equal(inference.status, 200);
@@ -1112,6 +1158,7 @@ test('Codex exact responses inject the bearer while uncaptured compaction stays 
   assert.equal(compact.status, 403);
   assert.deepEqual(calls.map((call) => call.options.path), ['/v1/responses']);
   assert.equal(JSON.parse(calls[0].body).service_tier, 'default');
+  assert.equal(JSON.parse(calls[0].body).max_output_tokens, selectedPolicy.maxOutputTokens);
   for (const call of calls) {
     assert.equal(call.options.hostname, 'api.openai.com');
     assert.equal(call.options.headers.authorization, 'Bearer upstream-secret-that-never-returns');
