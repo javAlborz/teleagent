@@ -62,6 +62,14 @@ const TOKEN_RESERVATION_ENVELOPE = 1024;
 // currently reviewed text-token rates for the exact allowed models and modes.
 // Account billing remains authoritative; re-review these rates before release.
 const COST_RATE_MICRO_USD_PER_TOKEN = Object.freeze({ claude: 30, codex: 45 });
+// Reviewed 2026-09-26 against standard API pricing, including long-context
+// output and cache-write prices. Keep at least 1.5x the highest token rate;
+// charge every reserved input/output token at that model's ceiling.
+const CODEX_COST_RATE_MICRO_USD_PER_TOKEN = Object.freeze({
+  'gpt-5.6-luna': 3,
+  'gpt-5.6-terra': 27,
+  'gpt-5.6-sol': 45,
+});
 const MAX_DAILY_RESERVED_TOKENS = 200_000;
 const MAX_DAILY_RESERVED_COST_MICRO_USD = 5_000_000;
 const SAFE_MODEL = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -414,8 +422,10 @@ function budgetDay(now = new Date()) {
   return now.toISOString().slice(0, 10);
 }
 
-function costRateFor(policy) {
-  const rate = COST_RATE_MICRO_USD_PER_TOKEN[policy.provider];
+function costRateFor(policy, model = null) {
+  const rate = policy.provider === 'codex' && model !== null
+    ? CODEX_COST_RATE_MICRO_USD_PER_TOKEN[model]
+    : COST_RATE_MICRO_USD_PER_TOKEN[policy.provider];
   if (!Number.isSafeInteger(rate) || rate <= 0 ||
       !Number.isSafeInteger(policy.maxDailyReservedCostMicroUsd) ||
       policy.maxDailyReservedCostMicroUsd <= 0 ||
@@ -1141,7 +1151,7 @@ function parseRequestBody(buffer, provider, policy, routeKind) {
   else {
     outputTokens = provider === 'claude'
       ? Number.parseInt(body.max_tokens, 10)
-      : Number.parseInt(body.max_output_tokens, 10) || policy.maxOutputTokens;
+      : (Object.hasOwn(body, 'max_output_tokens') ? body.max_output_tokens : policy.maxOutputTokens);
   }
   if (!Number.isSafeInteger(outputTokens) || outputTokens <= 0 || outputTokens > policy.maxOutputTokens) {
     throw codedError('PROVIDER_EGRESS_OUTPUT_DENIED', 'Provider output token bound is invalid.', 403);
@@ -1149,7 +1159,12 @@ function parseRequestBody(buffer, provider, policy, routeKind) {
   // An omitted tier can inherit Fast mode from the OpenAI project. The caller
   // cannot select a tier, and the broker pins standard processing explicitly
   // before reserving its standard text-token cost allowance.
-  if (provider === 'codex') body.service_tier = 'default';
+  if (provider === 'codex') {
+    body.service_tier = 'default';
+    // The reserved output allowance must also constrain the upstream. The
+    // pinned CLI omits this field; omission must never mean unbounded output.
+    body.max_output_tokens = outputTokens;
+  }
   // Never forward the ambiguous raw JSON bytes. Upstreams may apply a
   // different first/last-wins rule to duplicate object members than V8 did
   // during validation. Serialize the one validated object and reserve using
@@ -1180,7 +1195,7 @@ function reserveBudget(db, policy, {
   now = new Date(),
 }) {
   const day = budgetDay(now);
-  const costRate = costRateFor(policy);
+  const costRate = costRateFor(policy, model);
   const reservedCostMicroUsd = reservedTokens * costRate;
   if (!Number.isSafeInteger(reservedTokens) || reservedTokens <= 0 ||
       !Number.isSafeInteger(reservedCostMicroUsd)) {
@@ -1258,6 +1273,9 @@ function budgetStatus(db, policy, now = new Date()) {
     usedReservedCostMicroUsd: total.reservedCostMicroUsd,
     remainingReservedCostMicroUsd: Math.max(
       0, policy.maxDailyReservedCostMicroUsd - total.reservedCostMicroUsd
+    ),
+    costRatesMicroUsdPerToken: Object.fromEntries(
+      policy.allowedModels.map((model) => [model, costRateFor(policy, model)])
     ),
     models,
   };
