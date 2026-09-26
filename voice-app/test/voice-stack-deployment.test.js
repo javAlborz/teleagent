@@ -226,6 +226,14 @@ test('voice deployment source is dormant and contains only the reviewed identity
     /^ExecStartPre=\/usr\/local\/libexec\/verify-voice-stack-identity/m);
   assert.match(unit,
     /^ExecStopPost=\/usr\/bin\/python3 -I \/usr\/local\/libexec\/verify-teleagent-release-closure --cleanup-voice-stack$/m);
+  // These permissions belong only to the immutable root observer. The live
+  // namespace admission needs host proc identities, setns/mount and netlink.
+  for (const line of [
+    'CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SYS_PTRACE CAP_SYS_ADMIN CAP_NET_ADMIN',
+    'ProtectProc=default', 'ProcSubset=all', 'RestrictNamespaces=net mnt',
+    'RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK',
+    'ReadWritePaths=/etc/teleagent-media /var/lib/teleagent-media',
+  ]) assert.ok(unit.split('\n').includes(line));
   assert.doesNotMatch(unit, /^\[Install\]$/m);
   assert.doesNotMatch(unit, /^Environment=.*(?:TOKEN|PASSWORD|SECRET|API_KEY|PRIVATE_KEY)=/mi);
   assert.doesNotMatch(compose, /^\s+group_add\s*:/m);
