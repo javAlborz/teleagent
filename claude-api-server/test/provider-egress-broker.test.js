@@ -851,6 +851,21 @@ test('provider persistence, premium tier selection, and remote content reference
   assert.equal(parseRequestBody(
     Buffer.from(JSON.stringify(capturedToolRoundTrip)), 'codex', codexPolicy, 'inference'
   ).model, 'gpt-5.6-sol', 'pinned local tool-result round trips remain compatible');
+  const namespaced = structuredClone(capturedToolRoundTrip);
+  namespaced.input[2].namespace = 'functions';
+  assert.equal(parseRequestBody(
+    Buffer.from(JSON.stringify(namespaced)), 'codex', codexPolicy, 'inference'
+  ).model, 'gpt-5.6-sol', 'observed namespaced code-mode continuations are admitted');
+  for (const mutation of [
+    { namespace: 'remote' }, { namespace: null }, { namespace: {} },
+    { namespace: 'functions', name: 'unobserved' },
+  ]) {
+    const invalid = structuredClone(namespaced);
+    Object.assign(invalid.input[2], mutation);
+    assert.throws(() => parseRequestBody(
+      Buffer.from(JSON.stringify(invalid)), 'codex', codexPolicy, 'inference'
+    ), error => error.code === 'PROVIDER_REMOTE_CONTENT_DENIED');
+  }
   for (const item of [
     { type: 'item_reference', id: 'provider-state-item' },
     {

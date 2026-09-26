@@ -896,13 +896,15 @@ function assertNoProviderFetchedContent(body, provider) {
         const fields = functionCall
           ? ['type', 'id', 'call_id', 'name', 'arguments',
             'internal_chat_message_metadata_passthrough']
-          : ['type', 'id', 'call_id', 'name', 'input', 'status',
+          : ['type', 'id', 'call_id', 'name', 'namespace', 'input', 'status',
             'internal_chat_message_metadata_passthrough'];
         const payload = functionCall ? item.arguments : item.input;
         if (!PROVIDER_ITEM_ID.test(String(item.id || '')) ||
             !PROVIDER_ITEM_ID.test(String(item.call_id || '')) ||
             !/^[A-Za-z0-9_.:-]{1,128}$/.test(String(item.name || '')) ||
             typeof payload !== 'string' ||
+            (item.namespace !== undefined &&
+              (functionCall || item.namespace !== 'functions' || item.name !== 'exec')) ||
             (!functionCall && item.status !== 'completed') ||
             Object.keys(item).some((key) => !fields.includes(key))) providerContentDenied();
         assertCodexCallMetadata(item);

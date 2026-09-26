@@ -161,8 +161,13 @@ function verifiedCodexToolCorrelation(body) {
   const input = Array.isArray(body?.input) ? body.input : [];
   const call = input.find((entry) => entry?.type === 'custom_tool_call');
   const result = input.find((entry) => entry?.type === 'custom_tool_call_output');
-  return call?.name === 'functions.exec' && typeof call.call_id === 'string' &&
-    call.call_id.length > 0 && result?.call_id === call.call_id;
+  return call?.name === 'exec' && call.namespace === 'functions' &&
+    typeof call.call_id === 'string' && call.call_id.length > 0 &&
+    result?.call_id === call.call_id && Array.isArray(result.output) &&
+    result.output.some(block => block.type === 'input_text' &&
+      block.text === 'OFFLINE_TOOL_OK') &&
+    result.output.some(block => block.type === 'input_text' &&
+      /^Script completed\n/.test(block.text));
 }
 
 function summarizeCapture(captured) {
@@ -305,7 +310,8 @@ function sendCodexToolUse(response, model, effort, inputTokens) {
     status: 'completed',
     call_id: 'call_offline_capture_1',
     input: 'text("OFFLINE_TOOL_OK")',
-    name: 'functions.exec',
+    name: 'exec',
+    namespace: 'functions',
   };
   const completed = codexResponse({ model, effort, item, inputTokens });
   sendSse(response, [
@@ -611,4 +617,6 @@ async function main() {
   }
 }
 
-main().catch((error) => fail(error.message));
+if (require.main === module) main().catch((error) => fail(error.message));
+
+module.exports = { verifiedCodexToolCorrelation };

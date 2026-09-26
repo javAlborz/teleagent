@@ -58,7 +58,7 @@ function readManifest() {
   }
   const manifest = JSON.parse(fs.readFileSync(MANIFEST, 'utf8'));
   if (manifest?.version !== 1 || !Array.isArray(manifest.artifacts) ||
-      manifest.artifacts.length !== 3) fail('the installed CLI manifest is invalid');
+      manifest.artifacts.length !== 4) fail('the installed CLI manifest is invalid');
   return manifest;
 }
 
@@ -211,7 +211,7 @@ function installArtifactsInPrivateStage(manifest, artifacts, sources, {
     }
     // The wrapper is committed last, so no executable path can select a new
     // vendor until that vendor and the matching Claude artifact are durable.
-    for (const id of ['codex-vendor', 'claude', 'codex-wrapper']) {
+    for (const id of ['codex-code-mode-host', 'codex-vendor', 'claude', 'codex-wrapper']) {
       const artifact = artifacts[id];
       fs.renameSync(path.join(stage, path.basename(artifact.path)), artifact.path);
       const descriptor = fs.openSync(artifact.path, fs.constants.O_RDONLY);
@@ -227,7 +227,7 @@ function installArtifactsInPrivateStage(manifest, artifacts, sources, {
   }
 }
 
-function install(claudeSource, codexVendorSource) {
+function install(claudeSource, codexVendorSource, codexCodeModeHostSource) {
   requireQuiescentProviderPlane();
   const manifest = readManifest();
   const artifacts = Object.fromEntries(manifest.artifacts.map((entry) => [entry.id, entry]));
@@ -235,6 +235,7 @@ function install(claudeSource, codexVendorSource) {
     claude: claudeSource,
     'codex-wrapper': artifacts['codex-wrapper'].source,
     'codex-vendor': codexVendorSource,
+    'codex-code-mode-host': codexCodeModeHostSource,
   };
   for (const artifact of manifest.artifacts) {
     assertTargetKnownOrAbsent(artifact);
@@ -274,12 +275,13 @@ function main() {
     for (const provider of ['claude', 'codex']) run(CHECKER, ['--provider', provider]);
     return;
   }
-  if (process.argv.length === 7 && process.argv[2] === '--install' &&
-      process.argv[3] === '--claude-source' && process.argv[5] === '--codex-vendor-source') {
-    install(process.argv[4], process.argv[6]);
+  if (process.argv.length === 9 && process.argv[2] === '--install' &&
+      process.argv[3] === '--claude-source' && process.argv[5] === '--codex-vendor-source' &&
+      process.argv[7] === '--codex-code-mode-host-source') {
+    install(process.argv[4], process.argv[6], process.argv[8]);
     return;
   }
-  fail('usage: teleagent-provider-cli-install --check | --install --claude-source ABS --codex-vendor-source ABS');
+  fail('usage: teleagent-provider-cli-install --check | --install --claude-source ABS --codex-vendor-source ABS --codex-code-mode-host-source ABS');
 }
 
 if (require.main === module) {

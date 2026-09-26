@@ -77,3 +77,35 @@ test('missing IPv4 evidence refuses before launch; disabled IPv6 remains support
   assert.match(inspectNetwork({ unavailable: '/proc/self/net/ipv6_route' }).refusal,
     /workspace is unavailable/);
 });
+
+// Exercise the real argument-admission block independently of the root-only
+// namespace setup, which is covered by the installed offline runtime probe.
+function admittedCodexArgs(extra = []) {
+  const { buildCodexArgs } = require('../agent-cli');
+  const args = buildCodexArgs({ model: 'gpt-5.6-luna', reasoningEffort: 'low',
+    sandbox: 'read-only', approvalPolicy: 'never',
+    workingDirectory: '/srv/teleagent-agent-workspaces/phone' });
+  const flagCheck = source.slice(source.indexOf('function requireExactFlag('),
+    source.indexOf('requireRootJson(EMPTY_SETTINGS'));
+  const admission = source.slice(source.indexOf('let providerArgs = args;'),
+    source.indexOf('process.umask(0o027)'));
+  return JSON.parse(vm.runInNewContext(`${flagCheck}\n${admission}\nJSON.stringify(providerArgs)`, {
+    args: [...args, ...extra], provider: 'codex', mode: 'managed',
+    spec: { baseUrl: 'http://127.0.0.1:18444/v1' },
+    fail: message => { throw new Error(message); },
+  }));
+}
+
+test('runtime pins Landlock and local egress independently of caller configuration', () => {
+  const args = admittedCodexArgs();
+  assert.equal(args.filter(value => value === 'features.use_legacy_landlock=true').length, 1);
+  assert.ok(args.includes('model_provider="teleagent-egress"'));
+  assert.ok(args.includes('model_providers.teleagent-egress.base_url="http://127.0.0.1:18444/v1"'));
+  assert.ok(args.includes('read-only'));
+  for (const extra of [
+    ['--disable', 'use_legacy_landlock'], ['--disable=use_legacy_landlock'],
+    ['--enable', 'unreviewed_feature'], ['--enable=unreviewed_feature'],
+    ['-c', 'features.use_legacy_landlock=false'],
+    ['--config', 'model_provider="openai"'],
+  ]) assert.throws(() => admittedCodexArgs(extra), /cannot be overridden/);
+});

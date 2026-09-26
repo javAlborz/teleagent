@@ -220,21 +220,24 @@ REALTIME_SIP_NATIVE_MODULE_PATHS = (
     "realtime-sip-gateway/node_modules/better-sqlite3/prebuilds/linux-x64.node",
 )
 
-PROVIDER_ARTIFACT_IDS = ("claude", "codex-wrapper", "codex-vendor")
+PROVIDER_ARTIFACT_IDS = ("claude", "codex-wrapper", "codex-vendor", "codex-code-mode-host")
 PROVIDER_DESTINATIONS = {
     "claude": "/opt/teleagent/agent-tools/claude",
     "codex-wrapper": "/opt/teleagent/agent-tools/codex",
     "codex-vendor": "/opt/teleagent/agent-tools/codex-vendor",
+    "codex-code-mode-host": "/opt/teleagent/agent-tools/codex-code-mode-host",
 }
 PROVIDER_NAMES = {
     "claude": "claude",
     "codex-wrapper": "codex",
     "codex-vendor": "codex",
+    "codex-code-mode-host": "codex",
 }
 PROVIDER_SOURCES = {
     "claude": None,
     "codex-wrapper": "/usr/local/libexec/teleagent-provider-codex-cli-wrapper",
     "codex-vendor": None,
+    "codex-code-mode-host": None,
 }
 
 
@@ -737,9 +740,13 @@ def _validate_provider_manifest(
         digest = _require_string(record["sha256"], "provider artifact digest", HEX_RE)
         size = _require_int(record["size"], "provider artifact size", minimum=1)
         args = _require_array(record["versionArgs"], "provider version arguments")
-        if not args or any(type(argument) is not str or not argument for argument in args):
-            raise _error("provider version arguments are invalid")
-        _require_string(record["versionStdout"], "provider version stdout")
+        if expected_id == "codex-code-mode-host":
+            if args != [] or record["versionStdout"] != "":
+                raise _error("companion artifact must have metadata-only version evidence")
+        else:
+            if not args or any(type(argument) is not str or not argument for argument in args):
+                raise _error("provider version arguments are invalid")
+            _require_string(record["versionStdout"], "provider version stdout")
         artifact_entry = _required_file(entries, binding["path"], f"provider artifact {expected_id}")
         if artifact_entry.digest != digest or artifact_entry.size != size or artifact_entry.mode != 0o555:
             raise _error("a bundled provider artifact differs from its CLI manifest")

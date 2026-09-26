@@ -41,7 +41,7 @@ function readManifest() {
   try { manifest = JSON.parse(fs.readFileSync(MANIFEST, 'utf8')); }
   catch { fail('the CLI manifest is invalid JSON'); }
   if (!exactKeys(manifest, ['version', 'artifacts']) || manifest.version !== 1 ||
-      !Array.isArray(manifest.artifacts) || manifest.artifacts.length !== 3) {
+      !Array.isArray(manifest.artifacts) || manifest.artifacts.length !== 4) {
     fail('the CLI manifest schema is invalid');
   }
   const ids = new Set();
@@ -55,15 +55,17 @@ function readManifest() {
         artifact.path.includes('/../') || artifact.mode !== '0755' ||
         !/^[a-f0-9]{64}$/.test(artifact.sha256) ||
         !Number.isSafeInteger(artifact.size) || artifact.size <= 0 ||
-        !Array.isArray(artifact.versionArgs) || artifact.versionArgs.length !== 1 ||
-        artifact.versionArgs[0] !== '--version' ||
-        !/^(?:2\.1\.246 \(Claude Code\)|codex-cli 0\.149\.1)$/.test(artifact.versionStdout)) {
+        !Array.isArray(artifact.versionArgs) ||
+        (artifact.id === 'codex-code-mode-host'
+          ? artifact.versionArgs.length !== 0 || artifact.versionStdout !== ''
+          : artifact.versionArgs.length !== 1 || artifact.versionArgs[0] !== '--version' ||
+            !/^(?:2\.1\.246 \(Claude Code\)|codex-cli 0\.149\.1)$/.test(artifact.versionStdout))) {
       fail('the CLI manifest artifact schema is invalid');
     }
     ids.add(artifact.id);
   }
-  if (ids.size !== 3 || !ids.has('claude') || !ids.has('codex-wrapper') ||
-      !ids.has('codex-vendor')) fail('the CLI manifest artifact set is incomplete');
+  if (ids.size !== 4 || !ids.has('claude') || !ids.has('codex-wrapper') ||
+      !ids.has('codex-vendor') || !ids.has('codex-code-mode-host')) fail('the CLI manifest artifact set is incomplete');
   return manifest;
 }
 

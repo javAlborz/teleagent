@@ -6,6 +6,8 @@
 # and standard terminal devices. Mount isolation and workspace admission are
 # required together with this profile.
 profile teleagent-provider-model flags=(attach_disconnected,mediate_deleted) {
+  # Landlock opens the root directory when installing its read-only rules.
+  / r,
   /** rixm,
   owner /tmp/** rwkl,
   /srv/teleagent-agent-workspaces/phone/{,**} rwkl,
@@ -13,6 +15,9 @@ profile teleagent-provider-model flags=(attach_disconnected,mediate_deleted) {
   /dev/tty rw,
   /dev/pts/[0-9]* rw,
   signal,
+  # The runtime records its child's /proc identity before acknowledging spawn.
+  # This permits same-profile metadata reads, not ptrace attachment/control.
+  ptrace (read, readby) peer=teleagent-provider-model,
   network inet stream,
   network inet6 stream,
   unix (create, getattr, getopt, setopt, shutdown, send, receive) type=stream addr=none,

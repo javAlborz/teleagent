@@ -21,6 +21,29 @@ const {
 const ROOT = path.resolve(__dirname, '..', '..');
 const DEPLOY = path.join(ROOT, 'deploy', 'worker-session');
 
+test('offline capture requires successful tool output, not only call correlation', () => {
+  const { verifiedCodexToolCorrelation } = require('../../scripts/capture-provider-cli-wire');
+  const body = { input: [
+    { type: 'custom_tool_call', name: 'exec', namespace: 'functions', call_id: 'call_test' },
+    { type: 'custom_tool_call_output', call_id: 'call_test', output: [
+      { type: 'input_text', text: 'Script completed\nWall time 0.1 seconds\nOutput:\n' },
+      { type: 'input_text', text: 'OFFLINE_TOOL_OK' },
+    ] },
+  ] };
+  assert.equal(verifiedCodexToolCorrelation(body), true);
+  for (const output of [
+    'unsupported custom tool call: functions.exec',
+    [{ type: 'input_text', text: 'Script error: text("OFFLINE_TOOL_OK") failed' }],
+    [{ type: 'input_text', text: 'OFFLINE_TOOL_OK' }],
+  ]) {
+    const failed = structuredClone(body);
+    failed.input[1].output = output;
+    assert.equal(verifiedCodexToolCorrelation(failed), false);
+  }
+  body.input[1].call_id = 'call_other';
+  assert.equal(verifiedCodexToolCorrelation(body), false);
+});
+
 test('streamed CLI integrity checks include every chunk and reject a changed final byte', async (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'provider-cli-chunks-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
@@ -47,7 +70,7 @@ test('provider CLI artifacts and capture versions are exact and mutually consist
   const capture = readJson('provider-cli-wire-capture.json');
   assert.equal(manifest.version, 1);
   assert.deepEqual(manifest.artifacts.map((entry) => entry.id), [
-    'claude', 'codex-wrapper', 'codex-vendor',
+    'claude', 'codex-wrapper', 'codex-vendor', 'codex-code-mode-host',
   ]);
   const artifacts = Object.fromEntries(manifest.artifacts.map((entry) => [entry.id, entry]));
   assert.equal(artifacts.claude.versionStdout, capture.clients.claude.version);
@@ -120,7 +143,7 @@ test('root provider CLI install and check never execute pinned artifacts', async
   const targetRoot = path.join(directory, 'targets');
   fs.mkdirSync(targetRoot, { mode: 0o755 });
   const marker = path.join(directory, 'provider-executed');
-  const ids = ['claude', 'codex-wrapper', 'codex-vendor'];
+  const ids = ['claude', 'codex-wrapper', 'codex-vendor', 'codex-code-mode-host'];
   const sources = {};
   const artifacts = {};
   for (const id of ids) {
@@ -189,7 +212,7 @@ test('provider CLI installation removes private stages on every pre-commit failu
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const expectedUid = process.getuid();
   const expectedGid = process.getgid();
-  const artifactIds = ['claude', 'codex-wrapper', 'codex-vendor'];
+  const artifactIds = ['claude', 'codex-wrapper', 'codex-vendor', 'codex-code-mode-host'];
 
   for (const scenario of ['second-source-validation', 'copy-enospc']) {
     const targetRoot = path.join(directory, scenario);

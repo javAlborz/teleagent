@@ -32,6 +32,22 @@ boundaries:
 
 The model profile permits anonymous stream socketpairs for Node child-process
 I/O. Abstract Unix connection/listener operations remain denied.
+The pinned Codex release includes its separately hashed code-mode host companion.
+Install and integrity checks treat it as data and never run a version command;
+its release version is bound by the reviewed artifact digest. Offline acceptance
+must prove a successful tool result, not merely a matching tool-call ID.
+The fixed runtime selects the pinned CLI's Landlock sandbox mode so read-only
+shell tools work within the outer `RestrictNamespaces=yes` and pid-only procfs.
+AppArmor permits reading `/` to establish Landlock rules. No nested namespace or
+mount privilege is granted. This CLI option is deprecated upstream: upgrading
+the pinned CLI requires a new offline shell, write-denial, and network-boundary
+proof before promotion. Launch callers cannot override this feature selection.
+The egress broker accepts the observed `functions` namespace only for `exec`
+custom-tool continuations; unobserved namespace/name pairs remain denied.
+
+Same-profile process metadata reads let the runtime record its child PID and
+start time before acknowledging spawn. Ptrace attachment/control and metadata
+access to other profiles are not granted.
 AppArmor checks pathname sockets through file-write permissions, so model
 writes are limited to its private `/tmp`, the admitted workspace, and standard
 terminal devices. The private mounts and pre-launch rejection of workspace

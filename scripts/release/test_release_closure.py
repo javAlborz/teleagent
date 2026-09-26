@@ -103,11 +103,13 @@ class ReleaseFixture:
             "claude": "artifacts/provider-cli/claude",
             "codex-wrapper": "deploy/worker-session/teleagent-codex-cli-wrapper",
             "codex-vendor": "artifacts/provider-cli/codex-vendor",
+            "codex-code-mode-host": "artifacts/provider-cli/codex-code-mode-host",
         }
         provider_payloads = {
             "claude": b"fixture-claude-cli",
             "codex-wrapper": b"#!/bin/sh\nexec /opt/teleagent/agent-tools/codex-vendor \"$@\"\n",
             "codex-vendor": b"fixture-codex-vendor",
+            "codex-code-mode-host": b"fixture-code-mode-host",
         }
         for artifact_id, relative in provider_paths.items():
             self.write(relative, provider_payloads[artifact_id], executable=True)
@@ -116,19 +118,22 @@ class ReleaseFixture:
             "claude": "/opt/teleagent/agent-tools/claude",
             "codex-wrapper": "/opt/teleagent/agent-tools/codex",
             "codex-vendor": "/opt/teleagent/agent-tools/codex-vendor",
+            "codex-code-mode-host": "/opt/teleagent/agent-tools/codex-code-mode-host",
         }
-        providers = {"claude": "claude", "codex-wrapper": "codex", "codex-vendor": "codex"}
+        providers = {"claude": "claude", "codex-wrapper": "codex", "codex-vendor": "codex", "codex-code-mode-host": "codex"}
         sources = {
             "claude": None,
             "codex-wrapper": "/usr/local/libexec/teleagent-provider-codex-cli-wrapper",
             "codex-vendor": None,
+            "codex-code-mode-host": None,
         }
         versions = {
             "claude": "2.1.246 (Claude Code)",
             "codex-wrapper": "codex-cli 0.149.1",
             "codex-vendor": "codex-cli 0.149.1",
+            "codex-code-mode-host": "",
         }
-        for artifact_id in ("claude", "codex-wrapper", "codex-vendor"):
+        for artifact_id in ("claude", "codex-wrapper", "codex-vendor", "codex-code-mode-host"):
             payload = provider_payloads[artifact_id]
             provider_records.append(
                 {
@@ -139,7 +144,7 @@ class ReleaseFixture:
                     "sha256": digest(payload),
                     "size": len(payload),
                     "mode": "0755",
-                    "versionArgs": ["--version"],
+                    "versionArgs": [] if artifact_id == "codex-code-mode-host" else ["--version"],
                     "versionStdout": versions[artifact_id],
                 }
             )
@@ -219,6 +224,7 @@ class ReleaseFixture:
                     {"id": "claude", "path": provider_paths["claude"]},
                     {"id": "codex-wrapper", "path": provider_paths["codex-wrapper"]},
                     {"id": "codex-vendor", "path": provider_paths["codex-vendor"]},
+                    {"id": "codex-code-mode-host", "path": provider_paths["codex-code-mode-host"]},
                 ],
             },
             "voiceImage": {
@@ -440,6 +446,25 @@ class ReleaseClosureTests(unittest.TestCase):
             (sip_missing.root / REALTIME_SIP_NATIVE_MODULE_PATHS[0]).unlink()
             with self.assertRaisesRegex(ClosureError, "realtime SIP gateway native node_modules set"):
                 sip_missing.generate()
+
+    def test_code_mode_companion_is_required_and_digest_bound(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            missing = self.fixture(base, "missing-companion")
+            companion = "artifacts/provider-cli/codex-code-mode-host"
+            (missing.root / companion).unlink()
+            with self.assertRaises(ClosureError):
+                missing.generate()
+
+            changed = self.fixture(base, "changed-companion")
+            (changed.root / companion).write_bytes(b"unreviewed companion")
+            with self.assertRaisesRegex(ClosureError, "differs from its CLI manifest"):
+                changed.generate()
+
+            omitted = self.fixture(base, "omitted-companion")
+            omitted.config["providerCli"]["artifacts"].pop()
+            with self.assertRaises(ClosureError):
+                omitted.generate()
 
     def test_provider_voice_and_sbom_cross_bindings_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
