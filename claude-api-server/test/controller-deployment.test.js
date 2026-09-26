@@ -76,6 +76,14 @@ test('controller unit is dormant, exact-path, resource-capped, and isolated', ()
   assert.match(service, /^Environment=AGENT_API_TRANSPORT=systemd-unix$/m);
   assert.match(service, /^Requires=.*teleagent-agent-controller\.socket/m);
   assert.match(service, /^ReadWritePaths=\/var\/lib\/teleagent-control$/m);
+  const inaccessiblePaths = service.split('\n')
+    .filter((line) => line.startsWith('InaccessiblePaths='))
+    .flatMap((line) => line.slice('InaccessiblePaths='.length).split(/\s+/u));
+  // Immutable releases omit these credential files; all state boundaries remain required.
+  assert.deepEqual(inaccessiblePaths.filter((entry) => entry.startsWith('-')), [
+    '-/opt/teleagent/current/.env',
+    '-/opt/teleagent/current/voice-app/.env',
+  ]);
   for (const inaccessible of [
     '/var/lib/teleagent-worker-state',
     '/var/lib/teleagent-privileged-action',
@@ -84,10 +92,7 @@ test('controller unit is dormant, exact-path, resource-capped, and isolated', ()
     '/etc/teleagent/provider-egress-secrets',
     '/run/teleagent-privileged-action',
   ]) {
-    assert.match(service, new RegExp(
-      `^InaccessiblePaths=.*${inaccessible.replaceAll('/', '\\/')}`,
-      'm',
-    ));
+    assert.ok(inaccessiblePaths.includes(inaccessible));
   }
   assert.match(service, /^UnsetEnvironment=.*NODE_PATH/m);
   assert.match(service, /^UnsetEnvironment=.*LD_PRELOAD/m);

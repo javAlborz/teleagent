@@ -226,6 +226,7 @@ test('source policy is static, sentinel-gated, bounded, and creates no activatio
     /fail-open|inaccessible path/u,
   );
   for (const unsafeDirective of [
+    'InaccessiblePaths=-/var/lib/unreviewed',
     'User=root',
     'MemoryMax=infinity',
     'ReadWritePaths=/',
@@ -238,7 +239,7 @@ test('source policy is static, sentinel-gated, bounded, and creates no activatio
       () => validateServiceSource(
         `${source('teleagent-realtime-sip-gateway.service')}\n${unsafeDirective}\n`,
       ),
-      /release start gate|reviewed|exactly once|credential/u,
+      /release start gate|reviewed|exactly once|credential|fail-open/u,
     );
   }
   assert.throws(

@@ -53,7 +53,7 @@ const REVIEWED_CREDENTIAL_DIRECTIVES = Object.freeze([
 ]);
 const EXECUTION_DIRECTIVE = /^Exec(?:Condition|StartPre|Start|StartPost|Reload|Stop|StopPost)=/u;
 const CREDENTIAL_DIRECTIVE = /^(?:LoadCredential|LoadCredentialEncrypted|SetCredential|SetCredentialEncrypted|ImportCredential|ImportCredentialEx)=/u;
-const REVIEWED_SERVICE_SHA256 = '26f97ad405bcf1d1a8be94a5135dea0ef14fd088a2d97144650dada9ebd3645d';
+const REVIEWED_SERVICE_SHA256 = '185a318afb00b524caa2bd9ace3a619c0670249de033ee51ef077ea1baee8f4c';
 const GIB = 1024n * 1024n * 1024n;
 const MIB = 1024n * 1024n;
 const DURABLE_FILESYSTEMS = new Set([
@@ -299,8 +299,6 @@ export function validateServiceSource(source) {
     '/var/lib/teleagent-worker-state',
     '/var/lib/teleagent-control',
     '/var/lib/teleagent-privileged-action',
-    '/var/lib/teleagent-claude-supervisor',
-    '/var/lib/teleagent-codex-supervisor',
     '/var/lib/teleagent-voice',
     '/var/lib/teleagent-voice-stack',
     '/srv/teleagent-agent-workspaces',
@@ -327,7 +325,17 @@ export function validateServiceSource(source) {
       `inaccessible path ${inaccessible}`,
     );
   }
-  if (/^InaccessiblePaths=-/mu.test(source)) {
+  const optionalAbsentPaths = [
+    '/var/lib/teleagent-claude-supervisor',
+    '/var/lib/teleagent-codex-supervisor',
+  ];
+  for (const inaccessible of optionalAbsentPaths) {
+    exactlyOnce(source,
+      new RegExp(`^InaccessiblePaths=-${inaccessible.replaceAll('/', '\\/')}$`, 'gmu'),
+      `optional inaccessible path ${inaccessible}`);
+  }
+  if (source.split('\n').some((line) => line.startsWith('InaccessiblePaths=-') &&
+      !optionalAbsentPaths.some((path) => line === `InaccessiblePaths=-${path}`))) {
     refuse('an inaccessible path became fail-open');
   }
   if (createHash('sha256').update(String(source)).digest('hex') !== REVIEWED_SERVICE_SHA256) {
