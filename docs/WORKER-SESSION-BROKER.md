@@ -344,7 +344,7 @@ and zero-capability model runtime. Do not add provider workers to
 provider credentials into worker homes, or make owner tmux sockets visible.
 
 Each provider canary captures rather than forwards provider stdout/stderr,
-enforces a 16 KiB combined-output ceiling and a 60-second absolute deadline,
+enforces a 16 KiB combined-output ceiling and a 90-second absolute deadline,
 and accepts only the provider-specific final protocol evidence for the exact
 text `PROVIDER_CANARY_OK`. Successful verification receives only the fixed
 `PROVIDER_CANARY_ATTESTED <provider>` line. On a deadline or output violation,
@@ -352,6 +352,15 @@ the canary kills its supervisor client and waits on a bounded close fence; the
 supervisor's established client-loss path reserves provider termination and
 checks the launch cgroup. A canary failure never claims that recovery or cgroup
 quiescence has completed.
+
+The pinned Codex v0.149.1 CLI emits its fixed Landlock deprecation notice as an
+`item.completed` error before the turn starts. The canary admits at most one
+exact notice after `thread.started` and before `turn.started`, with the exact
+event fields and an unreused item identity. Other errors, changed or repeated
+notices, missing terminal evidence, and an incorrect answer still fail. The
+notice itself is never evidence of model success. This behavior is covered by
+offline parser checks using the retained CLI notice; it does not substitute
+for the installed provider canary.
 
 The local allowance is an estimate, not actual token usage, dollar spend, or
 remaining OpenAI/Anthropic project balance. Provider billing dashboards remain

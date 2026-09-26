@@ -162,6 +162,40 @@ test('provider canary parsers accept only exact provider-specific final evidence
   }
 });
 
+test('Codex canary admits only the pinned pre-turn Landlock notice and still requires success', () => {
+  // Observed verbatim from the pinned CLI in the retained offline namespace probe.
+  const notice = { type: 'item.completed', item: {
+    id: 'item_0', type: 'error',
+    message: '`[features].use_legacy_landlock` is deprecated and will be removed soon. (Remove this setting to stop opting into the legacy Linux sandbox behavior.)',
+  } };
+  const original = codexJsonl().trim().split('\n').map(JSON.parse);
+  const encode = (events) => Buffer.from(`${events.map((x) => JSON.stringify(x)).join('\n')}\n`);
+  const withNotice = [original[0], notice, ...original.slice(1)];
+  assert.equal(parseProviderCanaryOutput('codex', encode(withNotice)), true);
+  for (const events of [
+    [notice, ...original],
+    [original[0], notice, notice, ...original.slice(1)],
+    [...original.slice(0, 2), notice, ...original.slice(2)],
+    [...original, notice],
+    [original[0], { ...notice, extra: true }, ...original.slice(1)],
+    ...[
+      { ...notice.item, id: '' },
+      { ...notice.item, id: 'item_reasoning' },
+      { ...notice.item, message: 'real startup failure' },
+      { ...notice.item, message: `${notice.item.message} extra` },
+      { ...notice.item, type: 'agent_message' },
+      { ...notice.item, text: CANARY_RESPONSE },
+    ].map((item) => [original[0], { ...notice, item }, ...original.slice(1)]),
+    withNotice.slice(0, -1),
+    withNotice.filter((event) => event.item?.type !== 'agent_message'),
+    withNotice.map((event) => event.item?.type === 'agent_message'
+      ? { ...event, item: { ...event.item, text: 'WRONG_ANSWER' } } : event),
+    [...withNotice.slice(0, -1), { type: 'turn.failed', error: { message: 'failed' } }],
+  ]) {
+    assert.throws(() => parseProviderCanaryOutput('codex', encode(events)));
+  }
+});
+
 test('provider canary captures output and emits only fixed attestation after exact success', async () => {
   const receiptDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'teleagent-canary-test-'));
   for (const [provider, stdout] of [
