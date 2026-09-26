@@ -32,6 +32,9 @@ boundaries:
 
 The model profile permits anonymous stream socketpairs for Node child-process
 I/O. Abstract Unix connection/listener operations remain denied.
+Same-profile process metadata reads let the runtime record its child PID and
+start time before acknowledging spawn. Ptrace attachment/control and metadata
+access to other profiles are not granted.
 AppArmor checks pathname sockets through file-write permissions, so model
 writes are limited to its private `/tmp`, the admitted workspace, and standard
 terminal devices. The private mounts and pre-launch rejection of workspace

@@ -42,6 +42,13 @@ test('session broker, RPC socket, state DB, and tmux socket exclude provider ide
   const libexecInstall = source('teleagent-provider-libexec-install');
   const libexecUnit = source('teleagent-provider-libexec-install.service');
   const apparmorInstall = source('teleagent-provider-apparmor-install');
+  const modelProfile = source('teleagent-provider-model.apparmor');
+
+  // Child identity attestation needs proc metadata access, never attachment
+  // or access to a different profile's processes.
+  assert.deepEqual(modelProfile.split('\n').map(line => line.trim())
+    .filter(line => line.startsWith('ptrace')),
+  ['ptrace (read, readby) peer=teleagent-provider-model,']);
 
   assert.match(libexecUnit,
     /^ReadWritePaths=\/usr\/local\/libexec \/etc\/teleagent\/provider-runtime$/m);
