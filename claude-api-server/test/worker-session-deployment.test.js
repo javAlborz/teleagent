@@ -367,7 +367,7 @@ test('activation verification requires clean provider homes, synthetic DAC denia
   assert.doesNotMatch(verifier, /\.teleagent-config-boundary-probe/);
   assert.doesNotMatch(verifier, /malformed = \[|hook-executed/);
   assert.match(verifier,
-    /visible_socket_probe="\$workspace\/\.teleagent-visible-host-socket-probe\.sock"/);
+    /visible_socket_probe=\/run\/teleagent-visible-host-socket-probe\.sock/);
   assert.match(verifier, /teleagent-provider-egress\/claude\.sock/);
   assert.match(verifier, /NoNewPrivs/);
   assert.match(verifier, /CapBnd/);

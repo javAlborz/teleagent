@@ -151,6 +151,9 @@ test('boundary invocation creates a private, bounded, credential-fed transient c
   assert.doesNotMatch(joined, /CAP_CHOWN/);
   assert.match(joined, /LoadCredential=provider-launch-capability:/);
   assert.match(joined, /BindPaths=.*provider-readiness\.jsonl/);
+  assert.ok(invocation.args.includes(
+    'BindReadOnlyPaths=-/run/teleagent-visible-host-socket-probe.sock'));
+  assert.ok(invocation.args.includes('ProcSubset=pid'));
   assert.match(joined, /teleagent-provider-boundary-runtime/);
   assert.match(joined, /--launch-id/);
   assert.match(joined, /--access-mode\nread-only/);
@@ -160,6 +163,33 @@ test('boundary invocation creates a private, bounded, credential-fed transient c
     /InaccessiblePaths=.*-\/var\/lib\/teleagent-claude-worker.*-\/var\/lib\/teleagent-codex-worker/);
   assert.doesNotMatch(joined, /ReadWritePaths=.*teleagent-agent-workspaces\/phone/);
   assert.doesNotMatch(joined, /[a-f0-9]{64}/, 'the raw capability must never enter argv');
+});
+
+test('activation socket fixtures stay outside the socket-free workspace contract', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'provider-workspace-socket-'));
+  const workspace = path.join(directory, 'phone');
+  fs.mkdirSync(workspace);
+  const listen = async filename => {
+    const server = http.createServer();
+    await new Promise((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(filename, resolve);
+    });
+    return server;
+  };
+  let outside;
+  let inside;
+  try {
+    outside = await listen(path.join(directory, 'activation.sock'));
+    assert.doesNotThrow(() => boundary.validateProviderWorkspace(workspace));
+    inside = await listen(path.join(workspace, '.teleagent-visible-host-socket-probe.sock'));
+    assert.throws(() => boundary.validateProviderWorkspace(workspace), /forbidden file type/);
+  } finally {
+    for (const server of [inside, outside]) {
+      if (server) await new Promise(resolve => server.close(resolve));
+    }
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test('workspace storage must be a bounded dedicated filesystem with a free-space floor', () => {

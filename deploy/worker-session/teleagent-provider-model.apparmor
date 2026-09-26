@@ -1,15 +1,20 @@
 #include <tunables/global>
-
-# Model/tool descendants run inside a launch-private network namespace and may
-# connect only to the matching loopback TCP shim. Pathname AF_UNIX sockets are
-# host-global even with PrivateNetwork=yes, so they are denied by a model-only
-# enforced LSM profile. The root wrapper and shim do not enter this profile.
+# Model descendants use only private loopback networking. Anonymous stream
+# socketpairs carry Node child-process I/O; named/abstract Unix listeners and
+# connections are not needed. AppArmor mediates pathname sockets as file writes,
+# so writes are confined to private /tmp, the admitted socket-free workspace,
+# and standard terminal devices. Mount isolation and workspace admission are
+# required together with this profile.
 profile teleagent-provider-model flags=(attach_disconnected,mediate_deleted) {
-  file,
+  /** rixm,
+  owner /tmp/** rwkl,
+  /srv/teleagent-agent-workspaces/phone/{,**} rwkl,
+  /dev/null rw,
+  /dev/tty rw,
+  /dev/pts/[0-9]* rw,
   signal,
-
   network inet stream,
   network inet6 stream,
-
-  deny network unix,
+  unix (create, getattr, getopt, setopt, shutdown, send, receive) type=stream addr=none,
+  deny unix (bind, listen, accept, connect),
 }
