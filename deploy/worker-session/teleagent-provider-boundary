@@ -1473,7 +1473,25 @@ function providerControl(input, { timeoutMs = 5000, socketPath = null } = {}) {
   });
 }
 
+function assertPrivateRuntimeAlias({ lstat = fs.lstatSync, readlink = fs.readlinkSync } = {}) {
+  // /var/run must resolve into the same private /run mount. Masking this
+  // symlink as InaccessiblePaths=/var/run would mask /run itself on systemd.
+  for (const directory of ['/var', '/run']) {
+    const st = lstat(directory);
+    if (!st.isDirectory() || st.uid !== 0 || (st.mode & 0o022) !== 0) {
+      fail('private runtime alias parent is unsafe');
+    }
+  }
+  const alias = lstat('/var/run');
+  if (!alias.isSymbolicLink() || alias.uid !== 0 ||
+      path.resolve('/var', readlink('/var/run')) !== '/run') {
+    fail('private runtime alias is unsafe');
+  }
+  return true;
+}
+
 function buildSystemdRunInvocation(input) {
+  assertPrivateRuntimeAlias();
   if (input.credentialPath !== capabilityFilePath(input.launchId)) {
     fail('launch credential path is invalid');
   }
@@ -1545,14 +1563,19 @@ function buildSystemdRunInvocation(input) {
     'LockPersonality=yes',
     'RestrictRealtime=yes',
     'RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6',
+    // libuv probes io_uring during Node startup; deny it without killing
+    // the process so the ordinary non-io_uring fallback remains available.
     'SystemCallFilter=~io_uring_setup io_uring_enter io_uring_register',
+    'SystemCallErrorNumber=EPERM',
     'ReadOnlyPaths=/opt/teleagent/agent-tools /opt/teleagent/node /usr/local/libexec /etc/teleagent/provider-runtime',
     ...(input.accessMode === 'read-only'
       ? [`BindReadOnlyPaths=${input.workspace}:${input.workspace}`]
       : [`BindPaths=${input.workspace}:${input.workspace}`]),
     `BindReadOnlyPaths=${input.spec.egressSocket}:${input.spec.egressSocket}`,
     `BindPaths=${input.readinessPath}:${input.readinessPath}`,
-    `InaccessiblePaths=/opt/teleagent/current /var/run /var/lib/teleagent-control /var/lib/teleagent-worker-state /var/lib/teleagent-privileged-action -/var/lib/teleagent-claude-worker -/var/lib/teleagent-codex-worker -${input.spec.workerHome} -${input.spec.otherHome} /run/teleagent-worker-session /run/teleagent-provider-launch /run/teleagent-provider-egress-control /run/teleagent-privileged-action /etc/teleagent/provider-egress-secrets -/etc/teleagent/credentials -/etc/teleagent-control -/etc/teleagent/controller -/etc/teleagent/privileged-action -/etc/teleagent-voice -${input.workspace}/.codex -${input.workspace}/.claude`,
+    // /run is an empty read-only tmpfs with only the explicit bindings above.
+    // Its host-only denial targets are absent when systemd applies the list.
+    `InaccessiblePaths=/opt/teleagent/current /var/lib/teleagent-control /var/lib/teleagent-worker-state /var/lib/teleagent-privileged-action -/var/lib/teleagent-claude-worker -/var/lib/teleagent-codex-worker -${input.spec.workerHome} -${input.spec.otherHome} -/run/teleagent-worker-session -/run/teleagent-provider-launch -/run/teleagent-provider-egress-control -/run/teleagent-privileged-action /etc/teleagent/provider-egress-secrets -/etc/teleagent/credentials -/etc/teleagent-control -/etc/teleagent/controller -/etc/teleagent/privileged-action -/etc/teleagent-voice -${input.workspace}/.codex -${input.workspace}/.claude`,
     // SETPCAP is required for setpriv to drop the descendant bounding set;
     // KILL lets the root wrapper terminate its two different-UID children.
     // Both descendants assert Cap*=0 and NoNewPrivs=1 before provider start.
@@ -1868,6 +1891,32 @@ async function panicAllProviderPlanes({
     `teleagent-provider-supervisor@${provider}.service`,
   ]);
   const masked = runSystemctl(['mask', '--runtime', ...supervisorUnits], { allowFailure: true });
+  const egress = {};
+  for (const provider of Object.keys(PROVIDERS)) {
+    if (enabledProviders.includes(provider)) continue;
+    const dataStopped = runSystemctl(['stop', `teleagent-provider-egress@${provider}.socket`], {
+      allowFailure: true,
+    });
+    const controlStopped = runSystemctl(
+      ['stop', `teleagent-provider-egress-control@${provider}.socket`],
+      { allowFailure: true },
+    );
+    const serviceStopped = await stopUnit(`teleagent-provider-egress@${provider}.service`);
+    const quiesced = [dataStopped, controlStopped].every((status) =>
+      status && !status.error && !status.signal && status.status === 0) &&
+      serviceStopped?.quiesced === true;
+    egress[provider] = { persisted: quiesced, quiesced, disabled: true };
+  }
+  // A disabled broker cannot acknowledge individual revocations. Stop both
+  // activation sockets and its service first, then use that independently
+  // proved shutdown only for global cleanup. Exact launch tombstones and
+  // cgroup quiescence remain mandatory; ordinary termination is unchanged.
+  const terminationControl = (request) => {
+    if (request.action === 'revoke' && egress[request.provider]?.disabled === true) {
+      return Promise.resolve(egress[request.provider]);
+    }
+    return control(request);
+  };
   const launchResults = [];
   const retainedLaunchResults = [];
   let retainedLaunch = null;
@@ -1882,7 +1931,7 @@ async function panicAllProviderPlanes({
   if (retainedLaunch !== null) {
     for (const provider of Object.keys(PROVIDERS)) {
       retainedLaunchResults.push(await terminate(provider, retainedLaunch.launchId, {
-        control, allowMissingReadinessForGlobalRecovery: true,
+        control: terminationControl, allowMissingReadinessForGlobalRecovery: true,
       }));
     }
   }
@@ -1893,28 +1942,12 @@ async function panicAllProviderPlanes({
       );
       if (!match) fail('provider panic unit identity is invalid');
       launchResults.push(await terminate(provider, `launch_${match[1]}`, {
-        control, allowMissingReadinessForGlobalRecovery: true,
+        control: terminationControl, allowMissingReadinessForGlobalRecovery: true,
       }));
     }
   }
-  const egress = {};
-  for (const provider of Object.keys(PROVIDERS)) {
-    if (enabledProviders.includes(provider)) {
-      egress[provider] = await recoverEgress(provider, control);
-      continue;
-    }
-    const dataStopped = runSystemctl(['stop', `teleagent-provider-egress@${provider}.socket`], {
-      allowFailure: true,
-    });
-    const controlStopped = runSystemctl(
-      ['stop', `teleagent-provider-egress-control@${provider}.socket`],
-      { allowFailure: true },
-    );
-    const serviceStopped = await stopUnit(`teleagent-provider-egress@${provider}.service`);
-    const quiesced = [dataStopped, controlStopped].every((status) =>
-      status && !status.error && !status.signal && status.status === 0) &&
-      serviceStopped?.quiesced === true;
-    egress[provider] = { persisted: quiesced, quiesced, disabled: true };
+  for (const provider of enabledProviders) {
+    egress[provider] = await recoverEgress(provider, control);
   }
   const allLaunchResults = [...retainedLaunchResults, ...launchResults];
   const providerPlaneQuiesced =
@@ -2090,6 +2123,7 @@ const PROVIDER_LAUNCH_OPERATIONS = Object.freeze({
   createCapabilityFile,
   createReadinessFile,
   buildSystemdRunInvocation,
+  assertPrivateRuntimeAlias,
   waitQuiesced,
   removeCapabilityFile,
   removeGlobalLaunchLock,
@@ -2156,6 +2190,7 @@ async function main(argv = process.argv.slice(2), environment = process.env, {
       createCapabilityFile,
       createReadinessFile,
       buildSystemdRunInvocation,
+  assertPrivateRuntimeAlias,
       waitQuiesced,
       removeCapabilityFile,
       removeGlobalLaunchLock,
@@ -2315,6 +2350,7 @@ module.exports = {
   assertProviderEnabled,
   assertGlobalProviderLaunchUnlocked,
   buildSystemdRunInvocation,
+  assertPrivateRuntimeAlias,
   capabilityFilePath,
   createCapabilityFile,
   createGlobalLaunchLock,

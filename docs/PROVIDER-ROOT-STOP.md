@@ -29,9 +29,16 @@ launch identities even when enumeration is empty, persists existing cancellation
 tombstones and revokes capabilities. It clears a stale launch lock only after
 the existing complete quiescence proof. The global panic remains set.
 
-Existing egress recovery behavior is unchanged: the fixed egress control daemons
-may be stopped and restarted to reconcile their durable ledgers while panic and
-supervisor fences remain set. This does not grant a supervisor/model restart.
+For an enabled provider, the fixed egress control daemon may be stopped and
+restarted to reconcile its durable ledger while panic and supervisor fences
+remain set. A disabled provider is never contacted or restarted: both of its
+egress activation sockets and its service must stop before retained launch
+cleanup. That independent shutdown proof replaces the unavailable per-launch
+broker acknowledgment only within global cleanup. Exact cancellation tombstones,
+completed launch stop jobs, and empty cgroups remain required for both providers,
+including old locks that omit provider identity. Missing readiness is never
+proof that execution did not occur. Failed or malformed shutdown evidence keeps
+the retained launch lock. This does not grant a supervisor/model restart.
 The JSON result preserves `accepted`, `persisted`, `quiesced` and the existing
 per-plane evidence. Exit 0 requires persisted and quiesced; incomplete proof
 returns 75, while authorization/persistence/inspection exceptions remain failures.
