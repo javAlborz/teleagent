@@ -57,7 +57,11 @@ test('controller unit is dormant, exact-path, resource-capped, and isolated', ()
   assert.doesNotMatch(service, /^WorkingDirectory=\/opt\/teleagent\/current$/m);
   assert.match(service, /^Requires=.*teleagent-worker-session\.service/m);
   assert.doesNotMatch(service, /^Requires=.*teleagent-provider-supervisor@claude\.socket/m);
-  assert.match(service, /^Requires=.*teleagent-provider-supervisor@codex\.socket/m);
+  // Recovery restarts supervisor sockets; stop propagation must not kill the
+  // controller before its authenticated unlock/panic response can be delivered.
+  assert.doesNotMatch(service, /^(?:Requires|BindsTo|PartOf)=.*teleagent-provider-supervisor@/m);
+  assert.match(service, /^Wants=.*teleagent-provider-supervisor@codex\.socket/m);
+  assert.match(service, /^After=.*teleagent-provider-supervisor@codex\.socket/m);
   assert.match(service, /^CPUQuota=200%$/m);
   assert.match(service, /^Slice=teleagent\.slice$/m);
   assert.match(service, /^MemoryHigh=671088640$/m);

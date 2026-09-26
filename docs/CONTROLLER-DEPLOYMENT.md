@@ -182,3 +182,12 @@ failure. Unlock writes `locked:false`; it never unlinks the state file.
 If a marker or trust-state file is missing, stop. Do not reinitialize it.
 Restore the complete verified filesystem snapshot or investigate and migrate
 it with an explicitly reviewed recovery procedure.
+
+The controller starts after and wants the Codex supervisor socket, but does not
+require its lifetime. Root provider recovery intentionally stops and re-creates
+that socket; a Requires edge would terminate the controller's own unlock request.
+The controller still requires the isolated worker broker and its private listeners.
+Existing supervisor health, durable panic and executor readiness gates continue
+to reject work until the provider is ready. Configure the existing worker control
+response timeout for the bounded root operation (Hermes uses 60000 ms); this does
+not extend model execution or provider receiver deadlines.
