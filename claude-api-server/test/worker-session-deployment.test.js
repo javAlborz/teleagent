@@ -401,7 +401,7 @@ test('activation canaries use the exact production clean-config argument builder
   assert.doesNotMatch(canarySource, /require\([^)]*agent-cli|\.\.\/\.\.\/claude-api-server/);
   assert.match(canarySource, /const FIXED_WORKSPACE = '\/srv\/teleagent-agent-workspaces\/phone'/);
   assert.match(canarySource, /MAX_COMBINED_OUTPUT_BYTES = 16 \* 1024/);
-  assert.match(canarySource, /CANARY_DEADLINE_MS = 60 \* 1000/);
+  assert.match(canarySource, /CANARY_DEADLINE_MS = 90 \* 1000/);
   assert.match(canarySource, /POST_KILL_CLOSE_MS = 2 \* 1000/);
   assert.match(canarySource, /stdio: \['pipe', 'pipe', 'pipe', 'pipe', 'pipe'\]/);
   assert.match(canarySource, /fs\.fsyncSync\(file\)/);
