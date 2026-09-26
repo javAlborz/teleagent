@@ -213,9 +213,16 @@ function readProductionProfile() {
   return boundedRootRead(PROFILE);
 }
 
-function parseCgroupMount(text) {
+function parseCgroupMount(text, ownCgroup = null) {
   if (typeof text !== 'string' || !text.endsWith('\n')) refuse('RESOURCE_EVIDENCE_INVALID');
+  if (ownCgroup !== null && (typeof ownCgroup !== 'string' ||
+      !/^\/(?:[A-Za-z0-9_.:@-]+(?:\/[A-Za-z0-9_.:@-]+)*)?$/u.test(ownCgroup) ||
+      ownCgroup.split('/').some((part) => part === '.' || part === '..'))) {
+    refuse('RESOURCE_BOUNDARY_UNSAFE');
+  }
   let selected;
+  let rootFields;
+  const descendants = [];
   for (const line of text.slice(0, -1).split('\n')) {
     const halves = line.split(' - ');
     const left = halves[0].split(' ');
@@ -223,9 +230,10 @@ function parseCgroupMount(text) {
     if (halves.length !== 2 || left.length < 6 || right.length !== 3 ||
         !/^[1-9][0-9]*$/u.test(left[0]) || !/^[1-9][0-9]*$/u.test(left[1]) ||
         !/^[0-9]+:[0-9]+$/u.test(left[2])) refuse('RESOURCE_EVIDENCE_INVALID');
-    // A mount anywhere below the canonical root could replace a descendant's
-    // evidence, even if its final file still looked root-owned.
-    if (left[4].startsWith(`${CGROUP_ROOT}/`)) refuse('RESOURCE_BOUNDARY_UNSAFE');
+    if (left[4].startsWith(`${CGROUP_ROOT}/`)) {
+      descendants.push({ line, left, right });
+      continue;
+    }
     if (left[4] !== CGROUP_ROOT) continue;
     if (selected || left[3] !== '/' || right[0] !== 'cgroup2') refuse('RESOURCE_BOUNDARY_UNSAFE');
     const flags = right[2].split(',');
@@ -243,9 +251,36 @@ function parseCgroupMount(text) {
       // Default PID event propagation differs between kernel generations.
       // Every group is sampled, so neither default is assumed to aggregate.
       tasksEvents: flags.includes('pids_localevents') ? 'local' : 'kernel-default' };
+    rootFields = { left, right };
   }
   if (!selected) refuse('RESOURCE_BOUNDARY_UNSAFE');
+  // systemd pressure monitoring binds the service's own memory.pressure file
+  // over the read-only cgroup view. Admit only that same file on the same
+  // cgroup2 superblock; other mounts could replace the observed evidence.
+  if (descendants.length) {
+    const pressureRoot = `${ownCgroup === '/' ? '' : ownCgroup}/memory.pressure`;
+    if (ownCgroup === null || descendants.length !== 1 ||
+        !rootFields.left[5].split(',').includes('ro')) refuse('RESOURCE_BOUNDARY_UNSAFE');
+    const bind = descendants[0];
+    const options = bind.left[5].split(',');
+    if (bind.left[1] !== rootFields.left[0] || bind.left[2] !== rootFields.left[2] ||
+        bind.left[3] !== pressureRoot || bind.left[4] !== `${CGROUP_ROOT}${pressureRoot}` ||
+        bind.right.join(' ') !== rootFields.right.join(' ') ||
+        new Set(options).size !== options.length ||
+        !['rw', 'nosuid', 'nodev', 'noexec'].every((flag) => options.includes(flag)) ||
+        options.some((flag) => !['rw', 'nosuid', 'nodev', 'noexec', 'relatime'].includes(flag))) {
+      refuse('RESOURCE_BOUNDARY_UNSAFE');
+    }
+    selected.identity += `\n${bind.line}`;
+  }
   return selected;
+}
+
+function readOwnCgroup() {
+  const text = boundedRootRead('/proc/self/cgroup');
+  const match = text.match(/^0::(\/[^\n]*)\n$/u);
+  if (!match) refuse('RESOURCE_BOUNDARY_UNSAFE');
+  return match[1];
 }
 
 function collectEventInventory(withCounters) {
@@ -444,7 +479,8 @@ function collectSnapshot(policy) {
       fs.realpathSync('/proc/pressure/memory') !== '/proc/pressure/memory') {
     refuse('RESOURCE_BOUNDARY_UNSAFE');
   }
-  const mount = parseCgroupMount(boundedRootRead(MOUNTINFO));
+  const ownCgroup = readOwnCgroup();
+  const mount = parseCgroupMount(boundedRootRead(MOUNTINFO), ownCgroup);
   const boot = boundedRootRead('/proc/sys/kernel/random/boot_id');
   if (!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}\n$/u.test(boot) ||
       boundedRootRead('/proc/sys/kernel/hostname') !== `${policy.profile.hostname}\n`) {
@@ -492,7 +528,8 @@ function collectSnapshot(policy) {
   const meminfo = parseMeminfo(boundedRootRead('/proc/meminfo'));
   const hostPressure = parsePressure(boundedRootRead('/proc/pressure/memory'));
   assertStableInventory(eventInventory, collectEventInventory(false));
-  if (parseCgroupMount(boundedRootRead(MOUNTINFO)).identity !== mount.identity) {
+  if (readOwnCgroup() !== ownCgroup ||
+      parseCgroupMount(boundedRootRead(MOUNTINFO), ownCgroup).identity !== mount.identity) {
     refuse('RESOURCE_BOUNDARY_CHANGED');
   }
   return { boot, pool, children, meminfo, hostPressure, mount, eventInventory };
