@@ -212,7 +212,7 @@ function requirePinnedProviderCli(provider, { spawnCheck = spawnSync } = {}) {
   const result = spawnCheck(CLI_CHECK, ['--provider', provider], {
     cwd: '/',
     encoding: 'utf8',
-    timeout: 15000,
+    timeout: 30000,
     maxBuffer: 4096,
     env: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8' },
     stdio: ['ignore', 'pipe', 'pipe'],

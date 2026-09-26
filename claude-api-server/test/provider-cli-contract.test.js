@@ -21,6 +21,23 @@ const {
 const ROOT = path.resolve(__dirname, '..', '..');
 const DEPLOY = path.join(ROOT, 'deploy', 'worker-session');
 
+test('streamed CLI integrity checks include every chunk and reject a changed final byte', async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'provider-cli-chunks-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const filename = path.join(directory, 'artifact');
+  const contents = crypto.randomBytes(2 * 1024 * 1024 + 37);
+  fs.writeFileSync(filename, contents, { mode: 0o755 });
+  const artifact = {
+    path: filename, size: contents.length,
+    sha256: crypto.createHash('sha256').update(contents).digest('hex'),
+  };
+  const options = { expectedUid: process.getuid(), expectedGid: process.getgid() };
+  await checkArtifact(artifact, options);
+  contents[contents.length - 1] ^= 1;
+  fs.writeFileSync(filename, contents);
+  await assert.rejects(checkArtifact(artifact, options), /digest drifted/);
+});
+
 function readJson(name) {
   return JSON.parse(fs.readFileSync(path.join(DEPLOY, name), 'utf8'));
 }

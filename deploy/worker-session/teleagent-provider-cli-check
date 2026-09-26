@@ -22,7 +22,10 @@ function exactKeys(value, expected) {
 
 async function digestFile(filename) {
   const hash = crypto.createHash('sha256');
-  const stream = fs.createReadStream(filename, { flags: fs.constants.O_RDONLY });
+  const stream = fs.createReadStream(filename, {
+    flags: fs.constants.O_RDONLY,
+    highWaterMark: 1024 * 1024,
+  });
   for await (const chunk of stream) hash.update(chunk);
   return hash.digest('hex');
 }
