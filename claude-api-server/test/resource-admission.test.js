@@ -302,6 +302,7 @@ function kernelFixture(t) {
     '/sys', '/sys/fs', '/sys/fs/cgroup', pool]);
   const texts = new Map([
     [MOUNTINFO, mountLine()],
+    ['/proc/self/cgroup', '0::/system.slice/resource-test.service\n'],
     ['/etc/teleagent/resource-admission.json', encode(profile())],
     ['/proc/sys/kernel/hostname', 'hermes\n'],
     ['/proc/sys/kernel/random/boot_id', '11111111-2222-3333-4444-555555555555\n'],
@@ -419,6 +420,54 @@ test('a root-owned read-only cgroup mount still permits complete resource observ
   assert.equal((await observeKernel()).admitted, true);
 });
 
+const ownCgroup = '/system.slice/resource-test.service';
+const pressureMount = () => `90 31 0:28 ${ownCgroup}/memory.pressure /sys/fs/cgroup${ownCgroup}/memory.pressure rw,nosuid,nodev,noexec,relatime - cgroup2 cgroup2 rw,nsdelegate,memory_recursiveprot\n`;
+const protectedMount = () => mountLine().replace(' rw,nosuid', ' ro,nosuid');
+
+test('systemd own pressure bind preserves the full read-only resource observation', async (t) => {
+  const fixture = kernelFixture(t);
+  const mounts = protectedMount() + pressureMount();
+  fixture.texts.set(MOUNTINFO, mounts);
+  assert.equal((await observeKernel()).admitted, true);
+  assert.equal(admission.parseCgroupMount(mounts, ownCgroup).identity, mounts.trimEnd());
+  assert.equal(admission.parseCgroupMount(pressureMount() + protectedMount(), ownCgroup).identity,
+    mounts.trimEnd());
+});
+
+test('pressure mount exception refuses substituted files, devices, targets and unrelated groups', () => {
+  const bind = pressureMount();
+  const mutations = [
+    bind.replace('90 31 ', '90 99 '),
+    bind.replace('0:28 ', '0:29 '),
+    bind.replace(`${ownCgroup}/memory.pressure `, '/other/memory.pressure '),
+    bind.replace(`/sys/fs/cgroup${ownCgroup}/memory.pressure `, '/sys/fs/cgroup/other/memory.pressure '),
+    bind.replaceAll('memory.pressure', 'memory.current'),
+    bind.replace('cgroup2 cgroup2', 'tmpfs tmpfs'),
+    bind.replace('memory_recursiveprot', 'memory_localevents'),
+    bind.replace('rw,nosuid,nodev,noexec,relatime', 'rw,nosuid,nodev,relatime'),
+    bind + bind,
+    bind + '91 31 0:30 / /sys/fs/cgroup/teleagent.slice ro - tmpfs tmpfs rw\n',
+  ];
+  for (const changed of mutations) {
+    assert.throws(() => admission.parseCgroupMount(protectedMount() + changed, ownCgroup),
+      { code: 'RESOURCE_BOUNDARY_UNSAFE' });
+  }
+  for (const group of [null, '/other.service', '/system.slice/../resource-test.service', 'relative']) {
+    assert.throws(() => admission.parseCgroupMount(protectedMount() + bind, group),
+      { code: 'RESOURCE_BOUNDARY_UNSAFE' });
+  }
+  assert.throws(() => admission.parseCgroupMount(mountLine() + bind, ownCgroup),
+    { code: 'RESOURCE_BOUNDARY_UNSAFE' });
+});
+
+test('pressure bind identity must remain stable through observation', async (t) => {
+  const fixture = kernelFixture(t);
+  fixture.texts.set(MOUNTINFO, protectedMount() + pressureMount());
+  await assert.rejects(observeKernel(() => {
+    fixture.texts.set(MOUNTINFO, protectedMount() + pressureMount().replace('90 31 ', '91 31 '));
+  }), { code: 'RESOURCE_BOUNDARY_CHANGED' });
+});
+
 function nestedGroups(fixture) {
   const parent = `${fixture.pool}/teleagent-voice.slice/teleagent-voice-containers.slice`;
   const leaf = `${parent}/docker-fixture.scope`;
@@ -479,7 +528,7 @@ test('nested topology additions, removals, replacements and counter resets refus
 });
 
 test('a snapshot refuses topology or mount changes during collection', async (t) => {
-  for (const kind of ['late child', 'directory replacement', 'remount']) {
+  for (const kind of ['late child', 'directory replacement', 'remount', 'observer moved']) {
     await t.test(kind, (sub) => {
       const fixture = kernelFixture(sub);
       const { parent, leaf } = nestedGroups(fixture);
@@ -488,6 +537,11 @@ test('a snapshot refuses topology or mount changes during collection', async (t)
       };
       if (kind === 'directory replacement') fixture.state.onOpenDirectory = (directory) => {
         if (directory === leaf) fixture.metadataOverrides.set(leaf, { ino: 99n });
+      };
+      if (kind === 'observer moved') fixture.state.onRead = (filename) => {
+        if (filename === '/proc/meminfo') {
+          fixture.texts.set('/proc/self/cgroup', '0::/system.slice/other.service\n');
+        }
       };
       if (kind === 'remount') {
         let reads = 0;
@@ -543,6 +597,7 @@ test('production collector refuses unsafe ownership, hierarchy, namespace and mi
     ['wrong filesystem', (f) => { f.state.fsType = 0xef53n; }, 'RESOURCE_BOUNDARY_UNSAFE'],
     ['PSI is not procfs', (f) => { f.state.procType = 0xef53n; }, 'RESOURCE_BOUNDARY_UNSAFE'],
     ['cgroup namespace differs', (f) => { f.state.namespace = 'cgroup:[other]'; }, 'RESOURCE_BOUNDARY_UNSAFE'],
+    ['ambiguous observer group', (f) => { f.texts.set('/proc/self/cgroup', '0::/one\n0::/two\n'); }, 'RESOURCE_BOUNDARY_UNSAFE'],
     ['pool ancestor replaceable', (f) => { f.metadataOverrides.set('/sys/fs', { mode: 0o40777n }); }, 'RESOURCE_BOUNDARY_UNSAFE'],
     ['child delegated to user', (f) => { f.metadataOverrides.set(`${f.pool}/teleagent-provider.slice`, { uid: 1000n }); }, 'RESOURCE_BOUNDARY_UNSAFE'],
     ['symlink child', (f) => { f.metadataOverrides.set(`${f.pool}/teleagent-provider.slice`, { isDirectory: () => false }); }, 'RESOURCE_BOUNDARY_UNSAFE'],
