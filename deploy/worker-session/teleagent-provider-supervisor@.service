@@ -13,7 +13,9 @@ CPUAccounting=yes
 CPUQuota=25%
 CPUQuotaPeriodSec=100ms
 MemoryAccounting=yes
-MemoryHigh=402653184
+# The fixed CLI integrity check includes the 58 MB Codex companion.
+# Keep its cache below the reclaim threshold without raising the hard cap.
+MemoryHigh=469762048
 MemoryMax=536870912
 MemorySwapMax=0
 TasksAccounting=yes
