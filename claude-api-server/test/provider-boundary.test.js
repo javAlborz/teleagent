@@ -1063,6 +1063,78 @@ test('failed global recovery never clears an uncertain launch fence', async (t) 
   }
 });
 
+test('initial readiness publication exposes only a complete record and preserves existing history', (t) => {
+  const fixture = launchTransactionFixture(t);
+  const provider = 'codex';
+  const launchId = fixture.launchIds.codex;
+  const options = { directory: fixture.directory, uid: process.getuid() };
+  const filename = boundary.readinessFilePath(provider, launchId, fixture.directory);
+  const inspect = () => boundary.inspectProviderReadiness(provider, launchId, {}, options);
+  for (const failure of ['pre-write', 'pre-publish']) {
+    assert.throws(() => boundary.createReadinessFile(provider, launchId, {
+      ...options,
+      phaseHook: (phase) => {
+        assert.equal(fs.existsSync(filename), false);
+        if (phase === failure) throw new Error('publication interrupted');
+      },
+    }), /publication interrupted/);
+    assert.throws(inspect, { code: 'PROVIDER_READINESS_MISSING' });
+    assert.equal(fs.readdirSync(fixture.directory).some((name) => name.includes('.pending.')), false);
+  }
+  boundary.createReadinessFile(provider, launchId, {
+    ...options,
+    phaseHook: (phase) => {
+      if (phase !== 'post-publish') {
+        assert.throws(inspect, { code: 'PROVIDER_READINESS_MISSING' });
+      } else {
+        assert.equal(inspect().providerExecutionAttempted, false);
+      }
+    },
+  });
+  const original = fs.readFileSync(filename, 'utf8');
+  assert.throws(() => boundary.createReadinessFile(provider, launchId, options), { code: 'EEXIST' });
+  assert.equal(fs.readFileSync(filename, 'utf8'), original);
+  assert.equal(fs.readdirSync(fixture.directory).some((name) => name.includes('.pending.')), false);
+});
+
+test('status before readiness publication is unconfirmed and cannot assert quiescence', (t) => {
+  const fixture = launchTransactionFixture(t);
+  const provider = 'codex';
+  const launchId = fixture.launchIds.codex;
+  const options = {
+    inspectReadiness: (name, id, status) => boundary.inspectProviderReadiness(
+      name, id, status, { directory: fixture.directory, uid: process.getuid() },
+    ),
+  };
+  for (const status of [
+    { exists: false, quiesced: true, activeState: 'not-found', controlGroup: null },
+    { exists: true, quiesced: true, activeState: 'inactive', controlGroup: null },
+    { exists: true, quiesced: false, activeState: 'active', controlGroup: '/live' },
+  ]) {
+    const pending = boundary.inspectProviderLaunchStatus(provider, launchId, {
+      ...options, inspectStatus: () => status,
+    });
+    assert.equal(pending.quiesced, false);
+    assert.equal(pending.providerHistoryUnavailable, true);
+    for (const key of ['providerExecutionAttempted', 'providerSpawnedEver', 'providerAlive', 'retrySafe']) {
+      assert.equal(Object.hasOwn(pending, key), false);
+    }
+  }
+  const filename = boundary.readinessFilePath(provider, launchId, fixture.directory);
+  fs.writeFileSync(filename, `${JSON.stringify({
+    version: 1, type: 'provider_planned', provider, launchId,
+  })}\n`, { mode: 0o600 });
+  const inspectStatus = () => ({ exists: false, quiesced: true, controlGroup: null });
+  const planned = boundary.inspectProviderLaunchStatus(provider, launchId, { ...options, inspectStatus });
+  assert.equal(planned.quiesced, true);
+  assert.equal(planned.providerExecutionAttempted, false);
+  assert.equal(planned.providerSpawnedEver, false);
+  fs.writeFileSync(filename, 'partial');
+  assert.throws(() => boundary.inspectProviderLaunchStatus(provider, launchId, {
+    ...options, inspectStatus,
+  }), /readiness evidence is invalid/);
+});
+
 test('missing readiness is cleanup-only and never a never-started or retry-safe result', async (t) => {
   const fixture = launchTransactionFixture(t);
   const options = {
