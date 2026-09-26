@@ -356,8 +356,8 @@ LoadCredential=teleagent-release-gate:/run/teleagent-release-gate/verified.json'
     /var/lib/teleagent-worker-state \
     /var/lib/teleagent-control \
     /var/lib/teleagent-privileged-action \
-    /var/lib/teleagent-claude-supervisor \
-    /var/lib/teleagent-codex-supervisor \
+    -/var/lib/teleagent-claude-supervisor \
+    -/var/lib/teleagent-codex-supervisor \
     /var/lib/teleagent-voice \
     /var/lib/teleagent-voice-stack \
     /srv/teleagent-agent-workspaces \
