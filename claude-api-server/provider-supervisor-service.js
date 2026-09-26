@@ -16,8 +16,11 @@ const MAX_LAUNCH_OUTPUT_BYTES = 8 * 1024 * 1024;
 // transient cgroup is empty before admitting the next launch.
 const MAX_ACTIVE = 1;
 const CONTROL_TIMEOUT_MS = 12_000;
-const PROVIDER_READY_TIMEOUT_MS = 15_000;
-const PROVIDER_READY_POLL_MS = 25;
+// Root preflight shares this supervisor's quarter-core quota. Leave room for
+// the bounded CLI integrity check and resource observations without spending
+// that quota on continuous status subprocesses.
+const PROVIDER_READY_TIMEOUT_MS = 45_000;
+const PROVIDER_READY_POLL_MS = 1000;
 const WORKSPACE_ROOT = '/srv/teleagent-agent-workspaces';
 const PROVIDER_PLANE_ROOT = '/var/lib/teleagent-provider-plane';
 const PROVIDER_PLANE_PARENT = path.dirname(PROVIDER_PLANE_ROOT);

@@ -12,7 +12,8 @@ const EMPTY_MCP = '/etc/teleagent/provider-runtime/empty-mcp.json';
 const EMPTY_SETTINGS = '/etc/teleagent/provider-runtime/empty-settings.json';
 const CANARY_RESPONSE = 'PROVIDER_CANARY_OK';
 const MAX_COMBINED_OUTPUT_BYTES = 16 * 1024;
-const CANARY_DEADLINE_MS = 60 * 1000;
+// Includes bounded root preflight, one minimal model turn, and completion.
+const CANARY_DEADLINE_MS = 90 * 1000;
 const POST_KILL_CLOSE_MS = 2 * 1000;
 const CANARY_RECEIPTS = '/var/lib/teleagent-provider-plane/canary';
 const LAUNCH_ID = /^launch_[a-f0-9]{32}$/;

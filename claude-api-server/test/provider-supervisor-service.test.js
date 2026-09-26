@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
+const { performance } = require('node:perf_hooks');
 const { EventEmitter } = require('node:events');
 const { PassThrough } = require('node:stream');
 const test = require('node:test');
@@ -346,6 +347,54 @@ test('provider stdin is refused until a live model-spawn boundary is verified', 
     await waitFor(() => written === 'approved input');
     client.socket.destroy();
     await waitFor(() => runtime.active.size === 0);
+  } finally {
+    await runtime.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('pending readiness polls leave CPU headroom and still terminate at the startup deadline', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'provider-ready-budget-'));
+  const workspace = path.join(directory, 'phone');
+  const socketPath = path.join(directory, 'supervisor.sock');
+  fs.mkdirSync(workspace);
+  const boundary = boundaryHarness();
+  const observations = [];
+  let terminated = false;
+  let child;
+  let written = '';
+  boundary.control.status = async () => {
+    if (terminated) return { quiesced: true, providerExecutionAttempted: false };
+    observations.push(performance.now());
+    return { quiesced: false, providerHistoryUnavailable: true };
+  };
+  boundary.control.terminate = async () => {
+    terminated = true;
+    return { persisted: true, quiesced: true, providerExecutionAttempted: false };
+  };
+  const runtime = createProviderSupervisor({
+    config: config(), workspaceRoot: directory, boundaryControl: boundary.control,
+    providerReadyTimeoutMs: 1200,
+    spawnImpl() {
+      child = fakeRuntime();
+      child.stdin.on('data', (chunk) => { written += chunk.toString(); });
+      return child;
+    },
+  });
+  try {
+    await listen(runtime, socketPath);
+    const client = frameSocket(socketPath);
+    await connect(client);
+    client.send(startFrame(workspace));
+    await waitFor(() => Boolean(child));
+    await waitFor(() => terminated);
+    const result = await client.next();
+    assert.equal(result.code, 'PROVIDER_NOT_STARTED');
+    assert.equal(written, '');
+    assert.ok(observations.length <= 2, 'startup must not busy-poll the root boundary');
+    if (observations.length === 2) assert.ok(observations[1] - observations[0] >= 900);
+    assert.equal(runtime.active.size, 0);
+    client.socket.destroy();
   } finally {
     await runtime.close();
     fs.rmSync(directory, { recursive: true, force: true });
