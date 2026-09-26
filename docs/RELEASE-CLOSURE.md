@@ -214,7 +214,7 @@ The v2 `hostRuntime` schema requires, in exact key order, these package-local
 bindings in addition to the API dependency binding:
 
 ```json
-{"privilegedBrokerLockPath":"privileged-action-broker/package-lock.json","privilegedBrokerLockSha256":"sha256:<64hex>","privilegedBrokerNodeModulesPath":"privileged-action-broker/node_modules","privilegedBrokerNativeModules":[{"path":"privileged-action-broker/node_modules/better-sqlite3/build/Release/better_sqlite3.node","sha256":"sha256:<64hex>","size":123}],"realtimeSipLockPath":"realtime-sip-gateway/package-lock.json","realtimeSipLockSha256":"sha256:<64hex>","realtimeSipNodeModulesPath":"realtime-sip-gateway/node_modules","realtimeSipNativeModules":[{"path":"realtime-sip-gateway/node_modules/better-sqlite3/build/Release/better_sqlite3.node","sha256":"sha256:<64hex>","size":123}]}
+{"privilegedBrokerLockPath":"privileged-action-broker/package-lock.json","privilegedBrokerLockSha256":"sha256:<64hex>","privilegedBrokerNodeModulesPath":"privileged-action-broker/node_modules","privilegedBrokerNativeModules":[{"path":"privileged-action-broker/node_modules/better-sqlite3/prebuilds/linux-x64.node","sha256":"sha256:<64hex>","size":123}],"realtimeSipLockPath":"realtime-sip-gateway/package-lock.json","realtimeSipLockSha256":"sha256:<64hex>","realtimeSipNodeModulesPath":"realtime-sip-gateway/node_modules","realtimeSipNativeModules":[{"path":"realtime-sip-gateway/node_modules/better-sqlite3/prebuilds/linux-x64.node","sha256":"sha256:<64hex>","size":123}]}
 ```
 
 These fields occur after the API `nativeModules` field and before

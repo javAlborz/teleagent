@@ -70,7 +70,7 @@ class ReleaseFixture:
         self.write("runtime/node/bin/node", b"fixture-node-runtime\n", executable=True)
         self.write("claude-api-server/package-lock.json", '{"lockfileVersion":3}\n')
         self.write(
-            "claude-api-server/node_modules/better-sqlite3/build/Release/better_sqlite3.node",
+            "claude-api-server/node_modules/better-sqlite3/prebuilds/linux-x64.node",
             b"fixture-better-sqlite3-native",
             executable=True,
         )
