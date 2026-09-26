@@ -317,12 +317,11 @@ test('provider stdin is refused until a live model-spawn boundary is verified', 
   const boundary = boundaryHarness();
   let child;
   let providerAlive = false;
-  boundary.control.status = async (_provider, launchId) => ({
-    quiesced: false,
-    providerSpawnedEver: providerAlive,
-    providerAlive,
-    launchId,
-  });
+  boundary.control.status = async (_provider, launchId) => providerAlive ? {
+    quiesced: false, providerSpawnedEver: true, providerAlive: true, launchId,
+  } : {
+    quiesced: false, providerHistoryUnavailable: true, launchId,
+  };
   const runtime = createProviderSupervisor({
     config: config(), workspaceRoot: directory, boundaryControl: boundary.control,
     randomLaunchId: () => 'launch_77777777777777777777777777777777',
@@ -339,6 +338,8 @@ test('provider stdin is refused until a live model-spawn boundary is verified', 
     child.stdin.on('data', (chunk) => { written += chunk.toString(); });
     await new Promise((resolve) => setTimeout(resolve, 25));
     assert.equal(written, '');
+    assert.equal(runtime.active.size, 1);
+    assert.equal(boundary.calls.some(([action]) => action === 'terminate'), false);
     providerAlive = true;
     assert.equal((await client.next()).type, 'accepted');
     client.send({ version: 1, type: 'stdin', data: Buffer.from('approved input').toString('base64') });

@@ -1189,9 +1189,14 @@ function fsyncDirectory(directory) {
   finally { fs.closeSync(descriptor); }
 }
 
-function createReadinessFile(provider, launchId) {
-  secureRootDirectory(CAPABILITY_DIRECTORY);
-  const filename = readinessFilePath(provider, launchId);
+function createReadinessFile(provider, launchId, {
+  directory = CAPABILITY_DIRECTORY,
+  uid = 0,
+  phaseHook = () => {},
+} = {}) {
+  secureRootDirectory(directory, 0o022, uid);
+  const filename = readinessFilePath(provider, launchId, directory);
+  const temporary = `${filename}.pending.${crypto.randomBytes(16).toString('hex')}`;
   const planned = `${JSON.stringify({
     version: 1,
     type: 'provider_planned',
@@ -1201,17 +1206,26 @@ function createReadinessFile(provider, launchId) {
   let fd;
   try {
     fd = fs.openSync(
-      filename,
+      temporary,
       fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL |
         fs.constants.O_NOFOLLOW,
       0o600
     );
+    phaseHook('pre-write');
     fs.writeFileSync(fd, planned, 'utf8');
     fs.fsyncSync(fd);
+    phaseHook('pre-publish');
+    // Publish only the complete durable record, without replacing prior history.
+    fs.linkSync(temporary, filename);
+    fsyncDirectory(directory);
+    phaseHook('post-publish');
   } finally {
-    if (fd !== undefined) fs.closeSync(fd);
+    if (fd !== undefined) {
+      fs.closeSync(fd);
+      fs.unlinkSync(temporary);
+      fsyncDirectory(directory);
+    }
   }
-  fsyncDirectory(CAPABILITY_DIRECTORY);
   return filename;
 }
 
@@ -1639,6 +1653,24 @@ function inspectUnit(unit, {
     controlGroup: fields.ControlGroup || null,
     populated,
   };
+}
+
+function inspectProviderLaunchStatus(provider, launchId, {
+  inspectStatus = inspectUnit,
+  inspectReadiness = inspectProviderReadiness,
+} = {}) {
+  const status = inspectStatus(unitName(provider, launchId));
+  try {
+    return { ...status, ...inspectReadiness(provider, launchId, status) };
+  } catch (error) {
+    if (error?.code !== 'PROVIDER_READINESS_MISSING') throw error;
+    // The supervisor polls as soon as the root launcher is spawned, before
+    // its preflight necessarily publishes the planned record. Missing history
+    // is an unconfirmed observation, never readiness, quiescence, or proof
+    // that a model did not execute. Ordinary termination still requires the
+    // durable history; only the existing global recovery path may omit it.
+    return { ...status, quiesced: false, providerHistoryUnavailable: true };
+  }
 }
 
 async function waitQuiesced(unit, timeoutMs) {
@@ -2234,11 +2266,9 @@ async function main(argv = process.argv.slice(2), environment = process.env, {
     }
   }
   if (input.action === 'status') {
-    const status = inspectUnit(unitName(input.provider, input.launchId));
-    process.stdout.write(`${JSON.stringify({
-      ...status,
-      ...inspectProviderReadiness(input.provider, input.launchId, status),
-    })}\n`);
+    process.stdout.write(`${JSON.stringify(
+      inspectProviderLaunchStatus(input.provider, input.launchId)
+    )}\n`);
     return 0;
   }
   if (input.action === 'terminate') {
@@ -2300,6 +2330,7 @@ module.exports = {
   validateWorkspaceStorageBoundary,
   hasCancellationTombstone,
   inspectUnit,
+  inspectProviderLaunchStatus,
   inspectProviderReadiness,
   listProviderUnits,
   main,
