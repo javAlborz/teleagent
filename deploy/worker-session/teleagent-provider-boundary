@@ -1931,7 +1931,8 @@ async function panicAllProviderPlanes({
   if (retainedLaunch !== null) {
     for (const provider of Object.keys(PROVIDERS)) {
       retainedLaunchResults.push(await terminate(provider, retainedLaunch.launchId, {
-        control: terminationControl, allowMissingReadinessForGlobalRecovery: true,
+        control: enabledProviders.includes(provider) ? control : terminationControl,
+        allowMissingReadinessForGlobalRecovery: true,
       }));
     }
   }
@@ -1942,7 +1943,8 @@ async function panicAllProviderPlanes({
       );
       if (!match) fail('provider panic unit identity is invalid');
       launchResults.push(await terminate(provider, `launch_${match[1]}`, {
-        control: terminationControl, allowMissingReadinessForGlobalRecovery: true,
+        control: enabledProviders.includes(provider) ? control : terminationControl,
+        allowMissingReadinessForGlobalRecovery: true,
       }));
     }
   }
