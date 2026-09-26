@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
+const { performance } = require('node:perf_hooks');
 const { EventEmitter } = require('node:events');
 const { PassThrough } = require('node:stream');
 const test = require('node:test');
