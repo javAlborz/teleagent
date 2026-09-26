@@ -206,13 +206,13 @@ BOUND_SOURCE_PATHS = (
 API_LOCK_PATH = "claude-api-server/package-lock.json"
 API_NODE_MODULES_PATH = "claude-api-server/node_modules"
 API_NATIVE_MODULE_PATHS = (
-    "claude-api-server/node_modules/better-sqlite3/build/Release/better_sqlite3.node",
+    "claude-api-server/node_modules/better-sqlite3/prebuilds/linux-x64.node",
     "claude-api-server/node_modules/node-pty/build/Release/pty.node",
 )
 PRIVILEGED_BROKER_LOCK_PATH = "privileged-action-broker/package-lock.json"
 PRIVILEGED_BROKER_NODE_MODULES_PATH = "privileged-action-broker/node_modules"
 PRIVILEGED_BROKER_NATIVE_MODULE_PATHS = (
-    "privileged-action-broker/node_modules/better-sqlite3/build/Release/better_sqlite3.node",
+    "privileged-action-broker/node_modules/better-sqlite3/prebuilds/linux-x64.node",
 )
 REALTIME_SIP_LOCK_PATH = "realtime-sip-gateway/package-lock.json"
 REALTIME_SIP_NODE_MODULES_PATH = "realtime-sip-gateway/node_modules"
