@@ -2,6 +2,8 @@
 
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const test = require('node:test');
 const {
   ROLE_SPECS,
@@ -9,6 +11,7 @@ const {
   createDurableStateStorageGuard,
   inspectDurableStateStorage,
   requireExactStatePaths,
+  statfsDescriptor,
 } = require('../../lib/durable-state-storage-boundary');
 const {
   normalizeControllerStateConfiguration,
@@ -84,6 +87,30 @@ function inspectController(overrides = {}) {
   assert.equal(closed, true);
   return health;
 }
+
+test('real Node filesystem observation stays bound to an open directory after unlink', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'teleagent-statfs-'));
+  const descriptor = fs.openSync(root, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY);
+  let closed = false;
+  try {
+    const before = fs.statfsSync(root, { bigint: true });
+    fs.rmdirSync(root);
+    const observed = statfsDescriptor(descriptor);
+    for (const key of ['type', 'bsize', 'blocks', 'files']) {
+      assert.equal(observed[key], before[key]);
+      assert.equal(typeof observed[key], 'bigint');
+    }
+    fs.closeSync(descriptor);
+    closed = true;
+    assert.throws(() => statfsDescriptor(descriptor), { code: 'ENOENT' });
+    for (const invalid of [-1, 1.5, '0/../../tmp', NaN]) {
+      assert.throws(() => statfsDescriptor(invalid), TypeError);
+    }
+  } finally {
+    if (!closed) fs.closeSync(descriptor);
+    if (fs.existsSync(root)) fs.rmdirSync(root);
+  }
+});
 
 test('controller state requires one exact canonical durable 2-8 GiB submount', () => {
   const health = inspectController();
