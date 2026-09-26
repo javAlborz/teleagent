@@ -6,5 +6,5 @@
 Defaults!/usr/local/libexec/teleagent-provider-boundary env_reset,secure_path=/usr/sbin:/usr/bin:/sbin:/bin,!setenv
 teleagent-claude-supervisor ALL=(root) NOPASSWD: /usr/local/libexec/teleagent-provider-boundary *
 teleagent-codex-supervisor ALL=(root) NOPASSWD: /usr/local/libexec/teleagent-provider-boundary *
-teleagent-session-broker ALL=(root) NOPASSWD: /usr/local/libexec/teleagent-provider-boundary --action panic-all
-teleagent-session-broker ALL=(root) NOPASSWD: /usr/local/libexec/teleagent-provider-boundary --action recover-root-panic
+# The session broker retains NoNewPrivileges and uses the independently
+# installed fixed root provider-control socket; it receives no sudo rule.

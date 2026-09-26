@@ -4,7 +4,6 @@
 const net = require('node:net');
 const fs = require('node:fs');
 const path = require('node:path');
-const { execFile } = require('node:child_process');
 
 const SOCKETS = Object.freeze({
   claude: '/run/teleagent-provider-launch/claude.sock',
@@ -14,7 +13,51 @@ const MAX_FRAME_BYTES = 256 * 1024;
 const MAX_DECODED_FRAME_BYTES = 64 * 1024;
 const MAX_LAUNCH_OUTPUT_BYTES = 8 * 1024 * 1024;
 const SAFE_TASK_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
-const ROOT_BOUNDARY = '/usr/local/libexec/teleagent-provider-boundary';
+const ROOT_CONTROL_SOCKET = '/run/teleagent-provider-control/control.sock';
+const ACTIVATION_MODE_FILE = '/etc/teleagent/provider-runtime/enabled-providers';
+
+function readEnabledProviders({ filesystem = fs } = {}) {
+  let descriptor;
+  try {
+    descriptor = filesystem.openSync(ACTIVATION_MODE_FILE,
+      fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    const before = filesystem.fstatSync(descriptor);
+    if (!before.isFile() || before.uid !== 0 || before.gid !== 0 ||
+        before.nlink !== 1 || (before.mode & 0o7777) !== 0o444 ||
+        before.size < 1 || before.size > 32) {
+      throw new Error('unsafe provider activation metadata');
+    }
+    const value = Buffer.alloc(33);
+    const bytes = filesystem.readSync(descriptor, value, 0, value.length, 0);
+    const after = filesystem.fstatSync(descriptor);
+    const fields = ['dev', 'ino', 'mode', 'uid', 'gid', 'nlink', 'size', 'mtimeMs', 'ctimeMs'];
+    if (bytes !== before.size || fields.some((field) => before[field] !== after[field])) {
+      throw new Error('provider activation mode changed while reading');
+    }
+    if (value.subarray(0, bytes).equals(Buffer.from('codex\n'))) return ['codex'];
+    if (value.subarray(0, bytes).equals(Buffer.from('claude,codex\n'))) return ['claude', 'codex'];
+    throw new Error('invalid provider activation mode');
+  } catch {
+    throw new Error('the root provider activation mode is unavailable or unsafe');
+  } finally {
+    if (descriptor !== undefined) filesystem.closeSync(descriptor);
+  }
+}
+
+function selectedProviders(readProviders) {
+  const providers = readProviders();
+  if (!Array.isArray(providers) ||
+      !['codex', 'claude,codex'].includes(providers.join(','))) {
+    throw new Error('the root provider activation mode is invalid');
+  }
+  return [...providers];
+}
+
+function requireSameProviders(providers, readProviders) {
+  if (providers.join(',') !== selectedProviders(readProviders).join(',')) {
+    throw new Error('the root provider activation mode changed during control');
+  }
+}
 
 function fail(message, code = 78) {
   const error = Object.assign(new Error(message), { exitCode: code });
@@ -145,21 +188,27 @@ async function probeProvider(provider, options = {}) {
   return payload;
 }
 
-async function probeProviderSupervisors(options) {
-  const [claude, codex] = await Promise.all([
-    probeProvider('claude', options),
-    probeProvider('codex', options),
-  ]);
-  return { ready: true, claude, codex };
+async function probeProviderSupervisors({
+  readProviders = readEnabledProviders, probe = probeProvider, ...options
+} = {}) {
+  const selected = selectedProviders(readProviders);
+  const results = await Promise.all(selected.map(async (provider) =>
+    [provider, await probe(provider, options)]));
+  requireSameProviders(selected, readProviders);
+  return { ready: true, ...Object.fromEntries(results) };
 }
 
 async function panicProviderSupervisors({
   reason = 'worker_session_panic',
   source = 'controller',
   timeoutMs = 7000,
+  request = requestProviderControl,
 } = {}) {
+  // Panic still covers both planes, including a disabled provider. An absent
+  // supervisor requires the broker's fixed root fallback and independent
+  // quiescence proof; selection alone must never prove that plane stopped.
   const results = await Promise.all(['claude', 'codex'].map(async (provider) => {
-    const payload = await requestProviderControl(provider, {
+    const payload = await request(provider, {
       type: 'panic',
       reason: String(reason).slice(0, 160),
       source: String(source).slice(0, 80),
@@ -174,11 +223,16 @@ async function panicProviderSupervisors({
   return { success: quiesced, accepted, persisted: accepted, quiesced, providers };
 }
 
-async function unlockProviderSupervisors({ timeoutMs = 7000 } = {}) {
-  const results = await Promise.all(['claude', 'codex'].map(async (provider) => {
-    const payload = await requestProviderControl(provider, { type: 'unlock' }, { timeoutMs });
+async function unlockProviderSupervisors({
+  timeoutMs = 7000, readProviders = readEnabledProviders, request = requestProviderControl,
+} = {}) {
+  // The broker requires root recovery (including disabled-plane proof) first.
+  const selected = selectedProviders(readProviders);
+  const results = await Promise.all(selected.map(async (provider) => {
+    const payload = await request(provider, { type: 'unlock' }, { timeoutMs });
     return [provider, payload];
   }));
+  requireSameProviders(selected, readProviders);
   const providers = Object.fromEntries(results);
   const success = results.every(([, result]) => (
     result?.success === true && result?.persisted === true && result?.quiesced === true
@@ -187,26 +241,47 @@ async function unlockProviderSupervisors({ timeoutMs = 7000 } = {}) {
 }
 
 function requestRootProviderPlane(action, {
-  execFileImpl = execFile,
+  createSocket = (socketPath) => net.createConnection({ path: socketPath }),
   timeoutMs = 60_000,
 } = {}) {
-  if (!['panic-all', 'recover-root-panic'].includes(action)) {
+  const commands = { 'panic-all': 'PANIC\n', 'recover-root-panic': 'RECOVER\n' };
+  if (!Object.hasOwn(commands, action)) {
     return Promise.reject(new Error('root provider-plane action is invalid'));
   }
   return new Promise((resolve, reject) => {
-    execFileImpl('/usr/bin/sudo', ['-n', ROOT_BOUNDARY, '--action', action], {
-      timeout: timeoutMs,
-      maxBuffer: 256 * 1024,
-      encoding: 'utf8',
-      env: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8' },
-    }, (error, stdout) => {
-      let payload;
-      try { payload = JSON.parse(String(stdout || '').trim()); }
-      catch { return reject(new Error('root provider-plane response is invalid')); }
-      if (error && payload?.quiesced !== true) {
-        return reject(new Error('root provider-plane control failed'));
-      }
-      resolve(payload);
+    const socket = createSocket(ROOT_CONTROL_SOCKET);
+    const chunks = [];
+    let bytes = 0;
+    let settled = false;
+    const finish = (error, payload) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.destroy();
+      if (error) reject(error);
+      else resolve(payload);
+    };
+    const timer = setTimeout(() => finish(new Error('root provider-plane control timed out')), timeoutMs);
+    socket.once('connect', () => socket.end(commands[action]));
+    socket.on('data', (chunk) => {
+      bytes += chunk.length;
+      if (bytes > 1024) return finish(new Error('root provider-plane response exceeded bound'));
+      chunks.push(chunk);
+    });
+    socket.once('error', () => finish(new Error('root provider-plane control failed')));
+    socket.once('close', () => finish(new Error('root provider-plane response was incomplete')));
+    socket.once('end', () => {
+      try {
+        const payload = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        if (payload?.version !== 1 || payload?.action !== action ||
+            Object.keys(payload).sort().join(',') !==
+              'accepted,action,persisted,quiesced,success,version' ||
+            ['accepted', 'persisted', 'quiesced', 'success'].some((key) =>
+              typeof payload[key] !== 'boolean')) {
+          throw new Error('invalid response');
+        }
+        finish(null, payload);
+      } catch { finish(new Error('root provider-plane response is invalid')); }
     });
   });
 }
@@ -362,6 +437,7 @@ module.exports = {
   parseInvocation,
   probeProvider,
   probeProviderSupervisors,
+  readEnabledProviders,
   requestProviderControl,
   requestRootProviderPlane,
   runClient,

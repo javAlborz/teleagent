@@ -278,11 +278,9 @@ test('session broker, RPC socket, state DB, and tmux socket exclude provider ide
     /^teleagent-claude-supervisor ALL=\(root\).*teleagent-provider-boundary \*$/m);
   assert.match(sudoers,
     /^teleagent-codex-supervisor ALL=\(root\).*teleagent-provider-boundary \*$/m);
-  assert.match(sudoers,
-    /^teleagent-session-broker ALL=\(root\) NOPASSWD: .* --action panic-all$/m);
-  assert.match(sudoers,
-    /^teleagent-session-broker ALL=\(root\) NOPASSWD: .* --action recover-root-panic$/m);
-  assert.doesNotMatch(sudoers, /teleagent-session-broker .* --action (?:unlock|recover)(?!-root-panic)/);
+  assert.doesNotMatch(sudoers, /^teleagent-session-broker ALL=/m);
+  assert.match(service, /^Requires=.*teleagent-provider-control.socket$/m);
+  assert.match(service, /^NoNewPrivileges=yes$/m);
   assert.doesNotMatch(sudoers, /teleagent-(?:claude|codex)-worker ALL=/);
   assert.doesNotMatch(socket + service + tmpfiles, /SocketGroup=teleagent-worker/);
   assert.doesNotMatch(service, /SupplementaryGroups=.*teleagent-control/);

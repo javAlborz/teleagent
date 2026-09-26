@@ -3,8 +3,8 @@ After=teleagent-provider.slice teleagent-voice.slice teleagent-media.slice telea
 Requires=teleagent-provider.slice teleagent-voice.slice teleagent-media.slice teleagent-recovery.slice
 Description=Teleagent isolated workspace and tmux session broker
 Documentation=file:/opt/teleagent/current/docs/WORKER-SESSION-BROKER.md
-Requires=teleagent-worker-session.socket
-After=local-fs.target teleagent-worker-session.socket
+Requires=teleagent-worker-session.socket teleagent-provider-control.socket
+After=local-fs.target teleagent-worker-session.socket teleagent-provider-control.socket
 RequiresMountsFor=/var/lib/teleagent-worker-state /var/lib/teleagent-provider-plane
 ConditionPathExists=/etc/teleagent/worker-session/ENABLE
 

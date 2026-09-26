@@ -331,6 +331,13 @@ the Codex credential preflight does not require a dummy Claude key. In the
 full two-provider mode, start the Claude supervisor socket explicitly before
 running the verifier, and use the full two-provider canary acknowledgment.
 Neither mode makes the release or phone ready without the remaining gates.
+The worker broker's supervisor health and cooperative unlock use that same
+protected activation file, with no environment-derived default. They contact
+only the selected providers and refuse a mode change during the operation.
+Broker unlock still requires the fixed root recovery proof before clearing its
+local durable fence. Panic continues to cover both execution planes: an absent
+disabled supervisor forces the existing root fallback and independent quiescence
+proof. A disabled selection by itself never proves a plane stopped.
 The
 verifier repeats both storage attestations after verifying the installed
 libexec digest closure. Both the worker broker and provider supervisor units
@@ -417,3 +424,15 @@ nor vendor limit is asserted by this source policy. OpenAI's
 [spend-limit instructions](https://developers.openai.com/api/docs/guides/spend-limits)
 and Claude's [workspace limits](https://platform.claude.com/docs/en/manage-claude/workspaces)
 describe those account controls.
+
+Provider root panic/recovery uses the independently installed host socket
+`/run/teleagent-provider-control/control.sock`. Its root listener admits only
+the dedicated broker UID/GID and exact `PANIC` or `RECOVER` frames; there is
+no path, command, provider or argument input. The worker retains
+`NoNewPrivileges=yes` and its read-only provider-plane view. A missing listener,
+partial result, timeout or failed proof keeps the broker panic-locked.
+The host receiver pins the fixed executable closure, serializes requests and
+limits each transaction, including its child process group and output.
+It independently confirms both provider planes before reporting completion.
+This socket is a host prerequisite; install it disabled, review its sandbox
+and peer rejection evidence, then activate only inside the guarded window.
