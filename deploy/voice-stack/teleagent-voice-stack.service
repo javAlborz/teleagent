@@ -40,9 +40,9 @@ TimeoutStopSec=150s
 KillMode=control-group
 IOWeight=50
 NoNewPrivileges=yes
-# Only the pinned root launcher receives these host observation capabilities.
+# The pinned root launcher observes namespaces and drops identity for rendering.
 # Workload containers retain their separate nonroot, capability-free profiles.
-CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SYS_PTRACE CAP_SYS_ADMIN CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SYS_PTRACE CAP_SYS_ADMIN CAP_NET_ADMIN CAP_SETUID CAP_SETGID
 PrivateDevices=yes
 PrivateTmp=yes
 ProtectSystem=strict
