@@ -186,7 +186,10 @@ function renderReceiverEndpoints(networkConfig, applicationContract) {
 function prepareProtectedReceiverEndpoints(releaseRoot, { lifecycleFd = null } = {}) {
   const text = boundary.protectedFile(NETWORK_CONFIG);
   const config = JSON.parse(text);
-  refuse(text.trim() === boundary.canonical(config));
+  // Infrastructure pins its two-space JSON bytes independently. Accept that
+  // encoding and canonical JSON; both round trips still reject duplicate keys.
+  refuse(text.trim() === boundary.canonical(config) ||
+    text.trim() === JSON.stringify(config, null, 2));
   const configDigest = boundary.digest(boundary.canonical(config));
   const contract = boundary.loadAdmission(releaseRoot, 'bootstrap-app', configDigest, { lifecycleFd });
   // The host authority validates the entire infra config, external boundary,

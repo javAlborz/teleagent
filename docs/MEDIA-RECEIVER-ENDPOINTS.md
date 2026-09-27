@@ -134,3 +134,11 @@ activation refusal are tested unchanged. The tests run serially under
 `scripts/hermes-safe-test`; they open no network sockets and call no Docker,
 FreeSWITCH, Drachtio or provider services. A passing fixture is not live
 connectivity, effective configuration or activation evidence.
+
+
+The protected entrypoint accepts canonical JSON and the infrastructure's exact
+two-space JSON encoding. Both encodings must round-trip without duplicate
+members. Independent host admission still pins the installed file bytes and
+binds the canonical configuration digest to the current boot and contract.
+This permits the reviewed infrastructure configuration without rewriting its
+pinned bytes during voice startup.
