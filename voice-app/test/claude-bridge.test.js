@@ -5,6 +5,10 @@ installTestRuntimeSecrets();
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const axios = require('axios');
+const fs = require('node:fs');
+const http = require('node:http');
+const os = require('node:os');
+const path = require('node:path');
 const bridge = require('../lib/claude-bridge');
 const { READY_CAPABILITIES, operatorHealth, executorHealth } = require('./controller-capabilities-fixture');
 const { UNAVAILABLE } = require('../lib/controller-capabilities');
@@ -667,3 +671,40 @@ test('voice-control and operator clients never reuse the general agent bearer', 
   assert.equal(panic.config.proxy, false);
   assert.equal(panic.config.maxRedirects, 0);
 });
+
+test('stop and unlock accept a confirmed Unix response after the former five-second deadline',
+  { timeout: 20000 }, async (t) => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'voice-recovery-deadline-'));
+    const socketPath = path.join(directory, 'control.sock');
+    const timers = new Set();
+    const paths = [];
+    const server = http.createServer((req, res) => {
+      assert.equal(req.headers.authorization, `Bearer ${TEST_RUNTIME_SECRETS.voiceControlToken}`);
+      paths.push(req.url);
+      req.resume();
+      const timer = setTimeout(() => {
+        timers.delete(timer);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true, voiceExecution: { locked: req.url.endsWith('/stop') } }));
+      }, 6100);
+      timers.add(timer);
+    });
+    t.after(async () => {
+      for (const timer of timers) clearTimeout(timer);
+      server.closeAllConnections();
+      await new Promise((resolve) => server.close(resolve));
+      fs.rmSync(directory, { recursive: true });
+    });
+    await new Promise((resolve) => server.listen(socketPath, resolve));
+    const realPost = axios.post.bind(axios);
+    t.mock.method(axios, 'post', (url, body, options) => {
+      assert.equal(options.socketPath, '/run/teleagent-controller/controller.sock');
+      assert.ok(options.timeout > 60000 && options.timeout < 70000);
+      return realPost(url, body, { ...options, socketPath });
+    });
+    assert.equal((await bridge.panicStop({ source: 'fixture' })).success, true);
+    const unlocked = await bridge.unlockVoiceExecution('fixture');
+    assert.equal(unlocked.success, true);
+    assert.equal(unlocked.voiceExecution.locked, false);
+    assert.deepEqual(paths, ['/voice-control/stop', '/voice-control/unlock']);
+  });

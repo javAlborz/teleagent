@@ -1065,6 +1065,7 @@ test('offline recovery initializes missing state and retains partial or unavaila
       successEvents.push('controller-panic');
       assert.equal(options.method, 'POST');
       assert.equal(options.pathname, '/voice-control/stop');
+      assert.ok(options.timeoutMs > 65000 && options.timeoutMs < 150000);
       assert.equal(options.socketPath, '/run/teleagent-controller/controller.sock');
       assert.equal(options.port, undefined);
       assert.equal(successEvents.indexOf('containers-zero') <

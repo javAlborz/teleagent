@@ -25,6 +25,9 @@ const RUNTIME_SECRET_ROOT = `${RUNTIME_ROOT}/voice-secrets`;
 const CONTROL_ROOT = `${RUNTIME_ROOT}/control`;
 const CONTROL_SOCKET = `${CONTROL_ROOT}/control.sock`;
 const CONTROLLER_SOCKET = '/run/teleagent-controller/controller.sock';
+// Worker recovery may use 60 seconds and the voice bridge waits 65 seconds.
+// The outer stop/recovery caller must outlive both bounded inner requests.
+const VOICE_PANIC_TIMEOUT_MS = 70000;
 const ACTIVATION_ROOT = '/var/lib/teleagent-isolated-voice-stack';
 const ACTIVATION_STATE = `${ACTIVATION_ROOT}/activation-state.json`;
 const WRAPPER = `${APP_ROOT}/deploy/voice-stack/teleagent-voice-stack-launch.js`;
@@ -1812,7 +1815,7 @@ async function stop() {
       socketPath: CONTROL_SOCKET,
       token: tokenBuffer.toString('utf8'),
       body: { source: 'teleagent_voice_stack', reason: 'systemd_voice_stack_stop' },
-      timeoutMs: 15000,
+      timeoutMs: VOICE_PANIC_TIMEOUT_MS,
     });
     assertPanicQuiesced(panic);
   } catch (error) {
@@ -1923,7 +1926,7 @@ async function runOfflineRecovery(priorState, {
       pathname: '/voice-control/stop',
       token: tokenBuffer.toString('utf8'),
       body: { source: 'teleagent_voice_stack', reason: 'offline_activation_recovery' },
-      timeoutMs: 15000,
+      timeoutMs: VOICE_PANIC_TIMEOUT_MS,
       socketPath: CONTROLLER_SOCKET,
     });
     assertPanicQuiesced(panic);

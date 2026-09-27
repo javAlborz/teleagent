@@ -12,6 +12,9 @@ const {
 } = require('./claude-api-config');
 const { looksLikePhoneDeployRequest } = require('../../lib/phone-deploy-intent');
 const { UNAVAILABLE, capabilitiesFromHealth } = require('./controller-capabilities');
+// The controller permits up to 60 seconds for worker panic/unlock. Keep the
+// caller alive through that bounded response instead of abandoning recovery.
+const VOICE_CONTROL_MUTATION_TIMEOUT_MS = 65000;
 const {
   assertSensitiveAgentLoggingDisabled,
   summarizeSensitiveText,
@@ -639,7 +642,7 @@ async function panicStop(options = {}) {
       `${AGENT_API_URL}/voice-control/stop`,
       { reason, source },
       {
-        timeout: 5000,
+        timeout: VOICE_CONTROL_MUTATION_TIMEOUT_MS,
         headers: buildVoiceControlApiHeaders({ 'Content-Type': 'application/json' }),
         maxRedirects: 0,
       }
@@ -679,7 +682,7 @@ async function unlockVoiceExecution(source = 'operator') {
       `${AGENT_API_URL}/voice-control/unlock`,
       { source },
       {
-        timeout: 5000,
+        timeout: VOICE_CONTROL_MUTATION_TIMEOUT_MS,
         headers: buildVoiceControlApiHeaders({ 'Content-Type': 'application/json' }),
         maxRedirects: 0,
       }
