@@ -6,6 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const test = require('node:test');
+const vm = require('node:vm');
 const {
   REVIEWED_ASSETS,
   formatInstalledIdentities,
@@ -27,6 +28,46 @@ const RELEASE_START_GATE = 'ExecStartPre=+/usr/bin/env -i HOME=/var/empty ' +
 const RELEASE_START = 'ExecStart=/usr/bin/python3 -I ' +
   '/usr/local/libexec/verify-teleagent-release-closure --start-component ' +
   'voice-stack-start ${CREDENTIALS_DIRECTORY}/teleagent-release-gate';
+
+test('voice credential projection remains group-readable under the service umask', (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'voice-projection-mode-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const source = fs.readFileSync(path.join(DEPLOY, 'teleagent-voice-stack-launch.js'), 'utf8');
+  const body = /function projectRuntime\([\s\S]*?(?=\nfunction ensureDockerConfigDirectory\()/u
+    .exec(source)?.[0];
+  assert.ok(body);
+  const ownership = [];
+  const projectRuntime = vm.runInNewContext(`${body}\nprojectRuntime`, {
+    fs: { ...fs, chownSync: (target, uid, gid) => ownership.push({ target, uid, gid }) },
+    path,
+    process: { pid: process.pid },
+    RUNTIME_ROOT: directory,
+    RUNTIME_SECRET_ROOT: path.join(directory, 'voice-secrets'),
+    CONTROL_ROOT: path.join(directory, 'control'),
+    inspectRootPath: (target) => assert.equal(target, directory),
+    materializePrivateReceiverFiles: () => ({}),
+    ensureDockerConfigDirectory: () => {},
+  });
+  const credentials = new Map([
+    ['teleagent-drachtio-secret', Buffer.from('synthetic-drachtio')],
+    ['teleagent-freeswitch-secret', Buffer.from('synthetic-freeswitch')],
+  ]);
+  const previous = process.umask(0o077);
+  try {
+    projectRuntime({ voice: { uid: 982, gid: 982 } }, credentials, {});
+  } finally {
+    process.umask(previous);
+  }
+  const projection = path.join(directory, 'voice-secrets');
+  assert.equal(fs.statSync(projection).mode & 0o777, 0o750);
+  assert.ok(ownership.some(({ target, uid, gid }) =>
+    target.startsWith(`${directory}/voice-secrets.new-`) && uid === 0 && gid === 982));
+  for (const [name, cleared] of credentials) {
+    assert.equal(fs.statSync(path.join(projection, name)).mode & 0o777, 0o440);
+    assert.ok(cleared.every((byte) => byte === 0));
+  }
+  assert.equal(fs.statSync(path.join(directory, 'control')).mode & 0o777, 0o700);
+});
 
 function voiceInstallerFixture(t) {
   const directory = fs.mkdtempSync('/tmp/teleagent-voice-install-test-');
