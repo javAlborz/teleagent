@@ -1518,11 +1518,12 @@ function parseProcessIdentityStatus(source, expectedIdentity) {
   }
   const groupMatches = text.split('\n').filter((line) => line.startsWith('Groups:'));
   if (groupMatches.length !== 1) refuse('a running voice process identity is ambiguous');
-  // /proc/PID/status reports supplementary groups here; the primary GID is
-  // already bound by all four Gid fields above. Compose GroupAdd is forbidden,
-  // so any value in Groups is an identity-boundary escape.
-  const supplementaryGroups = groupMatches[0].slice('Groups:'.length).trim();
-  if (supplementaryGroups !== '') {
+  // Docker may repeat the configured primary GID in supplementary Groups.
+  // Permit only that same identity, consistent with the media observers;
+  // Compose GroupAdd and every different group remain forbidden.
+  const supplementaryGroups = groupMatches[0].slice('Groups:'.length)
+    .trim().split(/\s+/u).filter(Boolean);
+  if (supplementaryGroups.some((gid) => gid !== String(expectedIdentity.gid))) {
     refuse('a running voice process has an unexpected supplementary group');
   }
   if (fields.Uid.some((value) => value !== expectedIdentity.uid) ||

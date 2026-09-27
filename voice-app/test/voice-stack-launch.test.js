@@ -973,6 +973,16 @@ test('every exact Compose service proves the durable generation and aggregate cg
   const status = (uid, gid) => `Name:\tmedia\nUid:\t${uid}\t${uid}\t${uid}\t${uid}\n` +
     `Gid:\t${gid}\t${gid}\t${gid}\t${gid}\nGroups:\t\n`;
   assert.equal(parseProcessIdentityStatus(status(988, 988), RUNTIME_IDENTITIES.drachtio), true);
+  assert.equal(parseProcessIdentityStatus(
+    status(988, 988).replace('Groups:\t\n', 'Groups:\t988\n'),
+    RUNTIME_IDENTITIES.drachtio
+  ), true);
+  for (const groups of ['0', '988 27', '0988', '-1', '988x']) {
+    assert.throws(() => parseProcessIdentityStatus(
+      status(988, 988).replace('Groups:\t\n', `Groups:\t${groups}\n`),
+      RUNTIME_IDENTITIES.drachtio
+    ), /supplementary group/);
+  }
   assert.throws(() => parseProcessIdentityStatus(
     status(0, 0), RUNTIME_IDENTITIES.drachtio
   ), /malformed|escaped/);
