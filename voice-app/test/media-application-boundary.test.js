@@ -127,6 +127,31 @@ test('container metadata refuses image, network, sandbox, restart and resource d
   }
 });
 
+test('mount order cannot change admission or digest, while mount edits still refuse', () => {
+  const contract = fixture();
+  const value = inspection(contract, 'voice-app', false);
+  value.mounts = ['/z', '/a'].map((target) => ({ Type: 'bind', Source: `/source${target}`,
+    Destination: target, Mode: 'ro', RW: false, Propagation: 'rprivate' }));
+  const reversed = { ...value, mounts: [...value.mounts].reverse() };
+  const before = structuredClone(value);
+  contract.workloads['voice-app'].sandboxDigest = boundary.profile(value);
+  assert.equal(boundary.profile(reversed), boundary.profile(value));
+  assert.deepEqual(boundary.validateDocker(reversed, 'voice-app', contract, IDS['voice-app'], false),
+    boundary.validateDocker(value, 'voice-app', contract, IDS['voice-app'], false));
+  assert.deepEqual(value, before);
+  for (const change of [
+    (v) => { v.mounts[0].Source = '/other'; },
+    (v) => { v.mounts[0].Destination = '/other'; },
+    (v) => { v.mounts[0].Mode = 'rw'; v.mounts[0].RW = true; },
+    (v) => { v.mounts[0].Propagation = 'shared'; },
+    (v) => { v.mounts.push({ ...v.mounts[0] }); },
+    (v) => { v.mounts.pop(); },
+  ]) {
+    const altered = structuredClone(value); change(altered);
+    assert.throws(() => boundary.validateDocker(altered, 'voice-app', contract, IDS['voice-app'], false));
+  }
+});
+
 test('kernel proof binds start generation, exact cgroup, namespace, UID and capability sets', () => {
   const expected = { uid: 983, gid: 983, namespaceDevice: 4, namespaceInode: 1003, cgroup: '/exact', startTicks: '77' };
   const io = kernelIo(expected);

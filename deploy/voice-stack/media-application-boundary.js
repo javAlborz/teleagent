@@ -186,12 +186,29 @@ function exactComposeCandidate(document, contract) {
   return candidate;
 }
 
+function stableInspection(value) {
+  need(value && typeof value === 'object' && Array.isArray(value.mounts));
+  const targets = new Set();
+  for (const mount of value.mounts) {
+    keys(mount, 'Type Source Destination Mode RW Propagation');
+    need(mount.Type === 'bind' && typeof mount.Source === 'string' && mount.Source.startsWith('/') &&
+      typeof mount.Destination === 'string' && mount.Destination.startsWith('/') &&
+      ['ro', 'rw'].includes(mount.Mode) && mount.RW === (mount.Mode === 'rw') &&
+      mount.Propagation === 'rprivate' && !targets.has(mount.Destination));
+    targets.add(mount.Destination);
+  }
+  // Docker exposes mounts from a map: only array order is non-semantic.
+  return { ...value, mounts: [...value.mounts].sort((a, b) =>
+    a.Destination < b.Destination ? -1 : a.Destination > b.Destination ? 1 : 0) };
+}
+
 function profile(value) {
-  const { id: _id, image: _image, pid: _pid, running: _running, status: _status, restarts: _restarts, ...sandbox } = value;
+  const { id: _id, image: _image, pid: _pid, running: _running, status: _status, restarts: _restarts, ...sandbox } = stableInspection(value);
   return digest(canonical(sandbox));
 }
 function empty(value) { return value === null || canonical(value) === '[]' || canonical(value) === '{}'; }
 function validateDocker(value, service, contract, containerId, running) {
+  value = stableInspection(value);
   const workload = contract.workloads[service];
   const anchor = contract.bootstrap.services[service === 'voice-app' ? 'voice' : service];
   const [memory, nanoCpus, pidsLimit] = LIMITS[service];
@@ -351,7 +368,7 @@ function verifyPlacement(contract, placements, { inspect, anchorCheck, io = fs, 
         cgroup: `/teleagent.slice/teleagent-voice.slice/teleagent-voice-containers.slice/docker-${observed.id}.scope` }, io);
       kernelLimits(evidence[service].cgroup, LIMITS[service], io);
     }
-    need(canonical(inspect(placements[service])) === canonical(observed));
+    need(canonical(stableInspection(inspect(placements[service]))) === canonical(observed));
   }
   evidence.tasks = verifyTasks(contract, stage === 'created' ? {} : placements, io);
   if (stage !== 'created') {
