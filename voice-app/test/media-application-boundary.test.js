@@ -207,7 +207,7 @@ test('namespace scan retries only disappearing proc entries with a fixed bound',
   const contract = fixture();
   const anchors = Object.values(contract.bootstrap.services);
   let races = 0;
-  const io = { readdirSync(filename) {
+  const io = { lstatSync() { return { isDirectory: () => true }; }, readdirSync(filename) {
     if (filename === '/proc') return anchors.map((anchor) => String(anchor.pid));
     if (races > 0) { races -= 1; throw Object.assign(new Error('exited during scan'), { code: 'ENOENT' }); }
     return [filename.split('/')[2]];
@@ -226,6 +226,49 @@ test('namespace scan retries only disappearing proc entries with a fixed bound',
   races = 0;
   io.readdirSync = () => { throw new Error('unreadable /proc'); };
   assert.throws(() => boundary.verifyTasks(contract, {}, io), /unreadable \/proc/u);
+});
+
+test('namespace inventory tolerates only independently confirmed vanished processes', () => {
+  const contract = fixture();
+  const anchors = Object.values(contract.bootstrap.services);
+  const absent = () => Object.assign(new Error('process exited'), { code: 'ENOENT' });
+  let goneAt = 'listing', gonePid = '999', rootError = 'ENOENT';
+  const io = {
+    readdirSync(filename) {
+      if (filename === '/proc') return [...anchors.map((anchor) => String(anchor.pid)), '999'];
+      const pid = filename.split('/')[2];
+      if (pid === gonePid && goneAt === 'listing') throw absent();
+      return [pid];
+    },
+    statSync(filename) {
+      const pid = filename.split('/')[2];
+      if (pid === gonePid && goneAt === 'namespace') throw absent();
+      return { dev: 4, ino: pid === '999' ? 9999 : 1000 + Number(pid) - 100 };
+    },
+    openSync() { throw absent(); },
+    readFileSync(filename) {
+      const pid = filename.split('/')[2];
+      if (pid === gonePid && goneAt === 'cgroup') throw absent();
+      const anchor = anchors.find((value) => value.pid === Number(pid));
+      return anchor ? `0::/teleagent.slice/teleagent-media.slice/docker-${anchor.containerId}.scope` : '0::/elsewhere';
+    },
+    lstatSync(filename) {
+      assert.equal(filename, `/proc/${gonePid}`);
+      if (rootError) throw Object.assign(new Error('root observation'), { code: rootError });
+      return { isDirectory: () => true };
+    },
+  };
+  for (goneAt of ['listing', 'namespace', 'cgroup']) {
+    assert.equal(Object.keys(boundary.verifyTasks(contract, {}, io)).length, 4);
+    rootError = null; // A present/reused PID must not be omitted.
+    assert.throws(() => boundary.verifyTasks(contract, {}, io), { code: 'ENOENT' });
+    rootError = 'EACCES';
+    assert.throws(() => boundary.verifyTasks(contract, {}, io), { code: 'EACCES' });
+    rootError = 'ENOENT';
+  }
+  gonePid = String(anchors[0].pid);
+  goneAt = 'listing';
+  assert.throws(() => boundary.verifyTasks(contract, {}, io));
 });
 
 test('missing authority and unpublished host start cannot fall back to legacy host networking', () => {

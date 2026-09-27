@@ -310,28 +310,46 @@ function verifyTasksOnce(contract, placements, io) {
       `0::/teleagent.slice/teleagent-voice.slice/teleagent-voice-containers.slice/docker-${placements[service]}.scope`, key);
   }
   for (const processId of io.readdirSync('/proc').filter((value) => /^[1-9][0-9]*$/u.test(value))) {
-    for (const taskId of io.readdirSync(`/proc/${processId}/task`)) {
-      const task = `/proc/${processId}/task/${taskId}`;
-      const namespace = namespaceTaskInfo(task, io);
-      if (namespace === null) continue;
-      const namespaceKey = `${namespace.dev}:${namespace.ino}`;
-      const cgroup = io.readFileSync(`${task}/cgroup`, 'utf8').trim();
-      need(![...admittedCgroups.keys()].some((scope) => cgroup.startsWith(`${scope}/`)));
-      need(!admittedCgroups.has(cgroup) || admittedCgroups.get(cgroup) === namespaceKey);
-      const match = expected.get(namespaceKey);
-      if (!match) continue;
-      const anchorGroup = `0::/teleagent.slice/teleagent-media.slice/docker-${match.anchor.containerId}.scope`;
-      const workloadId = placements[match.service];
-      const workloadGroup = `0::/teleagent.slice/teleagent-voice.slice/teleagent-voice-containers.slice/docker-${workloadId}.scope`;
-      const isAnchor = Number(processId) === match.anchor.pid && Number(taskId) === match.anchor.pid && cgroup === anchorGroup;
-      need(isAnchor || (workloadId && cgroup === workloadGroup));
-      if (!isAnchor) {
-        const workload = contract.workloads[match.service];
-        kernelProcess(Number(taskId), { ...match.anchor, startTicks: null, uid: workload.uid, gid: workload.gid,
-          cgroup: workloadGroup.slice(3) }, io);
+    const observed = [];
+    try {
+      for (const taskId of io.readdirSync(`/proc/${processId}/task`)) {
+        const task = `/proc/${processId}/task/${taskId}`;
+        const namespace = namespaceTaskInfo(task, io);
+        if (namespace === null) continue;
+        const namespaceKey = `${namespace.dev}:${namespace.ino}`;
+        const cgroup = io.readFileSync(`${task}/cgroup`, 'utf8').trim();
+        need(![...admittedCgroups.keys()].some((scope) => cgroup.startsWith(`${scope}/`)));
+        need(!admittedCgroups.has(cgroup) || admittedCgroups.get(cgroup) === namespaceKey);
+        const match = expected.get(namespaceKey);
+        if (!match) continue;
+        const anchorGroup = `0::/teleagent.slice/teleagent-media.slice/docker-${match.anchor.containerId}.scope`;
+        const workloadId = placements[match.service];
+        const workloadGroup = `0::/teleagent.slice/teleagent-voice.slice/teleagent-voice-containers.slice/docker-${workloadId}.scope`;
+        const isAnchor = Number(processId) === match.anchor.pid && Number(taskId) === match.anchor.pid && cgroup === anchorGroup;
+        need(isAnchor || (workloadId && cgroup === workloadGroup));
+        if (!isAnchor) {
+          const workload = contract.workloads[match.service];
+          kernelProcess(Number(taskId), { ...match.anchor, startTicks: null, uid: workload.uid, gid: workload.gid,
+            cgroup: workloadGroup.slice(3) }, io);
+        }
+        observed.push([match, { pid: Number(processId), tid: Number(taskId), cgroup }]);
       }
-      match.tasks.push({ pid: Number(processId), tid: Number(taskId), cgroup });
+    } catch (error) {
+      if (!['ENOENT', 'ESRCH'].includes(error.code)) throw error;
+      // A vanished process cannot retain a live namespace participant. Prove
+      // the whole process absent independently; a missing thread/namespace,
+      // inaccessible process, or reused PID still refuses this inventory.
+      let absent = false;
+      try { io.lstatSync(`/proc/${processId}`); }
+      catch (rootError) {
+        if (!['ENOENT', 'ESRCH'].includes(rootError.code)) throw rootError;
+        absent = true;
+      }
+      if (!absent) throw error;
+      continue;
     }
+    // Never retain partial observations from a process that disappeared.
+    for (const [match, task] of observed) match.tasks.push(task);
   }
   for (const value of expected.values()) need(value.tasks.some((task) => task.pid === value.anchor.pid && task.tid === value.anchor.pid));
   return Object.fromEntries([...expected].map(([namespace, value]) => [namespace, value.tasks.sort((a, b) => a.tid - b.tid)]));
