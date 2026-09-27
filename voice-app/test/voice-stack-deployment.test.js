@@ -233,7 +233,14 @@ test('voice deployment source is dormant and contains only the reviewed identity
     'ProtectProc=default', 'ProcSubset=all', 'RestrictNamespaces=net mnt',
     'RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK',
     'ReadWritePaths=/etc/teleagent-media /var/lib/teleagent-media',
+    'ReadWritePaths=/var/lib/teleagent-sip-local-peer-fence-install/operation.lock /run/teleagent-sip-local-peer-fence/operation.lock',
   ]) assert.ok(unit.split('\n').includes(line));
+  const writable = unit.split('\n').filter((line) => line.startsWith('ReadWritePaths='))
+    .flatMap((line) => line.slice('ReadWritePaths='.length).split(/\s+/u));
+  for (const parent of ['/var/lib/teleagent-sip-local-peer-fence-install',
+    '/run/teleagent-sip-local-peer-fence']) {
+    assert.ok(!writable.includes(parent), 'fence directories must remain read-only');
+  }
   assert.doesNotMatch(unit, /^\[Install\]$/m);
   assert.doesNotMatch(unit, /^Environment=.*(?:TOKEN|PASSWORD|SECRET|API_KEY|PRIVATE_KEY)=/mi);
   assert.doesNotMatch(compose, /^\s+group_add\s*:/m);

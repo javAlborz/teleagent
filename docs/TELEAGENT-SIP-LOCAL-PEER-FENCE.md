@@ -104,3 +104,12 @@ validates the installed descriptor rather than requiring it to match a newer
 source bundle, additionally requires Docker stopped, and is the only path that
 deletes the retained rules. The optional Hermes-wide Docker dependency drop-in
 remains infrastructure policy and is not installed by this application bundle.
+
+The isolated voice launcher checks the installed fence under `ProtectSystem=strict`.
+The installer and reconciliation helpers both take their existing root-owned
+lock files with write access. The voice unit therefore admits only
+`/var/lib/teleagent-sip-local-peer-fence-install/operation.lock` and
+`/run/teleagent-sip-local-peer-fence/operation.lock` as additional writable paths.
+Their parent directories, installed policy and receipt files remain read-only.
+Both locks must already exist through the required fence service; this grants
+no new application-container access and does not create or start that service.

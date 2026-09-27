@@ -64,6 +64,8 @@ ReadOnlyPaths=/usr/local/libexec /sys/kernel/security/apparmor/profiles
 ReadWritePaths=/run/teleagent-isolated-voice-stack /var/lib/teleagent-isolated-voice
 ReadWritePaths=/var/lib/teleagent-isolated-voice-stack
 ReadWritePaths=/etc/teleagent-media /var/lib/teleagent-media
+# Admission checks retain the existing installer and reconciliation locks.
+ReadWritePaths=/var/lib/teleagent-sip-local-peer-fence-install/operation.lock /run/teleagent-sip-local-peer-fence/operation.lock
 InaccessiblePaths=/etc/teleagent/provider-egress-secrets /etc/teleagent/privileged-action
 InaccessiblePaths=/var/lib/teleagent-provider-plane /var/lib/teleagent-worker-state
 
