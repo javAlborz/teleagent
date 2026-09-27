@@ -6,7 +6,10 @@ const path = require('node:path');
 const { admitLocalUnixRequest } = require('./local-control-request');
 
 const CONTROL_SOCKET = '/run/teleagent-voice-control/control.sock';
-const ALLOWED = new Set(['GET /api/realtime-health', 'POST /api/voice-control/stop']);
+// Status and unlock retain the router's scoped bearer authentication. The
+// private Unix directory remains the only host transport into these routes.
+const ALLOWED = new Set(['GET /api/realtime-health', 'POST /api/voice-control/stop',
+  'GET /api/voice-control/status', 'POST /api/voice-control/unlock']);
 
 function need(value) {
   if (!value) throw new Error('isolated host control socket refused');
