@@ -640,7 +640,7 @@ async function panicStop(options = {}) {
       { reason, source },
       {
         timeout: 5000,
-        headers: { 'Content-Type': 'application/json' },
+        headers: buildVoiceControlApiHeaders({ 'Content-Type': 'application/json' }),
         maxRedirects: 0,
       }
     );

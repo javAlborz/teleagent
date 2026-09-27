@@ -662,5 +662,8 @@ test('voice-control and operator clients never reuse the general agent bearer', 
     config.headers.Authorization !== 'Bearer general-agent-token'));
 
   const [panic] = requests.filter(({ url }) => url.endsWith('/voice-control/stop'));
-  assert.equal(panic.config.headers.Authorization, undefined);
+  assert.equal(panic.config.headers.Authorization, `Bearer ${TEST_RUNTIME_SECRETS.voiceControlToken}`);
+  assert.equal(panic.config.socketPath, '/run/teleagent-controller/controller.sock');
+  assert.equal(panic.config.proxy, false);
+  assert.equal(panic.config.maxRedirects, 0);
 });
