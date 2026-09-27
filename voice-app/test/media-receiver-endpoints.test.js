@@ -248,10 +248,19 @@ test('protected entrypoint binds the fixed configuration to independent bootstra
     return contract;
   };
   try {
-    assert.equal(renderer.prepareProtectedReceiverEndpoints(contract.releaseRoot).readyToLaunch, false);
-    assert.equal(admitted, true);
-    text = text.replace('"schema":"teleagent.media-docker-install.v1"',
-      '"schema":"discarded","schema":"teleagent.media-docker-install.v1"');
+    for (const encoding of [boundary.canonical(config), `${JSON.stringify(config, null, 2)}\n`]) {
+      text = encoding;
+      admitted = false;
+      assert.equal(renderer.prepareProtectedReceiverEndpoints(contract.releaseRoot).readyToLaunch, false);
+      assert.equal(admitted, true);
+      // Duplicate members remain refused even in the reviewed pretty format.
+      text = text.replace(/"schema":\s*"teleagent.media-docker-install.v1"/u,
+        '"schema":"discarded","schema":"teleagent.media-docker-install.v1"');
+      admitted = false;
+      assert.throws(() => renderer.prepareProtectedReceiverEndpoints(contract.releaseRoot));
+      assert.equal(admitted, false);
+    }
+    text = '{';
     admitted = false;
     assert.throws(() => renderer.prepareProtectedReceiverEndpoints(contract.releaseRoot));
     assert.equal(admitted, false);
