@@ -3,6 +3,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const vm = require('node:vm');
 const boundary = require('../../deploy/voice-stack/media-application-boundary');
 const BOOT = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
 const RELEASE = `/opt/teleagent/releases/sha256-${'e'.repeat(64)}`;
@@ -294,6 +295,37 @@ test('placement reuses only the independent host journal evidence while fenced',
   assert.throws(() => boundary.verifyProtectedPlacement(RELEASE, placements, 'created', {
     lifecycleFd: 7, load, verify,
   }), { code: 'MEDIA_APPLICATION_REFUSED' });
+});
+
+test('default Docker inspection inherits the retained lifecycle descriptor and rejects its absence', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../../deploy/voice-stack/media-application-boundary.js'), 'utf8');
+  const config = '/etc/teleagent-media/docker-client/config.json';
+  const metadata = (filename) => ({ uid: 0, gid: 0, mode: 0o644, nlink: 1, dev: 1, ino: 2,
+    size: 2, isFile: () => filename === config, isDirectory: () => filename !== config });
+  const io = { constants: fs.constants, lstatSync: metadata, fstatSync: metadata,
+    openSync: (filename) => filename, closeSync() {}, readFileSync: () => '{}' };
+  const calls = [];
+  const isolated = { exports: {} };
+  vm.runInNewContext('(function(require, module) {\n' + source + '\n})', {}, { filename: 'media-application-boundary.js' })(
+    (name) => name === 'node:fs' ? io : name === 'node:child_process' ? {
+      spawnSync(executable, args, options) {
+        calls.push({ executable, args: Array.from(args), stdio: Array.from(options.stdio) });
+        return { status: 0, stdout: JSON.stringify({ id: IDS.drachtio }) };
+      },
+    } : require(name), isolated);
+  const admit = (lifecycleFd) => isolated.exports.verifyProtectedPlacement(RELEASE, IDS, 'created', {
+    lifecycleFd, hostEvidenceDigest: `sha256:${'a'.repeat(64)}`,
+    load: () => ({ bootstrap: {} }),
+    verify: (_contract, placements, options) => options.inspect(placements.drachtio),
+  });
+  assert.equal(admit(7).id, IDS.drachtio);
+  assert.deepEqual(calls, [{ executable: '/usr/bin/docker', args: ['--host', 'unix:///var/run/docker.sock',
+    '--config', '/etc/teleagent-media/docker-client', 'inspect', '--type', 'container', '--format',
+    boundary.INSPECT, IDS.drachtio], stdio: ['ignore', 'pipe', 'pipe', 7] }]);
+  for (const fd of [undefined, null, -1, 2, '7']) {
+    assert.throws(() => admit(fd), { code: 'MEDIA_APPLICATION_REFUSED' });
+  }
+  assert.equal(calls.length, 1);
 });
 
 test('placement refuses escaped workload tasks and init disappearance after kernel observation', () => {
