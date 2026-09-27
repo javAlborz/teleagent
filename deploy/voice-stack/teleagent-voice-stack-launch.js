@@ -875,6 +875,9 @@ function projectRuntime(identities, credentials, projection) {
   const staging = `${RUNTIME_ROOT}/voice-secrets.new-${process.pid}`;
   fs.mkdirSync(staging, { mode: 0o750 });
   fs.chownSync(staging, 0, identity.gid);
+  // The service's 0077 umask removes the voice group's access during mkdir.
+  // Establish the exact root-owned projection mode before publishing it.
+  fs.chmodSync(staging, 0o750);
   try {
     for (const [runtimeName, contents] of credentials) {
       const target = path.join(staging, runtimeName);
