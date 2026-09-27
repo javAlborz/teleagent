@@ -34,7 +34,8 @@ ExecStartPre=+/usr/bin/env -i HOME=/var/empty PATH=/usr/sbin:/usr/bin:/sbin:/bin
 ExecStart=/usr/bin/python3 -I /usr/local/libexec/verify-teleagent-release-closure --start-component voice-stack-start ${CREDENTIALS_DIRECTORY}/teleagent-release-gate
 ExecStop=/usr/bin/python3 -I /usr/local/libexec/verify-teleagent-release-closure --stop-voice-stack
 ExecStopPost=/usr/bin/python3 -I /usr/local/libexec/verify-teleagent-release-closure --cleanup-voice-stack
-TimeoutStartSec=120s
+# Serial release and media admission runs under the one-CPU launcher limit.
+TimeoutStartSec=300s
 TimeoutStopSec=150s
 KillMode=control-group
 IOWeight=50
