@@ -382,11 +382,12 @@ function verifyPlacement(contract, placements, { inspect, anchorCheck, io = fs, 
   return { schema: 'teleagent.media-application-observation.v1', stage, placements, processes: evidence };
 }
 
-function inspectDocker(containerId) {
+function inspectDocker(containerId, { lifecycleFd = null } = {}) {
   need(id(containerId));
   need(protectedFile('/etc/teleagent-media/docker-client/config.json').trim() === '{}');
   return JSON.parse(command('/usr/bin/docker', ['--host', 'unix:///var/run/docker.sock', '--config',
-    '/etc/teleagent-media/docker-client', 'inspect', '--type', 'container', '--format', INSPECT, containerId]));
+    '/etc/teleagent-media/docker-client', 'inspect', '--type', 'container', '--format', INSPECT, containerId],
+    { lifecycleFd }));
 }
 
 function verifyProtectedPlacement(releaseRoot, placements, stage, {
@@ -396,7 +397,7 @@ function verifyProtectedPlacement(releaseRoot, placements, stage, {
   need(sha(hostEvidenceDigest));
   const contract = load(releaseRoot, stage, hostEvidenceDigest, { lifecycleFd });
   const observation = verify(contract, placements, {
-    stage, inspect,
+    stage, inspect: (containerId) => inspect(containerId, { lifecycleFd }),
     anchorCheck: () => load(releaseRoot, stage, hostEvidenceDigest, { lifecycleFd }).bootstrap,
   });
   // The host evidence binds the retained project journal. Re-admit it after
