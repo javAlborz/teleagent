@@ -43,6 +43,9 @@ NoNewPrivileges=yes
 # The pinned root launcher observes namespaces and drops identity for rendering.
 # Workload containers retain their separate nonroot, capability-free profiles.
 CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SYS_PTRACE CAP_SYS_ADMIN CAP_NET_ADMIN CAP_SETUID CAP_SETGID
+# Retain SETUID through systemd User= and seccomp setup on the host.
+# The renderer loses all effective, permitted and ambient caps on identity drop.
+AmbientCapabilities=CAP_SETUID
 PrivateDevices=yes
 PrivateTmp=yes
 ProtectSystem=strict

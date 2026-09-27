@@ -271,6 +271,7 @@ test('voice deployment source is dormant and contains only the reviewed identity
   // netlink, then drops to the voice identity for the projection renderer.
   for (const line of [
     'CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SYS_PTRACE CAP_SYS_ADMIN CAP_NET_ADMIN CAP_SETUID CAP_SETGID',
+    'AmbientCapabilities=CAP_SETUID',
     'ProtectProc=default', 'ProcSubset=all', 'RestrictNamespaces=net mnt',
     'RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK',
     'ReadWritePaths=/etc/teleagent-media /var/lib/teleagent-media',
