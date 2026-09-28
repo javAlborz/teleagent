@@ -230,6 +230,54 @@ test('caller turns route silently out of band before a speech-only response stre
   assert.deepEqual(transcripts, ['Direct answer.']);
 });
 
+test('managed routing uses the typed profile and cannot execute invented or disabled choices', async (t) => {
+  const calls = [];
+  const client = await createConnectedClient({
+    toolHandler: async (name, args) => {
+      calls.push({ name, args });
+      return { accepted: true, job_id: 'job-1' };
+    },
+  });
+  t.after(() => client.close());
+  const route = (id, profile, nestedProfile) => client._handleToolCall({
+    name: 'route_turn', call_id: id,
+    arguments: JSON.stringify({
+      action: 'send_agent_message', agent_profile: profile,
+      arguments_json: JSON.stringify({ profile: nestedProfile, request: 'Calculate 17 times 32 using Codex.' }),
+    }),
+  });
+  await route('automatic', undefined, 'codex-auto-codex');
+  assert.equal(calls[0].args.profile, 'auto');
+  await route('named', 'codex-terra', 'codex-auto');
+  assert.equal(calls[1].args.profile, 'codex-terra');
+  for (const profile of ['codex-auto', 'codex-auto-codex', 'claude-haiku', '', null, {}]) {
+    const result = await route(`invalid-${JSON.stringify(profile)}`, profile, 'codex-terra');
+    assert.equal(result.output.success, false);
+    assert.equal(result.output.accepted, false);
+    assert.equal(result.output.code, 'UNKNOWN_AGENT_PROFILE');
+  }
+  assert.equal(calls.length, 2);
+});
+
+test('rejected jobs remain failures in tool results, audit events, and subsequent speech instructions', async (t) => {
+  const client = await createConnectedClient({
+    toolHandler: async () => ({ accepted: false, code: 'AGENT_PROVIDER_DISABLED', message: 'Provider unavailable.' }),
+  });
+  t.after(() => client.close());
+  const audited = once(client, 'tool.completed');
+  await client._handleResponseDone({ output: [{
+    type: 'function_call', name: 'route_turn', call_id: 'refused-job',
+    arguments: JSON.stringify({ action: 'send_agent_message', agent_profile: 'auto', arguments_json: '{"request":"Calculate 17 times 32."}' }),
+  }] });
+  const [audit] = await audited;
+  assert.equal(audit.output.accepted, false);
+  assert.equal(audit.output.success, false);
+  const speech = client.ws.sentEvents().at(-1).response;
+  assert.equal(speech.tool_choice, 'none');
+  assert.match(speech.instructions, /"success":false/);
+  assert.match(speech.instructions, /rejected agent submission started no new job; do not supply your own answer/);
+});
+
 test('spoken preambles attached to tool selection are suppressed before phone playout', async (t) => {
   const client = await createConnectedClient({ toolHandler: async () => ({ success: true }) });
   t.after(() => client.close());

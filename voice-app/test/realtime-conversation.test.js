@@ -1292,6 +1292,12 @@ test('assistant transcript deduplication is item-scoped and tool/limit events ar
     output: { success: true, content: 'sensitive pane text that must not be audited' },
     durationMs: 12,
   });
+  realtime.emit('tool.completed', {
+    call: { name: 'send_agent_message', call_id: 'refused-agent' },
+    args: { profile: 'codex-auto' },
+    output: { accepted: false, code: 'UNKNOWN_AGENT_PROFILE' },
+    durationMs: 2,
+  });
   realtime.emit('response.clipped', {
     itemId: 'item-limited',
     responseId: 'response-limited',
@@ -1325,6 +1331,10 @@ test('assistant transcript deduplication is item-scoped and tool/limit events ar
   assert.ok(auditRows.some((event) => event.action === 'realtime_context_item_deleted'));
   assert.ok(auditRows.some((event) => event.action === 'realtime_output_suppressed'));
   assert.doesNotMatch(JSON.stringify(auditRows), /sensitive pane text/);
+  const refusal = auditRows.find((event) => event.metadata?.tool_call_id === 'refused-agent');
+  assert.ok(refusal);
+  assert.equal(refusal.metadata.success, false);
+  assert.equal(refusal.profile, 'codex-auto');
 
   await fixture.dialog.destroy();
   await call;

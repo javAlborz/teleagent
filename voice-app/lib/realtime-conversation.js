@@ -63,7 +63,7 @@ function buildToolAudit({ call = {}, args = {}, output = {}, durationMs = 0 } = 
       tool_name: redactAuditText(call.name || 'unknown'),
       tool_call_id: redactAuditText(call.call_id || call.id || ''),
       duration_ms: Math.max(0, Number.parseInt(durationMs, 10) || 0),
-      success: output?.success !== false,
+      success: output?.success !== false && output?.accepted !== false,
       code: output?.code ? redactAuditText(output.code) : null,
       status: output?.status || output?.job?.status || null,
       job_id: output?.job_id || output?.job?.job_id || null,
@@ -126,7 +126,7 @@ Rules:
 - During route_turn, choose exactly one action and produce no audio, message, or narration. Use respond only for an ordinary answer that needs no application state or action.
 - In the later speech-only stage, answer from the latest caller turn or the supplied app result. Never invent another action, approval, or status.
 - Never claim you ran commands, changed files, or delivered a message unless the corresponding tool returned verified success.
-- When the caller names a profile, use it. Otherwise use profile auto; the broker routes by capability.
+- For send_agent_message, select the exact named model in route_turn.agent_profile. If the caller only says Codex or names no model tier, use auto. Do not put a profile inside arguments_json; the broker routes auto by capability.
 - Default to the thread's selected profile: ${thread.selected_profile}.
 - Agent messages are asynchronous. Call tools without a spoken preamble. For an accepted read-only job, a tone acknowledges it; do not also say it started.
 - Before starting a request that resembles recent work, call list_agent_tasks and report or reuse an existing result instead of launching a duplicate job.
