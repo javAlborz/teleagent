@@ -34,7 +34,8 @@ test('every advertised production tool has an explicit classification and unavai
   assert.doesNotMatch(localContract, /"action":"send_agent_message"/);
   const readyContract = buildRealtimeRouterTool(['codex-terra'], READY_CAPABILITIES).description;
   assert.match(readyContract, /"action":"send_agent_message"/);
-  assert.match(readyContract, /"profile":\{"type":"string","enum":\["auto","codex-terra"\]/);
+  assert.deepEqual(buildRealtimeRouterTool(['codex-terra'], READY_CAPABILITIES)
+    .parameters.properties.agent_profile.enum, ['auto', 'codex-terra']);
   assert.doesNotMatch(readyContract, /"action":"get_latest_agent_session_message"/);
 });
 

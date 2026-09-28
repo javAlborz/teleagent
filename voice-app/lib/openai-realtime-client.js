@@ -423,8 +423,16 @@ function buildRealtimeRouterTool(profiles, capabilities = UNAVAILABLE) {
       'Use respond for an ordinary conversational answer.',
       'Otherwise select exactly one bounded application action by name and put its JSON arguments in arguments_json.',
       'Use only the available action contracts below. The JSON argument object must match the selected action schema.',
+      'For send_agent_message, select agent_profile here, outside arguments_json. Use auto when the caller says Codex without a model tier. Never invent a profile name.',
       'Never narrate, approve, cancel, or claim an action inside this routing response.',
-      ...tools.map(({ name, description, parameters }) => JSON.stringify({ action: name, description, parameters })),
+      ...tools.map(({ name, description, parameters }) => {
+        if (name === 'send_agent_message') {
+          const properties = { ...parameters.properties };
+          delete properties.profile;
+          parameters = { ...parameters, properties };
+        }
+        return JSON.stringify({ action: name, description, parameters });
+      }),
     ].join('\n'),
     parameters: {
       type: 'object',
@@ -433,6 +441,11 @@ function buildRealtimeRouterTool(profiles, capabilities = UNAVAILABLE) {
           type: 'string',
           enum: actions,
           description: 'The single deterministic application action for this caller turn.',
+        },
+        agent_profile: {
+          type: 'string',
+          enum: ['auto', ...profiles],
+          description: 'For send_agent_message only: an exact named model profile, or auto when no model tier was requested. Defaults to auto. A provider name such as Codex is not a profile.',
         },
         arguments_json: {
           type: 'string',
@@ -1211,6 +1224,7 @@ class OpenAIRealtimeClient extends EventEmitter {
             'Answer the latest caller request using only the following app-owned result.',
             `Result JSON: ${routedToolResult}`,
             'Do not claim anything beyond the result, and do not ask a follow-up question.',
+            'If success or accepted is false, report the failure reason. A rejected agent submission started no new job; do not supply your own answer as a substitute for the requested agent result.',
           ].join(' '),
         } : undefined, { purpose: routed ? 'tool_result' : nextPurpose });
       }
@@ -1255,8 +1269,22 @@ class OpenAIRealtimeClient extends EventEmitter {
         };
       } else {
         toolName = action;
+        const agentProfile = args.agent_profile === undefined ? 'auto' : args.agent_profile;
         args = parseRoutedArguments(args.arguments_json);
         auditCall = { ...call, name: action, routed_by: 'route_turn' };
+        if (action === 'send_agent_message' && !args._parse_error) {
+          // Profile selection has one typed owner. Never let the free-form
+          // argument string override it with an invented or disabled profile.
+          args.profile = agentProfile;
+          if (!['auto', ...this.profiles].includes(agentProfile)) {
+            output = {
+              success: false,
+              accepted: false,
+              code: 'UNKNOWN_AGENT_PROFILE',
+              message: 'The agent request was not started because its model selection was invalid.',
+            };
+          }
+        }
       }
     }
 
@@ -1281,6 +1309,7 @@ class OpenAIRealtimeClient extends EventEmitter {
           itemId: call.id || null,
           routed,
         });
+        if (output?.accepted === false) output = { ...output, success: false };
       } catch (error) {
         output = { success: false, code: 'TOOL_ERROR', message: error.message };
       }
