@@ -307,3 +307,13 @@ target or mutation work fails against the current disabled authority. Pending
 legacy approvals never become production authorization. Completed jobs,
 transcript history, preferences, usage, audit, and provider session mappings
 remain durable.
+
+### Saved context across response stages
+
+Realtime `response.create.instructions` replaces the session instructions for
+that response. Routing, direct speech, and tool-result speech therefore include
+the conductor instructions before their stage-specific instructions. This keeps
+saved phone context and authority guidance available after a redial. A farewell
+still uses an empty input and only its one-time goodbye instruction, so saved
+answers cannot leak into hangup speech. The API contract is documented in
+[Realtime client events](https://developers.openai.com/api/reference/resources/realtime/client-events#response.create).

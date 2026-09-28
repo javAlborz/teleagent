@@ -876,7 +876,9 @@ class OpenAIRealtimeClient extends EventEmitter {
       output_modalities: ['text'],
       tools: [buildRealtimeRouterTool(this.profiles, this.capabilities)],
       tool_choice: { type: 'function', name: 'route_turn' },
+      // Per-response instructions replace the session instructions in Realtime.
       instructions: [
+        this.instructions,
         'Route the latest completed caller turn now.',
         'Call route_turn exactly once and emit no message, narration, or audio.',
         'Use respond only when no application action is needed.',
@@ -1189,6 +1191,7 @@ class OpenAIRealtimeClient extends EventEmitter {
           output_modalities: ['audio'],
           tool_choice: 'none',
           instructions: [
+            this.instructions,
             'Speech stage after deterministic routing. Do not call a tool.',
             instruction,
             'Answer the latest completed caller turn and then stop.',
@@ -1221,6 +1224,7 @@ class OpenAIRealtimeClient extends EventEmitter {
           output_modalities: ['audio'],
           tool_choice: 'none',
           instructions: [
+            this.instructions,
             'The deterministic application action has completed.',
             'Answer the latest caller request using only the following app-owned result.',
             `Result JSON: ${routedToolResult}`,

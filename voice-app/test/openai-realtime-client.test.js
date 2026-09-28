@@ -230,6 +230,30 @@ test('caller turns route silently out of band before a speech-only response stre
   assert.deepEqual(transcripts, ['Direct answer.']);
 });
 
+test('routing and both speech stages retain the saved session context when overriding instructions', async (t) => {
+  const saved = 'Saved phone context: assistant answered 437. Use saved transcripts for recall.';
+  for (const action of ['respond', 'get_voice_history']) {
+    const client = await createConnectedClient({
+      instructions: saved,
+      toolHandler: async () => ({ success: true, events: [{ role: 'assistant', text: '437' }] }),
+    });
+    t.after(() => client.close());
+    client.requestRoutedResponse();
+    const route = client.ws.sentEvents().at(-1).response;
+    assert.ok(route.instructions.startsWith(saved), 'response.create instructions replace session instructions');
+    assert.match(route.instructions, /Call route_turn exactly once/);
+    client.responseActive = false;
+    await client._handleResponseDone({ output: [{
+      type: 'function_call', name: 'route_turn', call_id: `recall-${action}`,
+      arguments: JSON.stringify({ action, arguments_json: '{"role":"assistant"}', response_instruction: 'Recall the saved assistant answer.' }),
+    }] });
+    const speech = client.ws.sentEvents().at(-1).response;
+    assert.ok(speech.instructions.startsWith(saved), 'speech must retain context available to routing');
+    assert.equal(speech.tool_choice, 'none');
+    assert.deepEqual(speech.output_modalities, ['audio']);
+  }
+});
+
 test('managed routing uses the typed profile and cannot execute invented or disabled choices', async (t) => {
   const calls = [];
   const client = await createConnectedClient({
@@ -547,7 +571,7 @@ test('keyed notices replace stale status and flush after the active response', a
 });
 
 test('a queued goodbye cannot inherit the previous history result or repeat its answer', async (t) => {
-  const client = await createConnectedClient();
+  const client = await createConnectedClient({ instructions: 'Saved assistant answer: 437.' });
   t.after(() => client.close());
   client.requestResponse({ instructions: 'The previous answer was 437.' }, { purpose: 'tool_result' });
   client.ws.serverSend({ type: 'response.created', response: { id: 'response-history' } });
