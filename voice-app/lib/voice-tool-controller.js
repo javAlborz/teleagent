@@ -338,8 +338,19 @@ class VoiceToolController {
             .filter((event) => event.kind === 'transcript' && event.id !== currentRequest?.id)
             .slice(-requestedLimit);
           const safeEvents = voiceSafeSessionHistory(events);
+          // A speaker filter selects quotations; it cannot establish that the
+          // other speaker never answered. Preserve bounded two-sided evidence
+          // even when the router mistakenly asks for caller-only history.
+          const conversationContext = voiceSafeSessionHistory(
+            this.stateStore.listCallerEvents(this.callerId, { limit: 200 })
+              .filter((event) => event.kind === 'transcript' && event.id !== currentRequest?.id)
+              .slice(-10)
+          );
           return {
             success: true,
+            selected_role: role || 'all',
+            conversation_context: conversationContext,
+            context_note: 'The selected events may filter one speaker. conversation_context contains recent phone transcripts from both speakers; use it to recall Teleagent answers. A filtered selection never proves an answer is absent.',
             events: safeEvents,
             exact_text: safeEvents
               .map((event, index) => `${index + 1}. ${event.role}: ${event.text}`)

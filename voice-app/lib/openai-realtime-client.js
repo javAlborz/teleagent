@@ -194,13 +194,13 @@ function buildRealtimeTools(profiles) {
     {
       type: 'function',
       name: 'get_voice_history',
-      description: 'Read exact Teleagent phone-call transcript events from local SQLite, excluding the current request and suppressed noise/backchannels. Read exact_text verbatim. This is voice-call history only, never Codex or Claude provider-session history.',
+      description: 'Read Teleagent phone-call transcripts from local SQLite, excluding the current request and suppressed noise/backchannels. For exact quotations read exact_text; for previous Teleagent answers use assistant events and conversation_context. This is phone history only, never Codex or Claude provider-session history.',
       parameters: {
         type: 'object',
         properties: {
           limit: { type: 'integer', minimum: 1, maximum: 50 },
-          role: { type: 'string', enum: ['user', 'assistant', 'tool'] },
-          user_only: { type: 'boolean' },
+          role: { type: 'string', enum: ['user', 'assistant', 'tool'], description: 'Optional quotation filter. Use assistant for what Teleagent said; omit for a conversation.' },
+          user_only: { type: 'boolean', description: 'Use true only for quotations of the caller, never for previous Teleagent answers.' },
         },
         additionalProperties: false,
       },
@@ -933,6 +933,7 @@ class OpenAIRealtimeClient extends EventEmitter {
     if (speak) {
       const record = { content: notice, speak, key, priority };
       const started = this.requestResponse({
+        ...(key === 'hangup' ? { conversation: 'none', input: [], tools: [], output_modalities: ['audio'] } : {}),
         tool_choice: 'none',
         instructions: `One-time voice instruction. Follow it for this response only, then discard it: ${notice}`,
       }, { purpose: key ? `notice:${key}` : 'system_notice', notice: record });
