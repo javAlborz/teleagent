@@ -389,6 +389,38 @@ test('history reads exact caller events and inspection actions stay bounded by t
   assert.match(usage.budget_note, /dashboard/i);
 });
 
+test('caller-only history retains the saved assistant answer without mixing callers or the current request', async (t) => {
+  const { controller, stateStore, thread } = createController(t);
+  stateStore.appendEvent({ voiceThreadId: thread.id, role: 'user', kind: 'transcript', content: 'What is nineteen times twenty three?' });
+  stateStore.appendEvent({ voiceThreadId: thread.id, role: 'assistant', kind: 'transcript', content: '437' });
+  stateStore.appendEvent({ voiceThreadId: thread.id, role: 'user', kind: 'suppressed_transcript', content: 'noise fragment' });
+  const other = stateStore.createThread({ callerId: '9999', selectedProfile: 'codex-luna' });
+  stateStore.appendEvent({ voiceThreadId: other.id, role: 'assistant', kind: 'transcript', content: 'another caller private answer' });
+  stateStore.appendEvent({ voiceThreadId: thread.id, role: 'user', kind: 'transcript', content: 'What number did you give me in our previous conversation?' });
+
+  // These are the incorrect router arguments observed in the live resume test.
+  const history = await controller.handle('get_voice_history', { limit: 50, role: 'user', user_only: true });
+  assert.equal(history.selected_role, 'user');
+  assert.deepEqual(history.events.map((event) => event.text), ['What is nineteen times twenty three?']);
+  assert.deepEqual(history.conversation_context.map((event) => [event.role, event.text]), [
+    ['user', 'What is nineteen times twenty three?'], ['assistant', '437'],
+  ]);
+  assert.doesNotMatch(JSON.stringify(history), /noise fragment|another caller private answer|What number did you give/);
+});
+
+test('supplementary conversation context stays bounded while exact speaker quotations retain their requested limit', async (t) => {
+  const { controller, stateStore, thread } = createController(t);
+  for (let i = 0; i < 20; i++) {
+    stateStore.appendEvent({ voiceThreadId: thread.id, role: i % 2 ? 'assistant' : 'user', kind: 'transcript', content: `turn ${i}` });
+  }
+  stateStore.appendEvent({ voiceThreadId: thread.id, role: 'user', kind: 'transcript', content: 'Quote my last message.' });
+  const history = await controller.handle('get_voice_history', { limit: 1, user_only: true });
+  assert.equal(history.exact_text, '1. user: turn 18');
+  assert.equal(history.conversation_context.length, 10);
+  assert.equal(history.conversation_context[0].text, 'turn 10');
+  assert.equal(history.conversation_context.at(-1).text, 'turn 19');
+});
+
 test('legacy history continuation remains bounded but cannot bypass the worker inspection contract', async (t) => {
   const { controller } = createController(t);
   const calls = [];

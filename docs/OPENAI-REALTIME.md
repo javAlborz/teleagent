@@ -62,6 +62,10 @@ provider session ID. Its tools are grouped as follows:
 - Exact local state: read Teleagent phone transcript history, measured Realtime
   usage, and explicitly saved preferences. Phone history is deliberately
   distinct from provider-session history.
+  Speaker-filtered quotations also carry the last ten transcript turns from
+  both speakers, so recalling a Teleagent answer cannot mistake a caller-only
+  selection for missing history. The current request and suppressed fragments
+  are excluded from both views.
 - Bounded inspection: ask the worker-owned broker to list/find/read files below
   approved worker workspace roots, inspect Git status, list/capture panes on
   the dedicated worker tmux socket, read redacted numbered chunks from the exact

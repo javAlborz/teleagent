@@ -546,6 +546,25 @@ test('keyed notices replace stale status and flush after the active response', a
   );
 });
 
+test('a queued goodbye cannot inherit the previous history result or repeat its answer', async (t) => {
+  const client = await createConnectedClient();
+  t.after(() => client.close());
+  client.requestResponse({ instructions: 'The previous answer was 437.' }, { purpose: 'tool_result' });
+  client.ws.serverSend({ type: 'response.created', response: { id: 'response-history' } });
+  client.sendSystemNotice('Say one short goodbye now.', { key: 'hangup', priority: 1000 });
+  client.ws.serverSend({ type: 'response.done', response: { id: 'response-history', output: [] } });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const farewell = client.ws.sentEvents().filter((event) => event.type === 'response.create').at(-1).response;
+  assert.equal(farewell.conversation, 'none');
+  assert.deepEqual(farewell.input, []);
+  assert.deepEqual(farewell.tools, []);
+  assert.deepEqual(farewell.output_modalities, ['audio']);
+  assert.equal(farewell.tool_choice, 'none');
+  assert.match(farewell.instructions, /short goodbye/);
+  assert.doesNotMatch(farewell.instructions, /437/);
+});
+
 test('ordinary long sentences are not clipped until the absolute safety limit', async (t) => {
   const client = await createConnectedClient({ maxSpokenWords: 35, hardMaxSpokenWords: 120 });
   t.after(() => client.close());
