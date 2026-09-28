@@ -1,5 +1,7 @@
 'use strict';
 
+const { destroySipResource } = require('./sip-resource-cleanup');
+
 const crypto = require('node:crypto');
 const logger = require('./logger');
 const { redactAudioForkSecrets } = require('./audio-fork');
@@ -471,7 +473,7 @@ async function runRealtimeConversation(endpoint, dialog, callUuid, {
       metadata: { reason },
     });
     try {
-      await dialog.destroy();
+      await destroySipResource(dialog);
     } catch (error) {
       logger.warn('Realtime requested hangup signaling failed', { callUuid, error: error.message });
       stateStore.appendAuditEvent({
@@ -1323,7 +1325,7 @@ async function runRealtimeConversation(endpoint, dialog, callUuid, {
       logger.warn('Realtime audio WebSocket cleanup failed', { callUuid, error: error.message });
     }
     try {
-      await endpoint.destroy?.();
+      await destroySipResource(endpoint);
     } catch (error) {
       logger.warn('Realtime media endpoint cleanup failed', { callUuid, error: error.message });
     }

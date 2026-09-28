@@ -1,3 +1,4 @@
+const { destroySipResource } = require('./sip-resource-cleanup');
 /**
  * SIP Call Handler with Conversation Loop
  * v12: Device registry integration with proper method names
@@ -110,11 +111,11 @@ async function handleInvite(req, res, options) {
     if (cleanupPromise) return cleanupPromise;
     cleanupPromise = (async () => {
       const failures = [];
-      if (dialog && !dialog.destroyed && typeof dialog.destroy === 'function') {
-        try { await dialog.destroy(); } catch (error) { failures.push(error); }
+      if (dialog) {
+        try { await destroySipResource(dialog); } catch (error) { failures.push(error); }
       }
-      if (endpoint && !endpoint.destroyed && typeof endpoint.destroy === 'function') {
-        try { await endpoint.destroy(); } catch (error) { failures.push(error); }
+      if (endpoint) {
+        try { await destroySipResource(endpoint); } catch (error) { failures.push(error); }
       }
       if (failures.length > 0) {
         throw new AggregateError(failures, 'Inbound SIP/media cleanup failed');

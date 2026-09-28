@@ -1,5 +1,7 @@
 'use strict';
 
+const { destroySipResource } = require('./sip-resource-cleanup');
+
 const { randomUUID } = require('node:crypto');
 
 function rejectInvite(res, status = 503) {
@@ -8,12 +10,6 @@ function rejectInvite(res, status = 503) {
   } catch {
     // The admission decision is still fail-closed if the SIP transport ended.
   }
-}
-
-async function destroyResource(resource) {
-  if (!resource || resource.destroyed || typeof resource.destroy !== 'function') return true;
-  await resource.destroy();
-  return true;
 }
 
 class InboundCallRegistry {
@@ -94,14 +90,14 @@ class InboundCallRegistry {
         if (operation.cleanup) {
           await operation.cleanup();
         } else {
-          await destroyResource(operation.dialog);
-          await destroyResource(operation.endpoint);
+          await destroySipResource(operation.dialog);
+          await destroySipResource(operation.endpoint);
         }
       } catch (error) {
         failures.push(error);
         // A custom cleanup may have failed before attempting one resource.
-        try { await destroyResource(operation.dialog); } catch (fallbackError) { failures.push(fallbackError); }
-        try { await destroyResource(operation.endpoint); } catch (fallbackError) { failures.push(fallbackError); }
+        try { await destroySipResource(operation.dialog); } catch (fallbackError) { failures.push(fallbackError); }
+        try { await destroySipResource(operation.endpoint); } catch (fallbackError) { failures.push(fallbackError); }
       }
       operation.cleanupSucceeded = failures.length === 0;
       return { success: operation.cleanupSucceeded, resourcesAcquired: true, failures };
