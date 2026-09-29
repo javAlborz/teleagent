@@ -16,7 +16,7 @@ const MAX_LAUNCH_OUTPUT_BYTES = 8 * 1024 * 1024;
 // transient cgroup is empty before admitting the next launch.
 const MAX_ACTIVE = 1;
 const CONTROL_TIMEOUT_MS = 12_000;
-// Root preflight shares this supervisor's quarter-core quota. Leave room for
+// Root preflight shares this supervisor's bounded one-core quota. Leave room for
 // the bounded CLI integrity check and resource observations without spending
 // that quota on continuous status subprocesses.
 const PROVIDER_READY_TIMEOUT_MS = 45_000;

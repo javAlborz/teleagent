@@ -10,7 +10,7 @@ ConditionPathExists=/etc/teleagent/worker-session/ENABLE
 [Service]
 Slice=teleagent-provider.slice
 CPUAccounting=yes
-CPUQuota=25%
+CPUQuota=100%
 CPUQuotaPeriodSec=100ms
 MemoryAccounting=yes
 # The fixed CLI integrity check includes the 58 MB Codex companion.
