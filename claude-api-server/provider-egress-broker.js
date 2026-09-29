@@ -70,8 +70,8 @@ const CODEX_COST_RATE_MICRO_USD_PER_TOKEN = Object.freeze({
   'gpt-5.6-terra': 27,
   'gpt-5.6-sol': 45,
 });
-const MAX_DAILY_RESERVED_TOKENS = 200_000;
-const MAX_DAILY_RESERVED_COST_MICRO_USD = 5_000_000;
+const MAX_DAILY_RESERVED_TOKENS = 20_000_000;
+const MAX_DAILY_RESERVED_COST_MICRO_USD = 100_000_000;
 const SAFE_MODEL = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const OPENAI_PROJECT_ID = /^proj_[A-Za-z0-9_-]{3,128}$/;
 const PROVIDER_ROUTE_KINDS = Object.freeze({

@@ -2,15 +2,19 @@
   "version": 1,
   "provider": "codex",
   "openaiProjectId": null,
-  "allowedModels": ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"],
-  "maxRequestBytes": 2097152,
-  "maxResponseBytes": 8388608,
+  "allowedModels": [
+    "gpt-5.6-luna",
+    "gpt-5.6-terra",
+    "gpt-5.6-sol"
+  ],
+  "maxRequestBytes": 4194304,
+  "maxResponseBytes": 33554432,
   "maxConcurrent": 2,
-  "maxDailyRequests": 100,
-  "maxDailyReservedTokens": 200000,
-  "maxDailyReservedCostMicroUsd": 5000000,
-  "maxOutputTokens": 32768,
-  "maxLaunchRequests": 16,
-  "maxLaunchReservedTokens": 250000,
-  "maxLaunchSeconds": 3600
+  "maxDailyRequests": 1000,
+  "maxDailyReservedTokens": 20000000,
+  "maxDailyReservedCostMicroUsd": 100000000,
+  "maxOutputTokens": 65536,
+  "maxLaunchRequests": 128,
+  "maxLaunchReservedTokens": 2000000,
+  "maxLaunchSeconds": 7200
 }

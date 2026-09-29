@@ -237,7 +237,7 @@ test('targeted tmux messages always require pound approval and complete only aft
     target: '%12',
     message: 'What is the latest status?',
     sessionFingerprint: 'private-fingerprint',
-    timeoutSeconds: 1800,
+    timeoutSeconds: 3600,
   });
   const targetVerifier = createApprovalCapabilityVerifier({
     publicKeys: { 'test-controller-1': approvalKeyPair.publicKey },

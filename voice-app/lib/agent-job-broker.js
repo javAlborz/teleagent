@@ -49,13 +49,13 @@ const PROFILE_DEFINITIONS = Object.freeze({
   'codex-luna': {
     provider: 'codex',
     sessionType: 'phone-codex-luna',
-    timeoutSeconds: 600,
+    timeoutSeconds: 3600,
     routingTier: 'read',
   },
   'codex-terra': {
     provider: 'codex',
     sessionType: 'phone-codex-terra',
-    timeoutSeconds: 1800,
+    timeoutSeconds: 3600,
     routingTier: 'write',
   },
   'codex-sol': {
