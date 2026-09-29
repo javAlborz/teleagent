@@ -73,13 +73,13 @@ function policy(provider = 'codex') {
   };
 }
 
-test('pilot egress policies require bounded token and cost allowances', () => {
+test('owner and dormant pilot policies require bounded token and cost allowances', () => {
   for (const provider of ['claude', 'codex']) {
     const filename = path.join(__dirname, '..', '..', 'deploy', 'worker-session',
       `provider-egress-${provider}.policy.example.json`);
     const source = JSON.parse(fs.readFileSync(filename, 'utf8'));
-    assert.equal(normalizePolicy(source, provider).maxDailyReservedTokens, 200_000);
-    assert.equal(normalizePolicy(source, provider).maxDailyReservedCostMicroUsd, 5_000_000);
+    assert.equal(normalizePolicy(source, provider).maxDailyReservedTokens, provider === 'codex' ? 20_000_000 : 200_000);
+    assert.equal(normalizePolicy(source, provider).maxDailyReservedCostMicroUsd, provider === 'codex' ? 100_000_000 : 5_000_000);
     if (provider === 'codex') {
       assert.equal(normalizePolicy(source, provider).openaiProjectId, null);
       assert.equal(normalizePolicy({ ...source, openaiProjectId: 'proj_teleagenttest0001' },
@@ -89,7 +89,7 @@ test('pilot egress policies require bounded token and cost allowances', () => {
           /OpenAI project identity is invalid/);
       }
     }
-    assert.throws(() => normalizePolicy({ ...source, maxDailyReservedTokens: 200_001 }, provider),
+    assert.throws(() => normalizePolicy({ ...source, maxDailyReservedTokens: 20_000_001 }, provider),
       /maxDailyReservedTokens exceeds its hard bound/);
     for (const invalid of [0, '100000', null, undefined]) {
       assert.throws(() => normalizePolicy({ ...source, maxDailyReservedTokens: invalid }, provider),
@@ -97,7 +97,7 @@ test('pilot egress policies require bounded token and cost allowances', () => {
       assert.throws(() => normalizePolicy({ ...source, maxDailyReservedCostMicroUsd: invalid }, provider),
         /maxDailyReservedCostMicroUsd exceeds its hard bound or is missing/);
     }
-    assert.throws(() => normalizePolicy({ ...source, maxDailyReservedCostMicroUsd: 5_000_001 }, provider),
+    assert.throws(() => normalizePolicy({ ...source, maxDailyReservedCostMicroUsd: 100_000_001 }, provider),
       /maxDailyReservedCostMicroUsd exceeds its hard bound/);
   }
 });
@@ -1700,4 +1700,25 @@ test('provider startup refuses exhausted state before opening SQLite', async () 
     verifySocketPaths: false,
   }), { code: 'WORKER_STATE_CAPACITY_EXHAUSTED' });
   assert.deepEqual(calls, ['storage_checked', 'storage_refused']);
+});
+
+
+test('owner policy admits work beyond pilot caps without rewriting the ledger', (t) => {
+  const { db } = harness(t);
+  const source = JSON.parse(fs.readFileSync(path.join(__dirname, '../../deploy/worker-session/provider-egress-codex.policy.example.json'), 'utf8'));
+  const relaxed = normalizePolicy(source, 'codex');
+  const model = 'gpt-5.6-luna';
+  register(db, relaxed, { model, maxRequests: 128, maxReservedTokens: 2_000_000 });
+  for (let i = 0; i < 20; i += 1) {
+    reserveBudget(db, relaxed, {
+      reservationId: `relaxed_${i}`, launchId: LAUNCH_ID, capability: CAPABILITY,
+      model, routeKind: 'inference', reasoningEffort: REASONING_EFFORT_BY_MODEL[model],
+      requestBytes: 10, reservedTokens: 50_000,
+    });
+  }
+  const status = budgetStatus(db, relaxed);
+  assert.equal(status.usedRequests, 20);
+  assert.equal(status.usedReservedTokens, 1_000_000);
+  assert.equal(status.remainingReservedTokens, 19_000_000);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM provider_egress_reservations').get().count, 20);
 });

@@ -375,8 +375,8 @@ authoritative. The durable SQLite ledger reserves request bytes plus the
 maximum output tokens and an envelope for every admitted request, including
 failed upstream requests. It charges those reserved tokens at a fixed
 conservative ceiling of $30 per million for Claude. Codex reserves $3 per
-million for GPT-5.6 Luna, $27 for Terra, and $45 for Sol, with a hard policy
-ceiling of $5 in reserved cost per provider per UTC day. Historical cost rows
+million for GPT-5.6 Luna, $27 for Terra, and $45 for Sol, with an owner-configurable policy
+ceiling up to $100 in reserved cost per provider per UTC day. Historical cost rows
 retain their original reservations; a rate change never refunds or rewrites
 them. Codex requests always forward the reserved `max_output_tokens` limit,
 including when the CLI omitted it. Explicit token limits must be positive
@@ -385,8 +385,8 @@ rejects multimodal content, hosted tools, and caller-selected
 premium service tiers. Codex requests explicitly use the OpenAI `default`
 service tier so a project-wide Fast setting cannot silently change their
 price. Those rates cover the admitted standard text traffic. A
-missing legacy cost row fails closed. The policy examples also cap each
-provider at 200,000 reserved tokens per UTC day. No local ledger guarantees a
+missing legacy cost row fails closed. The Codex owner policy now permits 20,000,000 reserved tokens per UTC day;
+the dormant Claude example retains its smaller pilot settings. No local ledger guarantees a
 provider invoice ceiling: verify current model rates, project/workspace
 credential binding, and provider-side monthly hard limits before activating
 either credential. Recheck these fixed rates if the allowed models or provider
@@ -396,9 +396,14 @@ review used the providers'
 and [OpenAI API pricing](https://developers.openai.com/api/docs/pricing);
 the Codex ceilings are at least 1.5 times each model's highest standard
 long-context output or cache-write token rate. Status reports expose those
-per-model ceilings alongside the provider-wide maximum. The unchanged
-200,000-token daily reservation cap remains independent of cost: inexpensive
-models can still exhaust that conservative token allowance. These bounds do
+per-model ceilings alongside the provider-wide maximum. The daily token reservation cap remains independent of cost. On September 29,
+the owner requested relaxed usage limits: Codex now permits 1,000 requests/day,
+20 million reserved tokens/day, $100/day in conservative reservations (not
+actual billed cost), 128 requests and 2 million reserved tokens per launch,
+a two-hour capability lifetime, 64 Ki output tokens, and 4/32 MiB request/response
+bodies. Concurrent requests remain two under the existing host resource caps.
+Luna and Terra phone jobs now share Sol's one-hour execution ceiling. Existing
+ledger rows are never refunded or reset during this policy update. These bounds do
 not promise unlimited phone queries.
 
 For the first account-bound, Codex-only pilot, use the owner-selected OpenAI
