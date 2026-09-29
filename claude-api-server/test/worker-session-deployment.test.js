@@ -125,7 +125,7 @@ test('session broker, RPC socket, state DB, and tmux socket exclude provider ide
   assert.match(providerService, /^MemoryHigh=469762048$/m);
   assert.match(providerService, /^MemoryMax=536870912$/m);
   assert.match(providerService, /^MemorySwapMax=0$/m);
-  assert.match(providerService, /^CPUQuota=25%$/m);
+  assert.match(providerService, /^CPUQuota=100%$/m);
   for (const protectedPath of [
     '/etc/teleagent/provider-egress-secrets',
     '/etc/teleagent/privileged-action',
