@@ -144,7 +144,8 @@ class OwnerCodexClient {
   async history(threadId) {
     if (!(await this.loaded()).includes(threadId)) throw sessionError('OWNER_SESSION_NOT_LOADED');
     const result = await this._request('thread/turns/list', {
-      threadId, limit: 3, sortDirection: 'desc', itemsView: 'full',
+      // Native summary contains user/assistant messages without tool-output payloads.
+      threadId, limit: 3, sortDirection: 'desc', itemsView: 'summary',
     });
     if (!Array.isArray(result?.data) || result.data.length > 3) {
       throw sessionError('OWNER_SESSION_RESPONSE_INVALID');
