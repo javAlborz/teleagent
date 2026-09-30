@@ -131,7 +131,9 @@ function createVoiceControlRouter({ jobBroker, agentBridge, voiceControlAuth = n
       if (String(req.query?.response || '').toLowerCase() === 'plain') {
         return res.status(success ? 200 : 503).type('text/plain').send(success ? 'STOPPED' : 'PARTIAL');
       }
-      return res.status(success ? 200 : 503).json({ success, ...result });
+      return res.status(success ? 200 : 503).json({ ...result, success,
+        ownedQuiesced: result.locked === true && result.persistent === true &&
+          result.bridge?.ownedQuiesced === true });
     } catch (error) {
       logger.error('Voice panic stop failed', { source, error: error.message });
       if (String(req.query?.response || '').toLowerCase() === 'plain') {

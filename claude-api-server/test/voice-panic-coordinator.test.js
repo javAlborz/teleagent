@@ -50,6 +50,18 @@ test('owner-session delivery locks cannot falsely claim personal agents quiesced
   assert.equal(failed.accepted, false); assert.equal(failed.success, false);
 });
 
+test('owned shutdown requires every managed plane and the owner delivery slot to drain', async () => {
+  for (const executorQuiesced of [true, false]) {
+    for (const deliveryQuiesced of [true, false]) {
+      const result = await performCoordinatedVoicePanic({ ...localPlanes({ executorQuiesced }),
+        ownerCoordinator: { async panic() { return { locked: true, quiesced: false, deliveryQuiesced }; } } });
+      assert.equal(result.ownedQuiesced, executorQuiesced && deliveryQuiesced);
+      assert.equal(result.success, false);
+      assert.equal(result.quiesced, false);
+    }
+  }
+});
+
 test('controller panic locks first and requires both executor and root planes to quiesce', async () => {
   const planes = localPlanes();
   let rootPanicCalls = 0;

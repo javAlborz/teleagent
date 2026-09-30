@@ -26,6 +26,23 @@ function listen(app) {
   });
 }
 
+test('owned shutdown proof stays PARTIAL on the handset endpoint', async (t) => {
+  const app = express();
+  app.use(createVoiceControlRouter({
+    jobBroker: { async panicStop() { return { locked: true, persistent: true,
+      bridge: { success: false, ownedQuiesced: true } }; } },
+    agentBridge: {}, voiceControlAuth: { apiToken: VOICE_TOKEN },
+  }));
+  const server = await listen(app); t.after(() => server.close());
+  const url = `http://127.0.0.1:${server.address().port}/voice-control/stop`;
+  const plain = await fetch(`${url}?response=plain`, { method: 'POST' });
+  assert.equal(plain.status, 503); assert.equal(await plain.text(), 'PARTIAL');
+  const json = await fetch(url, { method: 'POST' });
+  assert.equal(json.status, 503);
+  const receipt = await json.json();
+  assert.equal(receipt.success, false); assert.equal(receipt.ownedQuiesced, true);
+});
+
 test('loopback address detection accepts only local socket forms', () => {
   assert.equal(isLoopbackAddress('127.0.0.1'), true);
   assert.equal(isLoopbackAddress('::1'), true);

@@ -134,9 +134,11 @@ test('parallel requests fail boundedly and panic remains available during inspec
   let resume; state.pause = new Promise((resolve) => { resume = resolve; });
   const first = broker.inspect('os_fixture');
   await assert.rejects(broker.inspect('os_fixture'), { code: 'OWNER_BROKER_BUSY' });
-  assert.deepEqual(broker.panic(), { locked: true, quiesced: false });
+  assert.deepEqual(broker.panic(), { locked: true, quiesced: false, deliveryQuiesced: false });
   resume(); state.pause = null;
   await first;
+  assert.deepEqual(broker.panic(), { locked: true, quiesced: false, deliveryQuiesced: true });
+  await assert.rejects(broker.inspect('os_fixture'), { code: 'OWNER_SESSION_PANIC_LOCKED' });
   broker.close();
   await assert.rejects(broker.inspect('os_fixture'), { code: 'OWNER_BROKER_CLOSING' });
 });

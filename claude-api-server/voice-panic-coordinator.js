@@ -200,8 +200,9 @@ async function performCoordinatedVoicePanic({
     ? Promise.resolve().then(() => ownerCoordinator.panic()).then((result) => ({
       configured: true, accepted: result.locked === true, persisted: result.locked === true,
       quiesced: result.quiesced === true,
+      deliveryQuiesced: result.locked === true && result.deliveryQuiesced === true,
     }), () => ({ configured: true, accepted: false, persisted: false, quiesced: false }))
-    : Promise.resolve({ configured: false, accepted: true, persisted: true, quiesced: true });
+    : Promise.resolve({ configured: false, accepted: true, persisted: true, quiesced: true, deliveryQuiesced: true });
   let activeCancellation;
   try {
     activeCancellation = {
@@ -245,6 +246,9 @@ async function performCoordinatedVoicePanic({
     privilegedCancellation.quiesced === true &&
     workerCancellation.quiesced === true && ownerCancellation.quiesced === true
   );
+  const ownedQuiesced = Boolean(accepted && executorCancellation.quiesced === true &&
+    privilegedCancellation.quiesced === true && workerCancellation.quiesced === true &&
+    ownerCancellation.deliveryQuiesced === true);
   return {
     // Acceptance and quiescence are intentionally distinct. No caller may
     // announce STOPPED until both durable execution planes are quiescent.
@@ -252,6 +256,7 @@ async function performCoordinatedVoicePanic({
     accepted,
     persisted: accepted,
     quiesced,
+    ownedQuiesced,
     lock,
     activeCancellation,
     executorCancellation,

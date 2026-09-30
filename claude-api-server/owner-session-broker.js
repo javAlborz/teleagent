@@ -22,6 +22,7 @@ class OwnerSessionBroker {
   }
   async serial(work) {
     if (this.closing) throw sessionError('OWNER_BROKER_CLOSING');
+    if (this.store.isLocked()) throw sessionError('OWNER_SESSION_PANIC_LOCKED');
     if (this.busy) throw sessionError('OWNER_BROKER_BUSY');
     this.busy = true;
     try { return await work(); } finally { this.busy = false; }
@@ -101,7 +102,12 @@ class OwnerSessionBroker {
     }
     return this.store.get(input.operationId, input.planHash);
   }
-  panic() { return this.store.lock(); }
+  panic() {
+    this.store.lock();
+    // An RPC already handed to a native agent may still execute there. This
+    // proves only that our bounded delivery slot has drained behind the lock.
+    return { locked: true, quiesced: false, deliveryQuiesced: !this.busy };
+  }
   close() { this.closing = true; }
 }
 

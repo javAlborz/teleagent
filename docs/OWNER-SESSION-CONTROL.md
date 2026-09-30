@@ -155,3 +155,19 @@ cannot enable delivery.
 An independent star press during prompt generation now cancels that approval
 before playback. Outside approval, the ARI router forwards only the owner's star
 to the conductor trunk for existing cancellation behavior.
+
+## Shutdown scope
+
+Owner-session panic durably fences new delivery and separately reports whether
+Teleagent's in-flight delivery slot and approval work have drained. It always
+reports personal-agent execution as unproven. The controller requires every
+managed plane to quiesce before reporting `ownedQuiesced`; generic failures or
+partial delivery cannot establish that proof.
+
+The voice lifecycle can use this narrower proof to stop its owned containers.
+Its activation journal records `owned_quiesced`, including after offline
+recovery, rather than full quiescence. Both phone-facing panic endpoints continue
+to return HTTP 503 / PARTIAL. Personal sessions are never killed, cancelled,
+restarted, or resent by this path. Root host recovery must independently stop
+and verify the owner broker, PBX attester and ARI proxy and preserve this scope
+before the feature can be activated.

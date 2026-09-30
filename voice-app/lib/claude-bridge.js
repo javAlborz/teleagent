@@ -653,6 +653,15 @@ async function panicStop(options = {}) {
     return response.data;
   } catch (error) {
     console.error(`[${timestamp}] AGENT Voice panic stop failed: ${error.message}`);
+    // A typed partial receipt may prove delivery/control shutdown without
+    // claiming that an independently owned native agent stopped executing.
+    const partial = error.response?.data;
+    if (error.response?.status === 503 && partial?.success === false &&
+        partial.ownedQuiesced === true && partial.voiceExecution?.locked === true &&
+        partial.voiceExecution?.persistent === true && partial.ownerSessions?.configured === true &&
+        partial.ownerSessions?.quiesced === false && partial.ownerSessions?.deliveryQuiesced === true) {
+      return partial;
+    }
     return {
       success: false,
       error: error.response?.data?.error || error.message,

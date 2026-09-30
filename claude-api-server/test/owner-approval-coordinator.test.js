@@ -42,7 +42,7 @@ function fixture(t) {
       if (state.lost) throw new Error('socket lost');
       return state.receipt;
     },
-    async result() { return state.receipt; }, async panic() { return { locked: true, quiesced: false }; },
+    async result() { return state.receipt; }, async panic() { return { locked: true, quiesced: false, deliveryQuiesced: true }; },
   };
   const attester = {
     async resolveCall(sipCallId) { assert.equal(sipCallId, 'call@pbx'); return Buffer.alloc(32, 1).toString('base64url'); },
@@ -60,7 +60,7 @@ function fixture(t) {
       const evidenceToken = evidenceIssuer.issue({ armToken, observation });
       return { evidenceToken };
     },
-    async panic() { return { quiesced: true }; },
+    async panic() { return { locked: true, quiesced: true }; },
   };
   const options = { store, broker, attester, armPrivateKey: keys.arm.privateKey, armKeyId: 'arm',
     executionPrivateKey: keys.execution.privateKey, executionKeyId: 'execution',
@@ -150,8 +150,9 @@ test('panic is durable and truthfully reports personal agents are not quiesced',
   const f = fixture(t); let resume;
   f.state.pause = new Promise((resolve) => { resume = resolve; });
   await f.coordinator.request(f.input, f.context);
-  assert.deepEqual(await f.coordinator.panic(), { locked: true, quiesced: false });
+  assert.deepEqual(await f.coordinator.panic(), { locked: true, quiesced: false, deliveryQuiesced: false });
   resume(); await f.drain();
+  assert.deepEqual(await f.coordinator.panic(), { locked: true, quiesced: false, deliveryQuiesced: true });
   assert.equal(f.state.sends, 0);
   await assert.rejects(f.coordinator.request({ ...f.input, operationId: 'job_next' }, f.context), { code: 'OWNER_APPROVAL_LOCKED' });
 });

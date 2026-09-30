@@ -265,6 +265,29 @@ test('root launcher consumes only the fixed installed identity authority result'
   }), /authority result is malformed/);
 });
 
+test('owned shutdown accepts a complete partial receipt without claiming personal execution stopped', async () => {
+  const body = { success: false, ownedQuiesced: true,
+    voiceExecution: { locked: true, persistent: true },
+    executorTasks: { quiesced: true }, privilegedActions: { quiesced: true }, workerSessions: { quiesced: true },
+    ownerSessions: { configured: true, accepted: true, persisted: true, quiesced: false, deliveryQuiesced: true } };
+  assert.equal(assertPanicQuiesced({ status: 503, body }), true);
+  for (const field of ['configured', 'accepted', 'persisted', 'deliveryQuiesced']) {
+    assert.throws(() => assertPanicQuiesced({ status: 503,
+      body: { ...body, ownerSessions: { ...body.ownerSessions, [field]: false } } }));
+  }
+  assert.throws(() => assertPanicQuiesced({ status: 503, body: { ...body, workerSessions: { quiesced: false } } }));
+  const voice = { success: false, locked: true, persistent: true, ownedQuiesced: true,
+    bridge: { success: false, ownedQuiesced: true, agent: body, privileged: { success: true }, outbound: { success: true } } };
+  assert.equal(assertPanicQuiesced({ status: 503, body: voice }), true);
+  assert.throws(() => assertPanicQuiesced({ status: 503, body: { ...voice, persistent: false } }));
+  const states = [];
+  await runOfflineRecovery(null, { requireUnit() {}, ensureDockerConfig() {}, cleanupProject() {}, removeProjection() {},
+    loadControlToken: () => Buffer.from('fixture'), request: async () => ({ status: 503, body }),
+    persist: (phase, evidence) => states.push({ phase, ...evidence }) });
+  assert.deepEqual(states.at(-1), { phase: 'inactive', panic: 'owned_quiesced', cleanup: 'proved' });
+  assert.equal(activationRequiresRecovery({ version: 3, ...states.at(-1) }), false);
+});
+
 test('stack shutdown refuses persisted-but-unquiesced panic and forced exits', () => {
   assert.equal(assertPanicQuiesced({ status: 200, body: { success: true } }), true);
   for (const response of [
@@ -1051,7 +1074,7 @@ test('interrupted activation remains recovery-gated until coordinated panic is p
     source.indexOf('async function recover()'));
   for (const [before, after] of [
     ['cleanupProject()', "pathname: '/voice-control/stop'"],
-    ['assertPanicQuiesced(panic)', "panic: 'recovered'"],
+    ['assertPanicQuiesced(panic)', 'panic: recoveredPanic'],
   ]) {
     assert.notEqual(recoverBody.indexOf(before), -1);
     assert.notEqual(recoverBody.indexOf(after), -1);
