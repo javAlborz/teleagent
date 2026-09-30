@@ -51,7 +51,8 @@ async function codexFixture(t) {
     else if (call.method === 'thread/turns/list') result = { data: [{ id: state.turnId,
       status: state.status === 'active' ? 'inProgress' : 'completed', items: [
         { type: 'userMessage', content: [{ type: 'text', text: 'hello' }] },
-        { type: 'commandExecution', aggregatedOutput: 'SECRET-TOOL-OUTPUT' },
+        ...(call.params.itemsView === 'full' ? [{ type: 'commandExecution',
+          aggregatedOutput: state.largeToolOutput ? 'x'.repeat(2 * 1024 * 1024) : 'SECRET-TOOL-OUTPUT' }] : []),
         { type: 'agentMessage', text: 'token=fixture-sensitive answer' },
       ] }] };
     else if (['turn/start', 'turn/steer'].includes(call.method)) {
@@ -142,6 +143,17 @@ test('native Codex inventory/history redact output and never subscribe, resume, 
   assert.doesNotMatch(JSON.stringify(history), /fixture-sensitive|SECRET/);
   assert.ok(state.calls.every((call) => ['initialize', 'initialized', 'thread/loaded/list',
     'thread/read', 'thread/turns/list'].includes(call.method)));
+});
+
+test('native summary history succeeds when full tool output exceeds the unchanged transport bound', async (t) => {
+  const { client, state } = await codexFixture(t);
+  state.largeToolOutput = true;
+  const history = await client.history(SESSION);
+  assert.equal(history.messages.length, 2);
+  assert.equal(client.maxPayload, 1024 * 1024);
+  await assert.rejects(client._request('thread/turns/list', {
+    threadId: SESSION, limit: 3, sortDirection: 'desc', itemsView: 'full',
+  }), { code: 'OWNER_SESSION_TRANSPORT_LOST' });
 });
 
 test('one exact capability admits one native delivery and replay returns its receipt', async (t) => {
