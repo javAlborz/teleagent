@@ -111,7 +111,7 @@ jobs:
         shell: /usr/bin/bash --noprofile --norc -euo pipefail {0}
         run: |
           npm --prefix claude-api-server ci --omit=dev
-          node -e 'require("./claude-api-server/node_modules/better-sqlite3"); require("./claude-api-server/node_modules/ws"); require("./claude-api-server/owner-session-delivery")'
+          node -e 'const Database = require("./claude-api-server/node_modules/better-sqlite3"); new Database(":memory:").close(); require("./claude-api-server/node_modules/ws"); require("./claude-api-server/owner-session-delivery")'
           npm --prefix claude-api-server audit --omit=dev
 
       - name: Verify a clean generated state

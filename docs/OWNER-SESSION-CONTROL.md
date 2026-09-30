@@ -48,8 +48,11 @@ fallback when a native endpoint is unavailable.
 Read-only requests against the existing Codex 0.159.2 daemon listed five loaded
 threads, read their runtime metadata, and read active-turn identities. The live
 daemon requires an object `params` for `thread/loaded/list`. Four Claude Code
-2.1.285 interactive registrations advertised native inbox sockets. No messages
-were sent to those sessions and no new agent/daemon was started.
+2.1.285 interactive registrations passed the native socket/process/session
+identity checks. Their 0664 metadata is accepted only inside the owner-only 0700
+registry with one file link; live permissions were not changed. The installed
+Claude receiver checks the supplied session UUID before enqueueing a message.
+No messages were sent to those sessions and no new agent/daemon was started.
 
 These observations establish discovery, not production delivery acceptance.
 The tests use synthetic Unix sockets and synthetic signing keys. They cannot

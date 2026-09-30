@@ -241,6 +241,17 @@ test('Claude /resume or recycled process registration refuses the old target', a
   assert.equal(fixture.received.length, 0);
 });
 
+test('Claude inherited-umask registration is allowed only within its private single-link boundary', async (t) => {
+  const fixture = await claudeFixture(t);
+  fs.chmodSync(fixture.filename, 0o664);
+  assert.equal(readClaudeRegistration(fixture.registration).id, SESSION);
+  fs.chmodSync(fixture.registration.registryRoot, 0o750);
+  assert.throws(() => readClaudeRegistration(fixture.registration), { code: 'OWNER_SESSION_REGISTRATION_UNSAFE' });
+  fs.chmodSync(fixture.registration.registryRoot, 0o700);
+  fs.linkSync(fixture.filename, path.join(fixture.root, 'external-link'));
+  assert.throws(() => readClaudeRegistration(fixture.registration), { code: 'OWNER_SESSION_REGISTRATION_UNSAFE' });
+});
+
 test('Claude history reads only bounded message records belonging to the selected session', async (t) => {
   const fixture = await claudeFixture(t);
   const logs = path.join(fixture.root, 'projects', fixture.root.replace(/[^a-zA-Z0-9]/g, '-'));

@@ -17,14 +17,18 @@ function readClaudeRegistration({ registryRoot, socketRoot, pid, uid, procRoot =
     throw sessionError('OWNER_SESSION_REGISTRATION_UNSAFE');
   }
   const directory = fs.lstatSync(registryRoot);
-  if (!directory.isDirectory() || directory.uid !== uid || (directory.mode & 0o022)) {
+  if (!directory.isDirectory() || directory.uid !== uid || (directory.mode & 0o077)) {
     throw sessionError('OWNER_SESSION_REGISTRATION_UNSAFE');
   }
   const fd = fs.openSync(path.join(registryRoot, `${pid}.json`), fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
   let record;
   try {
     const stat = fs.fstatSync(fd);
-    if (!stat.isFile() || stat.uid !== uid || (stat.mode & 0o022) || stat.size > 16384) {
+    // Claude inherits the owner's umask and can write 0664 registrations inside
+    // its 0700 registry. The private parent and single link prevent another
+    // user from reaching that group-writable file. Do not chmod live state.
+    if (!stat.isFile() || stat.uid !== uid || (stat.mode & 0o002) ||
+        stat.nlink !== 1 || stat.size > 16384) {
       throw sessionError('OWNER_SESSION_REGISTRATION_UNSAFE');
     }
     const buffer = Buffer.alloc(16385);
