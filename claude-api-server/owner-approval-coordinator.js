@@ -170,7 +170,7 @@ class OwnerApprovalCoordinator {
       this.store.transition(request.operationId, phase, state, { state, completed: false });
     } catch (error) {
       this.store.transition(request.operationId, phase, phase === 'dispatching' ? 'outcome_unknown' : 'refused', {
-        code: /^OWNER_[A-Z_]+$/.test(error.code || '') ? error.code : 'OWNER_APPROVAL_UNCONFIRMED', completed: false });
+        code: /^(?:OWNER|PBX)_[A-Z_]+$/.test(error.code || '') ? error.code : 'OWNER_APPROVAL_UNCONFIRMED', completed: false });
     }
   }
   cancel(operationId) {

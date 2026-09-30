@@ -9,6 +9,21 @@ const {
 const { buildRealtimeTools, buildRealtimeRouterTool } = require('../lib/openai-realtime-client');
 const { READY_CAPABILITIES, operatorHealth, executorHealth } = require('./controller-capabilities-fixture');
 
+test('owner tools require the independently attested owner plane and retain managed read-only isolation', () => {
+  const health = operatorHealth();
+  health.phoneAuthority = { mode: 'owner_session_approval', status: 'independent_pbx_owner_configured' };
+  health.ownerSessions = { configured: true, available: true, protocol: 'independent-pbx-owner-v1' };
+  const capabilities = capabilitiesFromHealth(health, executorHealth());
+  assert.equal(capabilities.ownerSessionsAvailable, true);
+  assert.equal(isToolAvailable('request_owner_instruction', capabilities), true);
+  assert.equal(isToolAvailable('send_agent_session_message', capabilities), false);
+  assert.equal(isToolAvailable('start_privileged_action', capabilities), false);
+  health.voiceExecution.locked = true;
+  assert.equal(capabilitiesFromHealth(health, executorHealth()).ownerSessionsAvailable, false);
+  health.voiceExecution.locked = false; health.ownerSessions.protocol = 'unreviewed';
+  assert.deepEqual(capabilitiesFromHealth(health, executorHealth()), UNAVAILABLE);
+});
+
 test('every advertised production tool has an explicit classification and unavailable defaults are local-only', () => {
   for (const tool of buildRealtimeTools(['codex-terra'])) {
     assert.notEqual(toolCapability(tool.name), 'disabled', tool.name);

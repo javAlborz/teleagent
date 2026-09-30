@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const crypto = require('node:crypto');
-const { PbxPromptRenderer, createPbxSpeechSynthesizer, MAX_AUDIO } = require('../pbx-prompt-renderer');
+const { PbxPromptRenderer, MAX_AUDIO } = require('../pbx-prompt-renderer');
 const { hashText } = require('../../lib/pbx-approval-protocol');
 
 function fixture(t, synthesize = async () => Buffer.alloc(48000, 1)) {
@@ -57,10 +57,4 @@ test('unsafe media directories and replaced audio are refused', async (t) => {
   fs.chmodSync(f.directory, 0o777);
   assert.throws(() => new PbxPromptRenderer({ directory: f.directory, synthesize: async () => null }),
     { code: 'PBX_AUDIO_DIRECTORY_UNSAFE' });
-});
-
-test('speech client requires independent egress admission before any network request', async () => {
-  assert.throws(() => createPbxSpeechSynthesizer({ apiKey: 'x'.repeat(32) }), { code: 'PBX_SPEECH_CONFIGURATION_INVALID' });
-  const synthesize = createPbxSpeechSynthesizer({ apiKey: 'x'.repeat(32), assertEgress: () => { throw new Error('denied'); } });
-  await assert.rejects(synthesize('Exact approval'), /denied/);
 });

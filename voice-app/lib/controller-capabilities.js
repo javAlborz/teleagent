@@ -18,6 +18,10 @@ const UNAVAILABLE = Object.freeze({
 });
 
 const TOOL_CAPABILITIES = Object.freeze({
+  list_owner_sessions: 'owner',
+  inspect_owner_session: 'owner',
+  request_owner_instruction: 'owner',
+  get_owner_instruction: 'owner',
   send_agent_message: 'managed',
   start_agent_task: 'managed',
   handoff_agent_session: 'managed',
@@ -61,6 +65,7 @@ function isToolAvailable(name, capabilities = UNAVAILABLE) {
   const worker = controller && capabilities?.workerInspectionAvailable === true;
   const managed = controller && capabilities?.managedExecutionAvailable === true;
   switch (toolCapability(name)) {
+    case 'owner': return controller && capabilities?.ownerSessionsAvailable === true;
     case 'local':
     case 'composite': return true;
     case 'worker': return worker && WORKER_INSPECTION_ACTIONS.includes(
@@ -102,8 +107,11 @@ function capabilitiesFromHealth(operator, executor) {
   // or a process being present is never sufficient. Unknown/legacy shapes fail
   // closed, as does a controller with the retired phone signer still installed.
   const safe = operator?.service === 'claude-api-server' &&
-    operator?.phoneAuthority?.mode === 'read_only' &&
-    operator?.phoneAuthority?.status === 'disabled_pending_independent_pbx_attester' &&
+    ((operator?.phoneAuthority?.mode === 'read_only' &&
+      operator?.phoneAuthority?.status === 'disabled_pending_independent_pbx_attester') ||
+     (operator?.phoneAuthority?.mode === 'owner_session_approval' &&
+      operator?.phoneAuthority?.status === 'independent_pbx_owner_configured' &&
+      operator?.ownerSessions?.configured === true && operator?.ownerSessions?.protocol === 'independent-pbx-owner-v1')) &&
     operator?.approvalCapabilities?.verifierConfigured === false &&
     operator?.privilegedActions?.enabled === false &&
     operator?.privilegedActions?.proxyConfigured === false &&
@@ -126,6 +134,8 @@ function capabilitiesFromHealth(operator, executor) {
     controllerAvailable: true,
     workerInspectionAvailable: worker,
     managedExecutionAvailable: managed,
+    ...(operator?.ownerSessions?.configured === true ? { ownerSessionsAvailable: !locked &&
+      operator?.ownerSessions?.available === true && operator?.ownerSessions?.protocol === 'independent-pbx-owner-v1' } : {}),
     reasonCode: locked ? 'VOICE_EXECUTION_LOCKED' : (managed ? null : UNAVAILABLE.reasonCode),
   });
 }
@@ -140,6 +150,7 @@ async function readControllerCapabilities(agentBridge) {
       controllerAvailable: true,
       workerInspectionAvailable: value.workerInspectionAvailable === true,
       managedExecutionAvailable: value.managedExecutionAvailable === true,
+      ...(value.ownerSessionsAvailable !== undefined ? { ownerSessionsAvailable: value.ownerSessionsAvailable === true } : {}),
       reasonCode: value.reasonCode === 'VOICE_EXECUTION_LOCKED' ? value.reasonCode
         : (value.managedExecutionAvailable === true ? null : UNAVAILABLE.reasonCode),
     });

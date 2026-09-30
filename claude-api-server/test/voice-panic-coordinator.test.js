@@ -38,6 +38,18 @@ function localPlanes({ executorQuiesced = true } = {}) {
   };
 }
 
+test('owner-session delivery locks cannot falsely claim personal agents quiesced', async () => {
+  const result = await performCoordinatedVoicePanic({ ...localPlanes(), ownerCoordinator: {
+    async panic() { return { locked: true, quiesced: false }; },
+  } });
+  assert.equal(result.accepted, true); assert.equal(result.success, false);
+  assert.equal(result.ownerCancellation.quiesced, false);
+  const failed = await performCoordinatedVoicePanic({ ...localPlanes(), ownerCoordinator: {
+    async panic() { throw new Error('unavailable'); },
+  } });
+  assert.equal(failed.accepted, false); assert.equal(failed.success, false);
+});
+
 test('controller panic locks first and requires both executor and root planes to quiesce', async () => {
   const planes = localPlanes();
   let rootPanicCalls = 0;

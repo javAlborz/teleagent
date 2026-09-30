@@ -14,10 +14,11 @@ function timestamp(value) {
 // The call router, not voice or SIP headers, enrolls channels it has placed in
 // its own Stasis bridge. It must revoke the binding on StasisEnd/transfer.
 class PbxAriCallCatalog {
-  constructor({ ari, pbxInstanceId }) {
+  constructor({ ari, pbxInstanceId, now = Date.now }) {
     identifier(pbxInstanceId);
     this.ari = ari; this.pbxInstanceId = pbxInstanceId; this.calls = new Map(); this.binding = false;
-    ari.on('disconnect', () => this.calls.clear());
+    this.now = now; this.leases = new Map();
+    ari.on('disconnect', () => { this.calls.clear(); this.leases.clear(); });
     ari.on('event', (event) => {
       if (['StasisEnd', 'ChannelDestroyed', 'ChannelHangupRequest', 'BridgeDestroyed',
         'BridgeAttendedTransfer', 'BridgeBlindTransfer'].includes(event.type)) {
@@ -70,14 +71,31 @@ class PbxAriCallCatalog {
     }
     throw sessionError('PBX_ARI_CALL_NOT_CURRENT');
   }
+  issueApprovalHandle(sipCallId) {
+    const base = this.handleForSipCall(sipCallId);
+    for (const [handle, lease] of this.leases) if (lease.expiresAt <= this.now() || !this.calls.has(lease.base)) this.leases.delete(handle);
+    if (this.leases.size >= 8) throw sessionError('PBX_ARI_APPROVAL_BUSY');
+    const handle = crypto.randomBytes(32).toString('base64url');
+    this.leases.set(handle, { base, expiresAt: this.now() + 120000 });
+    return handle;
+  }
+  releaseApprovalHandle(handle) { this.leases.delete(handle); }
   get(handle) {
-    const call = this.calls.get(handle);
+    const lease = this.leases.get(handle);
+    if (lease && lease.expiresAt <= this.now()) { this.leases.delete(handle); throw sessionError('PBX_ARI_CALL_NOT_CURRENT'); }
+    const call = this.calls.get(lease ? lease.base : handle);
     if (!call) throw sessionError('PBX_ARI_CALL_NOT_CURRENT');
     this.ari.assertEpoch(call.epoch);
     return structuredClone(call);
   }
   async assertCurrent(handle, { detached = false } = {}) {
     const call = this.get(handle);
+    const secure = await this.ari.variable(call.leg.handset_uniqueid, 'CHANNEL(rtp,secure,audio)');
+    // The private trunk can address the PBX RTP range. Channel labeling and
+    // strict-RTP learning alone cannot authenticate a handset digit. Require
+    // negotiated SRTP, whose keys remain within handset/PBX signaling, before
+    // rendering or accepting any approval. Plain calls may still converse.
+    if (secure?.value !== '1') throw sessionError('PBX_ARI_HANDSET_MEDIA_UNAUTHENTICATED');
     const handset = await this.ari.channel(call.leg.handset_uniqueid);
     const trunk = await this.ari.channel(call.leg.trunk_uniqueid);
     const bridge = await this.ari.bridge(call.leg.bridge_id);
@@ -90,7 +108,8 @@ class PbxAriCallCatalog {
         !Array.isArray(bridge.channels) || bridge.channels.length !== (detached ? 1 : 2) ||
         !bridge.channels.includes(call.leg.trunk_uniqueid) ||
         bridge.channels.includes(call.leg.handset_uniqueid) === detached) {
-      this.calls.delete(handle); throw sessionError('PBX_ARI_CALL_IDENTITY_CHANGED');
+      this.calls.delete(this.leases.get(handle)?.base || handle);
+      this.leases.delete(handle); throw sessionError('PBX_ARI_CALL_IDENTITY_CHANGED');
     }
     return call;
   }

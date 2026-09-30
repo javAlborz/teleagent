@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('node:crypto');
 const { URL } = require('node:url');
 const {
   UNAVAILABLE, isToolAvailable, readControllerCapabilities, toolCapability, unavailableResult,
@@ -86,6 +87,7 @@ class VoiceToolController {
     voiceThreadId,
     realtimeSessionId,
     callerId,
+    sipCallId = null,
     fetchImpl = globalThis.fetch,
   }) {
     this.stateStore = stateStore;
@@ -94,6 +96,7 @@ class VoiceToolController {
     this.voiceThreadId = voiceThreadId;
     this.realtimeSessionId = realtimeSessionId;
     this.callerId = callerId;
+    this.sipCallId = sipCallId;
     this.fetchImpl = fetchImpl;
     this.agentHistoryContinuation = null;
     this.targetBindings = new Map();
@@ -228,6 +231,26 @@ class VoiceToolController {
       if (!['local', 'disabled'].includes(capability)) await this.refreshCapabilities();
       if (!isToolAvailable(name, this.capabilities)) return unavailableResult(name, this.capabilities);
       switch (name) {
+        case 'list_owner_sessions':
+          return this.agentBridge.ownerSessionAction('list', {});
+        case 'inspect_owner_session':
+          return this.agentBridge.ownerSessionAction('inspect', { id: args.id, history: args.history === true });
+        case 'get_owner_instruction':
+          return this.agentBridge.ownerSessionAction('status', { operationId: args.operation_id });
+        case 'request_owner_instruction': {
+          if (typeof this.sipCallId !== 'string' || !/^[A-Za-z0-9_.@:+-]{1,256}$/.test(this.sipCallId) ||
+              typeof context.callId !== 'string' || !context.callId) {
+            return { success: false, code: 'OWNER_PHONE_CALL_UNAVAILABLE' };
+          }
+          const operationId = 'job_' + crypto.createHash('sha256')
+            .update(JSON.stringify([this.realtimeSessionId, context.callId])).digest('hex');
+          const result = await this.agentBridge.ownerSessionAction('request', {
+            id: args.id, message: args.message, operationId, sipCallId: this.sipCallId,
+          });
+          return { ...result, operation_id: operationId, completed: false,
+            outcome_note: 'Only the independent phone prompt and a fresh pound press can authorize delivery. Accepted or submitted never proves agent completion. If status is uncertain, query this operation ID; do not resend.' };
+        }
+
         case 'send_agent_message':
         case 'start_agent_task':
           return this.jobBroker.startAgentTask({
@@ -424,7 +447,8 @@ class VoiceToolController {
             transcript_storage: 'Local append-only SQLite text events; raw audio is not recorded.',
             profiles: this.jobBroker.listProfileDetails(),
             emergency_controls: {
-              pound: 'no production authority',
+              pound: this.capabilities.ownerSessionsAvailable === true
+                ? 'confirms only a fully played independent owner-session prompt' : 'no production authority',
               star: 'cancel focused job',
               nine: 'global emergency stop',
             },

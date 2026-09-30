@@ -696,6 +696,24 @@ async function unlockVoiceExecution(source = 'operator') {
   }
 }
 
+async function ownerSessionAction(action, body) {
+  if (!['list', 'inspect', 'request', 'status', 'cancel'].includes(action)) {
+    return { success: false, code: 'OWNER_PHONE_ACTION_INVALID' };
+  }
+  try {
+    const response = await axios.post(`${AGENT_API_URL}/voice-control/owner/${action}`, body, {
+      timeout: 18000, signal: AbortSignal.timeout(18000),
+      headers: buildVoiceControlApiHeaders({ 'Content-Type': 'application/json' }),
+      maxRedirects: 0, maxContentLength: 32768, maxBodyLength: 4096, proxy: false,
+    });
+    return response.data;
+  } catch {
+    // No automatic request retry. The stable operation ID permits status-only
+    // reconciliation if the controller committed the approval before disconnect.
+    return { success: false, code: 'OWNER_PHONE_UNCONFIRMED' };
+  }
+}
+
 async function inspectOperator(action, args = {}) {
   try {
     const response = await axios.post(
@@ -903,6 +921,7 @@ module.exports = {
   getVoiceExecutionStatus,
   unlockVoiceExecution,
   inspectOperator,
+  ownerSessionAction,
   prepareAgentSessionMessage,
   sendAgentSessionMessage,
   endSession,
