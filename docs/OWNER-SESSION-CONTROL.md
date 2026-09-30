@@ -1,7 +1,9 @@
 # Native owner-session control
 
 Status: implemented transport and durable-delivery tests; **not phone-enabled**.
-There is no owner broker service, route, enable setting, or installed trust key.
+The separately testable owner broker and Unix API are source-only. They have no
+installed unit, production route, enable setting, or trust key. Its service
+entrypoint is deliberately read-only until the authority integration is reviewed.
 The production phone release still provides its accepted read-only features.
 
 The requested MVP is to select an existing owner Codex or Claude Code session,
@@ -42,6 +44,26 @@ The adapters are host-side library code. They do not authorize giving the phone
 container, controller, or provider worker the owner's tmux/daemon sockets,
 credentials, home directory, or unrestricted execution. There is no tmux send
 fallback when a native endpoint is unavailable.
+
+## Exact enrollment and controller boundary
+
+The host broker exposes list, inspect/history, prepare, deliver, result and panic
+operations over one private Unix listener. It refuses TCP requests, extra request
+fields, oversized bodies, arbitrary socket paths and generic RPCs. The controller
+proxy never retries delivery: it queries the durable operation ID and plan hash
+after a lost response. One native operation runs at a time, with no waiting queue;
+panic can persist an admission lock while an inspection is in flight.
+
+A root-owned catalog enrolls exact session IDs, friendly labels, canonical
+workspaces, UID, PID/start time, boot, socket identity and executable identity.
+Enrollment does not claim liveness; inspection revalidates it. Session output
+cannot enroll another target. Catalog changes revoke an in-flight preflight
+before admission. Paths under the laptop work bridge are refused. Native daemon
+or session replacement requires fresh operator enrollment. The service uses an
+exclusive lifetime lock and inherits only the root-owned controller-group Unix
+listener. It cannot start without its protected catalog and private state root.
+The host namespace/unit installation remains outstanding; the library alone is
+not an isolation proof.
 
 ## Observed on Hermes, 2026-09-30
 
@@ -91,4 +113,9 @@ The regular hosted PR validation runs the full repository suites.
 
 Native protocols: [OpenAI App Server](https://learn.chatgpt.com/docs/app-server)
 and [Claude Code cross-session messaging](https://code.claude.com/docs/en/cross-session-messaging).
-Codex turn pagination is experimental; unsupported versions fail closed.
+OpenAI explicitly describes App Server and its WebSocket transport as
+experimental and unsupported for production. The Unix endpoint uses that
+transport too. Exact executable enrollment and regression tests reduce accidental
+version drift; they do not turn it into a supported production API. Native
+acceptance must be repeated after changing the enrolled daemon executable.
+Unsupported protocol shapes fail closed.
