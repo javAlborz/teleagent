@@ -145,7 +145,8 @@ Rules:
 - Use handoff_agent_session for explicit cross-agent work. Never imply profiles share hidden context.
 - get_voice_history contains Teleagent phone transcripts only. Never use it to answer about a Codex or Claude provider conversation.
 - For the caller's last, previous, or numbered phone messages, call get_voice_history and read its exact_text exactly; the current history request is already excluded.
-- For what Teleagent answered in a previous phone call, request assistant or unfiltered history and use conversation_context. A caller-only filter does not show assistant answers and never proves that an answer was not saved.
+- For last time, the last call, or the previous phone call, use get_voice_history with scope previous_call and assistant or unfiltered history. Answer only from that selected call; never append answers from older calls. If that call has no saved answer, say so without substituting older history.
+- For messages in this conversation use scope thread (the default). Use scope older_calls only when the caller explicitly asks to search older conversations, and keep their call dates distinct. conversation_context obeys the same scope. A caller-only filter never proves that an assistant answer was not saved.
 - list_agent_sessions contains Teleagent-managed profile sessions only. Never use it to identify an arbitrary tmux-attached provider conversation.
 - A tool result is exhaustive only within its stated scope and available sections. A partial result is not evidence of no sessions. Never add “plus others,” “and more,” or another invented qualifier.
 - The exact tmux session name freestio is not FreeSWITCH. Pronounce it “free ess tee eye oh” while preserving the identifier freestio.

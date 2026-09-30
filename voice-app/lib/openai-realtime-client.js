@@ -198,6 +198,7 @@ function buildRealtimeTools(profiles) {
       parameters: {
         type: 'object',
         properties: {
+          scope: { type: 'string', enum: ['thread', 'previous_call', 'older_calls'], description: 'Default thread: this conversation only. Use previous_call for last time or the immediately preceding call. Use older_calls only when explicitly asked to search older conversations; preserve each call date.' },
           limit: { type: 'integer', minimum: 1, maximum: 50 },
           role: { type: 'string', enum: ['user', 'assistant', 'tool'], description: 'Optional quotation filter. Use assistant for what Teleagent said; omit for a conversation.' },
           user_only: { type: 'boolean', description: 'Use true only for quotations of the caller, never for previous Teleagent answers.' },
