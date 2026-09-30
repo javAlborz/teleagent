@@ -825,6 +825,44 @@ class VoiceStateStore {
     `).get(threadId) || null;
   }
 
+  getScopedVoiceHistory({ callerId, threadId, sessionId, scope = 'thread' }) {
+    if (!['thread', 'previous_call', 'older_calls'].includes(scope)) {
+      throw Object.assign(new Error('Unknown phone history scope.'), { code: 'INVALID_HISTORY_SCOPE' });
+    }
+    const current = this.db.prepare(`
+      SELECT s.rowid AS sequence, s.* FROM realtime_sessions s
+      JOIN voice_threads t ON t.id = s.voice_thread_id
+      WHERE s.id = ? AND t.id = ? AND t.caller_id = ?
+    `).get(sessionId, threadId, String(callerId || 'unknown'));
+    if (!current) {
+      throw Object.assign(new Error('Phone history call context is unavailable.'), { code: 'HISTORY_CONTEXT_UNAVAILABLE' });
+    }
+    const previous = scope === 'previous_call' ? this.db.prepare(`
+      SELECT s.* FROM realtime_sessions s
+      JOIN voice_threads t ON t.id = s.voice_thread_id
+      WHERE t.caller_id = ? AND s.rowid < ?
+      ORDER BY s.rowid DESC LIMIT 1
+    `).get(String(callerId || 'unknown'), current.sequence) : null;
+    if (scope === 'previous_call' && !previous) return { scope, call: null, events: [] };
+    const rows = this.db.prepare(`
+      SELECT e.id, e.voice_thread_id, e.realtime_session_id, e.role, e.kind,
+             e.content, e.created_at, s.opened_at AS call_opened_at
+      FROM voice_events e JOIN voice_threads t ON t.id = e.voice_thread_id
+      LEFT JOIN realtime_sessions s ON s.id = e.realtime_session_id
+      WHERE t.caller_id = ? AND e.kind = 'transcript'
+        AND (? != 'thread' OR e.voice_thread_id = ?)
+        AND (? != 'previous_call' OR e.realtime_session_id = ?)
+        AND (? != 'older_calls' OR s.rowid < ?)
+      ORDER BY e.id DESC LIMIT 200
+    `).all(String(callerId || 'unknown'), scope, threadId, scope, previous?.id || null,
+      scope, current.sequence).reverse();
+    return {
+      scope,
+      call: previous ? { id: previous.id, opened_at: previous.opened_at, closed_at: previous.closed_at } : null,
+      events: rows,
+    };
+  }
+
   setPreference({ callerId, key, value, sourceText = null }) {
     const preferenceKey = normalizePreferenceKey(key);
     if (!preferenceKey) throw new Error('Preference key is required');

@@ -32,6 +32,8 @@ function voiceSafeSessionHistory(events) {
     kind: event.kind,
     text: event.content,
     at: event.created_at,
+    call_id: event.realtime_session_id || null,
+    call_opened_at: event.call_opened_at || null,
   }));
 }
 
@@ -331,26 +333,28 @@ class VoiceToolController {
           const role = args.user_only ? 'user' : (args.role || null);
           const requestedLimit = Math.max(1, Math.min(Number.parseInt(args.limit, 10) || 20, 50));
           const currentRequest = this.stateStore.getLatestUserEvent(this.voiceThreadId);
-          const events = this.stateStore.listCallerEvents(this.callerId, {
-            limit: 200,
-            role,
-          })
-            .filter((event) => event.kind === 'transcript' && event.id !== currentRequest?.id)
+          const history = this.stateStore.getScopedVoiceHistory({
+            callerId: this.callerId, threadId: this.voiceThreadId,
+            sessionId: this.realtimeSessionId, scope: args.scope || 'thread',
+          });
+          const available = history.events.filter((event) => event.id !== currentRequest?.id);
+          const events = available
+            .filter((event) => !role || event.role === role)
             .slice(-requestedLimit);
           const safeEvents = voiceSafeSessionHistory(events);
           // A speaker filter selects quotations; it cannot establish that the
           // other speaker never answered. Preserve bounded two-sided evidence
           // even when the router mistakenly asks for caller-only history.
           const conversationContext = voiceSafeSessionHistory(
-            this.stateStore.listCallerEvents(this.callerId, { limit: 200 })
-              .filter((event) => event.kind === 'transcript' && event.id !== currentRequest?.id)
-              .slice(-10)
+            available.slice(-10)
           );
           return {
             success: true,
+            scope: history.scope,
+            selected_call: history.call,
             selected_role: role || 'all',
             conversation_context: conversationContext,
-            context_note: 'The selected events may filter one speaker. conversation_context contains recent phone transcripts from both speakers; use it to recall Teleagent answers. A filtered selection never proves an answer is absent.',
+            context_note: 'Both events and conversation_context obey the stated scope. Each event identifies its call. Never combine different calls as last time. An empty previous_call is not permission to substitute older calls. A speaker filter never proves the other speaker did not answer.',
             events: safeEvents,
             exact_text: safeEvents
               .map((event, index) => `${index + 1}. ${event.role}: ${event.text}`)

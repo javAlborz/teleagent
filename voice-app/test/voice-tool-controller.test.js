@@ -421,6 +421,65 @@ test('supplementary conversation context stays bounded while exact speaker quota
   assert.equal(history.conversation_context.at(-1).text, 'turn 19');
 });
 
+test('attended resume history excludes unrelated older 608 and 729 answers by default', async (t) => {
+  const { controller, stateStore, thread, realtime } = createController(t);
+  const older = stateStore.createThread({ callerId: '1001', selectedProfile: 'codex-luna' });
+  stateStore.appendEvent({ voiceThreadId: older.id, role: 'assistant', kind: 'transcript', content: '608 and 729' });
+  stateStore.appendEvent({ voiceThreadId: thread.id, realtimeSessionId: realtime.id,
+    role: 'assistant', kind: 'transcript', content: '17 times 32 is 544.' });
+  stateStore.markRealtimeSessionClosed(realtime.id);
+  const resumed = stateStore.createRealtimeSession({ voiceThreadId: thread.id, callId: 'resumed', model: 'test' });
+  controller.realtimeSessionId = resumed.id;
+  stateStore.appendEvent({ voiceThreadId: thread.id, realtimeSessionId: resumed.id,
+    role: 'user', kind: 'transcript', content: 'What number did we discuss last time?' });
+  const history = await controller.handle('get_voice_history', {});
+  assert.equal(history.scope, 'thread');
+  assert.match(history.exact_text, /544/);
+  assert.doesNotMatch(JSON.stringify(history), /608|729|What number/);
+});
+
+test('previous-call scope selects one prior call, preserves both speakers, and excludes later or other caller events', async (t) => {
+  const { controller, stateStore, thread, realtime } = createController(t);
+  stateStore.appendEvent({ voiceThreadId: thread.id, realtimeSessionId: realtime.id,
+    role: 'assistant', kind: 'transcript', content: 'old result 608' });
+  const previous = stateStore.createRealtimeSession({ voiceThreadId: thread.id, callId: 'prior', model: 'test' });
+  for (const [role, content] of [['user', 'Multiply 17 by 32.'], ['assistant', '544']]) {
+    stateStore.appendEvent({ voiceThreadId: thread.id, realtimeSessionId: previous.id, role, kind: 'transcript', content });
+  }
+  stateStore.markRealtimeSessionClosed(previous.id);
+  const current = stateStore.createRealtimeSession({ voiceThreadId: thread.id, callId: 'current', model: 'test' });
+  controller.realtimeSessionId = current.id;
+  stateStore.appendEvent({ voiceThreadId: thread.id, realtimeSessionId: current.id,
+    role: 'user', kind: 'transcript', content: 'What was your last answer?' });
+  const other = stateStore.createThread({ callerId: '9999' });
+  const otherCall = stateStore.createRealtimeSession({ voiceThreadId: other.id, callId: 'other', model: 'test' });
+  stateStore.appendEvent({ voiceThreadId: other.id, realtimeSessionId: otherCall.id,
+    role: 'assistant', kind: 'transcript', content: 'private answer' });
+  // Millisecond timestamps can tie; insertion order must still select the predecessor.
+  stateStore.db.prepare('UPDATE realtime_sessions SET opened_at = ?').run('2026-09-29T10:00:00.000Z');
+  const history = await controller.handle('get_voice_history', { scope: 'previous_call', user_only: true });
+  assert.equal(history.scope, 'previous_call');
+  assert.equal(history.selected_call.id, previous.id);
+  assert.deepEqual(history.conversation_context.map((e) => e.text), ['Multiply 17 by 32.', '544']);
+  assert.ok(history.conversation_context.every((e) => e.call_id === previous.id));
+  assert.doesNotMatch(JSON.stringify(history), /608|private answer|What was/);
+  const broad = await controller.handle('get_voice_history', { scope: 'older_calls' });
+  assert.match(broad.exact_text, /608/);
+  assert.doesNotMatch(JSON.stringify(broad), /private answer|What was/);
+});
+
+test('missing previous call, invalid scope, and mismatched caller context never broaden history', async (t) => {
+  const { controller } = createController(t);
+  const empty = await controller.handle('get_voice_history', { scope: 'previous_call' });
+  assert.equal(empty.success, true);
+  assert.equal(empty.selected_call, null);
+  assert.deepEqual(empty.events, []);
+  assert.deepEqual(empty.conversation_context, []);
+  assert.equal((await controller.handle('get_voice_history', { scope: 'everything' })).code, 'INVALID_HISTORY_SCOPE');
+  controller.callerId = 'different-caller';
+  assert.equal((await controller.handle('get_voice_history', {})).code, 'HISTORY_CONTEXT_UNAVAILABLE');
+});
+
 test('legacy history continuation remains bounded but cannot bypass the worker inspection contract', async (t) => {
   const { controller } = createController(t);
   const calls = [];
