@@ -1,0 +1,49 @@
+[Unit]
+Description=Teleagent fixed PBX-namespace ARI socket proxy
+Requires=teleagent-pbx-ari.socket
+After=teleagent-pbx-ari.socket
+ConditionPathExists=/etc/teleagent/pbx-attester/ENABLE
+ConditionPathExists=/run/netns/tm-asterisk
+
+[Service]
+Type=simple
+Slice=teleagent-media.slice
+User=teleagent-asterisk
+Group=teleagent-asterisk
+Sockets=teleagent-pbx-ari.socket
+NetworkNamespacePath=/run/netns/tm-asterisk
+ExecStartPre=+/usr/bin/python3 -I /usr/local/libexec/verify-teleagent-release-closure --check-start-gate
+ExecStartPre=+/usr/bin/python3 -I /usr/local/libexec/verify-teleagent-owner-plane --check-proxy
+ExecStart=/usr/lib/systemd/systemd-socket-proxyd --connections-max=8 127.0.0.1:8088
+CPUQuota=25%
+MemoryHigh=33554432
+MemoryMax=67108864
+MemorySwapMax=0
+TasksMax=16
+Restart=no
+KillMode=control-group
+TimeoutStopSec=5s
+OOMPolicy=kill
+UMask=0077
+WorkingDirectory=/
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateDevices=yes
+PrivateIPC=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictAddressFamilies=AF_UNIX AF_INET
+IPAddressDeny=any
+IPAddressAllow=127.0.0.1/32
+LimitNOFILE=64
+LimitCORE=0

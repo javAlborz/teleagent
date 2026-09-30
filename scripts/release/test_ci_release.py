@@ -57,6 +57,8 @@ TREE = "b" * 40
 CONFIG_DIGEST = f"sha256:{'c' * 64}"
 
 HOST_RUNTIME_ENTRYPOINTS = (
+    "claude-api-server/owner-session-broker-service.js",
+    "claude-api-server/pbx-attester-service.js",
     "claude-api-server/provider-egress-broker.js",
     "claude-api-server/provider-egress-shim.js",
     "claude-api-server/provider-supervisor-service.js",
@@ -76,6 +78,15 @@ PACKAGE_SCOPE_PATHS = (
 )
 
 VOICE_AND_HOST_SOURCE_PATHS = (
+    "deploy/owner-plane/teleagent-owner-plane.sysusers",
+    "deploy/owner-plane/teleagent-owner-plane.tmpfiles",
+    "deploy/owner-plane/teleagent-owner-session.service",
+    "deploy/owner-plane/teleagent-owner-session.socket",
+    "deploy/owner-plane/teleagent-pbx-ari.service",
+    "deploy/owner-plane/teleagent-pbx-ari.socket",
+    "deploy/owner-plane/teleagent-pbx-attester.service",
+    "deploy/owner-plane/teleagent-pbx-attester.socket",
+
     "deploy/host/teleagent-disabled-host-install",
     "deploy/voice-stack/drachtio.conf.xml.template",
     "deploy/voice-stack/freeswitch-event-socket.conf.xml.template",
@@ -441,7 +452,7 @@ class CiReleaseTests(unittest.TestCase):
             | sip_sources
         )
         self.assertEqual(BOUND_SOURCE_PATHS, tuple(sorted(expected)))
-        self.assertEqual(len(BOUND_SOURCE_PATHS), 162)
+        self.assertEqual(len(BOUND_SOURCE_PATHS), 184)
         self.assertIn("deploy/voice-stack/media-application-boundary.js", BOUND_SOURCE_PATHS)
         self.assertIn("lib/worker-inspection-contract.js", BOUND_SOURCE_PATHS)
         self.assertEqual(len(BOUND_SOURCE_PATHS), len(set(BOUND_SOURCE_PATHS)))

@@ -44,7 +44,8 @@ function createOwnerSessionServer(broker) {
       try {
         const body = req.method === 'POST' ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : null;
         let result;
-        if (req.method === 'GET' && req.url === '/v1/sessions') result = broker.list();
+        if (req.method === 'GET' && req.url === '/v1/health') result = broker.health();
+        else if (req.method === 'GET' && req.url === '/v1/sessions') result = broker.list();
         else if (req.method === 'POST' && req.url === '/v1/inspect') {
           exact(body, ['id', 'history']);
           if (typeof body.history !== 'boolean') throw sessionError('OWNER_BROKER_REQUEST_INVALID');

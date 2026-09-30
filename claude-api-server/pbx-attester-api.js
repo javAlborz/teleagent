@@ -21,12 +21,18 @@ class PbxAttesterControlStore {
   }
 }
 
-function createPbxAttesterApi({ calls, attester, armVerifier, adapter, router, assertBoundary, controlStore }) {
+function createPbxAttesterApi({ calls, attester, armVerifier, adapter, router, assertBoundary, controlStore, epoch, assertReady }) {
   if (!controlStore || typeof controlStore.isLocked !== 'function' || typeof controlStore.lock !== 'function') {
     throw sessionError('PBX_ATTESTER_STORAGE_REQUIRED');
   }
   let busy = false;
   return Object.freeze({
+    async health() {
+      if (controlStore.isLocked() || typeof assertReady !== 'function') throw sessionError('PBX_ATTESTER_LOCKED');
+      await assertBoundary(); assertReady();
+      if (controlStore.isLocked()) throw sessionError('PBX_ATTESTER_LOCKED');
+      return { ready: true, epoch, protocol: 'independent-pbx-owner-v1' };
+    },
     async resolveCall(sipCallId) {
       if (controlStore.isLocked()) throw sessionError('PBX_ATTESTER_LOCKED');
       await assertBoundary();
@@ -56,6 +62,7 @@ function createPbxAttesterApi({ calls, attester, armVerifier, adapter, router, a
       catch { return { locked: true, quiesced: false }; }
     },
     async handle(route, body) {
+      if (route === '/v1/health') { exact(body, []); return this.health(); }
       if (route === '/v1/call') {
         exact(body, ['sipCallId']); return this.resolveCall(body.sipCallId);
       }

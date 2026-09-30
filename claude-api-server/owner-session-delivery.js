@@ -139,6 +139,8 @@ class OwnerSessionDeliveryStore {
     return this.get(plan.operationId, hash(plan));
   }
 
+  isLocked() { return this.db.prepare('SELECT locked FROM owner_session_control WHERE singleton=1').get()?.locked !== 0; }
+
   lock() {
     this.db.prepare('UPDATE owner_session_control SET locked=1 WHERE singleton=1').run();
     // Owner agents remain outside Teleagent's process boundary. Locking delivery

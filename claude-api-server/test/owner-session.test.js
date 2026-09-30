@@ -304,7 +304,7 @@ test('native transport refuses generic shell, resume, fork, and configuration RP
   assert.ok(state.calls.every((call) => ['initialize', 'initialized', 'thread/loaded/list'].includes(call.method)));
 });
 
-test('native owner delivery has no production import, route, unit, or enable setting', () => {
+test('voice and controller cannot directly import native owner delivery', () => {
   const root = path.resolve(__dirname, '../..');
   for (const directoryName of ['voice-app', 'deploy']) {
     const walk = (directory) => {

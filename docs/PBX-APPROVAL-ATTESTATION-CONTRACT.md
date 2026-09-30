@@ -265,3 +265,36 @@ from authorizing work even if an event names the handset channel. The boundary
 must prove authenticated SRTP configuration and confidential handset signaling
 (the existing private Tailnet path), plus disabled SIP INFO and in-band DTMF.
 An unencrypted conversation can remain useful, but cannot approve instructions.
+
+### Owner-plane service deployment
+
+The source units under `deploy/owner-plane` add two fixed Node entrypoints and a
+fixed systemd ARI socket proxy. They are installed disabled, with no boot enable
+section. The infrastructure verifier must independently approve their unit
+hashes and entrypoint profiles before a signed release can start them.
+
+The session broker runs as the personal owner to reach the native providers'
+owner-only Unix sockets. It is trusted code, with no model or generic RPC/shell
+route. Its mount view exposes enrolled project paths and native session records;
+this is not a security boundary against other processes already running as the
+same owner. Personal agents retain their existing account permissions. The
+controller reaches only its root-owned typed listener and receives no provider
+credential or native socket.
+
+The PBX attester uses a separate identity, private state and signing key. It
+reaches ARI through an attester-only Unix socket; the fixed proxy runs in the
+PBX network namespace as the existing PBX identity and targets loopback only.
+No new voice-to-PBX management route is added. An infrastructure-owned preflight
+must verify the actual PBX configuration, authenticated handset media, immutable
+mounts, installed speech packages and current process identities before issuing
+the current-boot boundary receipt. The receipt is rechecked before approval.
+
+Phone session controls require fresh successful health from both independent
+services with the same authority epoch. Probes are serial, throttled and never
+inspect or launch a native agent. Lost connectivity or stale readiness withdraws
+the capability. Operator recovery checks the independent durable locks separately
+from the global phone lock; this does not automatically clear any panic lock.
+
+These sources do not constitute an installed or accepted owner plane. Real
+packet rejection, handset audio/DTMF, native delivery and recovery acceptance
+remain deployment requirements.

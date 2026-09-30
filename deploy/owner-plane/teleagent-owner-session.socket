@@ -1,0 +1,16 @@
+[Unit]
+Description=Teleagent private owner-session listener
+ConditionPathExists=/etc/teleagent/owner-session/ENABLE
+
+[Socket]
+ListenStream=/run/teleagent-owner-session/broker.sock
+SocketUser=root
+SocketGroup=teleagent-control
+SocketMode=0660
+DirectoryMode=0711
+Backlog=8
+RemoveOnStop=yes
+FileDescriptorName=owner-session-broker
+Service=teleagent-owner-session.service
+
+# No [Install]; root coordinates the disabled installation and canary.

@@ -263,3 +263,11 @@ test('signed delivery requires a synchronous admission guard at the effect bound
   await assert.rejects(broker.deliver(input), { code: 'OWNER_SESSION_ASYNC_ADMISSION_GUARD' });
   assert.equal(state.calls.some((call) => call.method === 'turn/start'), false);
 });
+
+test('broker readiness checks current enrollment and durable lock without native RPC', async (t) => {
+  const { broker, store, state } = await fixture(t);
+  assert.throws(() => broker.health(), { code: 'OWNER_BROKER_UNAVAILABLE' });
+  broker.authority = { epoch: 'a'.repeat(64) }; broker.assertBoundary = () => {};
+  assert.equal(broker.health().ready, true); assert.equal(state.calls.length, 0);
+  store.lock(); assert.throws(() => broker.health(), { code: 'OWNER_BROKER_UNAVAILABLE' });
+});

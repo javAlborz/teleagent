@@ -490,6 +490,17 @@ test('voice activation authenticates exact authority-disabled controller health 
   });
   assert.equal(token.every((byte) => byte === 0), true);
 
+  const ownerHealth = { ...exactHealth,
+    phoneAuthority: { mode: 'owner_session_approval', status: 'independent_pbx_owner_configured' },
+    ownerSessions: { configured: true, available: true, protocol: 'independent-pbx-owner-v1' } };
+  await requireControllerReady(Buffer.alloc(32, 'a'), { request: async () => ({ status: 200, body: ownerHealth }) });
+  for (const field of ['configured', 'available', 'protocol']) {
+    const unsafe = structuredClone(ownerHealth); unsafe.ownerSessions[field] = false;
+    await assert.rejects(requireControllerReady(Buffer.alloc(32, 'a'), {
+      request: async () => ({ status: 200, body: unsafe }),
+    }));
+  }
+
   for (const mutate of [
     (health) => { health.phoneAuthority.status = 'unsafe_for_voice_activation'; },
     (health) => { health.approvalCapabilities.verifierConfigured = true; },
@@ -505,7 +516,7 @@ test('voice activation authenticates exact authority-disabled controller health 
     mutate(health);
     await assert.rejects(requireControllerReady(rejectedToken, {
       request: async () => ({ status: 200, body: health }),
-    }), /canonical read-only phone authority mode/);
+    }), /reviewed ready phone authority mode/);
     assert.equal(rejectedToken.every((byte) => byte === 0), true);
   }
 });
@@ -567,7 +578,7 @@ test('wrapper never puts credentials in Docker argv or inherited environment', (
   assert.match(source, /assertPanicQuiesced\(panic\)[\s\S]*assertVoiceExit\(inspection\)[\s\S]*privateComposeArgs\('down'/);
   assert.match(source, /requireControllerReady\(controllerControlToken\)/);
   assert.match(source, /requireExecutorReady\(executorReadinessToken\)/);
-  assert.match(source, /body\?\.phoneAuthority\?\.mode !== 'read_only'/);
+  assert.match(source, /body\?\.phoneAuthority\?\.mode === 'read_only'/);
   assert.match(source, /teleagent-provider-cli-check/);
   assert.match(source, /teleagent-provider-model \(enforce\)/);
   assert.match(source, /teleagent-sip-local-peer-fence/);

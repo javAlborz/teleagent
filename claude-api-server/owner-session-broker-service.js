@@ -1,7 +1,7 @@
 'use strict';
 
-// This service has no activation unit in the live release. The host installer
-// must supply its fixed root-owned listener, catalog and sandbox before start.
+// The disabled source unit requires a reviewed host installer to supply its
+// fixed root-owned listener, catalog and sandbox before explicit activation.
 const fs = require('node:fs');
 const path = require('node:path');
 const { OwnerSessionCatalog } = require('./owner-session-catalog');
@@ -40,10 +40,12 @@ async function startOwnerSessionBroker() {
     const enable = '/etc/teleagent/owner-session/ENABLE';
     const authority = loadOwnerAuthority('broker');
     if (protectedRead(enable) !== `${authority.epoch}\n`) throw sessionError('OWNER_AUTHORITY_ENABLE_INVALID');
-    const broker = new OwnerSessionBroker({ catalog, store, authority, assertAdmission(entry) {
+    const assertBoundary = () => {
       authority.assertCurrent();
       if (protectedRead(enable) !== `${authority.epoch}\n`) throw sessionError('OWNER_AUTHORITY_ENABLE_INVALID');
-      assertOwnerHostHeadroom(); assertOwnerProcessPool(entry.endpoint.pid);
+    };
+    const broker = new OwnerSessionBroker({ catalog, store, authority, assertBoundary, assertAdmission(entry) {
+      assertBoundary(); assertOwnerHostHeadroom(); assertOwnerProcessPool(entry.endpoint.pid);
     } });
     runtime = createOwnerSessionServer(broker);
     await new Promise((resolve, reject) => {
