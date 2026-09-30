@@ -9,7 +9,7 @@ ConditionPathIsMountPoint=/var/lib/teleagent-pbx-attester
 
 [Service]
 Type=simple
-Slice=teleagent.slice
+Slice=teleagent-voice.slice
 Sockets=teleagent-pbx-attester.socket
 User=teleagent-pbx-attester
 Group=teleagent-pbx-attester

@@ -273,6 +273,10 @@ fixed systemd ARI socket proxy. They are installed disabled, with no boot enable
 section. The infrastructure verifier must independently approve their unit
 hashes and entrypoint profiles before a signed release can start them.
 
+The two Node services share the existing bounded voice slice; they do not add
+unreviewed children to the exact aggregate provider-admission topology. The ARI
+relay shares the existing media slice. All retain their own smaller limits.
+
 The session broker runs as the personal owner to reach the native providers'
 owner-only Unix sockets. It is trusted code, with no model or generic RPC/shell
 route. Its mount view exposes enrolled project paths and native session records;
