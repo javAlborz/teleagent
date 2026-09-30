@@ -7,7 +7,7 @@ ConditionPathIsMountPoint=/var/lib/teleagent-owner-session
 
 [Service]
 Type=simple
-Slice=teleagent.slice
+Slice=teleagent-voice.slice
 Sockets=teleagent-owner-session.socket
 User=alborz
 Group=alborz
