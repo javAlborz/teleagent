@@ -2434,6 +2434,8 @@ class AgentJobBroker extends EventEmitter {
       persistentLock: confirmedLock,
       bridge: {
         success: remotePanicSucceeded,
+        ownedQuiesced: Boolean(bridgeResult?.ownedQuiesced === true &&
+          privilegedBridgeResult?.success === true && outboundResult?.success === true),
         agent: bridgeResult,
         privileged: privilegedBridgeResult,
         outbound: outboundResult,

@@ -4190,6 +4190,7 @@ app.post('/voice-control/stop', async (req, res) => {
     privilegedActions: panic.privilegedCancellation,
     workerSessions: panic.workerCancellation,
     ownerSessions: panic.ownerCancellation,
+    ownedQuiesced: panic.ownedQuiesced,
   });
 });
 

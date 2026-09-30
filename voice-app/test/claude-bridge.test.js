@@ -13,6 +13,15 @@ const bridge = require('../lib/claude-bridge');
 const { READY_CAPABILITIES, operatorHealth, executorHealth } = require('./controller-capabilities-fixture');
 const { UNAVAILABLE } = require('../lib/controller-capabilities');
 
+test('panic preserves typed owned shutdown evidence while generic failures stay unconfirmed', async (t) => {
+  const partial = { success: false, ownedQuiesced: true, voiceExecution: { locked: true, persistent: true },
+    ownerSessions: { configured: true, quiesced: false, deliveryQuiesced: true } };
+  t.mock.method(axios, 'post', async () => { throw Object.assign(new Error('partial'), { response: { status: 503, data: partial } }); });
+  assert.deepEqual(await bridge.panicStop(), partial);
+  partial.ownerSessions.deliveryQuiesced = false;
+  assert.equal((await bridge.panicStop()).ownedQuiesced, undefined);
+});
+
 test('runtime availability proves each scope using bounded nonredirecting GETs only', async (t) => {
   const calls = [];
   t.mock.method(axios, 'post', () => assert.fail('availability must never POST'));

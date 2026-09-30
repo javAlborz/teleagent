@@ -206,7 +206,12 @@ class OwnerApprovalCoordinator {
   async panic() {
     this.store.lock();
     const results = await Promise.allSettled([this.broker.panic(), this.attester.panic()]);
-    return { locked: true, quiesced: results.every((result) => result.status === 'fulfilled' && result.value?.quiesced === true) };
+    const broker = results[0].status === 'fulfilled' ? results[0].value : null;
+    const attester = results[1].status === 'fulfilled' ? results[1].value : null;
+    return { locked: true, quiesced: false,
+      deliveryQuiesced: !this.preparing && this.active.size === 0 &&
+        broker?.locked === true && broker.deliveryQuiesced === true &&
+        attester?.locked === true && attester.quiesced === true };
   }
 }
 module.exports = { OwnerApprovalStore, OwnerApprovalCoordinator, approvalPrompt };

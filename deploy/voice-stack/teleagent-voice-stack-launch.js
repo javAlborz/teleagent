@@ -94,7 +94,7 @@ const ACTIVATION_PHASES = new Set([
   'inactive',
 ]);
 const PANIC_STATES = new Set([
-  'not_requested', 'requested', 'quiesced', 'outcome_unknown', 'recovered',
+  'not_requested', 'requested', 'quiesced', 'owned_quiesced', 'outcome_unknown', 'recovered',
 ]);
 const CLEANUP_STATES = new Set(['required', 'proved', 'outcome_unknown']);
 
@@ -649,13 +649,13 @@ function validTimestamp(value, { nullable = false } = {}) {
 function validActivationEvidence(state) {
   if (state.phase === 'inactive') {
     return state.cleanup === 'proved' &&
-      ['not_requested', 'quiesced', 'recovered'].includes(state.panic);
+      ['not_requested', 'quiesced', 'owned_quiesced', 'recovered'].includes(state.panic);
   }
   if (['starting', 'active'].includes(state.phase)) {
     return state.panic === 'not_requested' && state.cleanup === 'required';
   }
   if (state.phase === 'stopping') {
-    return ['requested', 'quiesced'].includes(state.panic) && state.cleanup === 'required';
+    return ['requested', 'quiesced', 'owned_quiesced'].includes(state.panic) && state.cleanup === 'required';
   }
   if (state.phase === 'panic_outcome_unknown') {
     return ['requested', 'outcome_unknown'].includes(state.panic) &&
@@ -790,13 +790,13 @@ function atomicWriteActivationState(state) {
 function activationRequiresRecovery(state) {
   if (!state || ![2, 3].includes(state.version)) return true;
   if (state.phase !== 'inactive' || state.cleanup !== 'proved') return true;
-  return !['not_requested', 'quiesced', 'recovered'].includes(state.panic);
+  return !['not_requested', 'quiesced', 'owned_quiesced', 'recovered'].includes(state.panic);
 }
 
 function cleanupRequiresPanicRecovery(state) {
   if (!state || ![2, 3].includes(state.version)) return true;
   if (state.panic === 'outcome_unknown' || state.phase === 'panic_outcome_unknown') return true;
-  const panicProved = ['quiesced', 'recovered'].includes(state.panic);
+  const panicProved = ['quiesced', 'owned_quiesced', 'recovered'].includes(state.panic);
   return !panicProved && [
     'starting', 'active', 'stopping', 'cleanup_outcome_unknown',
   ].includes(state.phase);
@@ -1834,7 +1834,8 @@ async function stop() {
     tokenBuffer.fill(0);
   }
   if (activationEvidenceError) throw activationEvidenceError;
-  stoppingState = persistActivationState('stopping', { panic: 'quiesced', cleanup: 'required' });
+  const panicState = panic.body.success === true ? 'quiesced' : 'owned_quiesced';
+  stoppingState = persistActivationState('stopping', { panic: panicState, cleanup: 'required' });
   const imageManifest = stoppingState.imageManifest;
   const ownedVoice = retainedVoiceContainerForStop(stoppingState);
   const environment = fixedDockerEnvironment(
@@ -1856,12 +1857,12 @@ async function stop() {
     });
     cleanupExactProject({ environment });
     removeRuntimeProjection();
-    persistActivationState('inactive', { imageManifest, panic: 'quiesced', cleanup: 'proved' });
+    persistActivationState('inactive', { imageManifest, panic: panicState, cleanup: 'proved' });
   } catch (error) {
     try {
       persistActivationState('cleanup_outcome_unknown', {
         imageManifest,
-        panic: 'quiesced',
+        panic: panicState,
         cleanup: 'outcome_unknown',
       });
     } catch { /* retain the stop failure as the primary failure */ }
@@ -1920,6 +1921,7 @@ async function runOfflineRecovery(priorState, {
   requireUnit('teleagent-agent-controller.service');
   const tokenBuffer = loadControlToken();
   if (!Buffer.isBuffer(tokenBuffer)) refuse('the recovery control credential is invalid');
+  let recoveredPanic = 'recovered';
   try {
     persist('panic_outcome_unknown', {
       panic: 'requested',
@@ -1934,6 +1936,7 @@ async function runOfflineRecovery(priorState, {
       socketPath: CONTROLLER_SOCKET,
     });
     assertPanicQuiesced(panic);
+    if (panic.body.success !== true) recoveredPanic = 'owned_quiesced';
   } catch (error) {
     try {
       persist('panic_outcome_unknown', {
@@ -1945,7 +1948,7 @@ async function runOfflineRecovery(priorState, {
   } finally {
     tokenBuffer.fill(0);
   }
-  persist('inactive', { panic: 'recovered', cleanup: 'proved' });
+  persist('inactive', { panic: recoveredPanic, cleanup: 'proved' });
 }
 
 async function recover() {
@@ -1986,10 +1989,24 @@ function requireLifecycleLock(operation, {
 }
 
 function assertPanicQuiesced(panic) {
-  if (panic?.status !== 200 || panic.body?.success !== true) {
-    refuse('voice panic was persisted but full quiescence was not confirmed');
+  if (panic?.status === 200 && panic.body?.success === true) return true;
+  const body = panic?.body;
+  const controller = body?.bridge ? body.bridge.agent : body;
+  const owner = controller?.ownerSessions;
+  const managedStopped = controller?.executorTasks?.quiesced === true &&
+    controller?.privilegedActions?.quiesced === true && controller?.workerSessions?.quiesced === true;
+  const voiceStopped = !body?.bridge || (body.locked === true && body.persistent === true &&
+    body.bridge.ownedQuiesced === true && body.bridge.privileged?.success === true &&
+    body.bridge.outbound?.success === true);
+  if (panic?.status === 503 && body?.success === false && body.ownedQuiesced === true &&
+      controller?.success === false && controller.ownedQuiesced === true &&
+      controller.voiceExecution?.locked === true && controller.voiceExecution?.persistent === true &&
+      owner?.configured === true && owner.accepted === true && owner.persisted === true &&
+      owner.quiesced === false && owner.deliveryQuiesced === true && managedStopped && voiceStopped) {
+    // The activation journal retains owned_quiesced, never full quiesced.
+    return true;
   }
-  return true;
+  refuse('voice panic was persisted but full quiescence was not confirmed; owned shutdown proof is also unavailable');
 }
 
 function assertVoiceExit(inspection) {
