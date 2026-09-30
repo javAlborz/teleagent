@@ -1264,10 +1264,14 @@ async function requireControllerReady(controlToken, { request = requestJson } = 
       timeoutMs: 2000,
     });
     const body = response.body;
+    const readOnly = body?.phoneAuthority?.mode === 'read_only' &&
+      body?.phoneAuthority?.status === 'disabled_pending_independent_pbx_attester';
+    const ownerApproval = body?.phoneAuthority?.mode === 'owner_session_approval' &&
+      body?.phoneAuthority?.status === 'independent_pbx_owner_configured' &&
+      body?.ownerSessions?.configured === true && body?.ownerSessions?.available === true &&
+      body?.ownerSessions?.protocol === 'independent-pbx-owner-v1';
     if (response.status !== 200 || body?.ready !== true ||
-        body?.service !== 'claude-api-server' ||
-        body?.phoneAuthority?.mode !== 'read_only' ||
-        body?.phoneAuthority?.status !== 'disabled_pending_independent_pbx_attester' ||
+        body?.service !== 'claude-api-server' || !(readOnly || ownerApproval) ||
         body?.approvalCapabilities?.verifierConfigured !== false ||
         body?.authentication?.privilegedActionConfigured !== false ||
         body?.authentication?.privilegedActionRequired !== false ||
@@ -1275,7 +1279,7 @@ async function requireControllerReady(controlToken, { request = requestJson } = 
         body?.privilegedActions?.enabled !== false ||
         body?.privilegedActions?.proxyConfigured !== false ||
         body?.privilegedActions?.authConfigured !== false) {
-      refuse('the agent controller is not in the canonical read-only phone authority mode');
+      refuse('the agent controller is not in a reviewed ready phone authority mode');
     }
   } finally {
     controlToken.fill(0);
