@@ -15,9 +15,9 @@ function nativeClient(entry) {
 // No background polling and no unbounded queue. A single broker instance owns
 // one admission slot. Its service must also hold an exclusive lifetime lock.
 class OwnerSessionBroker {
-  constructor({ catalog, store, authority, clientFactory = nativeClient }) {
+  constructor({ catalog, store, authority, clientFactory = nativeClient, assertAdmission = null }) {
     this.catalog = catalog; this.store = store; this.authority = authority;
-    this.clientFactory = clientFactory; this.busy = false; this.closing = false;
+    this.clientFactory = clientFactory; this.assertAdmission = assertAdmission; this.busy = false; this.closing = false;
   }
   async serial(work) {
     if (this.closing) throw sessionError('OWNER_BROKER_CLOSING');
@@ -67,6 +67,7 @@ class OwnerSessionBroker {
     exact(input.approval, ['approvalId', 'evidenceSha256']);
     return this.serial(async () => {
       if (!this.authority) throw sessionError('OWNER_SESSION_AUTHORITY_UNAVAILABLE');
+      if (typeof this.assertAdmission !== 'function') throw sessionError('OWNER_BROKER_ADMISSION_UNAVAILABLE');
       const entry = this.catalog.get(input.id);
       const plan = requestPlan(input.request);
       if (plan.provider !== entry.provider || plan.sessionId !== entry.sessionId) {
@@ -76,7 +77,11 @@ class OwnerSessionBroker {
       if (previous) return previous;
       return this.session(input.id, ({ client, assertEnrolled }) => deliverOwnerSession({ client,
         store: this.store, request: input.request, capability: input.capability,
-        beforeAdmission: assertEnrolled,
+        beforeAdmission: () => {
+          assertEnrolled();
+          const admitted = this.assertAdmission(entry);
+          if (admitted && typeof admitted.then === 'function') throw sessionError('OWNER_SESSION_ASYNC_ADMISSION_GUARD');
+        },
         authority: { publicKeys: this.authority.publicKeys,
           bindings: { ...input.approval, ...this.authority.bindings } } }));
     });

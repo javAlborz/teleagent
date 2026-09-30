@@ -73,8 +73,9 @@ class PbxAriCallRouter {
       this.locked = true; await this.stop(); return;
     }
     if (event.type === 'ChannelDtmfReceived' && event.channel?.id === call.ownerId && event.digit === '*' &&
-        call.phase === 'connected' && !this.approvalAdapter.busy) {
-      await this.ari.forwardStar(call.trunkId);
+        call.phase === 'connected') {
+      if (this.approvalAdapter.busy) this.approvalAdapter.cancel();
+      else await this.ari.forwardStar(call.trunkId);
     }
   }
   assertCurrent(call) {

@@ -48,7 +48,7 @@ async function fixture(t) {
   }] };
   const catalog = new OwnerSessionCatalog(data);
   const store = new OwnerSessionDeliveryStore({ dbPath: path.join(root, 'delivery.sqlite') });
-  const broker = new OwnerSessionBroker({ catalog, store });
+  const broker = new OwnerSessionBroker({ catalog, store, assertAdmission: () => {} });
   t.after(async () => {
     broker.close(); store.close();
     for (const socket of wss.clients) socket.terminate();
@@ -249,4 +249,17 @@ test('an accidentally TCP-bound API refuses requests', async (t) => {
     req.on('error', reject);
   });
   assert.equal(status, 400);
+});
+
+test('signed delivery requires a synchronous admission guard at the effect boundary', async (t) => {
+  const { broker, state } = await fixture(t);
+  const prepared = await broker.prepare({ id: 'os_fixture', operationId: 'job_guard', message: 'Do not send' });
+  const input = signedInput(broker, prepared);
+  broker.assertAdmission = null;
+  await assert.rejects(broker.deliver(input), { code: 'OWNER_BROKER_ADMISSION_UNAVAILABLE' });
+  broker.assertAdmission = () => { throw Object.assign(new Error('pressure'), { code: 'OWNER_HOST_RESOURCE_PRESSURE' }); };
+  await assert.rejects(broker.deliver(input), { code: 'OWNER_HOST_RESOURCE_PRESSURE' });
+  broker.assertAdmission = async () => {};
+  await assert.rejects(broker.deliver(input), { code: 'OWNER_SESSION_ASYNC_ADMISSION_GUARD' });
+  assert.equal(state.calls.some((call) => call.method === 'turn/start'), false);
 });
