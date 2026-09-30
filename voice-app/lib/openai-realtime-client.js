@@ -120,6 +120,18 @@ function buildRealtimeTools(profiles) {
     },
   };
   return [
+    { type: 'function', name: 'list_owner_sessions',
+      description: 'List explicitly enrolled personal Codex/Claude native sessions. Enrollment is not proof of liveness or a current tmux-pane binding; inspect an exact returned ID. This is the owner session inventory, separate from managed phone jobs.',
+      parameters: { type: 'object', properties: {}, additionalProperties: false } },
+    { type: 'function', name: 'inspect_owner_session',
+      description: 'Read one exact enrolled personal session and optionally its bounded recent provider messages. Never substitute phone transcripts for this history.',
+      parameters: { type: 'object', properties: { id: { type: 'string' }, history: { type: 'boolean' } }, required: ['id'], additionalProperties: false } },
+    { type: 'function', name: 'request_owner_instruction',
+      description: 'Request an independent phone approval to send the caller’s exact instruction to one enrolled existing personal Codex/Claude session. The PBX reads the canonical prompt and waits for a fresh pound press. Existing session permissions apply, including authorized edits/deployment. Never substitute this for a status read or claim completion from delivery.',
+      parameters: { type: 'object', properties: { id: { type: 'string' }, message: { type: 'string', maxLength: 1200 } }, required: ['id', 'message'], additionalProperties: false } },
+    { type: 'function', name: 'get_owner_instruction',
+      description: 'Read the durable approval/delivery status of an owner-session instruction. Accepted is native acknowledgement, submitted_unconfirmed is only a socket write, and outcome_unknown must never be resent. This does not prove the agent finished its work.',
+      parameters: { type: 'object', properties: { operation_id: { type: 'string' } }, required: ['operation_id'], additionalProperties: false } },
     {
       type: 'function',
       name: 'send_agent_message',

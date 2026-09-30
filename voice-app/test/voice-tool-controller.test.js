@@ -54,6 +54,23 @@ function createController(t) {
   return { canceled, controller, inspections, realtime, stateStore, targeted, thread };
 }
 
+test('owner instructions bind the real SIP call and stable tool ID rather than model-supplied authority', async (t) => {
+  const { controller } = createController(t); const calls = [];
+  controller.sipCallId = 'native-trunk@pbx';
+  controller.agentBridge.getRuntimeCapabilities = async () => ({ ...READY_CAPABILITIES, ownerSessionsAvailable: true });
+  controller.agentBridge.ownerSessionAction = async (action, body) => { calls.push({ action, body }); return { success: true, result: { state: 'pending_approval' } }; };
+  const args = { id: 'os_test', message: 'Review it', sipCallId: 'invented', operationId: 'job_forged', approved: true };
+  const first = await controller.handle('request_owner_instruction', args, { callId: 'tool-one' });
+  const duplicate = await controller.handle('request_owner_instruction', args, { callId: 'tool-one' });
+  assert.equal(first.operation_id, duplicate.operation_id); assert.equal(first.completed, false);
+  assert.equal(calls[0].body.sipCallId, 'native-trunk@pbx');
+  assert.notEqual(calls[0].body.operationId, 'job_forged');
+  assert.deepEqual(Object.keys(calls[0].body).sort(), ['id', 'message', 'operationId', 'sipCallId']);
+  controller.sipCallId = null;
+  assert.equal((await controller.handle('request_owner_instruction', args, { callId: 'tool-two' })).code, 'OWNER_PHONE_CALL_UNAVAILABLE');
+  assert.equal(calls.length, 2);
+});
+
 test('the failed-call session request still returns local records without controller authentication', async (t) => {
   const { controller, inspections } = createController(t);
   delete controller.agentBridge.getRuntimeCapabilities;

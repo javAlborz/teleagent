@@ -109,6 +109,9 @@ const {
   privilegedSubmissionBoundary,
 } = require('./voice-panic-coordinator');
 
+const { createOwnerControllerRuntime } = require('./owner-controller-runtime');
+const { installOwnerPhoneRoutes } = require('./owner-phone-api');
+
 const MAX_AGENT_STDOUT_BYTES = 4 * 1024 * 1024;
 const MAX_AGENT_STDERR_BYTES = 1024 * 1024;
 const MAX_AGENT_OUTPUT_BYTES = MAX_AGENT_STDOUT_BYTES + MAX_AGENT_STDERR_BYTES;
@@ -285,6 +288,12 @@ try {
   executorTaskStore.close();
   throw new Error('Approval capability verification is misconfigured; refusing to start.');
 }
+const ownerControllerRuntime = createOwnerControllerRuntime({ db: executorTaskStore.db, assertUnlocked() {
+  if (approvalVerifier || PRIVILEGED_ACTION_PROXY_ENABLED || privilegedActionProxy || PRIVILEGED_ACTION_API_TOKEN ||
+      voiceExecutionControl.getStatus().locked || executorTaskStore.getPanicStatus().locked) {
+    throw Object.assign(new Error('Owner phone authority is unavailable'), { code: 'OWNER_APPROVAL_LOCKED' });
+  }
+} });
 let executorTaskDispatcher = null;
 let serverReady = false;
 let shutdownRequested = false;
@@ -3548,6 +3557,7 @@ async function performVoicePanic({ reason, source }) {
     privilegedActionProxyEnabled: PRIVILEGED_ACTION_PROXY_ENABLED,
     workerSessionProxy,
     workerSessionProxyEnabled: workerSessionProxyConfig.enabled,
+    ownerCoordinator: ownerControllerRuntime?.coordinator,
   });
   if (result.workerCancellation?.configured) {
     workerSessionBoundaryStatus = Object.freeze({
@@ -3563,6 +3573,11 @@ async function performVoicePanic({ reason, source }) {
 
 async function performVoiceUnlock({ source }) {
   const panic = executorTaskStore.getPanicStatus();
+  if (ownerControllerRuntime && !ownerControllerRuntime.health().available) {
+    return { success: false, code: 'OWNER_SESSION_RECOVERY_REQUIRED',
+      error: 'Independent owner-session recovery must complete before phone execution unlocks.',
+      voiceExecution: voiceExecutionControl.getStatus(), executor: { wasLocked: false, panic }, workerSessions: null };
+  }
   if (!panic.quiesced) {
     return {
       success: false,
@@ -4173,6 +4188,7 @@ app.post('/voice-control/stop', async (req, res) => {
     executorTasks: panic.executorCancellation,
     privilegedActions: panic.privilegedCancellation,
     workerSessions: panic.workerCancellation,
+    ownerSessions: panic.ownerCancellation,
   });
 });
 
@@ -4244,6 +4260,7 @@ function handleEndSession(req, res) {
 
 app.post('/end-session', handleEndSession);
 app.post('/voice-control/session/end', handleEndSession);
+installOwnerPhoneRoutes(app, () => ownerControllerRuntime);
 
 function controllerHealthSnapshot() {
   let executor;
@@ -4308,11 +4325,12 @@ function controllerHealthSnapshot() {
       providers: ENABLED_AGENT_PROVIDERS,
       voiceExecution,
       phoneAuthority: {
-        mode: phoneAuthorityDisabled ? 'read_only' : 'legacy_authority_present',
+        mode: phoneAuthorityDisabled ? (ownerControllerRuntime ? 'owner_session_approval' : 'read_only') : 'legacy_authority_present',
         status: phoneAuthorityDisabled
-          ? 'disabled_pending_independent_pbx_attester'
+          ? (ownerControllerRuntime ? 'independent_pbx_owner_configured' : 'disabled_pending_independent_pbx_attester')
           : 'unsafe_for_voice_activation',
       },
+      ownerSessions: ownerControllerRuntime?.health() || { configured: false, available: false },
       approvalCapabilities: { verifierConfigured: Boolean(approvalVerifier) },
       authentication: {
         agentConfigured: Boolean(AGENT_API_TOKEN),
@@ -4502,6 +4520,7 @@ function closeExecutorTaskStore() {
 async function startServer() {
   try {
     synchronizePanicControls();
+    if (ownerControllerRuntime) await ownerControllerRuntime.start();
     await refreshWorkerSessionBoundaryHealth();
     if (workerSessionBoundaryStatus.ready) {
       await executorTaskDispatcher.start();
@@ -4559,6 +4578,7 @@ function shutdown(signal, { exitCode = 0 } = {}) {
   console.log(`\nReceived ${signal}, shutting down gracefully...`);
 
   const httpDrain = beginHttpShutdown();
+  const ownerDrain = ownerControllerRuntime?.close() || Promise.resolve();
   shutdownPromise = (async () => {
     let finalExitCode = exitCode;
     let activeRequestsQuiesced = false;
@@ -4605,6 +4625,8 @@ function shutdown(signal, { exitCode = 0 } = {}) {
       console.error(`Agent request shutdown failed: ${error.stack || error.message}`);
     }
 
+    const owner = await settleWithin(ownerDrain.then(() => ({ closed: true })), 1000);
+    if (!owner.settled || !owner.value?.closed) activeRequestsQuiesced = false;
     let http = await settleWithin(httpDrain, 2500);
     if (!http.settled) {
       httpServer?.closeAllConnections?.();

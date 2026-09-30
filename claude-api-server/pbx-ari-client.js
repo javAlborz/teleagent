@@ -8,7 +8,8 @@ const { sessionError } = require('./owner-session-endpoint');
 const APP = 'teleagent-approval';
 const ORIGIN = 'http://127.0.0.1:8088';
 const VARIABLES = new Set(['CHANNEL(endpoint)', 'CHANNEL(linkedid)',
-  'CHANNEL(pjsip,call-id)', 'PJSIP_ENDPOINT(1001,dtmf_mode)', 'PJSIP_ENDPOINT(1001,direct_media)']);
+  'CHANNEL(pjsip,call-id)', 'CHANNEL(rtp,secure,audio)',
+  'PJSIP_ENDPOINT(1001,dtmf_mode)', 'PJSIP_ENDPOINT(1001,direct_media)']);
 
 function identifier(value) {
   if (typeof value !== 'string' || !/^[A-Za-z0-9_.:-]{1,128}$/.test(value)) {

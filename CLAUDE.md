@@ -160,9 +160,10 @@ protocol, not a production activation path:
    persisted.
 
 Dormant `telereq1`, `teleattest1`, and `telecap2` fixture contracts plus the
-attester state machine make this three-key protocol testable. They are not
-imported by production. The source ARI adapter has no installed service wiring and does not
-close the PBX promotion blocker. See
+attester state machine make this three-key protocol testable. The source controller now imports a separately gated owner-session runtime;
+its root-owned enable file and three-key epoch remain absent from production.
+The source ARI adapter has no installed service wiring and does not close the
+PBX promotion blocker. Managed jobs and retired privileged paths remain unchanged. See
 `docs/PBX-APPROVAL-ATTESTATION-CONTRACT.md`.
 
 Any future call-start integration must durably invalidate an old approval arm

@@ -75,12 +75,12 @@ function assertCredentialFreeEnvironment(environment = process.env) {
   }
 }
 
-function inheritedSocketFd(environment = process.env, pid = process.pid) {
+function inheritedSocketFd(environment = process.env, pid = process.pid, expectedName = 'worker-session-broker') {
   if (String(environment.LISTEN_PID || '') !== String(pid) ||
       environment.LISTEN_FDS !== '1') {
     throw new Error('Worker session broker requires exactly one systemd-inherited socket.');
   }
-  if (environment.LISTEN_FDNAMES && environment.LISTEN_FDNAMES !== 'worker-session-broker') {
+  if (environment.LISTEN_FDNAMES && environment.LISTEN_FDNAMES !== expectedName) {
     throw new Error('Worker session broker inherited an unexpected socket name.');
   }
   return 3;

@@ -10,6 +10,8 @@ const { OwnerSessionBroker } = require('./owner-session-broker');
 const { createOwnerSessionServer } = require('./owner-session-http');
 const { sessionError } = require('./owner-session-endpoint');
 const { SOCKET_PATH } = require('./owner-session-proxy');
+const { loadOwnerAuthority, protectedRead } = require('./owner-authority-config');
+const { assertOwnerHostHeadroom, assertOwnerProcessPool } = require('./owner-session-admission');
 const {
   inheritedSocketFd, assertInheritedSocketBoundary, lookupSystemGroupGid,
   acquireWorkerSessionSingletonLock, assertCredentialFreeEnvironment,
@@ -28,22 +30,28 @@ async function startOwnerSessionBroker() {
   const catalog = OwnerSessionCatalog.load(CATALOG_PATH);
   if (process.getuid() !== catalog.catalog.ownerUid) throw sessionError('OWNER_BROKER_UID_INVALID');
   assertDirectory(STATE_ROOT, process.getuid(), 0o700);
-  assertDirectory(path.dirname(SOCKET_PATH), 0, 0o750);
-  const fd = inheritedSocketFd();
+  assertDirectory(path.dirname(SOCKET_PATH), 0, 0o711);
+  const fd = inheritedSocketFd(process.env, process.pid, 'owner-session-broker');
   assertInheritedSocketBoundary(fd, SOCKET_PATH, 0, lookupSystemGroupGid(), { allowTestPath: true });
   const lock = acquireWorkerSessionSingletonLock(path.join(STATE_ROOT, 'lifetime.sqlite'), { allowTestPath: true });
   let store; let runtime;
   try {
     store = new OwnerSessionDeliveryStore({ dbPath: path.join(STATE_ROOT, 'deliveries.sqlite') });
-    // Deliberately read-only until the independently attested controller
-    // authority and host key epochs are included in a reviewed release.
-    const broker = new OwnerSessionBroker({ catalog, store, authority: null });
+    const enable = '/etc/teleagent/owner-session/ENABLE';
+    const authority = loadOwnerAuthority('broker');
+    if (protectedRead(enable) !== `${authority.epoch}\n`) throw sessionError('OWNER_AUTHORITY_ENABLE_INVALID');
+    const broker = new OwnerSessionBroker({ catalog, store, authority, assertAdmission(entry) {
+      authority.assertCurrent();
+      if (protectedRead(enable) !== `${authority.epoch}\n`) throw sessionError('OWNER_AUTHORITY_ENABLE_INVALID');
+      assertOwnerHostHeadroom(); assertOwnerProcessPool(entry.endpoint.pid);
+    } });
     runtime = createOwnerSessionServer(broker);
     await new Promise((resolve, reject) => {
       runtime.server.once('error', reject);
       runtime.server.listen({ fd, exclusive: false }, resolve);
     });
     return { async shutdown() {
+      broker.close();
       await runtime.close();
       // Every client RPC is bounded; leave intents unknown if the host's stop
       // deadline kills this process. Never close SQLite under an active request.

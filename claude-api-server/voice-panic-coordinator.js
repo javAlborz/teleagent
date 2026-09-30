@@ -167,6 +167,7 @@ async function performCoordinatedVoicePanic({
   privilegedActionProxyEnabled,
   workerSessionProxy,
   workerSessionProxyEnabled,
+  ownerCoordinator = null,
 } = {}) {
   // Persist the controller lock before beginning either remote cancellation.
   // Any concurrent privileged POST that has not yet crossed this point is
@@ -195,6 +196,12 @@ async function performCoordinatedVoicePanic({
     reason,
     source,
   });
+  const ownerPanicPromise = ownerCoordinator
+    ? Promise.resolve().then(() => ownerCoordinator.panic()).then((result) => ({
+      configured: true, accepted: result.locked === true, persisted: result.locked === true,
+      quiesced: result.quiesced === true,
+    }), () => ({ configured: true, accepted: false, persisted: false, quiesced: false }))
+    : Promise.resolve({ configured: false, accepted: true, persisted: true, quiesced: true });
   let activeCancellation;
   try {
     activeCancellation = {
@@ -220,6 +227,7 @@ async function performCoordinatedVoicePanic({
   }
   const privilegedCancellation = await privilegedPanicPromise;
   const workerCancellation = await workerPanicPromise;
+  const ownerCancellation = await ownerPanicPromise;
   const accepted = Boolean(
     lock.locked &&
     lock.persistent &&
@@ -229,13 +237,13 @@ async function performCoordinatedVoicePanic({
     privilegedCancellation.accepted &&
     privilegedCancellation.persisted &&
     workerCancellation.accepted &&
-    workerCancellation.persisted
+    workerCancellation.persisted && ownerCancellation.accepted && ownerCancellation.persisted
   );
   const quiesced = Boolean(
     accepted &&
     executorCancellation.quiesced === true &&
     privilegedCancellation.quiesced === true &&
-    workerCancellation.quiesced === true
+    workerCancellation.quiesced === true && ownerCancellation.quiesced === true
   );
   return {
     // Acceptance and quiescence are intentionally distinct. No caller may
@@ -249,6 +257,7 @@ async function performCoordinatedVoicePanic({
     executorCancellation,
     privilegedCancellation,
     workerCancellation,
+    ownerCancellation,
   };
 }
 

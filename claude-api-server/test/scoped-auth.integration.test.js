@@ -182,6 +182,15 @@ const SCOPES = Object.freeze([
     unauthorizedCode: 'VOICE_CONTROL_UNAUTHORIZED',
   },
   {
+    name: 'owner session phone route',
+    token: TOKENS.voice,
+    method: 'POST',
+    path: '/voice-control/owner/request',
+    body: { id: 'os_fixture', operationId: 'job_fixture', message: 'test', sipCallId: 'fixture@pbx' },
+    missingCode: 'VOICE_CONTROL_AUTH_NOT_CONFIGURED',
+    unauthorizedCode: 'VOICE_CONTROL_UNAUTHORIZED',
+  },
+  {
     name: 'voice session lifecycle',
     token: TOKENS.voice,
     method: 'POST',

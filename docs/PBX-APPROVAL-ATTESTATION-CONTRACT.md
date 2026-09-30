@@ -3,10 +3,12 @@
 Status: source-only protocol, state machine and ARI adapter. Nothing in this
 document or the modules below authorizes production phone mutation.
 
-Production voice remains read-only. The dormant implementation is deliberately
-not imported by `voice-app`, the controller, the executor, the privileged
-broker, or a service entrypoint. It has no unit, environment setting, secret,
-socket, SIP account, installed Asterisk adapter, route, or enable sentinel.
+The live V49 deployment remains read-only. Source now includes a gated controller
+runtime, typed voice routes/tools, a Unix-only attester API and owner-broker key
+epoch checks. None has been installed or activated. The root-owned controller
+enable file must match the exact protected authority epoch; without it the
+controller retains V49 behavior and advertises no owner-session tools. Source
+imports and passing synthetic tests are not production approval.
 
 ## Authority chain
 
@@ -134,14 +136,16 @@ A digit begun before completion, even if released afterward, is refused. The
 collector rejects wrong-leg digits, substituted/short/failed playback, transfers,
 replaced channels, expired arms and failed bridge restoration.
 
-`pbx-prompt-renderer.js` supplies bounded OpenAI speech rendering through the
-existing fixed TLS relay, with independently admitted credentials and no model
-selected endpoint. It writes hashed 24 kHz signed-linear audio, bounds retained
-files, deletes audio after collection, and only collects correctly hashed orphans
-after fifteen minutes. Its tests use synthetic PCM; no hosted or local test
-requests real speech. A playback event/hash proves which audio file was played,
-not that TTS pronounced every word correctly; attended acceptance remains
-required.
+`pbx-local-speech.js` supplies deterministic local speech using a fixed reviewed
+eSpeak NG executable and argument list. Text goes only to stdin; no model,
+network credential, SSML mode, shell, or user-selected path participates. The
+bounded streaming WAV is converted to 24 kHz PCM without a codec subprocess.
+`pbx-prompt-renderer.js` hashes the audio, bounds retained files, deletes it after
+collection, and only collects correctly hashed orphans after fifteen minutes.
+The files are explicitly mode 0640 even under a restrictive service umask so the
+PBX's dedicated audio group can read them. Synthetic tests establish bytes and
+lifecycle; attended acceptance still establishes intelligibility and handset
+playback. The former OpenAI speech client was removed before activation.
 
 ARI's `ChannelDtmfReceived` identifies a channel, not the DTMF transport. Setting
 `dtmf_mode=rfc4733` alone is insufficient: the Asterisk PJSIP INFO module also
@@ -154,7 +158,7 @@ and real negative SIP INFO/RTP tests remain activation blockers.
 Primary references: [ARI DTMF](https://docs.asterisk.org/Configuration/Interfaces/Asterisk-REST-Interface-ARI/Introduction-to-ARI-and-Channels/ARI-and-Channels-Handling-DTMF/),
 [ARI playback](https://docs.asterisk.org/Configuration/Interfaces/Asterisk-REST-Interface-ARI/Introduction-to-ARI-and-Channels/ARI-and-Channels-Simple-Media-Manipulation/),
 [Asterisk INFO implementation](https://github.com/asterisk/asterisk/blob/master/res/res_pjsip_dtmf_info.c),
-and [OpenAI speech](https://developers.openai.com/api/docs/guides/text-to-speech).
+and [PJSIP encrypted media](https://docs.asterisk.org/Deployment/Secure-Calling/Secure-Calling-Tutorial/).
 The installed Hermes PBX was observed as Asterisk 20.6.0 with ARI inactive; no
 configuration or call routing was changed during source validation.
 
@@ -221,3 +225,43 @@ open:
 
 Focused Hermes tests exercise only generated keys, in-memory/temporary SQLite,
 and fake adapter observations. They make no call and modify no host state.
+
+## Controller and phone integration (source only)
+
+The phone supplies its received trunk SIP Call-ID, never the FreeSWITCH media
+UUID or a model-selected call ID. Four separate owner tools list enrollment,
+inspect one exact native session, request independently attested instruction
+delivery, and read its durable status. Legacy managed tasks remain read-only.
+The voice bearer cannot supply evidence, capabilities, native endpoint paths or
+a native session identifier. Native history is bounded and redacted.
+
+Each approval within one live call receives a fresh one-use PBX handle, because
+the attester replay store uniquely consumes a call handle. Handles expire after
+120 seconds, cannot revive an ended call, and do not extend a conversation limit.
+The private API has only call lookup, attest and panic operations; it accepts no
+TCP requests, raw ARI commands or invented events. Panic is durable.
+
+The controller and broker recheck a root-owned three-key epoch before admitting
+work. The controller's private keys and PBX key live in separate directories;
+voice receives neither. All new transitive source imports are in the immutable
+release closure, which still needs independent infrastructure co-approval.
+
+An owner-session panic locks future phone delivery but does not terminate the
+personal agent. Global stop must report PARTIAL until every configured plane
+proves quiescence. Owner recovery remains an explicit operator procedure; the
+legacy unlock route cannot silently unlock this plane. Native acceptance is
+not completion; ambiguous delivery uses status-only reconciliation, never resend.
+
+Remaining promotion gates include host units and disabled installation, actual
+PBX/local-speech boundary attestation, RFC4733 transport and RTP-source isolation,
+SIP Call-ID correlation, guarded route migration, recovery and attended playback
+plus fresh-pound acceptance. The installed Asterisk 20.6 does not expose the
+newer per-endpoint RTP port-range option. Do not infer packet-source isolation
+from a channel-scoped ARI digit or from dtmf_mode alone.
+
+The approval adapter also requires `CHANNEL(rtp,secure,audio)=1` before playback
+and before accepting the observed digit. This prevents plain or downgraded RTP
+from authorizing work even if an event names the handset channel. The boundary
+must prove authenticated SRTP configuration and confidential handset signaling
+(the existing private Tailnet path), plus disabled SIP INFO and in-band DTMF.
+An unencrypted conversation can remain useful, but cannot approve instructions.

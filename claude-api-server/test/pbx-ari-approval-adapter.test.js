@@ -20,11 +20,12 @@ function fixture() {
     dialplan: { app_name: 'Stasis' } };
   const bridge = { id: 'bridge', bridge_type: 'mixing', channels: ['handset', 'trunk'] };
   const state = { operations: [], released: 0, boundaryCalls: 0, wrongEndpoint: false, mode: 'rfc4733',
-    driver: null, restoreFails: false, boundaryFails: false, detached: false };
+    driver: null, restoreFails: false, boundaryFails: false, detached: false, secure: '1' };
   ari.channel = async (id) => structuredClone(id === 'handset' ? handset : trunk);
   ari.bridge = async () => structuredClone(bridge);
   ari.variable = async (_id, variable) => ({ value: {
     'CHANNEL(pjsip,call-id)': 'fixture-call@pbx',
+    'CHANNEL(rtp,secure,audio)': state.secure,
     'CHANNEL(endpoint)': state.wrongEndpoint ? 'claude-phone' : '1001', 'CHANNEL(linkedid)': 'linked',
     'PJSIP_ENDPOINT(1001,dtmf_mode)': state.mode, 'PJSIP_ENDPOINT(1001,direct_media)': 'false',
   }[variable] });
@@ -92,6 +93,21 @@ test('unknown or stale call handles never render or play an approval', async () 
   f.ari.emit('disconnect');
   await assert.rejects(f.adapter.collectApproval(f.request), { code: 'PBX_ARI_CALL_NOT_CURRENT' });
   assert.equal(f.state.operations.length, 0);
+});
+
+test('unencrypted or downgraded handset media cannot approve even with exact channel events', async () => {
+  const f = fixture(); await f.bind(); f.state.secure = '0';
+  await assert.rejects(f.adapter.collectApproval(f.request), { code: 'PBX_ARI_HANDSET_MEDIA_UNAUTHENTICATED' });
+  assert.equal(f.state.operations.length, 0);
+  const second = fixture(); await second.bind();
+  second.state.driver = ({ event, playback }) => {
+    event('PlaybackStarted', { playback: { ...playback, state: 'playing' } }, NOW + 1100);
+    event('PlaybackFinished', { playback: { ...playback, state: 'done' } }, NOW + 2100);
+    second.state.secure = '0';
+    event('ChannelDtmfReceived', { channel: second.handset, digit: '#', duration_ms: 100 }, NOW + 2400);
+  };
+  await assert.rejects(second.adapter.collectApproval(second.request), { code: 'PBX_ARI_HANDSET_MEDIA_UNAUTHENTICATED' });
+  assert.equal(second.state.released, 1);
 });
 
 test('prompt substitution and missing independent PBX boundary fail before media changes', async () => {

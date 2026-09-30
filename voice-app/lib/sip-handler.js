@@ -229,6 +229,7 @@ async function handleInvite(req, res, options) {
         stateStore: options.voiceStateStore,
         jobBroker: options.agentJobBroker,
         callerId,
+        sipCallId: req.get('Call-ID'),
         callbackTarget: callerId,
         resume: realtimeResume,
         startupAnnouncement,
