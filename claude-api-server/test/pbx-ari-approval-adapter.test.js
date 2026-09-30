@@ -244,7 +244,7 @@ test('PBX handle lookup uses exact native trunk SIP Call-ID', async () => {
   assert.throws(() => f.calls.handleForSipCall('fixture-call@pbx'), { code: 'PBX_ARI_CALL_NOT_CURRENT' });
 });
 
-test('no production service imports the source ARI approval path', () => {
+test('controller and session brokers cannot directly import PBX media control', () => {
   const fs = require('node:fs'); const path = require('node:path');
   for (const filename of ['server.js', 'worker-session-broker-service.js', 'owner-session-broker-service.js']) {
     assert.doesNotMatch(fs.readFileSync(path.join(__dirname, '..', filename), 'utf8'), /require\([^)]*pbx-(?:ari|prompt)/);

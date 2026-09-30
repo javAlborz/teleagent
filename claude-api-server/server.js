@@ -3573,7 +3573,8 @@ async function performVoicePanic({ reason, source }) {
 
 async function performVoiceUnlock({ source }) {
   const panic = executorTaskStore.getPanicStatus();
-  if (ownerControllerRuntime && !ownerControllerRuntime.health().available) {
+  if (ownerControllerRuntime) await ownerControllerRuntime.refreshHealth();
+  if (ownerControllerRuntime && !ownerControllerRuntime.recoveryReady()) {
     return { success: false, code: 'OWNER_SESSION_RECOVERY_REQUIRED',
       error: 'Independent owner-session recovery must complete before phone execution unlocks.',
       voiceExecution: voiceExecutionControl.getStatus(), executor: { wasLocked: false, panic }, workerSessions: null };
@@ -4530,6 +4531,7 @@ async function startServer() {
     if (shutdownRequested) return;
     serverReady = true;
     workerSessionHealthTimer = setInterval(() => {
+      if (ownerControllerRuntime) void ownerControllerRuntime.refreshHealth();
       void refreshWorkerSessionBoundaryHealth().then(async (status) => {
         if (status.ready && !executorTaskDispatcher.status().running && !shutdownRequested) {
           await executorTaskDispatcher.start();

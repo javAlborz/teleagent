@@ -1,0 +1,16 @@
+[Unit]
+Description=Teleagent private pbx-attester listener
+ConditionPathExists=/etc/teleagent/pbx-attester/ENABLE
+
+[Socket]
+ListenStream=/run/teleagent-pbx-attester/attester.sock
+SocketUser=root
+SocketGroup=teleagent-control
+SocketMode=0660
+DirectoryMode=0711
+Backlog=8
+RemoveOnStop=yes
+FileDescriptorName=pbx-attester
+Service=teleagent-pbx-attester.service
+
+# No [Install]; root coordinates the disabled installation and canary.

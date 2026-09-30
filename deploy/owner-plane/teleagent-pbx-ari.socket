@@ -1,0 +1,14 @@
+[Unit]
+Description=Teleagent attester-only ARI transport
+ConditionPathExists=/etc/teleagent/pbx-attester/ENABLE
+
+[Socket]
+ListenStream=/run/teleagent-pbx-ari/ari.sock
+SocketUser=root
+SocketGroup=teleagent-pbx-attester
+SocketMode=0660
+DirectoryMode=0750
+Backlog=8
+RemoveOnStop=yes
+FileDescriptorName=pbx-ari
+Service=teleagent-pbx-ari.service

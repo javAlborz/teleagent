@@ -75,3 +75,15 @@ test('ended calls and expired handles cannot be revived by a signed arm', async 
   f.calls.calls.clear();
   await assert.rejects(f.api.resolveCall('call@pbx'), { code: 'PBX_ARI_CALL_NOT_CURRENT' });
 });
+
+test('PBX readiness requires live transport and current independent boundary, and observes panic', async (t) => {
+  const f = fixture(t); let live = true;
+  const api = createPbxAttesterApi({ ...f.options, epoch: 'a'.repeat(64), assertReady() {
+    if (!live) throw new Error('disconnected');
+  } });
+  assert.equal((await api.handle('/v1/health', {})).ready, true);
+  assert.equal(f.state.attestations, 0);
+  live = false; await assert.rejects(api.health());
+  live = true; f.options.controlStore.lock();
+  await assert.rejects(api.health(), { code: 'PBX_ATTESTER_LOCKED' });
+});

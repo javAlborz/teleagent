@@ -7,6 +7,7 @@ const WebSocket = require('ws');
 const { sessionError } = require('./owner-session-endpoint');
 const APP = 'teleagent-approval';
 const ORIGIN = 'http://127.0.0.1:8088';
+const SOCKET_PATH = '/run/teleagent-pbx-ari/ari.sock';
 const VARIABLES = new Set(['CHANNEL(endpoint)', 'CHANNEL(linkedid)',
   'CHANNEL(pjsip,call-id)', 'CHANNEL(rtp,secure,audio)',
   'PJSIP_ENDPOINT(1001,dtmf_mode)', 'PJSIP_ENDPOINT(1001,direct_media)']);
@@ -18,8 +19,9 @@ function identifier(value) {
   return value;
 }
 
-// Runs inside the isolated PBX network namespace. ARI credentials never enter
-// voice or controller. No endpoint, variable, media URI or RPC passthrough.
+// A private systemd socket proxy reaches only PBX-namespace loopback:8088.
+// This process needs AF_UNIX only. Credentials never enter voice/controller.
+// No endpoint, variable, media URI or RPC passthrough.
 class PbxAriClient extends EventEmitter {
   constructor({ username, password, timeoutMs = 5000 }) {
     super();
@@ -31,7 +33,7 @@ class PbxAriClient extends EventEmitter {
   }
   async connect() {
     if (this.socket) throw sessionError('PBX_ARI_ALREADY_CONNECTED');
-    const socket = this.socket = new WebSocket(`ws://127.0.0.1:8088/ari/events?app=${APP}`, {
+    const socket = this.socket = new WebSocket(`ws+unix://${SOCKET_PATH}:/ari/events?app=${APP}`, {
       headers: { authorization: this.auth }, handshakeTimeout: this.timeoutMs,
       maxPayload: 65536, followRedirects: false, perMessageDeflate: false,
     });
@@ -70,7 +72,8 @@ class PbxAriClient extends EventEmitter {
     const url = new URL(`/ari${route}`, ORIGIN);
     for (const [key, value] of Object.entries(query)) url.searchParams.set(key, value);
     return new Promise((resolve, reject) => {
-      const req = http.request(url, { method, agent: false, headers: { authorization: this.auth } });
+      const req = http.request({ socketPath: SOCKET_PATH, path: url.pathname + url.search,
+        method, agent: false, headers: { authorization: this.auth } });
       const timer = setTimeout(() => req.destroy(), this.timeoutMs);
       const failed = () => { clearTimeout(timer); reject(sessionError('PBX_ARI_REQUEST_FAILED')); };
       req.once('error', failed);

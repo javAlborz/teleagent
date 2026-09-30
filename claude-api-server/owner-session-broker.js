@@ -15,8 +15,9 @@ function nativeClient(entry) {
 // No background polling and no unbounded queue. A single broker instance owns
 // one admission slot. Its service must also hold an exclusive lifetime lock.
 class OwnerSessionBroker {
-  constructor({ catalog, store, authority, clientFactory = nativeClient, assertAdmission = null }) {
+  constructor({ catalog, store, authority, clientFactory = nativeClient, assertAdmission = null, assertBoundary = null }) {
     this.catalog = catalog; this.store = store; this.authority = authority;
+    this.assertBoundary = assertBoundary;
     this.clientFactory = clientFactory; this.assertAdmission = assertAdmission; this.busy = false; this.closing = false;
   }
   async serial(work) {
@@ -35,6 +36,13 @@ class OwnerSessionBroker {
       const assertEnrolled = () => this.catalog.assertEntry(entry, client, session);
       return await work({ entry, client, session, assertEnrolled });
     } finally { client.close(); }
+  }
+  health() {
+    if (this.closing || !this.authority || typeof this.assertBoundary !== 'function' || this.store.isLocked()) {
+      throw sessionError('OWNER_BROKER_UNAVAILABLE');
+    }
+    this.assertBoundary(); this.catalog.assertCurrent();
+    return { ready: true, epoch: this.authority.epoch, protocol: 'independent-pbx-owner-v1' };
   }
   list() {
     // Inventory is enrollment, not a claim that every session is still running.
