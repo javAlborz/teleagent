@@ -50,6 +50,7 @@ test('streamed CLI integrity checks include every chunk and reject a changed fin
   const filename = path.join(directory, 'artifact');
   const contents = crypto.randomBytes(2 * 1024 * 1024 + 37);
   fs.writeFileSync(filename, contents, { mode: 0o755 });
+  fs.chmodSync(filename, 0o755); // Release sandbox creates files under umask 077.
   const artifact = {
     path: filename, size: contents.length,
     sha256: crypto.createHash('sha256').update(contents).digest('hex'),
