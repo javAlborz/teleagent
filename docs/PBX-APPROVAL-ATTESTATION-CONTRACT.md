@@ -1,12 +1,12 @@
 # Dormant PBX approval attestation contract
 
-Status: fixture-only protocol and state-machine substrate. Nothing in this
+Status: source-only protocol, state machine and ARI adapter. Nothing in this
 document or the modules below authorizes production phone mutation.
 
 Production voice remains read-only. The dormant implementation is deliberately
 not imported by `voice-app`, the controller, the executor, the privileged
 broker, or a service entrypoint. It has no unit, environment setting, secret,
-socket, SIP account, Asterisk adapter, route, or enable sentinel.
+socket, SIP account, installed Asterisk adapter, route, or enable sentinel.
 
 ## Authority chain
 
@@ -118,7 +118,45 @@ PBX work starts. The connection owner remains responsible for protected storage,
 WAL mode, and `synchronous=FULL` before real use. Older exact schemas fail closed;
 this change deliberately supplies no live-data migration.
 
-The adapter interface is intentionally only a contract:
+The adapter interface is now implemented by a source-only ARI client, call
+catalog/router and approval collector in `claude-api-server/pbx-ari-*.js`.
+They are not imported by the production controller or voice service. There is
+still no reviewed live namespace, ARI configuration, signing-key installation,
+attester service or production controller integration.
+
+The ARI path reserves one owner call, validates the authenticated PJSIP endpoint
+and exact handset/trunk/bridge identities, and binds the trunk SIP Call-ID to an
+opaque PBX handle. Only the fixed 7/77 conductor trunks can be originated. A
+connection loss never redials or adopts an old call. During approval, the handset
+is detached from voice's bridge, hears an independently rendered canonical
+prompt, and can authorize only with a new pound press after complete playback.
+A digit begun before completion, even if released afterward, is refused. The
+collector rejects wrong-leg digits, substituted/short/failed playback, transfers,
+replaced channels, expired arms and failed bridge restoration.
+
+`pbx-prompt-renderer.js` supplies bounded OpenAI speech rendering through the
+existing fixed TLS relay, with independently admitted credentials and no model
+selected endpoint. It writes hashed 24 kHz signed-linear audio, bounds retained
+files, deletes audio after collection, and only collects correctly hashed orphans
+after fifteen minutes. Its tests use synthetic PCM; no hosted or local test
+requests real speech. A playback event/hash proves which audio file was played,
+not that TTS pronounced every word correctly; attended acceptance remains
+required.
+
+ARI's `ChannelDtmfReceived` identifies a channel, not the DTMF transport. Setting
+`dtmf_mode=rfc4733` alone is insufficient: the Asterisk PJSIP INFO module also
+queues DTMF frames. The independent host boundary must disable that module,
+exclude in-band/alternate control sources, and prove those settings before any
+arm. The adapter requires a host boundary checker; it cannot manufacture RFC4733
+proof from an event. Root-owned PBX configuration, namespace/credential controls,
+and real negative SIP INFO/RTP tests remain activation blockers.
+
+Primary references: [ARI DTMF](https://docs.asterisk.org/Configuration/Interfaces/Asterisk-REST-Interface-ARI/Introduction-to-ARI-and-Channels/ARI-and-Channels-Handling-DTMF/),
+[ARI playback](https://docs.asterisk.org/Configuration/Interfaces/Asterisk-REST-Interface-ARI/Introduction-to-ARI-and-Channels/ARI-and-Channels-Simple-Media-Manipulation/),
+[Asterisk INFO implementation](https://github.com/asterisk/asterisk/blob/master/res/res_pjsip_dtmf_info.c),
+and [OpenAI speech](https://developers.openai.com/api/docs/guides/text-to-speech).
+The installed Hermes PBX was observed as Asterisk 20.6.0 with ARI inactive; no
+configuration or call routing was changed during source validation.
 
 The dormant entrypoint `attest(replacementArmToken, previousArmToken)` verifies
 both raw controller artifacts. Replacement must preserve the approval/job,
@@ -167,9 +205,9 @@ open:
 
 1. Place the PBX attester in its own reviewed Unix/network/credential boundary
    and provision three independently managed key epochs.
-2. Implement and review the real Asterisk adapter, including authenticated AMI
-   or ARI access, exact PJSIP handset-channel attribution, reconnect behavior,
-   event ordering, and durable crash recovery.
+2. Install and accept the source ARI adapter with authenticated private access,
+   independently enforced RFC4733-only attribution, real event ordering, and
+   durable crash recovery. Synthetic event tests do not close this gate.
 3. Integrate arm creation and evidence consumption into the controller without
    making voice a trusted intermediary.
 4. Integrate `telecap2` consumption at the durable executor and privileged
