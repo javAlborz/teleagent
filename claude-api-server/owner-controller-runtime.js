@@ -1,6 +1,7 @@
 'use strict';
 
 const fs = require('node:fs');
+const { performance } = require('node:perf_hooks');
 const { protectedRead, loadOwnerAuthority } = require('./owner-authority-config');
 const { createOwnerSessionProxy } = require('./owner-session-proxy');
 const { createPbxAttesterProxy } = require('./pbx-attester-http');
