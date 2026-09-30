@@ -119,3 +119,26 @@ transport too. Exact executable enrollment and regression tests reduce accidenta
 version drift; they do not turn it into a supported production API. Native
 acceptance must be repeated after changing the enrolled daemon executable.
 Unsupported protocol shapes fail closed.
+
+## Durable controller coordination
+
+`owner-approval-coordinator.js` is the source controller coordinator, still not
+imported by the production HTTP service. It snapshots the broker's exact plan,
+resolves the native trunk SIP Call-ID through the independent attester, and
+constructs the approval prompt itself. One pending approval is admitted at a
+time. Only verified evidence from the three-key protocol can reach the broker's
+signed delivery endpoint.
+
+The controller commits a dispatch intent before issuing its one-time capability.
+It never persists signed artifacts. It stores the exact instruction in protected
+controller state, just as a durable job needs its request; that text must not be
+included in diagnostic logs. Cancellation or panic while awaiting confirmation
+prevents later evidence from starting delivery. A crash invalidates unfinished
+approvals, while a dispatch crash queries the exact operation ID and plan hash.
+An ambiguous response remains unknown until that query finds a native broker
+receipt. Neither recovery nor repeated phone tool calls resubmit the instruction.
+Transport acceptance is still not task completion.
+
+The source coordinator requires independent admission checks. Unit installation,
+protected keys/state, authenticated routes, handset SIP Call-ID propagation,
+native completion evidence and production panic integration remain outstanding.
