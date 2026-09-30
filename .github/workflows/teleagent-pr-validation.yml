@@ -107,6 +107,13 @@ jobs:
           ulimit -c 0
           python3 -m unittest discover -s scripts/release -p 'test_*.py'
 
+      - name: Verify controller production dependencies
+        shell: /usr/bin/bash --noprofile --norc -euo pipefail {0}
+        run: |
+          npm --prefix claude-api-server ci --omit=dev
+          node -e 'const Database = require("./claude-api-server/node_modules/better-sqlite3"); new Database(":memory:").close(); require("./claude-api-server/node_modules/ws"); require("./claude-api-server/owner-session-delivery")'
+          npm --prefix claude-api-server audit --omit=dev
+
       - name: Verify a clean generated state
         shell: /usr/bin/bash --noprofile --norc -euo pipefail {0}
         run: |
