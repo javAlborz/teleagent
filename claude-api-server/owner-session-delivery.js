@@ -148,7 +148,7 @@ class OwnerSessionDeliveryStore {
   close() { this.db.close(); }
 }
 
-async function deliverOwnerSession({ client, store, request, capability, authority }) {
+async function deliverOwnerSession({ client, store, request, capability, authority, beforeAdmission = () => {} }) {
   const plan = requestPlan(request);
   const previous = store.get(plan.operationId, hash(plan));
   if (previous) return previous;
@@ -166,6 +166,10 @@ async function deliverOwnerSession({ client, store, request, capability, authori
     operation: 'owner-session-message', requestHash: hash(plan.message), planHash: hash(plan),
     target: `owner-${plan.provider}:${plan.sessionId}`, provider: plan.provider,
     profile: `owner-${plan.provider}-session` };
+  const checked = beforeAdmission();
+  if (checked && typeof checked.then === 'function') {
+    throw sessionError('OWNER_SESSION_ASYNC_ADMISSION_GUARD');
+  }
   const admitted = store.admit(plan, capability, expected, authority.publicKeys);
   if (!admitted.admitted) return admitted.previous;
   // No await between admission and handing the exact immutable input to the
