@@ -234,3 +234,11 @@ test('no production service imports the source ARI approval path', () => {
     assert.doesNotMatch(fs.readFileSync(path.join(__dirname, '..', filename), 'utf8'), /require\([^)]*pbx-(?:ari|prompt)/);
   }
 });
+
+test('star during rendering cancels the pending approval before any media switch', async () => {
+  const f = fixture(); await f.bind();
+  const render = f.renderer.render;
+  f.renderer.render = async (prompt) => { f.adapter.cancel(); return render(prompt); };
+  await assert.rejects(f.adapter.collectApproval(f.request), { code: 'PBX_ARI_APPROVAL_CANCELLED' });
+  assert.equal(f.state.released, 1); assert.deepEqual(f.state.operations, []);
+});

@@ -104,6 +104,11 @@ class PbxAriApprovalAdapter {
     if (typeof assertPbxBoundary !== 'function') throw sessionError('PBX_ARI_BOUNDARY_REQUIRED');
     this.ari = ari; this.calls = calls; this.renderer = renderer;
     this.assertPbxBoundary = assertPbxBoundary; this.now = now; this.busy = false;
+    this.generation = 0; this.rejectActive = null;
+  }
+  cancel() {
+    this.generation++;
+    this.rejectActive?.('PBX_ARI_APPROVAL_CANCELLED');
   }
   async collectApproval(request) {
     if (this.busy) throw sessionError('PBX_ARI_APPROVAL_BUSY');
@@ -111,7 +116,9 @@ class PbxAriApprovalAdapter {
     try { return await this._collect(request); } finally { this.busy = false; }
   }
   async _collect(request) {
+    const generation = this.generation;
     const window = () => {
+      if (this.generation !== generation) throw sessionError('PBX_ARI_APPROVAL_CANCELLED');
       if (!Number.isSafeInteger(request.notBeforeMs) || !Number.isSafeInteger(request.expiresAtMs) ||
           request.expiresAtMs - request.notBeforeMs > 300000 || this.now() < request.notBeforeMs ||
           this.now() >= request.expiresAtMs) throw sessionError('PBX_ARI_APPROVAL_EXPIRED');
@@ -185,6 +192,7 @@ class PbxAriApprovalAdapter {
         }
       } catch (error) { fail(error.code || 'PBX_ARI_EVENT_INVALID'); }
     };
+    this.rejectActive = fail;
     this.ari.on('event', onEvent); this.ari.on('disconnect', onDisconnect);
     const timer = setTimeout(() => fail('PBX_ARI_APPROVAL_EXPIRED'), Math.max(1, request.expiresAtMs - this.now()));
     try {
@@ -199,6 +207,7 @@ class PbxAriApprovalAdapter {
       await this.calls.assertCurrent(request.pbxCallHandle, { detached: true }); window();
       return observation;
     } finally {
+      this.rejectActive = null;
       clearTimeout(timer); this.ari.removeListener('event', onEvent); this.ari.removeListener('disconnect', onDisconnect);
       // Uncertain detach/play is never repeated. Failure to restore the exact
       // still-live bridge invalidates even an otherwise positive observation.
@@ -212,6 +221,7 @@ class PbxAriApprovalAdapter {
           await this.calls.assertCurrent(request.pbxCallHandle);
         }
       } finally { await this.renderer.release(artifact); }
+      if (this.generation !== generation) throw sessionError('PBX_ARI_APPROVAL_CANCELLED');
     }
   }
 }

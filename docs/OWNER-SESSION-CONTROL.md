@@ -142,3 +142,16 @@ Transport acceptance is still not task completion.
 The source coordinator requires independent admission checks. Unit installation,
 protected keys/state, authenticated routes, handset SIP Call-ID propagation,
 native completion evidence and production panic integration remain outstanding.
+
+The source host-admission guard checks whole-host memory/CPU pressure, load,
+root/state disk reserve, and headroom in Hermes's existing aggregate owner pool.
+It verifies that pool's 11 GiB memory, five-core CPU and 5,000-task ceilings;
+it does not add a daily Codex allowance. A target process must belong to that
+pool. A missing, asynchronous or refusing broker admission guard prevents signed
+delivery before the durable effect boundary. Runtime service wiring must pass
+these checks and verifier-epoch checks; the source read-only entrypoint still
+cannot enable delivery.
+
+An independent star press during prompt generation now cancels that approval
+before playback. Outside approval, the ARI router forwards only the owner's star
+to the conductor trunk for existing cancellation behavior.

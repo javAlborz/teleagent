@@ -16,7 +16,7 @@ function fixture(t) {
     ari[method] = async (...args) => { operations.push({ method, args }); };
   }
   const calls = { calls: new Map(), async bind(input) { operations.push({ method: 'bind', args: [input] }); return 'handle'; } };
-  const approvalAdapter = { busy: false };
+  const approvalAdapter = { busy: false, cancel() { operations.push({ method: 'cancelApproval', args: [] }); } };
   const router = new PbxAriCallRouter({ ari, calls, approvalAdapter, assertPbxBoundary: async () => {} });
   t.after(() => router.close().catch(() => {}));
   const event = (type, channel, args = []) => ({ type, application: APP, channel: { id: channel }, args });
@@ -64,6 +64,7 @@ test('star forwards only from the handset outside approval, never from the trunk
   await f.router.event({ ...f.event('ChannelDtmfReceived', 'owner'), digit: '#' }, 'epoch');
   await f.router.event({ ...f.event('ChannelDtmfReceived', 'owner'), digit: '*' }, 'epoch');
   assert.deepEqual(f.operations.filter((entry) => entry.method === 'forwardStar').map((entry) => entry.args), [[call.trunkId]]);
+  assert.equal(f.operations.filter((entry) => entry.method === 'cancelApproval').length, 1);
 });
 
 test('lost originate or disconnect cannot redial and uncertain cleanup stays locked', async (t) => {
