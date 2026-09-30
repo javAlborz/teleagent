@@ -161,7 +161,7 @@ protocol, not a production activation path:
 
 Dormant `telereq1`, `teleattest1`, and `telecap2` fixture contracts plus the
 attester state machine make this three-key protocol testable. They are not
-imported by production, have no Asterisk adapter or service wiring, and do not
+imported by production. The source ARI adapter has no installed service wiring and does not
 close the PBX promotion blocker. See
 `docs/PBX-APPROVAL-ATTESTATION-CONTRACT.md`.
 
