@@ -483,7 +483,7 @@ test('tool schema exposes only the supplied profile enum', () => {
   assert.equal(tools.some((tool) => tool.name === 'send_agent_session_message'), false);
   assert.equal(tools.some((tool) => tool.name === 'start_privileged_action'), false);
   assert.deepEqual(
-    tools[0].parameters.properties.profile.enum,
+    tools.find((tool) => tool.name === 'send_agent_message').parameters.properties.profile.enum,
     ['auto', 'claude-opus', 'codex-sol']
   );
   assert.deepEqual(

@@ -29,10 +29,23 @@ test('production conductor instructions expose read-only managed authority only'
     resumeContext: null,
     startupAnnouncement: null,
   });
-  assert.match(instructions, /every production phone job is forced read-only/);
+  assert.match(instructions, /every managed phone job is forced read-only/);
   assert.match(instructions, /Pound does not grant production authority/);
   assert.doesNotMatch(instructions, /send_agent_session_message|start_privileged_action/);
   assert.doesNotMatch(instructions, /Sonnet \(write\)|Opus \(admin\)|Terra \(write\)|Sol \(admin\)/);
+});
+
+test('owner-capable instructions keep approval independent and never equate delivery with completion', () => {
+  const instructions = buildConductorInstructions({
+    thread: { id: 'vt_owner', selected_profile: 'codex-sol' },
+    capabilities: { ...READY_CAPABILITIES, ownerSessionsAvailable: true },
+  });
+  assert.match(instructions, /every managed phone job is forced read-only/);
+  assert.match(instructions, /independent PBX prompt and fresh pound approval/);
+  assert.match(instructions, /request_owner_instruction/);
+  assert.match(instructions, /Neither means work completed/);
+  assert.match(instructions, /may report PARTIAL/);
+  assert.doesNotMatch(instructions, /Pound does not grant production authority/);
 });
 
 class FakeRealtimeClient extends EventEmitter {
