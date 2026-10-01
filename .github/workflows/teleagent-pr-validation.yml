@@ -114,6 +114,15 @@ jobs:
           node -e 'const Database = require("./claude-api-server/node_modules/better-sqlite3"); new Database(":memory:").close(); require("./claude-api-server/node_modules/ws"); require("./claude-api-server/owner-session-delivery")'
           npm --prefix claude-api-server audit --omit=dev
 
+      - name: Verify voice and CLI production dependencies
+        shell: /usr/bin/bash --noprofile --norc -euo pipefail {0}
+        run: |
+          for package_dir in voice-app cli; do
+            npm --prefix "$package_dir" ci --omit=dev
+            PACKAGE_DIR="$package_dir" node -e 'const a=require("./"+process.env.PACKAGE_DIR+"/node_modules/axios"); if(a.VERSION!=="1.20.0") throw new Error("Axios version differs")'
+            npm --prefix "$package_dir" audit --omit=dev
+          done
+
       - name: Verify a clean generated state
         shell: /usr/bin/bash --noprofile --norc -euo pipefail {0}
         run: |
