@@ -71,6 +71,73 @@ test('owner instructions bind the real SIP call and stable tool ID rather than m
   assert.equal(calls.length, 2);
 });
 
+function configureNamedOwner(t, sessions = [{ id: 'os_teletest', label: 'teletest', provider: 'codex' }]) {
+  const { controller } = createController(t);
+  const calls = [];
+  controller.sipCallId = 'real-call@pbx';
+  controller.agentBridge.getRuntimeCapabilities = async () => ({ ...READY_CAPABILITIES, ownerSessionsAvailable: true });
+  controller.agentBridge.ownerSessionAction = async (action, body) => {
+    calls.push({ action, body });
+    return { success: true, result: action === 'list' ? { sessions }
+      : action === 'inspect' ? { history: { messages: [{ role: 'assistant', text: 'Ready.' }] } }
+        : { state: 'pending_approval' } };
+  };
+  return { controller, calls };
+}
+
+test('one named history action resolves teletest and reads native messages without another model turn', async (t) => {
+  const { controller, calls } = configureNamedOwner(t);
+  const result = await controller.handle('inspect_owner_session', { session_label: 'Tele Test', history: true });
+  assert.equal(result.result.history.messages[0].text, 'Ready.');
+  assert.deepEqual(calls, [{ action: 'list', body: {} },
+    { action: 'inspect', body: { id: 'os_teletest', history: true } }]);
+});
+
+test('one named instruction action requests real-call approval and preserves the exact instruction', async (t) => {
+  const { controller, calls } = configureNamedOwner(t);
+  const message = 'Reply with TELEAGENT READY. Do not change files or run commands.';
+  const result = await controller.handle('request_owner_instruction',
+    { session_label: 'Teletest', message, approved: true, sipCallId: 'forged' }, { callId: 'real-tool' });
+  assert.equal(result.result.state, 'pending_approval');
+  assert.equal(result.completed, false);
+  assert.deepEqual(calls.map(c => c.action), ['list', 'request']);
+  assert.deepEqual(calls[1].body, { id: 'os_teletest', message,
+    operationId: result.operation_id, sipCallId: 'real-call@pbx' });
+});
+
+test('unknown or ambiguous labels never inspect or request an instruction', async (t) => {
+  for (const sessions of [[], [{ id: 'os_one', label: 'teletest' }, { id: 'os_two', label: 'Tele Test' }]]) {
+    const { controller, calls } = configureNamedOwner(t, sessions);
+    const result = await controller.handle('request_owner_instruction',
+      { session_label: 'teletest', message: 'Reply ready.' }, { callId: 'tool-one' });
+    assert.equal(result.success, false);
+    assert.equal(result.code, sessions.length ? 'OWNER_SESSION_TARGET_AMBIGUOUS' : 'OWNER_SESSION_NOT_ENROLLED');
+    assert.deepEqual(calls.map(c => c.action), ['list']);
+  }
+});
+
+test('invalid and conflicting target selectors fail before inventory or delivery', async (t) => {
+  const { controller, calls } = configureNamedOwner(t);
+  for (const args of [{}, { id: 'os_teletest', session_label: 'teletest' },
+    { id: 'native-thread-id' }, { session_label: 'x'.repeat(81) }, { session_label: 42 }]) {
+    assert.equal((await controller.handle('inspect_owner_session', args)).code, 'OWNER_SESSION_TARGET_INVALID');
+  }
+  assert.equal(calls.length, 0);
+});
+
+test('failed or malformed inventory never selects a target or leaks its response', async (t) => {
+  const { controller, calls } = configureNamedOwner(t);
+  for (const result of [{ success: false, error: 'private diagnostic' },
+    { success: true, result: { sessions: [{ id: 'native-id', label: 'teletest' }] } },
+    { success: true, result: { sessions: Array(33).fill({ id: 'os_test', label: 'teletest' }) } }]) {
+    controller.agentBridge.ownerSessionAction = async (action) => { calls.push(action); return result; };
+    const value = await controller.handle('inspect_owner_session', { session_label: 'teletest', history: true });
+    assert.equal(value.code, 'OWNER_SESSION_INVENTORY_UNAVAILABLE');
+    assert.doesNotMatch(JSON.stringify(value), /private diagnostic/);
+  }
+  assert.deepEqual(calls, ['list', 'list', 'list']);
+});
+
 test('the failed-call session request still returns local records without controller authentication', async (t) => {
   const { controller, inspections } = createController(t);
   delete controller.agentBridge.getRuntimeCapabilities;

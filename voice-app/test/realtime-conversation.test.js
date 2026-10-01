@@ -43,6 +43,8 @@ test('owner-capable instructions keep approval independent and never equate deli
   assert.match(instructions, /every managed phone job is forced read-only/);
   assert.match(instructions, /independent PBX prompt and fresh pound approval/);
   assert.match(instructions, /request_owner_instruction/);
+  assert.match(instructions, /session_label/);
+  assert.match(instructions, /do not list first/);
   assert.match(instructions, /Neither means work completed/);
   assert.match(instructions, /may report PARTIAL/);
   assert.doesNotMatch(instructions, /Pound does not grant production authority/);
