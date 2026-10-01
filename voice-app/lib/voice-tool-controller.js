@@ -108,6 +108,29 @@ class VoiceToolController {
     return this.capabilities;
   }
 
+  async _ownerSessionInventory() {
+    const listed = await this.agentBridge.ownerSessionAction('list', {});
+    const sessions = listed?.result?.sessions;
+    if (listed?.success !== true || !Array.isArray(sessions) || sessions.length > 32 ||
+        sessions.some((entry) => !entry || typeof entry.id !== 'string' || !/^os_[A-Za-z0-9]{1,64}$/.test(entry.id) ||
+          typeof entry.label !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9 ._-]{0,79}$/.test(entry.label))) {
+      throw Object.assign(new Error('The personal-session inventory could not be verified. No instruction was sent.'),
+        { code: 'OWNER_SESSION_INVENTORY_UNAVAILABLE' });
+    }
+    return sessions;
+  }
+
+  async ownerSessionContext() {
+    if (!this.capabilities.ownerSessionsAvailable) return { available: false, labels: [] };
+    try {
+      const sessions = await this._ownerSessionInventory();
+      // Labels are pronunciation/routing context, never cached delivery authority.
+      return { available: true, labels: [...new Set(sessions.map((entry) => entry.label))] };
+    } catch {
+      return { available: false, labels: [] };
+    }
+  }
+
   async _ownerSessionId(args) {
     const failure = (code, message) => ({ failure: { success: false, code, message } });
     const hasId = Object.hasOwn(args, 'id');
@@ -125,20 +148,18 @@ class VoiceToolController {
     }
     // Resolve only the authenticated, explicitly enrolled inventory. Do not
     // infer identity from a tmux title, provider response, or approximate name.
-    const listed = await this.agentBridge.ownerSessionAction('list', {});
-    const sessions = listed?.result?.sessions;
-    if (listed?.success !== true || !Array.isArray(sessions) || sessions.length > 32 ||
-        sessions.some((entry) => !entry || typeof entry.id !== 'string' || !/^os_[A-Za-z0-9]{1,64}$/.test(entry.id) ||
-          typeof entry.label !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9 ._-]{0,79}$/.test(entry.label))) {
-      return failure('OWNER_SESSION_INVENTORY_UNAVAILABLE',
-        'The personal-session inventory could not be verified. No instruction was sent.');
-    }
+    const sessions = await this._ownerSessionInventory();
     const normalized = (label) => label.toLowerCase().replace(/\s+/g, '');
     const matches = sessions.filter((entry) => normalized(entry.label) === normalized(args.session_label));
-    if (matches.length !== 1) return failure(
-      matches.length ? 'OWNER_SESSION_TARGET_AMBIGUOUS' : 'OWNER_SESSION_NOT_ENROLLED',
-      matches.length ? 'That label matches multiple enrolled sessions. Ask which exact session to use.'
-        : 'No enrolled personal session has that label. Ask for the correct label.');
+    if (matches.length !== 1) {
+      const result = failure(
+        matches.length ? 'OWNER_SESSION_TARGET_AMBIGUOUS' : 'OWNER_SESSION_NOT_ENROLLED',
+        matches.length ? 'That label matches multiple enrolled sessions. Ask which exact session to use.'
+          : 'No enrolled personal session has that label. Ask the caller to choose an enrolled label.');
+      result.failure.clarification_required = true;
+      result.failure.available_session_labels = [...new Set(sessions.map((entry) => entry.label))];
+      return result;
+    }
     return { id: matches[0].id };
   }
 
