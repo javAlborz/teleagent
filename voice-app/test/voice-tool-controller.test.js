@@ -637,3 +637,41 @@ test('weather uses geocoding plus current conditions and end_call requests one f
   assert.equal(end.end_call, true);
   assert.equal(end.response_behavior, 'farewell_then_hangup');
 });
+
+
+test('startup owner context contains only verified labels and does not cache routing authority', async (t) => {
+  const { controller, calls } = configureNamedOwner(t);
+  await controller.refreshCapabilities();
+  assert.deepEqual(await controller.ownerSessionContext(), { available: true, labels: ['teletest'] });
+  controller.agentBridge.ownerSessionAction = async () => ({ success: true, result: { sessions: [] } });
+  const result = await controller.handle('request_owner_instruction',
+    { session_label: 'teletest', message: 'Do not send this.' }, { callId: 'changed-catalog' });
+  assert.equal(result.code, 'OWNER_SESSION_NOT_ENROLLED');
+  assert.equal(result.clarification_required, true);
+  assert.deepEqual(result.available_session_labels, []);
+  assert.deepEqual(calls.map(c => c.action), ['list']);
+});
+
+test('a misheard name asks for clarification and never selects a similar enrolled session', async (t) => {
+  const { controller, calls } = configureNamedOwner(t);
+  const result = await controller.handle('inspect_owner_session', { session_label: 'Telefest', history: true });
+  assert.equal(result.code, 'OWNER_SESSION_NOT_ENROLLED');
+  assert.equal(result.clarification_required, true);
+  assert.deepEqual(result.available_session_labels, ['teletest']);
+  assert.deepEqual(calls.map(c => c.action), ['list']);
+});
+
+test('owner context never exports an unverified inventory or private transport errors', async (t) => {
+  const { controller } = configureNamedOwner(t);
+  await controller.refreshCapabilities();
+  for (const response of [{ success: false, error: 'private secret' },
+    { success: true, result: { sessions: [{ id: 'os_bad', label: 'bad\nlabel' }] } }]) {
+    controller.agentBridge.ownerSessionAction = async () => response;
+    assert.deepEqual(await controller.ownerSessionContext(), { available: false, labels: [] });
+  }
+  controller.agentBridge.ownerSessionAction = async () => { throw new Error('private secret'); };
+  assert.deepEqual(await controller.ownerSessionContext(), { available: false, labels: [] });
+  controller.capabilities = { ownerSessionsAvailable: false };
+  controller.agentBridge.ownerSessionAction = async () => assert.fail('disabled context must not inspect');
+  assert.deepEqual(await controller.ownerSessionContext(), { available: false, labels: [] });
+});

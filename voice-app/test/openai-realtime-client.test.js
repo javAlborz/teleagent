@@ -794,3 +794,35 @@ test('Realtime uses a dedicated key rather than the Codex CLI key', () => {
     assert.equal(getRealtimeApiKey({ OPENAI_REALTIME_API_KEY: rejected }), '');
   }
 });
+
+
+test('voice owner action contracts require labels and never ask the model to manufacture IDs', () => {
+  for (const name of ['inspect_owner_session', 'request_owner_instruction']) {
+    const tool = buildRealtimeTools(['codex-sol']).find(t => t.name === name);
+    assert.ok(tool.parameters.required.includes('session_label'));
+    assert.equal(Object.hasOwn(tool.parameters.properties, 'id'), false);
+  }
+});
+
+test('unknown owner names can ask a clarification in the speech stage without another action', async (t) => {
+  let calls = 0;
+  const capabilities = { ...require('./controller-capabilities-fixture').READY_CAPABILITIES, ownerSessionsAvailable: true };
+  const client = await createConnectedClient({ capabilities, toolHandler: async () => {
+    calls += 1;
+    return { success: false, code: 'OWNER_SESSION_NOT_ENROLLED', clarification_required: true,
+      available_session_labels: ['teletest'] };
+  } });
+  t.after(() => client.close());
+  client.queueUserResponse();
+  client.ws.serverSend({ type: 'response.created', response: { id: 'clarify-route' } });
+  client.ws.serverSend({ type: 'response.done', response: { id: 'clarify-route', status: 'completed',
+    output: [{ type: 'function_call', name: 'route_turn', call_id: 'clarify-tool', arguments: JSON.stringify({
+      action: 'inspect_owner_session', arguments_json: JSON.stringify({ session_label: 'Telefest', history: true }),
+    }) }] } });
+  await new Promise(resolve => setImmediate(resolve));
+  const speech = client.ws.sentEvents().at(-1).response;
+  assert.equal(calls, 1);
+  assert.equal(speech.tool_choice, 'none');
+  assert.match(speech.instructions, /ask one short question using available_session_labels/);
+  assert.match(speech.instructions, /teletest/);
+});

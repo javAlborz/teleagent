@@ -1313,6 +1313,11 @@ test('assistant transcript deduplication is item-scoped and tool/limit events ar
     output: { accepted: false, code: 'UNKNOWN_AGENT_PROFILE' },
     durationMs: 2,
   });
+  realtime.emit('tool.completed', {
+    call: { name: 'inspect_owner_session', call_id: 'owner-audit' },
+    args: { session_label: 'Telefest', id: 'os_invented', history: true, message: 'private instruction' },
+    output: { success: false, code: 'OWNER_SESSION_NOT_ENROLLED' }, durationMs: 3,
+  });
   realtime.emit('response.clipped', {
     itemId: 'item-limited',
     responseId: 'response-limited',
@@ -1350,6 +1355,11 @@ test('assistant transcript deduplication is item-scoped and tool/limit events ar
   assert.ok(refusal);
   assert.equal(refusal.metadata.success, false);
   assert.equal(refusal.profile, 'codex-auto');
+  const ownerAudit = auditRows.find((event) => event.metadata?.tool_call_id === 'owner-audit');
+  assert.match(ownerAudit.scope_text, /session_label=Telefest/);
+  assert.match(ownerAudit.scope_text, /id=os_invented/);
+  assert.match(ownerAudit.scope_text, /history=true/);
+  assert.doesNotMatch(JSON.stringify(auditRows), /private instruction/);
 
   await fixture.dialog.destroy();
   await call;
@@ -1380,4 +1390,27 @@ test('an explicit callback thread cannot cross caller identities', async (t) => 
 
   assert.notEqual(result.voiceThreadId, otherCallerThread.id);
   assert.equal(fixture.stateStore.getThread(result.voiceThreadId).caller_id, '1001');
+});
+
+
+test('call startup supplies enrolled owner labels to both routing and transcription without native reads', async (t) => {
+  const fixture = createCallFixture(t);
+  const actions = [];
+  fixture.jobBroker.agentBridge.getRuntimeCapabilities = async () => ({ ...READY_CAPABILITIES, ownerSessionsAvailable: true });
+  fixture.jobBroker.agentBridge.ownerSessionAction = async (action) => {
+    actions.push(action);
+    assert.equal(action, 'list');
+    return { success: true, result: { sessions: [{ id: 'os_private', label: 'teletest', cwd: '/private/path' }] } };
+  };
+  await runRealtimeConversation(fixture.endpoint, fixture.dialog, 'call-owner-vocabulary', {
+    audioForkServer: fixture.audioForkServer, stateStore: fixture.stateStore,
+    jobBroker: fixture.jobBroker, callerId: '1001', openaiClientFactory: fixture.openaiClientFactory,
+  });
+  const options = fixture.getRealtimeClient().options;
+  assert.deepEqual(actions, ['list']);
+  assert.ok(options.transcriptionKeywords.includes('teletest'));
+  assert.match(options.transcriptionPrompt, /teletest/);
+  assert.match(options.instructions, /enrolled labels are \["teletest"\]/);
+  assert.match(options.instructions, /inspect_owner_session with session_label and history true/);
+  assert.doesNotMatch(options.instructions, /os_private|private\/path/);
 });

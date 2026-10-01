@@ -317,3 +317,20 @@ saved phone context and authority guidance available after a redial. A farewell
 still uses an empty input and only its one-time goodbye instruction, so saved
 answers cannot leak into hangup speech. The API contract is documented in
 [Realtime client events](https://developers.openai.com/api/reference/resources/realtime/client-events#response.create).
+
+
+### Enrolled personal session names
+
+When the independently gated owner-session capability is available, call startup
+loads the authenticated enrollment labels into routing and transcription context.
+This is a pronunciation hint, not a liveness check or delivery authorization.
+Reading a named conversation uses `inspect_owner_session`; sending an instruction
+uses `request_owner_instruction`. The voice contracts require `session_label`,
+not a model-generated identifier. Each action resolves the current inventory.
+
+An unknown or ambiguous label asks the caller to clarify among enrolled labels;
+it never chooses a similar name, substitutes phone history, or switches to the
+worker's tmux scope. Tool audits retain the bounded, redacted selector and error
+code, but never instruction text or native conversation contents. Instruction
+delivery still requires the independent PBX readback and fresh handset approval
+on an authenticated SRTP call.
