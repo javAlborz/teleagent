@@ -72,6 +72,39 @@ function spokenWords(count, { period = false } = {}) {
   return period ? `${text}.` : text;
 }
 
+test('a single named-session route resolves and reads native history before speech', async (t) => {
+  const { VoiceToolController } = require('../lib/voice-tool-controller');
+  const capabilities = { ...require('./controller-capabilities-fixture').READY_CAPABILITIES, ownerSessionsAvailable: true };
+  const calls = [];
+  const controller = new VoiceToolController({
+    agentBridge: {
+      getRuntimeCapabilities: async () => capabilities,
+      ownerSessionAction: async (action, body) => {
+        calls.push({ action, body });
+        return { success: true, result: action === 'list'
+          ? { sessions: [{ id: 'os_test', label: 'teletest' }] }
+          : { history: { messages: [{ role: 'assistant', text: 'Native test answer.' }] } } };
+      },
+    },
+  });
+  const client = await createConnectedClient({ capabilities,
+    toolHandler: (name, args, context) => controller.handle(name, args, context) });
+  t.after(() => client.close());
+  client.queueUserResponse();
+  client.ws.serverSend({ type: 'response.created', response: { id: 'named-route' } });
+  client.ws.serverSend({ type: 'response.done', response: {
+    id: 'named-route', status: 'completed', output: [{ type: 'function_call', name: 'route_turn',
+      call_id: 'named-history', arguments: JSON.stringify({ action: 'inspect_owner_session',
+        arguments_json: JSON.stringify({ session_label: 'Tele Test', history: true }) }) }],
+  } });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(calls, [{ action: 'list', body: {} },
+    { action: 'inspect', body: { id: 'os_test', history: true } }]);
+  const speech = client.ws.sentEvents().at(-1).response;
+  assert.equal(speech.tool_choice, 'none');
+  assert.match(JSON.stringify(speech), /Native test answer/);
+});
+
 test('hidden and direct unclassified function calls cannot bypass capability filtering', async (t) => {
   let invoked = 0;
   const client = await createConnectedClient({

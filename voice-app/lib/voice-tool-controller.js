@@ -108,6 +108,40 @@ class VoiceToolController {
     return this.capabilities;
   }
 
+  async _ownerSessionId(args) {
+    const failure = (code, message) => ({ failure: { success: false, code, message } });
+    const hasId = Object.hasOwn(args, 'id');
+    const hasLabel = Object.hasOwn(args, 'session_label');
+    if (hasId === hasLabel) return failure('OWNER_SESSION_TARGET_INVALID',
+      'Specify one enrolled session ID or one session label.');
+    if (hasId) {
+      return typeof args.id === 'string' && /^os_[A-Za-z0-9]{1,64}$/.test(args.id)
+        ? { id: args.id }
+        : failure('OWNER_SESSION_TARGET_INVALID', 'The enrolled session ID is invalid.');
+    }
+    if (typeof args.session_label !== 'string' || args.session_label.length > 80 ||
+        !/^[A-Za-z0-9][A-Za-z0-9 ._-]{0,79}$/.test(args.session_label.trim())) {
+      return failure('OWNER_SESSION_TARGET_INVALID', 'Provide the enrolled session label.');
+    }
+    // Resolve only the authenticated, explicitly enrolled inventory. Do not
+    // infer identity from a tmux title, provider response, or approximate name.
+    const listed = await this.agentBridge.ownerSessionAction('list', {});
+    const sessions = listed?.result?.sessions;
+    if (listed?.success !== true || !Array.isArray(sessions) || sessions.length > 32 ||
+        sessions.some((entry) => !entry || typeof entry.id !== 'string' || !/^os_[A-Za-z0-9]{1,64}$/.test(entry.id) ||
+          typeof entry.label !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9 ._-]{0,79}$/.test(entry.label))) {
+      return failure('OWNER_SESSION_INVENTORY_UNAVAILABLE',
+        'The personal-session inventory could not be verified. No instruction was sent.');
+    }
+    const normalized = (label) => label.toLowerCase().replace(/\s+/g, '');
+    const matches = sessions.filter((entry) => normalized(entry.label) === normalized(args.session_label));
+    if (matches.length !== 1) return failure(
+      matches.length ? 'OWNER_SESSION_TARGET_AMBIGUOUS' : 'OWNER_SESSION_NOT_ENROLLED',
+      matches.length ? 'That label matches multiple enrolled sessions. Ask which exact session to use.'
+        : 'No enrolled personal session has that label. Ask for the correct label.');
+    return { id: matches[0].id };
+  }
+
   async _optionalInspection(action, args = {}) {
     if (!this.capabilities.workerInspectionAvailable) {
       return unavailableResult('list_tmux_sessions', this.capabilities);
@@ -233,8 +267,11 @@ class VoiceToolController {
       switch (name) {
         case 'list_owner_sessions':
           return this.agentBridge.ownerSessionAction('list', {});
-        case 'inspect_owner_session':
-          return this.agentBridge.ownerSessionAction('inspect', { id: args.id, history: args.history === true });
+        case 'inspect_owner_session': {
+          const target = await this._ownerSessionId(args);
+          if (target.failure) return target.failure;
+          return this.agentBridge.ownerSessionAction('inspect', { id: target.id, history: args.history === true });
+        }
         case 'get_owner_instruction':
           return this.agentBridge.ownerSessionAction('status', { operationId: args.operation_id });
         case 'request_owner_instruction': {
@@ -242,10 +279,12 @@ class VoiceToolController {
               typeof context.callId !== 'string' || !context.callId) {
             return { success: false, code: 'OWNER_PHONE_CALL_UNAVAILABLE' };
           }
+          const target = await this._ownerSessionId(args);
+          if (target.failure) return target.failure;
           const operationId = 'job_' + crypto.createHash('sha256')
             .update(JSON.stringify([this.realtimeSessionId, context.callId])).digest('hex');
           const result = await this.agentBridge.ownerSessionAction('request', {
-            id: args.id, message: args.message, operationId, sipCallId: this.sipCallId,
+            id: target.id, message: args.message, operationId, sipCallId: this.sipCallId,
           });
           return { ...result, operation_id: operationId, completed: false,
             outcome_note: 'Only the independent phone prompt and a fresh pound press can authorize delivery. Accepted or submitted never proves agent completion. If status is uncertain, query this operation ID; do not resend.' };
