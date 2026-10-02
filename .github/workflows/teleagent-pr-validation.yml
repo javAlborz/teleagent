@@ -95,7 +95,12 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      - name: Install local speech regression dependency
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends espeak-ng
+
       - name: Test
+        env:
+          TELEAGENT_REQUIRE_LOCAL_SPEECH_TEST: '1'
         shell: /usr/bin/bash --noprofile --norc -euo pipefail {0}
         run: |
           ulimit -c 0
