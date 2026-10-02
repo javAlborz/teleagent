@@ -53,7 +53,10 @@ SystemCallArchitectures=native
 RestrictAddressFamilies=AF_UNIX
 IPAddressDeny=any
 LimitNOFILE=1024
-LimitFSIZE=33554432
+# eSpeak's PulseAudio dependency allocates a 64 MiB shared-memory file even
+# for stdout synthesis. A smaller inherited limit kills it with SIGXFSZ.
+# Approval PCM remains separately bounded to 90 seconds / 4.32 MB.
+LimitFSIZE=67108864
 LimitCORE=0
 LoadCredential=teleagent-release-gate:/run/teleagent-release-gate/verified.json
 ExecStartPre=+/usr/bin/python3 -I /usr/local/libexec/verify-teleagent-release-closure --check-start-gate
