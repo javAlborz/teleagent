@@ -163,7 +163,18 @@ class OwnerCodexClient {
         }
       }
     }
-    return { messages: boundedMessages(messages), limited: true };
+    // Never identify a reply from an older turn as the latest turn's result.
+    // Use the same redaction/bounds as history, and expose no native IDs.
+    const latest = result.data[0];
+    const latestReplies = boundedMessages((latest?.items || [])
+      .filter((item) => item.type === 'agentMessage')
+      .map((item) => ({ role: 'assistant', text: item.text })));
+    return { messages: boundedMessages(messages), limited: true,
+      latestTurn: {
+        status: ['completed', 'inProgress', 'failed', 'interrupted'].includes(latest?.status)
+          ? latest.status : 'unknown',
+        reply: latestReplies.at(-1) || null,
+      } };
   }
 
   async deliver({ threadId, message, expectedTurnId = null }) {

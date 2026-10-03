@@ -1,5 +1,18 @@
 # Native owner-session control
 
+## Phone feedback
+
+When an instruction is awaiting the independent PBX prompt, the conversational
+voice stays quiet so it does not overlap or contradict that prompt. Delivery
+status uses short fixed wording: acceptance means the native session accepted
+the instruction, not that its task completed. Unknown delivery must be checked
+before any resend.
+
+Codex readback identifies the newest turn separately from bounded recent
+history. The immediate spoken result uses only that turn's reply and status;
+an unfinished or reply-less turn must not reuse an older completion. These
+feedback changes do not alter approval requirements or native permissions.
+
 Status: implemented transport and durable-delivery tests; **not phone-enabled**.
 The separately testable owner broker and Unix API are source-only. They have no
 installed unit, production route, enable setting, or trust key. Its service

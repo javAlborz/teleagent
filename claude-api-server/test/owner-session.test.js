@@ -48,7 +48,7 @@ async function codexFixture(t) {
     else if (call.method === 'thread/loaded/list') result = { data: state.loaded ? [SESSION] : [] };
     else if (call.method === 'thread/read') result = { thread: { id: SESSION, cwd: root,
       status: { type: state.status }, canAcceptDirectInput: true, preview: 'SECRET-NOT-RETURNED' } };
-    else if (call.method === 'thread/turns/list') result = { data: [{ id: state.turnId,
+    else if (call.method === 'thread/turns/list') result = { data: state.historyTurns || [{ id: state.turnId,
       status: state.status === 'active' ? 'inProgress' : 'completed', items: [
         { type: 'userMessage', content: [{ type: 'text', text: 'hello' }] },
         ...(call.params.itemsView === 'full' ? [{ type: 'commandExecution',
@@ -140,9 +140,32 @@ test('native Codex inventory/history redact output and never subscribe, resume, 
   const history = await client.history(SESSION);
   assert.equal(history.messages.length, 2);
   assert.match(history.messages[1].text, /REDACTED/);
+  assert.equal(history.latestTurn.status, 'completed');
+  assert.match(history.latestTurn.reply.text, /REDACTED/);
   assert.doesNotMatch(JSON.stringify(history), /fixture-sensitive|SECRET/);
   assert.ok(state.calls.every((call) => ['initialize', 'initialized', 'thread/loaded/list',
     'thread/read', 'thread/turns/list'].includes(call.method)));
+});
+
+test('latest native reply belongs only to the newest turn, including unfinished and empty turns', async (t) => {
+  const { client, state } = await codexFixture(t);
+  const older = { status: 'completed', items: [{ type: 'agentMessage', text: 'Old test complete.' }] };
+  for (const status of ['inProgress', 'failed', 'interrupted', 'completed']) {
+    state.historyTurns = [{ status, items: [{ type: 'userMessage', content: [{ type: 'text', text: 'New task' }] }] }, older];
+    const history = await client.history(SESSION);
+    assert.equal(history.latestTurn.status, status);
+    assert.equal(history.latestTurn.reply, null);
+    assert.ok(history.messages.some((message) => message.text === 'Old test complete.'));
+  }
+  state.historyTurns = [{ status: 'completed', items: [
+    { type: 'agentMessage', text: 'Working.' },
+    { type: 'agentMessage', text: 'token=fixture-sensitive New result.' },
+  ] }, older];
+  const history = await client.history(SESSION);
+  assert.match(history.latestTurn.reply.text, /New result/);
+  assert.doesNotMatch(JSON.stringify(history.latestTurn), /fixture-sensitive|Old test complete/);
+  state.historyTurns = [];
+  assert.deepEqual((await client.history(SESSION)).latestTurn, { status: 'unknown', reply: null });
 });
 
 test('native summary history succeeds when full tool output exceeds the unchanged transport bound', async (t) => {

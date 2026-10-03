@@ -308,6 +308,10 @@ class VoiceToolController {
             id: target.id, message: args.message, operationId, sipCallId: this.sipCallId,
           });
           return { ...result, operation_id: operationId, completed: false,
+            // The independent PBX owns this prompt. A simultaneous model
+            // explanation can contradict it or talk over the approval audio.
+            ...(result?.success === true && result.result?.state === 'pending_approval'
+              ? { response_behavior: 'earcon_then_quiet' } : {}),
             outcome_note: 'Only the independent phone prompt and a fresh pound press can authorize delivery. Accepted or submitted never proves agent completion. If status is uncertain, query this operation ID; do not resend.' };
         }
 
