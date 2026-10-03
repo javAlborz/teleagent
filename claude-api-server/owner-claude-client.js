@@ -103,6 +103,8 @@ class OwnerClaudeClient {
     const fd = fs.openSync(path.join(directory, `${sessionId}.jsonl`),
       fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
     const messages = [];
+    let latestReply = null;
+    let completed = false;
     try {
       const stat = fs.fstatSync(fd);
       if (!stat.isFile() || stat.uid !== this.registration.uid || (stat.mode & 0o022)) {
@@ -122,11 +124,23 @@ class OwnerClaudeClient {
         const text = typeof content === 'string' ? content : Array.isArray(content)
           ? content.filter((part) => part.type === 'text' && typeof part.text === 'string')
             .map((part) => part.text).join('\n') : '';
+        // Tool-result records are not a new caller turn. A real new user
+        // message clears the previous reply, including when the tail is clipped.
+        if (text.trim() && record.type === 'user') {
+          latestReply = null;
+          completed = false;
+        } else if (text.trim() && record.type === 'assistant') {
+          latestReply = boundedMessages([{ role: 'assistant', text }])[0] || null;
+          completed = record.message?.stop_reason === 'end_turn';
+        }
         messages.push({ role: record.type, text });
       }
     } finally { fs.closeSync(fd); }
     this.assertIdentity();
-    return { messages: boundedMessages(messages), limited: true };
+    const status = this.read(sessionId).status;
+    return { messages: boundedMessages(messages), limited: true,
+      latestTurn: { status: status === 'busy' ? 'inProgress'
+        : status === 'idle' && completed ? 'completed' : 'unknown', reply: latestReply } };
   }
 
   async deliver({ threadId, message, messageId = crypto.randomUUID() }) {

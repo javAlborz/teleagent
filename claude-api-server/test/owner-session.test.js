@@ -302,6 +302,35 @@ test('Claude history reads only bounded message records belonging to the selecte
   assert.doesNotMatch(JSON.stringify(history), /WRONG_SESSION|TOOL_SECRET|hidden/);
 });
 
+test('Claude newest reply never falls back to an earlier turn or claims uncertain completion', async (t) => {
+  const f = await claudeFixture(t);
+  const logs = path.join(f.root, 'projects', f.root.replace(/[^a-zA-Z0-9]/g, '-'));
+  fs.mkdirSync(logs, { recursive: true });
+  const file = path.join(logs, `${SESSION}.jsonl`);
+  const record = (type, text, stop_reason = null) => ({ type, sessionId: SESSION,
+    message: { content: text, stop_reason } });
+  const rows = [record('user', 'Old request'), record('assistant', 'Old reply', 'end_turn'),
+    record('user', 'New request')];
+  const write = () => fs.writeFileSync(file, rows.map(JSON.stringify).join('\n'), { mode: 0o600 });
+  write();
+  assert.deepEqual(f.client.history(SESSION).latestTurn, { status: 'unknown', reply: null });
+  rows.push({ type: 'user', sessionId: SESSION,
+    message: { content: [{ type: 'tool_result', content: 'TOOL_SECRET' }] } });
+  rows.push(record('assistant', 'secret=hidden New reply', 'end_turn')); write();
+  const latest = f.client.history(SESSION).latestTurn;
+  assert.equal(latest.status, 'completed');
+  assert.match(latest.reply.text, /REDACTED.*New reply/);
+  assert.doesNotMatch(JSON.stringify(latest), /hidden|Old reply|TOOL_SECRET/);
+  fs.writeFileSync(f.filename, JSON.stringify({ ...f.record, status: 'busy' }));
+  assert.equal(f.client.history(SESSION).latestTurn.status, 'inProgress');
+  fs.writeFileSync(f.filename, JSON.stringify(f.record));
+  rows.push(record('user', 'Another request'), record('assistant', 'Progress')); write();
+  assert.equal(f.client.history(SESSION).latestTurn.status, 'unknown');
+  fs.writeFileSync(file, '', { mode: 0o600 });
+  assert.deepEqual(f.client.history(SESSION).latestTurn, { status: 'unknown', reply: null });
+  assert.equal(f.received.length, 0);
+});
+
 test('socket replacement, symlinks, and foreign listener process are refused', async (t) => {
   const fixture = await codexFixture(t);
   const link = path.join(fixture.root, 'link.sock');

@@ -1,3 +1,17 @@
+## Personal-session discovery and Claude readback
+
+The operator is extending discovery to existing personal Codex and Claude Code
+sessions in home project workspaces. This does not start a provider, change its
+permissions or replay instructions. Native IDs and verified process/socket
+identity remain authoritative; tmux names are only display labels.
+
+Claude history now supplies the same bounded newest-reply structure used by
+Codex readback. A later user message clears the previous reply. Busy sessions
+are reported as in progress; idle alone never proves completion. Only a logged
+end-of-turn marker together with idle status marks that reply completed.
+Claude inbox submission remains unconfirmed until subsequent native evidence;
+this update does not claim a socket write proves execution.
+
 # Native owner-session control
 
 ## Selected delivery policy
