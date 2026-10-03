@@ -39,6 +39,15 @@ function createPbxAttesterApi({ calls, attester, armVerifier, adapter, router, a
       if (controlStore.isLocked()) throw sessionError('PBX_ATTESTER_LOCKED');
       return calls.issueApprovalHandle(sipCallId);
     },
+    async validateCall(sipCallId) {
+      if (controlStore.isLocked()) throw sessionError('PBX_ATTESTER_LOCKED');
+      await assertBoundary();
+      const handle = calls.handleForSipCall(sipCallId);
+      await calls.assertCurrent(handle);
+      if (controlStore.isLocked()) throw sessionError('PBX_ATTESTER_LOCKED');
+      // No approval lease, playback, DTMF or private call identity is returned.
+      return { current: true };
+    },
     async attest(armToken) {
       if (controlStore.isLocked()) throw sessionError('PBX_ATTESTER_LOCKED');
       if (busy) throw sessionError('PBX_ATTESTER_BUSY');
@@ -65,6 +74,9 @@ function createPbxAttesterApi({ calls, attester, armVerifier, adapter, router, a
       if (route === '/v1/health') { exact(body, []); return this.health(); }
       if (route === '/v1/call') {
         exact(body, ['sipCallId']); return this.resolveCall(body.sipCallId);
+      }
+      if (route === '/v1/validate-call') {
+        exact(body, ['sipCallId']); return this.validateCall(body.sipCallId);
       }
       if (route === '/v1/attest') {
         exact(body, ['armToken']); return this.attest(body.armToken);

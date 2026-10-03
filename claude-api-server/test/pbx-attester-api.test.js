@@ -37,6 +37,22 @@ test('each approval gets a fresh one-use handle for the same live call', async (
   await assert.rejects(f.api.attest('base'), { code: 'PBX_ARI_CALL_NOT_CURRENT' });
 });
 
+test('native validation rechecks current encrypted call without allocating approval handles', async (t) => {
+  const f = fixture(t); let checked = 0;
+  f.calls.assertCurrent = async (handle) => { assert.equal(handle, 'base'); checked++; };
+  for (let index = 0; index < 20; index++) {
+    assert.deepEqual(await f.api.handle('/v1/validate-call', { sipCallId: 'call@pbx' }), { current: true });
+  }
+  assert.equal(checked, 20); assert.equal(f.calls.leases.size, 0); assert.equal(f.state.attestations, 0);
+  await assert.rejects(f.api.validateCall('missing@pbx'), { code: 'PBX_ARI_CALL_NOT_CURRENT' });
+  await assert.rejects(f.api.handle('/v1/validate-call', { sipCallId: 'call@pbx', approved: true }));
+  f.calls.assertCurrent = async () => { throw Object.assign(new Error('media'), { code: 'PBX_ARI_HANDSET_MEDIA_UNAUTHENTICATED' }); };
+  await assert.rejects(f.api.validateCall('call@pbx'), { code: 'PBX_ARI_HANDSET_MEDIA_UNAUTHENTICATED' });
+  f.calls.assertCurrent = async () => f.options.controlStore.lock();
+  await assert.rejects(f.api.validateCall('call@pbx'), { code: 'PBX_ATTESTER_LOCKED' });
+  assert.equal(f.calls.leases.size, 0);
+});
+
 test('the API refuses invented observations, extra fields and arbitrary routes', async (t) => {
   const f = fixture(t);
   await assert.rejects(f.api.handle('/v1/attest', { armToken: 'base', approved: true }));

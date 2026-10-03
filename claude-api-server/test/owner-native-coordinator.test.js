@@ -29,7 +29,7 @@ function fixture(t) {
     async panic() { return { locked: true, deliveryQuiesced: true }; },
   };
   const attester = {
-    async resolveCall(call) { assert.equal(call, 'handset@pbx'); state.calls++; return 'opaque'; },
+    async validateCall(call) { assert.equal(call, 'handset@pbx'); state.calls++; return { current: true }; },
     async attest() { assert.fail('native policy never plays or attests a prompt'); },
     async panic() { return { locked: true, quiesced: true }; },
   };
@@ -61,7 +61,7 @@ test('native policy forwards once from the real call with no approval evidence o
 test('invalid or absent handset, changed plan, and missing resources never forward', async (t) => {
   for (const failure of ['call', 'plan', 'resources']) {
     const f = fixture(t);
-    if (failure === 'call') f.attester.resolveCall = async () => { throw new Error('absent call'); };
+    if (failure === 'call') f.attester.validateCall = async () => { throw new Error('absent call'); };
     if (failure === 'plan') { const prepare = f.broker.prepare;
       f.broker.prepare = async (input) => ({ ...await prepare(input), planHash: 'b'.repeat(64) }); }
     if (failure === 'resources') f.state.admission = false;

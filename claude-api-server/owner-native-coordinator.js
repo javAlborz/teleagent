@@ -38,9 +38,11 @@ class OwnerNativeCoordinator extends OwnerApprovalCoordinator {
           plan.message !== input.message || prepared.planHash !== hash(plan) || prepared.requestHash !== hash(plan.message)) {
         throw sessionError('OWNER_APPROVAL_PLAN_CHANGED');
       }
-      // Still require the authenticated handset's current PBX call. Its opaque
-      // handle stays inside the controller; no playback, DTMF or attestation.
-      await this.attester.resolveCall(sipCallId);
+      // Still require the authenticated handset's current encrypted PBX call.
+      // No approval lease, private handle, playback, DTMF or attestation.
+      if ((await this.attester.validateCall(sipCallId))?.current !== true) {
+        throw sessionError('OWNER_APPROVAL_CALL_INVALID');
+      }
       this.store.assertUnlocked(); await this.assertAdmission();
       const admitted = this.store.insert({ inputHash, id: input.id, sipCallHash: hash(sipCallId),
         request: prepared.request, planHash: hash(plan), initialState: 'dispatching' });

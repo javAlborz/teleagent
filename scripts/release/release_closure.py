@@ -66,6 +66,7 @@ BOUND_SOURCE_PATHS = (
     "claude-api-server/owner-claude-client.js",
     "claude-api-server/owner-codex-client.js",
     "claude-api-server/owner-controller-runtime.js",
+    "claude-api-server/owner-native-coordinator.js",
     "claude-api-server/owner-phone-api.js",
     "claude-api-server/owner-session-admission.js",
     "claude-api-server/owner-session-broker-service.js",
