@@ -104,6 +104,21 @@ class OwnerSessionDeliveryStore {
   }
 
   admit(plan, token, expected, publicKeys) {
+    return this.admitOnce(plan, () => {
+      const verifier = createTelecap2Verifier({ publicKeys, now: this.now,
+        consumeReplay: (record) => this.db.prepare(`
+          INSERT OR IGNORE INTO owner_session_replay VALUES (?,?,?)
+        `).run(hash({ key: record.controllerKeyFingerprint, nonce: record.nonce }),
+          record.tokenSha256, record.expiresAt).changes === 1 });
+      verifier.authorize(token, expected);
+    });
+  }
+
+  // Only the enabled, controller-only native-forward route may use this.
+  // It records dispatch intent, not fabricated handset approval evidence.
+  admitNative(plan) { return this.admitOnce(plan, () => {}); }
+
+  admitOnce(plan, authorize) {
     if (this.db.inTransaction) throw sessionError('OWNER_SESSION_STORAGE_TRANSACTION_ACTIVE');
     return this.db.transaction(() => {
       if (this.db.prepare('SELECT locked FROM owner_session_control WHERE singleton=1').get()?.locked !== 0) {
@@ -111,12 +126,7 @@ class OwnerSessionDeliveryStore {
       }
       const previous = this.get(plan.operationId, hash(plan));
       if (previous) return { admitted: false, previous };
-      const verifier = createTelecap2Verifier({ publicKeys, now: this.now,
-        consumeReplay: (record) => this.db.prepare(`
-          INSERT OR IGNORE INTO owner_session_replay VALUES (?,?,?)
-        `).run(hash({ key: record.controllerKeyFingerprint, nonce: record.nonce }),
-          record.tokenSha256, record.expiresAt).changes === 1 });
-      verifier.authorize(token, expected);
+      authorize();
       // Replay consumption and durable intent commit together, before any bytes
       // carrying the instruction can leave. Never persist token or message.
       this.db.prepare('INSERT INTO owner_session_deliveries VALUES (?,?,?,NULL,?)')
@@ -150,7 +160,7 @@ class OwnerSessionDeliveryStore {
   close() { this.db.close(); }
 }
 
-async function deliverOwnerSession({ client, store, request, capability, authority, beforeAdmission = () => {} }) {
+async function deliverOwnerSession({ client, store, request, capability, authority, beforeAdmission = () => {}, nativePermissions = false }) {
   const plan = requestPlan(request);
   const previous = store.get(plan.operationId, hash(plan));
   if (previous) return previous;
@@ -163,7 +173,7 @@ async function deliverOwnerSession({ client, store, request, capability, authori
   }
   // authority is trusted controller/host configuration, never phone/model input.
   // The caller supplies the evidence binding from its independently verified arm.
-  const expected = { ...authority.bindings,
+  const expected = nativePermissions ? null : { ...authority.bindings,
     evidenceMethod: PBX_EVIDENCE_METHOD, jobId: plan.operationId,
     operation: 'owner-session-message', requestHash: hash(plan.message), planHash: hash(plan),
     target: `owner-${plan.provider}:${plan.sessionId}`, provider: plan.provider,
@@ -172,7 +182,8 @@ async function deliverOwnerSession({ client, store, request, capability, authori
   if (checked && typeof checked.then === 'function') {
     throw sessionError('OWNER_SESSION_ASYNC_ADMISSION_GUARD');
   }
-  const admitted = store.admit(plan, capability, expected, authority.publicKeys);
+  const admitted = nativePermissions ? store.admitNative(plan)
+    : store.admit(plan, capability, expected, authority.publicKeys);
   if (!admitted.admitted) return admitted.previous;
   // No await between admission and handing the exact immutable input to the
   // client. Client rechecks process/socket/session identity at its send boundary.

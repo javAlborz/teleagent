@@ -5,7 +5,8 @@ const { performance } = require('node:perf_hooks');
 const { protectedRead, loadOwnerAuthority } = require('./owner-authority-config');
 const { createOwnerSessionProxy } = require('./owner-session-proxy');
 const { createPbxAttesterProxy } = require('./pbx-attester-http');
-const { OwnerApprovalStore, OwnerApprovalCoordinator } = require('./owner-approval-coordinator');
+const { OwnerApprovalStore } = require('./owner-approval-coordinator');
+const { OwnerNativeCoordinator, NATIVE_DELIVERY_POLICY } = require('./owner-native-coordinator');
 const { createOwnerPhoneApi } = require('./owner-phone-api');
 const { assertOwnerHostHeadroom } = require('./owner-session-admission');
 const { sessionError } = require('./owner-session-endpoint');
@@ -14,8 +15,9 @@ const ENABLE = '/etc/teleagent/controller/OWNER_SESSION_ENABLE';
 // Cached readiness never contacts native agents. One bounded probe at a time;
 // a failed, stale or mismatched response withdraws the phone capability.
 class OwnerPlaneReadiness {
-  constructor({ broker, attester, epoch, now = () => performance.now() }) {
+  constructor({ broker, attester, epoch, now = () => performance.now(), deliveryPolicy = null }) {
     this.broker = broker; this.attester = attester; this.epoch = epoch; this.now = now;
+    this.deliveryPolicy = deliveryPolicy;
     this.checkedAt = -Infinity; this.attemptedAt = -Infinity; this.ready = false; this.pending = null;
   }
   available() { return this.ready && this.now() - this.checkedAt < 30000; }
@@ -30,6 +32,9 @@ class OwnerPlaneReadiness {
           const status = await plane.health();
           if (status?.ready !== true || status.epoch !== this.epoch ||
               status.protocol !== 'independent-pbx-owner-v1') throw sessionError('OWNER_PLANE_UNAVAILABLE');
+          if (plane === this.broker && this.deliveryPolicy && status.deliveryPolicy !== this.deliveryPolicy) {
+            throw sessionError('OWNER_PLANE_UNAVAILABLE');
+          }
         }
         this.checkedAt = started; this.ready = true;
       } catch { this.ready = false; }
@@ -52,12 +57,13 @@ function createOwnerControllerRuntime({ db, assertUnlocked }) {
   };
   const broker = createOwnerSessionProxy();
   const attester = createPbxAttesterProxy();
-  const readiness = new OwnerPlaneReadiness({ broker, attester, epoch: authority.epoch });
+  const readiness = new OwnerPlaneReadiness({ broker, attester, epoch: authority.epoch,
+    deliveryPolicy: NATIVE_DELIVERY_POLICY });
   const assertAdmission = () => {
     assertConfiguration(); assertUnlocked();
     if (!readiness.available()) throw sessionError('OWNER_PLANE_UNAVAILABLE');
   };
-  const coordinator = new OwnerApprovalCoordinator({ ...authority, store: new OwnerApprovalStore(db),
+  const coordinator = new OwnerNativeCoordinator({ store: new OwnerApprovalStore(db),
     broker, attester, assertAdmission });
   const api = createOwnerPhoneApi({ broker, coordinator, assertUnlocked: assertAdmission });
   return { api, coordinator, async start() {
@@ -72,7 +78,7 @@ function createOwnerControllerRuntime({ db, assertUnlocked }) {
     },
     health() {
       try { assertAdmission(); coordinator.store.assertUnlocked(); return { configured: true, available: true,
-        protocol: 'independent-pbx-owner-v1' }; }
+        protocol: 'independent-pbx-owner-v1', deliveryPolicy: NATIVE_DELIVERY_POLICY }; }
       catch { return { configured: true, available: false, protocol: 'independent-pbx-owner-v1' }; }
     },
     async close() {

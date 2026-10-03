@@ -1,8 +1,33 @@
 # Native owner-session control
 
+## Selected delivery policy
+
+The owner selected `native-session-permissions-v1` on October 3, 2026. Named
+instructions go to explicitly enrolled sessions without a keypad prompt.
+Their existing native permissions and approvals govern execution; Teleagent
+does not answer approval RPCs, change settings, or distinguish ordinary from
+destructive free-form instructions. An unrestricted session can act immediately.
+
+The controller still resolves an authenticated live handset call, checks host
+headroom, prepares the exact enrolled native plan, and persists dispatch intent
+before forwarding over its protected Unix socket. The broker independently
+checks release policy, enrollment, process/session identity, active turn, locks,
+and resource admission. It durably records a single delivery without fabricating
+an attestation or capability. A lost response stays unknown until reconciled;
+restarts never replay messages. Phone star cannot undo work already delivered.
+Nine locks future deliveries but cannot claim that personal agents stopped.
+
+The broker and controller advertise the explicit delivery policy. The existing
+`independent-pbx-owner-v1` protocol name is retained as the wire compatibility
+identifier; it is not an assertion that a native-forward instruction received
+handset approval. An older broker without the new policy cannot serve a native
+controller. The attester remains available to validate calls and handle the
+independent emergency controls, but forwarding never requests approval playback.
+The approval sections below describe the retained historical protocol.
+
 ## Phone feedback
 
-When an instruction is awaiting the independent PBX prompt, the conversational
+For the retained approval path, when an instruction awaits the PBX prompt, the conversational
 voice stays quiet so it does not overlap or contradict that prompt. Delivery
 status uses short fixed wording: acceptance means the native session accepted
 the instruction, not that its task completed. Unknown delivery must be checked

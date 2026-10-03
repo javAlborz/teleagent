@@ -111,7 +111,12 @@ function capabilitiesFromHealth(operator, executor) {
       operator?.phoneAuthority?.status === 'disabled_pending_independent_pbx_attester') ||
      (operator?.phoneAuthority?.mode === 'owner_session_approval' &&
       operator?.phoneAuthority?.status === 'independent_pbx_owner_configured' &&
-      operator?.ownerSessions?.configured === true && operator?.ownerSessions?.protocol === 'independent-pbx-owner-v1')) &&
+      operator?.ownerSessions?.configured === true && operator?.ownerSessions?.protocol === 'independent-pbx-owner-v1') ||
+     (operator?.phoneAuthority?.mode === 'owner_session_native' &&
+      operator?.phoneAuthority?.status === 'native_owner_configured' &&
+      operator?.ownerSessions?.configured === true &&
+      operator?.ownerSessions?.deliveryPolicy === 'native-session-permissions-v1' &&
+      operator?.ownerSessions?.protocol === 'independent-pbx-owner-v1')) &&
     operator?.approvalCapabilities?.verifierConfigured === false &&
     operator?.privilegedActions?.enabled === false &&
     operator?.privilegedActions?.proxyConfigured === false &&

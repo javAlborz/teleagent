@@ -4327,9 +4327,9 @@ function controllerHealthSnapshot() {
       providers: ENABLED_AGENT_PROVIDERS,
       voiceExecution,
       phoneAuthority: {
-        mode: phoneAuthorityDisabled ? (ownerControllerRuntime ? 'owner_session_approval' : 'read_only') : 'legacy_authority_present',
+        mode: phoneAuthorityDisabled ? (ownerControllerRuntime ? 'owner_session_native' : 'read_only') : 'legacy_authority_present',
         status: phoneAuthorityDisabled
-          ? (ownerControllerRuntime ? 'independent_pbx_owner_configured' : 'disabled_pending_independent_pbx_attester')
+          ? (ownerControllerRuntime ? 'native_owner_configured' : 'disabled_pending_independent_pbx_attester')
           : 'unsafe_for_voice_activation',
       },
       ownerSessions: ownerControllerRuntime?.health() || { configured: false, available: false },

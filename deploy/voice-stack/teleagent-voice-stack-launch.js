@@ -1270,8 +1270,13 @@ async function requireControllerReady(controlToken, { request = requestJson } = 
       body?.phoneAuthority?.status === 'independent_pbx_owner_configured' &&
       body?.ownerSessions?.configured === true && body?.ownerSessions?.available === true &&
       body?.ownerSessions?.protocol === 'independent-pbx-owner-v1';
+    const ownerNative = body?.phoneAuthority?.mode === 'owner_session_native' &&
+      body?.phoneAuthority?.status === 'native_owner_configured' &&
+      body?.ownerSessions?.configured === true && body?.ownerSessions?.available === true &&
+      body?.ownerSessions?.protocol === 'independent-pbx-owner-v1' &&
+      body?.ownerSessions?.deliveryPolicy === 'native-session-permissions-v1';
     if (response.status !== 200 || body?.ready !== true ||
-        body?.service !== 'claude-api-server' || !(readOnly || ownerApproval) ||
+        body?.service !== 'claude-api-server' || !(readOnly || ownerApproval || ownerNative) ||
         body?.approvalCapabilities?.verifierConfigured !== false ||
         body?.authentication?.privilegedActionConfigured !== false ||
         body?.authentication?.privilegedActionRequired !== false ||

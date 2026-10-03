@@ -35,13 +35,14 @@ test('production conductor instructions expose read-only managed authority only'
   assert.doesNotMatch(instructions, /Sonnet \(write\)|Opus \(admin\)|Terra \(write\)|Sol \(admin\)/);
 });
 
-test('owner-capable instructions keep approval independent and never equate delivery with completion', () => {
+test('owner instructions use native permissions without keypad and never equate delivery with completion', () => {
   const instructions = buildConductorInstructions({
     thread: { id: 'vt_owner', selected_profile: 'codex-sol' },
     capabilities: { ...READY_CAPABILITIES, ownerSessionsAvailable: true },
   });
   assert.match(instructions, /every managed phone job is forced read-only/);
-  assert.match(instructions, /independent PBX prompt and fresh pound approval/);
+  assert.match(instructions, /without a keypad prompt/);
+  assert.match(instructions, /Teleagent cannot answer them or expand its permissions/);
   assert.match(instructions, /request_owner_instruction/);
   assert.match(instructions, /session_label/);
   assert.match(instructions, /do not list first/);
