@@ -52,6 +52,7 @@ function createOwnerSessionServer(broker) {
           result = await broker.inspect(body.id, { history: body.history });
         } else if (req.method === 'POST' && req.url === '/v1/prepare') result = await broker.prepare(body);
         else if (req.method === 'POST' && req.url === '/v1/deliver') result = await broker.deliver(body);
+        else if (req.method === 'POST' && req.url === '/v1/forward') result = await broker.forward(body);
         else if (req.method === 'POST' && req.url === '/v1/result') result = broker.result(body);
         else if (req.method === 'POST' && req.url === '/v1/panic') {
           exact(body, []); result = broker.panic();

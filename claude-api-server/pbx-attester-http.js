@@ -3,7 +3,7 @@
 const http = require('node:http');
 const { sessionError } = require('./owner-session-endpoint');
 const SOCKET_PATH = '/run/teleagent-pbx-attester/attester.sock';
-const ROUTES = new Set(['/v1/health', '/v1/call', '/v1/attest', '/v1/panic']);
+const ROUTES = new Set(['/v1/health', '/v1/call', '/v1/validate-call', '/v1/attest', '/v1/panic']);
 const MAX_BYTES = 40000;
 
 function createPbxAttesterServer(api) {
@@ -69,6 +69,7 @@ function createPbxAttesterProxy() {
   });
   // No retries: the independent attester durably claims an arm before playback.
   return Object.freeze({ health: () => call('/v1/health', {}), resolveCall: (sipCallId) => call('/v1/call', { sipCallId }),
+    validateCall: (sipCallId) => call('/v1/validate-call', { sipCallId }),
     attest: (armToken) => call('/v1/attest', { armToken }), panic: () => call('/v1/panic', {}) });
 }
 module.exports = { createPbxAttesterServer, createPbxAttesterProxy, SOCKET_PATH };

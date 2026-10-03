@@ -8,6 +8,24 @@ This file is the canonical repository guidance. Read it before changing the
 call path, execution controller, authentication, approval flow, or deployment
 artifacts.
 
+## Current owner-session policy
+
+The owner explicitly selected `native-session-permissions-v1`: instructions to
+enrolled personal sessions are forwarded without an extra phone prompt or
+keypad approval. The authenticated live handset call, protected controller
+socket, exact enrollment, native process/session identity, host admission,
+durable dispatch intent, duplicate suppression and emergency locks still apply.
+The session keeps its native permissions; Teleagent neither changes them nor
+answers native approval requests. An unrestricted session can act immediately.
+There is no promise to classify free-form instructions into safe versus risky
+actions. Managed phone jobs remain read-only and arbitrary privileged tools
+remain unavailable.
+
+The independently attested approval protocol below remains the historical and
+unit-tested approval path. It is not the active policy for enrolled personal
+session forwarding in this release. Never forge handset evidence to implement
+the native policy; its controller-only forwarding route records no approval.
+
 ## Product shape
 
 - Extensions `1`–`6` directly select Claude Haiku/Sonnet/Opus or Codex

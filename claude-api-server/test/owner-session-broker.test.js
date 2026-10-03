@@ -143,6 +143,42 @@ test('parallel requests fail boundedly and panic remains available during inspec
   await assert.rejects(broker.inspect('os_fixture'), { code: 'OWNER_BROKER_CLOSING' });
 });
 
+test('native forwarding is enabled by host policy only and preserves exact session and RPC permissions', async (t) => {
+  const { broker, state, store } = await fixture(t);
+  const prepared = await broker.prepare({ id: 'os_fixture', operationId: 'job_native', message: 'Edit the fixture.' });
+  const input = { id: 'os_fixture', request: prepared.request };
+  await assert.rejects(broker.forward(input), { code: 'OWNER_NATIVE_DELIVERY_DISABLED' });
+  assert.throws(() => broker.forward({ ...input, nativePermissions: true }));
+  broker.nativePermissions = true; broker.authority = { epoch: 'fixture' }; broker.assertBoundary = () => {};
+  const result = await broker.forward(input);
+  assert.equal(result.state, 'accepted'); assert.equal(result.completed, false);
+  assert.deepEqual(await broker.forward(input), result);
+  const sends = state.calls.filter((call) => call.method === 'turn/start');
+  assert.equal(sends.length, 1);
+  assert.deepEqual(Object.keys(sends[0].params).sort(), ['input', 'threadId']);
+  assert.match(sends[0].params.input[0].text, /^Edit the fixture\./);
+  assert.equal(store.db.prepare('SELECT count(*) AS n FROM owner_session_replay').get().n, 0);
+  await assert.rejects(broker.forward({ ...input, request: { ...prepared.request, message: 'Changed' } }),
+    { code: 'OWNER_SESSION_IDEMPOTENCY_CONFLICT' });
+  await assert.rejects(broker.forward({ ...input, request: { ...prepared.request, sessionId: 'different' } }),
+    { code: 'OWNER_SESSION_IDENTITY_CHANGED' });
+});
+
+test('native forward rechecks admission, enrollment and locks before durable intent', async (t) => {
+  for (const failure of ['boundary', 'resource', 'identity', 'lock']) {
+    const { broker, state, store } = await fixture(t);
+    const prepared = await broker.prepare({ id: 'os_fixture', operationId: 'job_native', message: 'Review' });
+    broker.nativePermissions = true; broker.authority = {}; broker.assertBoundary = () => {};
+    if (failure === 'boundary') broker.assertBoundary = () => { throw new Error('boundary changed'); };
+    if (failure === 'resource') broker.assertAdmission = () => { throw new Error('headroom'); };
+    if (failure === 'identity') state.cwd = '/';
+    if (failure === 'lock') store.lock();
+    await assert.rejects(broker.forward({ id: 'os_fixture', request: prepared.request }));
+    assert.equal(state.calls.some((call) => call.method === 'turn/start'), false);
+    assert.equal(store.get('job_native', prepared.planHash), null);
+  }
+});
+
 async function api(t, broker, root) {
   const runtime = createOwnerSessionServer(broker);
   const socketPath = path.join(root, 'broker.sock');

@@ -15,9 +15,11 @@ function nativeClient(entry) {
 // No background polling and no unbounded queue. A single broker instance owns
 // one admission slot. Its service must also hold an exclusive lifetime lock.
 class OwnerSessionBroker {
-  constructor({ catalog, store, authority, clientFactory = nativeClient, assertAdmission = null, assertBoundary = null }) {
+  constructor({ catalog, store, authority, clientFactory = nativeClient, assertAdmission = null, assertBoundary = null,
+    nativePermissions = false }) {
     this.catalog = catalog; this.store = store; this.authority = authority;
     this.assertBoundary = assertBoundary;
+    this.nativePermissions = nativePermissions === true;
     this.clientFactory = clientFactory; this.assertAdmission = assertAdmission; this.busy = false; this.closing = false;
   }
   async serial(work) {
@@ -43,7 +45,8 @@ class OwnerSessionBroker {
       throw sessionError('OWNER_BROKER_UNAVAILABLE');
     }
     this.assertBoundary(); this.catalog.assertCurrent();
-    return { ready: true, epoch: this.authority.epoch, protocol: 'independent-pbx-owner-v1' };
+    return { ready: true, epoch: this.authority.epoch, protocol: 'independent-pbx-owner-v1',
+      deliveryPolicy: this.nativePermissions ? 'native-session-permissions-v1' : 'pbx-approval-v1' };
   }
   list() {
     // Inventory is enrollment, not a claim that every session is still running.
@@ -93,6 +96,28 @@ class OwnerSessionBroker {
         },
         authority: { publicKeys: this.authority.publicKeys,
           bindings: { ...input.approval, ...this.authority.bindings } } }));
+    });
+  }
+  forward(input) {
+    exact(input, ['id', 'request']);
+    return this.serial(async () => {
+      if (!this.nativePermissions || !this.authority || typeof this.assertBoundary !== 'function' ||
+          typeof this.assertAdmission !== 'function') throw sessionError('OWNER_NATIVE_DELIVERY_DISABLED');
+      this.assertBoundary();
+      const entry = this.catalog.get(input.id);
+      const plan = requestPlan(input.request);
+      if (plan.provider !== entry.provider || plan.sessionId !== entry.sessionId) {
+        throw sessionError('OWNER_SESSION_IDENTITY_CHANGED');
+      }
+      const previous = this.store.get(plan.operationId, hash(plan));
+      if (previous) return previous;
+      return this.session(input.id, ({ client, assertEnrolled }) => deliverOwnerSession({
+        client, store: this.store, request: input.request, nativePermissions: true,
+        beforeAdmission: () => {
+          this.assertBoundary(); assertEnrolled();
+          return this.assertAdmission(entry);
+        },
+      }));
     });
   }
   result(input) {

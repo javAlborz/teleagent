@@ -312,7 +312,7 @@ class VoiceToolController {
             // explanation can contradict it or talk over the approval audio.
             ...(result?.success === true && result.result?.state === 'pending_approval'
               ? { response_behavior: 'earcon_then_quiet' } : {}),
-            outcome_note: 'Only the independent phone prompt and a fresh pound press can authorize delivery. Accepted or submitted never proves agent completion. If status is uncertain, query this operation ID; do not resend.' };
+            outcome_note: 'The enrolled session keeps its existing native permissions and approvals. No extra phone confirmation is required. Accepted or submitted never proves agent completion. If status is uncertain, query this operation ID; do not resend.' };
         }
 
         case 'send_agent_message':

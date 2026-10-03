@@ -46,3 +46,13 @@ test('slow probes share one slot, cannot extend freshness, and do not accumulate
   const count = state.calls.length;
   await readiness.refresh(); assert.equal(state.calls.length, count);
 });
+
+test('native controller rejects an approval-only or mismatched broker policy', async () => {
+  const { state, readiness } = fixture();
+  readiness.deliveryPolicy = 'native-session-permissions-v1';
+  assert.equal(await readiness.refresh(), false);
+  state.time += 5000;
+  readiness.broker.health = async () => ({ ready: true, epoch: state.epoch,
+    protocol: 'independent-pbx-owner-v1', deliveryPolicy: 'native-session-permissions-v1' });
+  assert.equal(await readiness.refresh(), true);
+});

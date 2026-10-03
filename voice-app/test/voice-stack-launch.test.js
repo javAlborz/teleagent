@@ -517,6 +517,15 @@ test('voice activation authenticates exact authority-disabled controller health 
     phoneAuthority: { mode: 'owner_session_approval', status: 'independent_pbx_owner_configured' },
     ownerSessions: { configured: true, available: true, protocol: 'independent-pbx-owner-v1' } };
   await requireControllerReady(Buffer.alloc(32, 'a'), { request: async () => ({ status: 200, body: ownerHealth }) });
+  const nativeHealth = { ...exactHealth,
+    phoneAuthority: { mode: 'owner_session_native', status: 'native_owner_configured' },
+    ownerSessions: { configured: true, available: true, protocol: 'independent-pbx-owner-v1',
+      deliveryPolicy: 'native-session-permissions-v1' } };
+  await requireControllerReady(Buffer.alloc(32, 'a'), { request: async () => ({ status: 200, body: nativeHealth }) });
+  delete nativeHealth.ownerSessions.deliveryPolicy;
+  await assert.rejects(requireControllerReady(Buffer.alloc(32, 'a'), {
+    request: async () => ({ status: 200, body: nativeHealth }),
+  }));
   for (const field of ['configured', 'available', 'protocol']) {
     const unsafe = structuredClone(ownerHealth); unsafe.ownerSessions[field] = false;
     await assert.rejects(requireControllerReady(Buffer.alloc(32, 'a'), {

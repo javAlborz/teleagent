@@ -44,7 +44,10 @@ async function startOwnerSessionBroker() {
       authority.assertCurrent();
       if (protectedRead(enable) !== `${authority.epoch}\n`) throw sessionError('OWNER_AUTHORITY_ENABLE_INVALID');
     };
-    const broker = new OwnerSessionBroker({ catalog, store, authority, assertBoundary, assertAdmission(entry) {
+    // Signed release policy: the owner authorizes forwarding to enrolled
+    // sessions using their existing native permissions. No permission RPCs.
+    const broker = new OwnerSessionBroker({ catalog, store, authority, assertBoundary,
+      nativePermissions: true, assertAdmission(entry) {
       assertBoundary(); assertOwnerHostHeadroom(); assertOwnerProcessPool(entry.endpoint.pid);
     } });
     runtime = createOwnerSessionServer(broker);

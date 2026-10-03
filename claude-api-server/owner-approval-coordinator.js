@@ -50,7 +50,8 @@ class OwnerApprovalStore {
     return { operationId: row.operation_id, state: row.state, completed: false,
       result: row.result_json ? JSON.parse(row.result_json) : null };
   }
-  insert({ inputHash, id, sipCallHash, request, planHash }) {
+  insert({ inputHash, id, sipCallHash, request, planHash, initialState = 'pending_approval' }) {
+    if (!['pending_approval', 'dispatching'].includes(initialState)) throw sessionError('OWNER_APPROVAL_STATE_INVALID');
     this.assertWritable();
     return this.db.transaction(() => {
       this.assertUnlocked();
@@ -64,7 +65,7 @@ class OwnerApprovalStore {
       }
       this.db.prepare('INSERT INTO owner_approval_jobs VALUES(?,?,?,?,?,?,?,NULL,?,?)').run(
         request.operationId, inputHash, id, sipCallHash, canonicalJson(request), planHash,
-        'pending_approval', this.now(), this.now());
+        initialState, this.now(), this.now());
       return true;
     }).immediate();
   }
@@ -95,10 +96,11 @@ function approvalPrompt(prepared) {
 
 class OwnerApprovalCoordinator {
   constructor({ store, broker, attester, armPrivateKey, armKeyId, executionPrivateKey, executionKeyId,
-    controllerArmPublicKeys, pbxAttesterPublicKeys, now = Date.now, assertAdmission }) {
+    controllerArmPublicKeys, pbxAttesterPublicKeys, now = Date.now, assertAdmission, nativeOnly = false }) {
     if (typeof assertAdmission !== 'function') throw sessionError('OWNER_APPROVAL_ADMISSION_REQUIRED');
     this.store = store; this.broker = broker; this.attester = attester;
     this.now = now; this.assertAdmission = assertAdmission; this.active = new Map(); this.preparing = false;
+    if (nativeOnly) return;
     this.armIssuer = createPbxArmIssuer({ privateKey: armPrivateKey, keyId: armKeyId, now, ttlSeconds: 120 });
     this.armVerifier = createPbxArmVerifier({ publicKeys: controllerArmPublicKeys, now });
     this.authority = createTelecap2ControllerAuthority({ executionPrivateKey, executionKeyId,
