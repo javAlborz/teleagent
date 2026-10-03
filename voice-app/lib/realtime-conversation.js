@@ -71,6 +71,10 @@ function buildToolAudit({ call = {}, args = {}, output = {}, durationMs = 0 } = 
       status: output?.status || output?.job?.status || null,
       job_id: output?.job_id || output?.job?.job_id || null,
       end_call: Boolean(output?.end_call),
+      ...(['request_owner_instruction', 'get_owner_instruction'].includes(call.name) ? {
+        owner_operation_id: output?.operation_id || output?.result?.operationId || null,
+        owner_delivery_state: output?.result?.state || null,
+      } : {}),
     },
   };
 }

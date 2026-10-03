@@ -1319,6 +1319,11 @@ test('assistant transcript deduplication is item-scoped and tool/limit events ar
     args: { session_label: 'Telefest', id: 'os_invented', history: true, message: 'private instruction' },
     output: { success: false, code: 'OWNER_SESSION_NOT_ENROLLED' }, durationMs: 3,
   });
+  realtime.emit('tool.completed', {
+    call: { name: 'request_owner_instruction', call_id: 'owner-delivery-audit' },
+    args: { session_label: 'teletest', message: 'private instruction' },
+    output: { success: true, operation_id: 'job_example', result: { state: 'dispatching' } }, durationMs: 3,
+  });
   realtime.emit('response.clipped', {
     itemId: 'item-limited',
     responseId: 'response-limited',
@@ -1361,6 +1366,9 @@ test('assistant transcript deduplication is item-scoped and tool/limit events ar
   assert.match(ownerAudit.scope_text, /id=os_invented/);
   assert.match(ownerAudit.scope_text, /history=true/);
   assert.doesNotMatch(JSON.stringify(auditRows), /private instruction/);
+  const deliveryAudit = auditRows.find((event) => event.metadata?.tool_call_id === 'owner-delivery-audit');
+  assert.equal(deliveryAudit.metadata.owner_operation_id, 'job_example');
+  assert.equal(deliveryAudit.metadata.owner_delivery_state, 'dispatching');
 
   await fixture.dialog.destroy();
   await call;

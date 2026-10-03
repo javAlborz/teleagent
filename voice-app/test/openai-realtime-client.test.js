@@ -131,6 +131,77 @@ test('pending owner approval starts no competing model speech and other states g
   }
 });
 
+test('incorrect owner delivery audio is suppressed and speech retry never resends the instruction', async (t) => {
+  let deliveries = 0;
+  const client = await createConnectedClient({
+    capabilities: { ...require('./controller-capabilities-fixture').READY_CAPABILITIES, ownerSessionsAvailable: true },
+    toolHandler: async () => { deliveries += 1; return { success: true, result: { state: 'dispatching' } }; },
+  });
+  t.after(() => client.close());
+  const played = [];
+  client.on('audio', () => played.push('audio'));
+  client.on('audio.done', () => played.push('done'));
+  client.on('assistant_transcript', (text) => played.push(text));
+  const rejected = [];
+  client.on('response.output_rejected', (event) => rejected.push(event.reason));
+  await client._handleResponseDone({ output: [{ type: 'function_call', name: 'route_turn',
+    call_id: 'owner-request', arguments: JSON.stringify({ action: 'request_owner_instruction',
+      arguments_json: JSON.stringify({ session_label: 'teletest', message: 'ok' }) }) }] });
+  const finishSpeech = async (id, transcript) => {
+    await client._handleEvent({ type: 'response.created', response: { id } });
+    await client._handleEvent({ type: 'response.output_audio.delta', response_id: id, item_id: `item-${id}`, delta: 'AAAA' });
+    await client._handleEvent({ type: 'response.output_audio.done', response_id: id });
+    await client._handleEvent({ type: 'response.output_audio_transcript.done', response_id: id, transcript });
+    assert.deepEqual(played, [], 'no unverified audio, completion mark or transcript is released');
+    await client._handleEvent({ type: 'response.done', response: { id, status: 'completed', output: [] } });
+  };
+  await finishSpeech('wrong-status', 'I can’t send that message in the TeleTest session right now. Sorry about that!');
+  assert.deepEqual(played, []);
+  assert.deepEqual(rejected, ['owner_status_speech_mismatch']);
+  assert.ok(client.ws.sentEvents().some((event) => event.type === 'conversation.item.delete' &&
+    event.item_id === 'item-wrong-status'));
+  const retry = client.ws.sentEvents().filter((event) => event.type === 'response.create').at(-1).response;
+  assert.equal(retry.tool_choice, 'none');
+  assert.match(retry.instructions, /being sent.*not confirmed/);
+  const expected = 'Your instruction is being sent. Delivery is not confirmed yet.';
+  await finishSpeech('correct-status', expected);
+  assert.deepEqual(played, ['audio', 'done', expected]);
+  assert.equal(deliveries, 1);
+});
+
+test('owner status retries are bounded and missing transcripts or unexpected tools never leak audio or execute', async (t) => {
+  for (const output of [[], [{ type: 'function_call', name: 'request_owner_instruction', call_id: 'bad-call', arguments: '{}' }]]) {
+    let tools = 0;
+    const client = await createConnectedClient({ toolHandler: async () => { tools += 1; } });
+    t.after(() => client.close());
+    const played = [];
+    client.on('audio', (event) => played.push(event));
+    client._requestOwnerStatusSpeech('This instruction was not sent.');
+    for (const id of ['first', 'retry']) {
+      await client._handleEvent({ type: 'response.created', response: { id } });
+      await client._handleEvent({ type: 'response.output_audio.delta', response_id: id, delta: 'AAAA' });
+      await client._handleEvent({ type: 'response.done', response: { id, status: 'completed', output } });
+    }
+    assert.equal(client.ws.sentEvents().filter((event) => event.type === 'response.create').length, 2);
+    assert.equal(client.responseActive, false);
+    assert.deepEqual(played, []);
+    assert.equal(tools, 0);
+  }
+});
+
+test('interrupted owner status is discarded without a speech retry', async (t) => {
+  const client = await createConnectedClient();
+  t.after(() => client.close());
+  const played = [];
+  client.on('audio', (event) => played.push(event));
+  client._requestOwnerStatusSpeech('This instruction was not sent.');
+  await client._handleEvent({ type: 'response.created', response: { id: 'interrupted' } });
+  await client._handleEvent({ type: 'response.output_audio.delta', response_id: 'interrupted', delta: 'AAAA' });
+  await client._handleEvent({ type: 'response.done', response: { id: 'interrupted', status: 'cancelled', output: [] } });
+  assert.equal(client.ws.sentEvents().filter((event) => event.type === 'response.create').length, 1);
+  assert.deepEqual(played, []);
+});
+
 test('native readback identifies a missing new reply without treating the old answer as completion', async (t) => {
   const capabilities = { ...require('./controller-capabilities-fixture').READY_CAPABILITIES, ownerSessionsAvailable: true };
   const client = await createConnectedClient({ capabilities, toolHandler: async () => ({ success: true,

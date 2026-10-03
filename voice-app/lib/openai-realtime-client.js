@@ -589,6 +589,9 @@ class OpenAIRealtimeClient extends EventEmitter {
     this.activeResponseId = null;
     this.activeNotice = null;
     this.nextNotice = null;
+    this.nextVerifiedSpeech = null;
+    this.activeVerifiedSpeech = null;
+    this.bufferedAudioDone = new Map();
     this.eventSequence = 0;
   }
 
@@ -623,6 +626,7 @@ class OpenAIRealtimeClient extends EventEmitter {
     const audioBytes = audio.reduce((total, entry) => total + entry.audio.length, 0);
     this.bufferedResponseAudio.delete(responseId);
     this.bufferedAssistantTranscripts.delete(responseId);
+    this.bufferedAudioDone.delete(responseId);
     if (markSuppressed) this.suppressedResponseIds.add(responseId);
     if (audioBytes > 0 || transcripts.length > 0) {
       this.emit('response.output_suppressed', {
@@ -646,7 +650,14 @@ class OpenAIRealtimeClient extends EventEmitter {
       .join('\n')
       .trim();
     let validation = { allowed: true };
-    if (calls.length === 0 && transcript && typeof this.responseValidator === 'function') {
+    const verifiedSpeech = this.activeVerifiedSpeech;
+    // A prompt is not proof of what was spoken. Delivery acknowledgements
+    // must match the app-owned state before any of their audio reaches SIP.
+    const words = (text) => String(text).toLowerCase().match(/[a-z0-9]+/g)?.join(' ') || '';
+    if (verifiedSpeech && (calls.length > 0 || words(transcript) !== words(verifiedSpeech.text))) {
+      validation = { allowed: false, reason: 'owner_status_speech_mismatch' };
+    }
+    if (validation.allowed && calls.length === 0 && transcript && typeof this.responseValidator === 'function') {
       const result = this.responseValidator({
         response,
         responseId,
@@ -663,6 +674,14 @@ class OpenAIRealtimeClient extends EventEmitter {
     );
 
     if (shouldDiscard) {
+      if (rejected && verifiedSpeech) {
+        // Do not leave an unheard false status in the model's future context.
+        const itemIds = new Set([
+          ...(this.bufferedResponseAudio.get(responseId) || []).map((entry) => entry.itemId),
+          ...(this.bufferedAssistantTranscripts.get(responseId) || []).map((entry) => entry.event.item_id),
+        ].filter(Boolean));
+        for (const itemId of itemIds) this.deleteConversationItem(itemId);
+      }
       this._discardBufferedResponse(
         responseId,
         calls.length > 0
@@ -673,6 +692,10 @@ class OpenAIRealtimeClient extends EventEmitter {
     } else {
       for (const output of this.bufferedResponseAudio.get(responseId) || []) {
         this.emit('audio', output);
+      }
+      if (this.bufferedAudioDone.has(responseId)) {
+        this.emit('audio.done', this.bufferedAudioDone.get(responseId));
+        this.bufferedAudioDone.delete(responseId);
       }
       for (const output of this.bufferedAssistantTranscripts.get(responseId) || []) {
         this.emit('assistant_transcript', output.transcript, output.event);
@@ -695,6 +718,9 @@ class OpenAIRealtimeClient extends EventEmitter {
       rejected,
       retryInstructions: validation.retryInstructions || null,
       retryPurpose: validation.retryPurpose || 'validation_retry',
+      retrySpeech: rejected && verifiedSpeech && verifiedSpeech.attempt === 0 &&
+        status === 'completed' && !wasSuppressed && !this.userSpeaking && !this.pendingUserResponse
+        ? { text: verifiedSpeech.text, attempt: 1 } : null,
     };
   }
 
@@ -868,7 +894,7 @@ class OpenAIRealtimeClient extends EventEmitter {
     return true;
   }
 
-  requestResponse(response = undefined, { purpose = 'general', notice = null } = {}) {
+  requestResponse(response = undefined, { purpose = 'general', notice = null, verifiedSpeech = null } = {}) {
     if (this.responseActive) return false;
     const event = {
       event_id: this._nextEventId('response'),
@@ -878,8 +904,15 @@ class OpenAIRealtimeClient extends EventEmitter {
     this.responseActive = true;
     this.nextResponsePurpose = purpose;
     this.nextNotice = notice;
+    this.nextVerifiedSpeech = verifiedSpeech;
     this.sendEvent(event);
     return true;
+  }
+
+  _requestOwnerStatusSpeech(text, attempt = 0) {
+    return this.requestResponse({ output_modalities: ['audio'], tool_choice: 'none',
+      instructions: `Read this application-verified delivery status verbatim. Do not answer the caller again or infer another outcome. Say exactly: ${JSON.stringify(text)}`,
+    }, { purpose: 'tool_result', verifiedSpeech: { text, attempt } });
   }
 
   requestRoutedResponse({ purpose = 'user_turn' } = {}) {
@@ -990,6 +1023,9 @@ class OpenAIRealtimeClient extends EventEmitter {
     this.pendingNotices = [];
     this.activeNotice = null;
     this.nextNotice = null;
+    this.nextVerifiedSpeech = null;
+    this.activeVerifiedSpeech = null;
+    this.bufferedAudioDone.clear();
     if (!this.ws) return;
     const openState = this.WebSocketImpl.OPEN ?? WebSocket.OPEN;
     const connectingState = this.WebSocketImpl.CONNECTING ?? WebSocket.CONNECTING;
@@ -1038,6 +1074,8 @@ class OpenAIRealtimeClient extends EventEmitter {
         this.activeResponseId = event.response?.id || null;
         this.activeNotice = this.nextNotice;
         this.nextNotice = null;
+        this.activeVerifiedSpeech = this.nextVerifiedSpeech;
+        this.nextVerifiedSpeech = null;
         this.emit('response.created', event.response || {}, {
           purpose: this.activeResponsePurpose,
         });
@@ -1046,7 +1084,7 @@ class OpenAIRealtimeClient extends EventEmitter {
       case 'response.output_audio.delta':
         if (event.delta) {
           const audio = Buffer.from(event.delta, 'base64');
-          if (responseMaySelectTool(this.activeResponsePurpose)) this._bufferAudio(event, audio);
+          if (this.activeVerifiedSpeech || responseMaySelectTool(this.activeResponsePurpose)) this._bufferAudio(event, audio);
           else {
             this.emit('audio', {
               audio,
@@ -1061,7 +1099,8 @@ class OpenAIRealtimeClient extends EventEmitter {
         // This is the authoritative upstream boundary: all audio deltas for
         // the exact response item have been emitted by Realtime. Handset
         // authorization still waits for a separate downstream playout mark.
-        this.emit('audio.done', event);
+        if (this.activeVerifiedSpeech) this.bufferedAudioDone.set(this._responseKey(event), event);
+        else this.emit('audio.done', event);
         break;
 
       case 'response.output_audio_transcript.delta': {
@@ -1094,7 +1133,7 @@ class OpenAIRealtimeClient extends EventEmitter {
         this.outputTranscripts.delete(key);
         this.clippedResponses.delete(key);
         if (transcript) {
-          if (responseMaySelectTool(this.activeResponsePurpose)) {
+          if (this.activeVerifiedSpeech || responseMaySelectTool(this.activeResponsePurpose)) {
             this._bufferAssistantTranscript(event, transcript);
           } else {
             this.emit('assistant_transcript', transcript, event);
@@ -1122,13 +1161,18 @@ class OpenAIRealtimeClient extends EventEmitter {
           this.activeResponsePurpose = null;
           this.activeResponseId = null;
           this.activeNotice = null;
-          if (finalization.rejected && finalization.retryInstructions) {
+          this.activeVerifiedSpeech = null;
+          if (finalization.retrySpeech) {
+            this._requestOwnerStatusSpeech(finalization.retrySpeech.text, finalization.retrySpeech.attempt);
+          } else if (finalization.rejected && finalization.retryInstructions) {
             this.requestResponse({
               instructions: finalization.retryInstructions,
               tool_choice: 'auto',
             }, { purpose: finalization.retryPurpose });
           } else {
-            await this._handleResponseDone(event.response || {}, completedPurpose);
+            // Rejected speech must never execute an unexpected function call.
+            await this._handleResponseDone(finalization.rejected
+              ? { ...(event.response || {}), output: [] } : (event.response || {}), completedPurpose);
           }
           if (completedNotice) {
             if (completedStatus === 'completed' && !finalization.rejected) {
@@ -1200,9 +1244,7 @@ class OpenAIRealtimeClient extends EventEmitter {
       }[ownerStatus];
       if (ownerStatusSpeech && !(handledCalls[0].action === 'request_owner_instruction' &&
           ownerStatus === 'pending_approval')) {
-        this.requestResponse({ output_modalities: ['audio'], tool_choice: 'none',
-          instructions: `Say exactly this status and nothing else: ${JSON.stringify(ownerStatusSpeech)}`,
-        }, { purpose: 'tool_result' });
+        this._requestOwnerStatusSpeech(ownerStatusSpeech);
         return;
       }
       const behaviors = outputs.map((output) => output?.response_behavior).filter(Boolean);
