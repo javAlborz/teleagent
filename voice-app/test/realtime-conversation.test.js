@@ -1324,6 +1324,13 @@ test('assistant transcript deduplication is item-scoped and tool/limit events ar
     args: { session_label: 'teletest', message: 'private instruction' },
     output: { success: true, operation_id: 'job_example', result: { state: 'dispatching' } }, durationMs: 3,
   });
+  realtime.emit('tool.completed', {
+    call: { name: 'inspect_owner_session', call_id: 'owner-read-audit' },
+    args: { session_label: 'teletest', history: true },
+    output: { success: true, result: { history: { latestTurn: {
+      status: 'completed', reply: { role: 'assistant', text: 'PRIVATE_NATIVE_REPLY' },
+    } } } }, durationMs: 3,
+  });
   realtime.emit('response.clipped', {
     itemId: 'item-limited',
     responseId: 'response-limited',
@@ -1369,6 +1376,11 @@ test('assistant transcript deduplication is item-scoped and tool/limit events ar
   const deliveryAudit = auditRows.find((event) => event.metadata?.tool_call_id === 'owner-delivery-audit');
   assert.equal(deliveryAudit.metadata.owner_operation_id, 'job_example');
   assert.equal(deliveryAudit.metadata.owner_delivery_state, 'dispatching');
+  const readAudit = auditRows.find((event) => event.metadata?.tool_call_id === 'owner-read-audit');
+  assert.equal(readAudit.metadata.owner_history_returned, true);
+  assert.equal(readAudit.metadata.owner_latest_turn_status, 'completed');
+  assert.equal(readAudit.metadata.owner_latest_reply_present, true);
+  assert.doesNotMatch(JSON.stringify(auditRows), /PRIVATE_NATIVE_REPLY/);
 
   await fixture.dialog.destroy();
   await call;
