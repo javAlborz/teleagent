@@ -99,10 +99,23 @@ test('one named instruction action requests real-call approval and preserves the
   const result = await controller.handle('request_owner_instruction',
     { session_label: 'Teletest', message, approved: true, sipCallId: 'forged' }, { callId: 'real-tool' });
   assert.equal(result.result.state, 'pending_approval');
+  assert.equal(result.response_behavior, 'earcon_then_quiet');
   assert.equal(result.completed, false);
   assert.deepEqual(calls.map(c => c.action), ['list', 'request']);
   assert.deepEqual(calls[1].body, { id: 'os_teletest', message,
     operationId: result.operation_id, sipCallId: 'real-call@pbx' });
+});
+
+test('owner request errors and other delivery states are not silenced as pending approval', async (t) => {
+  for (const response of [{ success: false, code: 'OWNER_APPROVAL_BUSY' },
+    { success: true, result: { state: 'accepted' } }, { success: true, result: { state: 'outcome_unknown' } }]) {
+    const { controller } = configureNamedOwner(t);
+    controller.agentBridge.ownerSessionAction = async () => response;
+    const result = await controller.handle('request_owner_instruction',
+      { id: 'os_teletest', message: 'Review' }, { callId: 'status-test' });
+    assert.equal(result.response_behavior, undefined);
+    assert.equal(result.success, response.success);
+  }
 });
 
 test('unknown or ambiguous labels never inspect or request an instruction', async (t) => {

@@ -105,6 +105,49 @@ test('a single named-session route resolves and reads native history before spee
   assert.match(JSON.stringify(speech), /Native test answer/);
 });
 
+test('pending owner approval starts no competing model speech and other states get precise status', async (t) => {
+  const capabilities = { ...require('./controller-capabilities-fixture').READY_CAPABILITIES, ownerSessionsAvailable: true };
+  for (const [state, expected] of [
+    ['pending_approval', null], ['accepted', /accepted your instruction.*not confirmed/],
+    ['dispatching', /being sent.*not confirmed/], ['submitted_unconfirmed', /acceptance is not confirmed/],
+    ['outcome_unknown', /Delivery is uncertain/], ['refused', /was not sent/],
+  ]) {
+    const client = await createConnectedClient({ capabilities,
+      toolHandler: async () => ({ success: true, result: { state },
+        ...(state === 'pending_approval' ? { response_behavior: 'earcon_then_quiet' } : {}) }) });
+    t.after(() => client.close());
+    const before = client.ws.sentEvents().filter((event) => event.type === 'response.create').length;
+    await client._handleResponseDone({ output: [{ type: 'function_call', name: 'route_turn',
+      call_id: 'owner-request', arguments: JSON.stringify({ action: 'request_owner_instruction',
+        arguments_json: JSON.stringify({ session_label: 'teletest', message: 'Review' }) }) }] });
+    const responses = client.ws.sentEvents().filter((event) => event.type === 'response.create');
+    if (expected === null) assert.equal(responses.length, before);
+    else {
+      assert.equal(responses.length, before + 1);
+      assert.match(responses.at(-1).response.instructions, expected);
+      assert.equal(responses.at(-1).response.tool_choice, 'none');
+      assert.doesNotMatch(responses.at(-1).response.instructions, /read.only|Be concise/);
+    }
+  }
+});
+
+test('native readback identifies a missing new reply without treating the old answer as completion', async (t) => {
+  const capabilities = { ...require('./controller-capabilities-fixture').READY_CAPABILITIES, ownerSessionsAvailable: true };
+  const client = await createConnectedClient({ capabilities, toolHandler: async () => ({ success: true,
+    result: { history: { messages: [{ role: 'assistant', text: 'Old test complete.' }],
+      latestTurn: { status: 'inProgress', reply: null } } } }) });
+  t.after(() => client.close());
+  await client._handleResponseDone({ output: [{ type: 'function_call', name: 'route_turn', call_id: 'read-latest',
+    arguments: JSON.stringify({ action: 'inspect_owner_session',
+      arguments_json: JSON.stringify({ session_label: 'teletest', history: true }) }) }] });
+  const speech = client.ws.sentEvents().at(-1).response;
+  assert.equal(speech.tool_choice, 'none');
+  assert.match(speech.instructions, /latestTurn.*inProgress/);
+  assert.match(speech.instructions, /never substitute an older message/);
+  assert.match(speech.instructions, /null reply means there is no reply yet/);
+  assert.doesNotMatch(speech.instructions, /Old test complete/);
+});
+
 test('hidden and direct unclassified function calls cannot bypass capability filtering', async (t) => {
   let invoked = 0;
   const client = await createConnectedClient({
