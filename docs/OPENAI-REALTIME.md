@@ -334,3 +334,20 @@ worker's tmux scope. Tool audits retain the bounded, redacted selector and error
 code, but never instruction text or native conversation contents. Instruction
 delivery still requires the independent PBX readback and fresh handset approval
 on an authenticated SRTP call.
+
+
+### Personal-session follow-ups
+
+Named membership questions use `list_owner_sessions` with `session_label`.
+The app speaks a verified enrollment result; it does not imply native liveness.
+List and delivery-status speech are checked before audio reaches SIP.
+
+The router receives up to 32 application-owned instruction references from the
+current call, with stable send order, target label and operation ID. This keeps
+“the first message” distinct from the latest message after multiple sends.
+References contain no message text, grant no authority, and require a fresh
+`get_owner_instruction` lookup. Older dropped references and ambiguous requests
+require clarification; they never trigger a resend. Explicit membership and ordinal-delivery questions have a narrow read-only
+routing rule, bound to the completed caller turn. Short follow-ups use the last
+queried operation only while that delivery remains the focus. These rules never
+select a send action. A new call starts without these references. Acceptance still does not prove that the native agent finished.

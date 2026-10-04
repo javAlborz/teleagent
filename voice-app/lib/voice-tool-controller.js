@@ -131,6 +131,19 @@ class VoiceToolController {
     }
   }
 
+  async _listOwnerSessions(args) {
+    const sessions = await this._ownerSessionInventory();
+    const label = args.session_label;
+    if (label !== undefined && (typeof label !== 'string' ||
+        !/^[A-Za-z0-9][A-Za-z0-9 ._-]{0,79}$/.test(label.trim()))) {
+      return { success: false, code: 'OWNER_SESSION_TARGET_INVALID' };
+    }
+    const normalize = (value) => value.toLowerCase().replace(/\s+/g, '');
+    const matches = label === undefined ? sessions : sessions.filter(s => normalize(s.label) === normalize(label));
+    return { success: true, result: { sessions: matches.map(({ id, label: name, provider }) =>
+      ({ id, label: name, provider, availability: 'unchecked' })), query_label: label?.trim() || null } };
+  }
+
   async _ownerSessionId(args) {
     const failure = (code, message) => ({ failure: { success: false, code, message } });
     const hasId = Object.hasOwn(args, 'id');
@@ -287,7 +300,7 @@ class VoiceToolController {
       if (!isToolAvailable(name, this.capabilities)) return unavailableResult(name, this.capabilities);
       switch (name) {
         case 'list_owner_sessions':
-          return this.agentBridge.ownerSessionAction('list', {});
+          return this._listOwnerSessions(args);
         case 'inspect_owner_session': {
           const target = await this._ownerSessionId(args);
           if (target.failure) return target.failure;

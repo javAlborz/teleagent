@@ -688,3 +688,20 @@ test('owner context never exports an unverified inventory or private transport e
   controller.agentBridge.ownerSessionAction = async () => assert.fail('disabled context must not inspect');
   assert.deepEqual(await controller.ownerSessionContext(), { available: false, labels: [] });
 });
+
+
+test('named membership checks use verified enrollment and never inspect or send', async (t) => {
+  const { controller, calls } = configureNamedOwner(t, [{ id: 'os_phone', label: 'phoneA', provider: 'codex' }]);
+  const found = await controller.handle('list_owner_sessions', { session_label: 'Phone A' });
+  assert.equal(found.success, true);
+  assert.equal(found.result.query_label, 'Phone A');
+  assert.deepEqual(found.result.sessions, [{ id: 'os_phone', label: 'phoneA', provider: 'codex', availability: 'unchecked' }]);
+  const absent = await controller.handle('list_owner_sessions', { session_label: 'unknown' });
+  assert.deepEqual(absent.result.sessions, []);
+  assert.equal((await controller.handle('list_owner_sessions', { session_label: {} })).success, false);
+  assert.ok(calls.every(c => c.action === 'list'));
+  controller.agentBridge.ownerSessionAction = async () => ({ success: false, error: 'private detail' });
+  const failed = await controller.handle('list_owner_sessions', {});
+  assert.equal(failed.code, 'OWNER_SESSION_INVENTORY_UNAVAILABLE');
+  assert.doesNotMatch(JSON.stringify(failed), /private detail/);
+});
