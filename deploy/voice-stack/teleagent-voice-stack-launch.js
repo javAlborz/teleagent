@@ -1074,7 +1074,11 @@ function releaseHostVoiceStart(activationGeneration, lifecycleFd) {
   }
 }
 
-function publishContainerAdmission(ownership, lifecycleFd, stage) {
+function publishContainerAdmission(ownership, lifecycleFd, stage, {
+  runAdmission = spawnSync,
+  inspectPublisher = inspectRootPath,
+  verifyPlacement = verifyProtectedPlacement,
+} = {}) {
   if (!Number.isSafeInteger(lifecycleFd) || lifecycleFd < 3 ||
       !['created', 'running'].includes(stage) ||
       !Number.isSafeInteger(ownership?.activationGeneration) ||
@@ -1082,16 +1086,21 @@ function publishContainerAdmission(ownership, lifecycleFd, stage) {
       ownership.services.length !== VOICE_SERVICES.length) {
     refuse('media placement admission has no retained ownership or lifecycle lock');
   }
-  inspectRootPath(MEDIA_APPLICATION_PUBLISHER, { mode: 0o555, nlink: 1 });
-  const result = spawnSync(MEDIA_APPLICATION_PUBLISHER,
+  inspectPublisher(MEDIA_APPLICATION_PUBLISHER, { mode: 0o555, nlink: 1 });
+  // Running admission repeats the retained process/namespace proof before
+  // committing it. Under the one-CPU service quota that can exceed 30 seconds.
+  // Keep a fixed bound within the service's five-minute startup deadline.
+  const result = runAdmission(MEDIA_APPLICATION_PUBLISHER,
     [stage, String(ownership.activationGeneration)], {
-      encoding: 'utf8', timeout: 30000, maxBuffer: 8192,
+      encoding: 'utf8', timeout: stage === 'running' ? 90000 : 30000, maxBuffer: 8192,
       env: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C', LC_ALL: 'C' },
       stdio: ['ignore', 'pipe', 'pipe', lifecycleFd],
     });
   if (result.error || result.status !== 0 ||
       Buffer.byteLength(result.stdout || '') > 4096) {
-    refuse('independent media placement admission refused');
+    refuse(result.error?.code === 'ETIMEDOUT' ?
+      'independent media placement admission timed out' :
+      'independent media placement admission refused');
   }
   let admitted;
   try { admitted = JSON.parse(result.stdout); } catch {
@@ -1112,7 +1121,7 @@ function publishContainerAdmission(ownership, lifecycleFd, stage) {
   const placements = Object.fromEntries(ownership.services
     .filter((row) => row.service !== 'voice-runtime-preflight')
     .map((row) => [row.service, row.containerId]));
-  verifyProtectedPlacement(APP_ROOT, placements, stage, {
+  verifyPlacement(APP_ROOT, placements, stage, {
     lifecycleFd, hostEvidenceDigest: admitted.observationDigest,
   });
   return admitted.observationDigest;
@@ -2047,6 +2056,7 @@ async function main() {
 }
 
 module.exports = {
+  publishContainerAdmission,
   assertPanicQuiesced,
   assertVoiceExit,
   activationGenerationForTransition,
