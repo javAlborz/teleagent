@@ -1068,3 +1068,58 @@ test('a completed explicit read turn overrides a mistaken respond route without 
   assert.equal(client.pendingOwnerReadRoute, null);
   assert.equal(client.focusedOwnerOperation, operation);
 });
+
+
+test('reply follow-ups select the focused native session and keep delivery queries separate', () => {
+  const operation = 'job_' + '1'.repeat(64);
+  const refs = [{ send_number: 1, session_label: 'drizzy', operation_id: operation }];
+  for (const text of ['Did it reply?', 'Has it replied yet?', 'I sure did it reply?',
+    "So there's no output still. Could you recheck?", 'Any output?', 'Read its latest reply.',
+    'Has it answered yet?', 'Can you see whether it has written an answer yet?']) {
+    assert.deepEqual(ownerReadRoute(text, refs, 'get_owner_instruction', operation),
+      { action: 'inspect_owner_session', args: { session_label: 'drizzy', history: true } });
+  }
+  assert.equal(ownerReadRoute('Did it arrive?', refs, 'get_owner_instruction', operation).action, 'get_owner_instruction');
+  for (const text of ['What about now?', 'Could you recheck?', 'Recheck.']) {
+    assert.deepEqual(ownerReadRoute(text, refs, 'inspect_owner_session', null, 'phoneA'),
+      { action: 'inspect_owner_session', args: { session_label: 'phoneA', history: true } });
+  }
+  for (const text of ['Do not read its reply.', 'Send drizzy: did it reply?', 'Did it reply and send it hello?',
+    'Did another session reply?', 'Read its reply then deploy.'])
+    assert.equal(ownerReadRoute(text, refs, 'get_owner_instruction', operation), null);
+  assert.equal(ownerReadRoute('Did it reply?', refs), null, 'must not guess the last reference');
+  assert.equal(ownerReadRoute('Did it reply?', refs, null, operation, 'drizzy'), null, 'unrelated turns clear focus');
+});
+
+test('attended reply follow-ups override stale receipt routes and re-read only the newest native turn', async (t) => {
+  const capabilities = { ...require('./controller-capabilities-fixture').READY_CAPABILITIES, ownerSessionsAvailable: true };
+  const calls = [], operation = 'job_' + '1'.repeat(64);
+  let latestTurn = { status: 'inProgress', reply: null };
+  const client = await createConnectedClient({ capabilities, toolHandler: async (name, args) => {
+    calls.push({ name, args });
+    assert.equal(name, 'inspect_owner_session');
+    return { success: true, result: { label: 'drizzy', history: { latestTurn,
+      messages: [{ role: 'assistant', text: 'STALE ANSWER' }] } } };
+  } });t.after(() => client.close());
+  client.ownerInstructionReferences = [{ send_number: 1, session_label: 'drizzy', operation_id: operation }];
+  client.lastOwnerAction = 'get_owner_instruction';client.focusedOwnerOperation = operation;
+  for (const [index, transcript] of ['I sure did it reply?', "So there's no output still. Could you recheck?", 'What about now?'].entries()) {
+    client.latestUserTranscript = transcript;
+    client.requestRoutedResponse();
+    await client._handleEvent({ type: 'response.created', response: { id: 'reply-route-' + index } });
+    await client._handleEvent({ type: 'response.done', response: { id: 'reply-route-' + index, status: 'completed',
+      output: [{ type: 'function_call', name: 'route_turn', call_id: 'reply-' + index,
+        arguments: JSON.stringify({ action: 'get_owner_instruction', arguments_json: JSON.stringify({ operation_id: operation }) }) }] } });
+    const speech = client.ws.sentEvents().at(-1).response;
+    assert.deepEqual(speech.input, []);assert.deepEqual(speech.tools, []);assert.equal(speech.tool_choice, 'none');
+    assert.deepEqual(JSON.parse(speech.instructions.split('Native read result: ')[1]), { label: 'drizzy', latestTurn });
+    assert.doesNotMatch(speech.instructions, /STALE ANSWER/);
+    assert.equal(client.focusedOwnerSession, 'drizzy');assert.equal(client.lastOwnerAction, 'inspect_owner_session');
+    // Complete the synthetic speech response before the next caller turn.
+    client.responseActive = false;
+    latestTurn = { status: 'completed', reply: { role: 'assistant', text: 'v61 ready', clipped: false } };
+  }
+  assert.deepEqual(calls, Array(3).fill({ name: 'inspect_owner_session', args: { session_label: 'drizzy', history: true } }));
+  await client._handleToolCall({ name: 'respond', call_id: 'unrelated', arguments: '{}' }, { sendOutput: false });
+  assert.equal(client.focusedOwnerSession, null);
+});

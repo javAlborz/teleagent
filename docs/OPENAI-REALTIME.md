@@ -351,3 +351,10 @@ require clarification; they never trigger a resend. Explicit membership and ordi
 routing rule, bound to the completed caller turn. Short follow-ups use the last
 queried operation only while that delivery remains the focus. These rules never
 select a send action. A new call starts without these references. Acceptance still does not prove that the native agent finished.
+
+Reply and output questions instead use `inspect_owner_session` with `history`
+enabled. The focused session comes from a successful send/status/read, and the
+application resolves its label against fresh enrollment. After a reply read,
+“what about now?” and “recheck” inspect the same session again. An unrelated or
+failed action clears that focus. Each read speaks only the newest native turn;
+an accepted delivery receipt is never used as evidence that no reply exists.
