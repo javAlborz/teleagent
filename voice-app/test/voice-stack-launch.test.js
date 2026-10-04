@@ -10,6 +10,7 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const {
+  publishContainerAdmission,
   assertPanicQuiesced,
   assertVoiceExit,
   activationGenerationForTransition,
@@ -49,6 +50,44 @@ const {
   MAX_CONTROL_RESPONSE_BYTES,
 } = require('../../deploy/voice-stack/teleagent-voice-stack-launch');
 const voiceAppRuntimeContract = require('../../lib/voice-app-runtime-env');
+
+test('running admission keeps a bounded process-proof budget and verifies committed evidence', () => {
+  const ownership = { activationGeneration: 68, services: [
+    'drachtio', 'freeswitch', 'voice-app', 'voice-runtime-preflight',
+  ].map((service) => ({ service, containerId: service })) };
+  const digest = `sha256:${'a'.repeat(64)}`;
+  let verified = false;
+  const dependencies = {
+    inspectPublisher: () => {},
+    runAdmission: (program, args, options) => {
+      assert.deepEqual(args, ['running', '68']);
+      assert.ok(options.timeout > 30000 && options.timeout < 120000);
+      assert.deepEqual(options.stdio, ['ignore', 'pipe', 'pipe', 7]);
+      return { status: 0, stdout: JSON.stringify({ phase: 'running', applicationStarted: true,
+        processPlacementAdmitted: true, runtimePublished: false,
+        contractDigest: digest, observationDigest: digest }) };
+    },
+    verifyPlacement: (root, placements, stage, evidence) => {
+      assert.equal(stage, 'running');
+      assert.deepEqual(Object.keys(placements).sort(), ['drachtio', 'freeswitch', 'voice-app']);
+      assert.deepEqual(evidence, { lifecycleFd: 7, hostEvidenceDigest: digest });
+      verified = true;
+    },
+  };
+  assert.equal(publishContainerAdmission(ownership, 7, 'running', dependencies), digest);
+  assert.equal(verified, true);
+  for (const [result, error] of [
+    [{ status: null, error: { code: 'ETIMEDOUT' } }, /admission timed out/],
+    [{ status: 77, stderr: 'secret diagnostic' }, /admission refused/],
+    [{ status: 0, stdout: '{}' }, /unexpected evidence/],
+  ]) {
+    verified = false;
+    assert.throws(() => publishContainerAdmission(ownership, 7, 'running', {
+      ...dependencies, runAdmission: () => result,
+    }), error);
+    assert.equal(verified, false);
+  }
+});
 
 test('voice startup checks only the configured agent providers', () => {
   assert.deepEqual(selectedProviderChecks({ AGENT_PROVIDERS: 'codex' }), ['codex']);
