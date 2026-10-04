@@ -10,6 +10,7 @@ const {
   buildRealtimeRouterTool,
   buildRealtimeTools,
   getRealtimeApiKey,
+  ownerReadRoute,
 } = require('../lib/openai-realtime-client');
 
 class FakeWebSocket extends EventEmitter {
@@ -969,4 +970,101 @@ test('unknown owner names can ask a clarification in the speech stage without an
   assert.equal(speech.tool_choice, 'none');
   assert.match(speech.instructions, /ask one short question using available_session_labels/);
   assert.match(speech.instructions, /teletest/);
+});
+
+
+test('named enrollment speech is verified and excludes earlier false refusals', async (t) => {
+  const capabilities = { ...require('./controller-capabilities-fixture').READY_CAPABILITIES, ownerSessionsAvailable: true };
+  const client = await createConnectedClient({ capabilities, toolHandler: async () => ({ success: true,
+    result: { query_label: 'phone A', sessions: [{ label: 'phoneA', provider: 'codex' }] } }) });
+  t.after(() => client.close());
+  client.queueUserResponse();
+  client.ws.serverSend({ type: 'response.created', response: { id: 'membership-route' } });
+  client.ws.serverSend({ type: 'response.done', response: { id: 'membership-route', status: 'completed',
+    output: [{ type: 'function_call', name: 'route_turn', call_id: 'membership-tool', arguments: JSON.stringify({
+      action: 'list_owner_sessions', arguments_json: JSON.stringify({ session_label: 'phone A' }),
+    }) }] } });
+  await new Promise(resolve => setImmediate(resolve));
+  const speech = client.ws.sentEvents().at(-1).response;
+  assert.deepEqual(speech.input, []);
+  assert.deepEqual(speech.tools, []);
+  assert.match(speech.instructions, /Yes, phoneA is an enrolled personal session/);
+  assert.equal(client.nextVerifiedSpeech.text, 'Yes, phoneA is an enrolled personal session.');
+  client.ws.serverSend({ type: 'response.created', response: { id: 'membership-speech' } });
+  const audio = []; client.on('audio', e => audio.push(e));
+  client.ws.serverSend({ type: 'response.output_audio.delta', response_id: 'membership-speech', item_id: 'membership-audio', delta: Buffer.from([1, 2]).toString('base64') });
+  client.ws.serverSend({ type: 'response.output_audio_transcript.done', response_id: 'membership-speech', item_id: 'membership-audio', transcript: 'I cannot confirm that from here.' });
+  client.ws.serverSend({ type: 'response.done', response: { id: 'membership-speech', status: 'completed', output: [] } });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(audio.length, 0);
+  assert.equal(client.nextVerifiedSpeech.attempt, 1);
+});
+
+test('delivery references survive routed tools, distinguish first from latest, and never contain message text', async (t) => {
+  const capabilities = { ...require('./controller-capabilities-fixture').READY_CAPABILITIES, ownerSessionsAvailable: true };
+  const calls = [];
+  const client = await createConnectedClient({ capabilities, toolHandler: async (name, args) => {
+    calls.push({ name, args });
+    return name === 'request_owner_instruction' ? { success: true, operation_id: 'job_' + (args.session_label === 'drizzy' ? '1' : '2').repeat(64), result: { state: 'dispatching' } }
+      : { success: true, result: { state: 'accepted' } };
+  } });
+  t.after(() => client.close());
+  for (const label of ['drizzy', 'phoneA']) await client._handleToolCall({ name: 'route_turn', call_id: label,
+    arguments: JSON.stringify({ action: 'request_owner_instruction', arguments_json: JSON.stringify({ session_label: label, message: 'PRIVATE MESSAGE' }) }) }, { sendOutput: false });
+  assert.equal(client.ownerInstructionReferences.length, 2);
+  client.requestRoutedResponse();
+  const route = client.ws.sentEvents().at(-1).response;
+  assert.match(route.instructions, /get_owner_instruction/);
+  assert.match(route.instructions, /send_number 1, not the latest/);
+  assert.ok(route.instructions.includes('job_' + '1'.repeat(64)));
+  assert.ok(route.instructions.includes('job_' + '2'.repeat(64)));
+  assert.doesNotMatch(route.instructions, /PRIVATE MESSAGE/);
+  const read = await client._handleToolCall({ name: 'get_owner_instruction', call_id: 'first-status', arguments: JSON.stringify({ operation_id: client.ownerInstructionReferences[0].operation_id }) });
+  assert.equal(read.output.result.state, 'accepted');
+  assert.deepEqual(calls.map(c => c.name), ['request_owner_instruction', 'request_owner_instruction', 'get_owner_instruction']);
+  const other = await createConnectedClient({ capabilities });t.after(() => other.close());
+  assert.deepEqual(other.ownerInstructionReferences, []);
+});
+
+test('instruction routing memory is bounded and does not renumber dropped references', async (t) => {
+  const capabilities = { ...require('./controller-capabilities-fixture').READY_CAPABILITIES, ownerSessionsAvailable: true };
+  const client = await createConnectedClient({ capabilities, toolHandler: async (name, args) => ({ success: true,
+    operation_id: 'job_' + args.message.padStart(64, '0'), result: { state: 'outcome_unknown' } }) });
+  t.after(() => client.close());
+  for (let i = 1; i <= 33; i++) await client._handleToolCall({ name: 'request_owner_instruction', call_id: 'ref-' + i,
+    arguments: JSON.stringify({ session_label: 'drizzy', message: i.toString(16) }) }, { sendOutput: false });
+  assert.equal(client.ownerInstructionReferences.length, 32);
+  assert.equal(client.ownerInstructionReferences[0].send_number, 2);
+  assert.equal(client.ownerInstructionReferences.at(-1).send_number, 33);
+});
+
+
+test('explicit follow-up reads are scoped, ordinal-stable and never reinterpret sends or ambiguous references', () => {
+  const first = 'job_' + '1'.repeat(64), last = 'job_' + '2'.repeat(64);
+  const refs = [{ send_number: 1, session_label: 'drizzy', operation_id: first }, { send_number: 2, session_label: 'phoneA', operation_id: last }];
+  assert.deepEqual(ownerReadRoute('Is there also a session called phone A?', refs), { action: 'list_owner_sessions', args: { session_label: 'phone A' } });
+  for (const text of ['Is there any status on the first message you sent?', 'Did the message to drizzy arrive?'])
+    assert.deepEqual(ownerReadRoute(text, refs), { action: 'get_owner_instruction', args: { operation_id: first } });
+  assert.equal(ownerReadRoute('What is the status of the latest message?', refs).args.operation_id, last);
+  assert.equal(ownerReadRoute('What about now?', refs, 'get_owner_instruction', first).args.operation_id, first);
+  for (const text of ['Do not check the first message.', 'Send drizzy: Is there a session called phone A?', 'What about now?', 'Is there any status on the third message?', 'Is there a session called phone A and send it hello?'])
+    assert.equal(ownerReadRoute(text, refs), null);
+  assert.equal(ownerReadRoute('Is there any status on the first message?', refs.slice(1)), null);
+  assert.equal(ownerReadRoute('Did the message to drizzy arrive?', [...refs, { ...refs[1], session_label: 'drizzy' }]), null);
+});
+
+test('a completed explicit read turn overrides a mistaken respond route without sending another instruction', async (t) => {
+  const capabilities = { ...require('./controller-capabilities-fixture').READY_CAPABILITIES, ownerSessionsAvailable: true };
+  const calls = [], operation = 'job_' + '1'.repeat(64);
+  const client = await createConnectedClient({ capabilities, toolHandler: async (name, args) => {
+    calls.push({ name, args });return { success: true, result: { state: 'accepted' } };
+  } });t.after(() => client.close());
+  client.ownerInstructionReferences = [{ send_number: 1, session_label: 'drizzy', operation_id: operation }];
+  client.ws.serverSend({ type: 'conversation.item.input_audio_transcription.completed', transcript: 'Is there any status on the first message you sent?' });
+  client.requestRoutedResponse();
+  const result = await client._handleToolCall({ name: 'route_turn', call_id: 'wrong-route', arguments: JSON.stringify({ action: 'respond', response_instruction: 'Say you cannot check.' }) }, { sendOutput: false });
+  assert.equal(result.action, 'get_owner_instruction');
+  assert.deepEqual(calls, [{ name: 'get_owner_instruction', args: { operation_id: operation } }]);
+  assert.equal(client.pendingOwnerReadRoute, null);
+  assert.equal(client.focusedOwnerOperation, operation);
 });
