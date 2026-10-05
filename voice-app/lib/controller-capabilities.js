@@ -22,6 +22,7 @@ const TOOL_CAPABILITIES = Object.freeze({
   inspect_owner_session: 'owner',
   request_owner_instruction: 'owner',
   get_owner_instruction: 'owner',
+  get_owner_reply: 'owner',
   send_agent_message: 'managed',
   start_agent_task: 'managed',
   handoff_agent_session: 'managed',

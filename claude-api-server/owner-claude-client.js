@@ -95,7 +95,7 @@ class OwnerClaudeClient {
     return { id: current.id, cwd: current.cwd, status: current.status };
   }
 
-  history(sessionId) {
+  history(sessionId, binding = null) {
     const current = this.read(sessionId);
     const projectsRoot = path.join(path.dirname(this.registration.registryRoot), 'projects');
     const directory = path.join(projectsRoot, current.cwd.replace(/[^a-zA-Z0-9]/g, '-'));
@@ -105,6 +105,7 @@ class OwnerClaudeClient {
     const messages = [];
     let latestReply = null;
     let completed = false;
+    let bound = !binding;
     try {
       const stat = fs.fstatSync(fd);
       if (!stat.isFile() || stat.uid !== this.registration.uid || (stat.mode & 0o022)) {
@@ -129,7 +130,8 @@ class OwnerClaudeClient {
         if (text.trim() && record.type === 'user') {
           latestReply = null;
           completed = false;
-        } else if (text.trim() && record.type === 'assistant') {
+          bound = !binding || text.endsWith(`\n[teleagent-operation:${binding.operationId}]`);
+        } else if (bound && text.trim() && record.type === 'assistant') {
           latestReply = boundedMessages([{ role: 'assistant', text }])[0] || null;
           completed = record.message?.stop_reason === 'end_turn';
         }
@@ -138,7 +140,7 @@ class OwnerClaudeClient {
     } finally { fs.closeSync(fd); }
     this.assertIdentity();
     const status = this.read(sessionId).status;
-    return { messages: boundedMessages(messages), limited: true,
+    return { messages: binding ? [] : boundedMessages(messages), limited: true,
       latestTurn: { status: status === 'busy' ? 'inProgress'
         : status === 'idle' && completed ? 'completed' : 'unknown', reply: latestReply } };
   }

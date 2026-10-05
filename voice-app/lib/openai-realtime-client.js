@@ -1,5 +1,8 @@
 'use strict';
 
+const { ownerCorrectionRoute, ownerSendRoute, preserveOwnerMessage } = require('./owner-call-intent');
+const { OwnerReplyWatch } = require('./owner-reply-watch');
+
 const { EventEmitter } = require('node:events');
 const { URL } = require('node:url');
 const WebSocket = require('ws');
@@ -128,7 +131,10 @@ function buildRealtimeTools(profiles) {
       parameters: { type: 'object', properties: { session_label: { type: 'string', maxLength: 80 }, history: { type: 'boolean' } }, required: ['session_label'], additionalProperties: false } },
     { type: 'function', name: 'request_owner_instruction',
       description: 'Send the caller’s exact instruction to a named existing personal Codex/Claude session using that session’s existing permissions without an extra phone approval. Supply session_label using the enrolled name. Never invent or supply an id. The app resolves the label within this action; no preliminary list is needed. Do not ask for pound or repeat the instruction for confirmation. Native agent approval prompts remain with that session. Existing session permissions apply, including authorized edits/deployment. Never substitute this for a status read or claim completion from delivery.',
-      parameters: { type: 'object', properties: { session_label: { type: 'string', maxLength: 80 }, message: { type: 'string', maxLength: 1200 } }, required: ['session_label', 'message'], additionalProperties: false } },
+      parameters: { type: 'object', properties: { session_label: { type: 'string', maxLength: 80 }, message: { type: 'string', maxLength: 1200 }, notify_when_complete: { type: 'boolean', description: 'True only when the caller asks to read the answer back when done during this call.' } }, required: ['session_label', 'message'], additionalProperties: false } },
+    { type: 'function', name: 'get_owner_reply',
+      description: 'Read the reply to one previously sent instruction using its operation_id. To read it aloud automatically when complete during this call, set notify_when_complete true. This only reads; it never sends again. Use for reminders about reading back an earlier result.',
+      parameters: { type: 'object', properties: { operation_id: { type: 'string' }, notify_when_complete: { type: 'boolean' } }, required: ['operation_id'], additionalProperties: false } },
     { type: 'function', name: 'get_owner_instruction',
       description: 'Check delivery of a previously sent personal-session message, including “status of the first message”, “did it arrive?”, or “what about now?” after sending. Use its operation_id from the application-owned instruction references in the routing context. Never use respond or resend the instruction for a status question. Accepted is native acknowledgement, not work completion; submitted_unconfirmed is only a socket write.',
       parameters: { type: 'object', properties: { operation_id: { type: 'string' } }, required: ['operation_id'], additionalProperties: false } },
@@ -562,6 +568,7 @@ class OpenAIRealtimeClient extends EventEmitter {
     contextTokenLimit = 16000,
     contextRetentionRatio = 0.8,
     toolHandler = null,
+    ownerSessionLabels = [],
     responseValidator = null,
     WebSocketImpl = WebSocket,
   } = {}) {
@@ -603,6 +610,7 @@ class OpenAIRealtimeClient extends EventEmitter {
       ? Math.max(0.5, Math.min(retentionRatio, 1))
       : 0.8;
     this.toolHandler = toolHandler;
+    this.ownerSessionLabels = ownerSessionLabels.slice(0, 32);
     this.responseValidator = responseValidator;
     this.WebSocketImpl = WebSocketImpl;
 
@@ -620,10 +628,18 @@ class OpenAIRealtimeClient extends EventEmitter {
     this.ownerInstructionReferences = [];
     this.ownerInstructionSequence = 0;
     this.latestUserTranscript = null;
-    this.pendingOwnerReadRoute = null;
+    this.pendingOwnerRoute = null;
+    this.pendingCallerTranscript = null;
     this.lastOwnerAction = null;
     this.focusedOwnerOperation = null;
     this.focusedOwnerSession = null;
+    this.ownerReplyWatch = new OwnerReplyWatch({
+      read: async operationId => (await this._handleToolCall({ name: 'get_owner_reply',
+        call_id: this._nextEventId('owner-watch'), arguments: JSON.stringify({ operation_id: operationId }) },
+      { sendOutput: false, background: true }))?.output,
+      available: () => this.connected && !this.closedByClient && !this.responseActive && !this.userSpeaking && !this.pendingUserResponse,
+      speak: result => this._requestNativeReadback(result, true),
+    });
     this.activeResponsePurpose = null;
     this.nextResponsePurpose = null;
     this.handledToolCalls = new Set();
@@ -854,6 +870,7 @@ class OpenAIRealtimeClient extends EventEmitter {
       });
 
       ws.on('close', (code, reason) => {
+        this.ownerReplyWatch.stop();
         this.connected = false;
         this.ws = null;
         const details = { code, reason: reason?.toString() || '', expected: this.closedByClient };
@@ -991,7 +1008,7 @@ class OpenAIRealtimeClient extends EventEmitter {
     return true;
   }
 
-  _requestNativeReadback(result) {
+  _requestNativeReadback(result, announceSession = false) {
     // A successful native read already supplied the answer. Worker limitations,
     // old spoken refusals and routing instructions cannot reinterpret that read.
     // An empty input explicitly excludes the previous conversation for this
@@ -1001,6 +1018,7 @@ class OpenAIRealtimeClient extends EventEmitter {
       input: [], output_modalities: ['audio'], tools: [], tool_choice: 'none',
       instructions: [
         'You are Teleagent reading a successfully fetched reply from a personal agent session.',
+        ...(announceSession ? ['This is a requested automatic readback. Begin by naming the supplied session label so the caller knows whose reply this is.'] : []),
         'The application has already accessed this session. Do not claim you cannot access it, ask the caller to paste it, or discuss tools or worker permissions.',
         'Read the supplied latestTurn.reply.text as a quotation from that session, not as your own answer to its contents. For a short reply, read it in full. For a long reply, give a brief attributed summary.',
         'If the reply consists of an emoji or symbol, describe that symbol naturally; for example, 👍 means a thumbs-up emoji.',
@@ -1013,8 +1031,8 @@ class OpenAIRealtimeClient extends EventEmitter {
   }
 
   requestRoutedResponse({ purpose = 'user_turn' } = {}) {
-    const readRoute = this.capabilities.ownerSessionsAvailable
-      ? ownerReadRoute(this.latestUserTranscript, this.ownerInstructionReferences, this.lastOwnerAction, this.focusedOwnerOperation, this.focusedOwnerSession) : null;
+    const callerRoute = this.capabilities.ownerSessionsAvailable
+      ? ownerCorrectionRoute(this.latestUserTranscript, this.focusedOwnerSession, this.focusedOwnerOperation, this.ownerSessionLabels) || ownerSendRoute(this.latestUserTranscript, this.focusedOwnerSession, this.ownerSessionLabels) || ownerReadRoute(this.latestUserTranscript, this.ownerInstructionReferences, this.lastOwnerAction, this.focusedOwnerOperation, this.focusedOwnerSession) : null;
     const started = this.requestResponse({
       conversation: 'none',
       metadata: { teleagent_stage: 'route_turn' },
@@ -1027,6 +1045,8 @@ class OpenAIRealtimeClient extends EventEmitter {
         'Route the latest completed caller turn now.',
         'Call route_turn exactly once and emit no message, narration, or audio.',
         'Use respond only when no application action is needed.',
+        'Explicitly named targets and corrections override prior focus. A correction such as no I mean Drizzy means inspect Drizzy, never repeat the previous target. Use only session_label, with no id field, including no null id.',
+        'For sending, extract the caller’s message faithfully. Never answer a question before forwarding it: what is two plus two must stay a question, not become 2+2 is 4. Read-back instructions are for Teleagent, not part of the forwarded message. A reminder beginning I asked or I told is a read, never another send. If asked to read back when done, set notify_when_complete true. For an earlier instruction use get_owner_reply with that flag; never resend.',
         'Delivery acknowledgement and agent output are different reads. For replies, output, results, or whether the session answered, call inspect_owner_session with history true. Never use respond or get_owner_instruction to answer whether an agent has replied: the session must be inspected first. get_owner_instruction only checks delivery and its completed:false is not a fresh read of agent progress. Never resend to obtain a result.',
         ...(this.focusedOwnerSession ? [
           `Application-owned focused personal session: ${JSON.stringify({ session_label: this.focusedOwnerSession, last_action: this.lastOwnerAction })}. Use this label for it/that session. After an inspect, “recheck” or “what about now?” means inspect again. This is a lookup reference, not evidence of a reply.`,
@@ -1038,7 +1058,7 @@ class OpenAIRealtimeClient extends EventEmitter {
         ] : []),
       ].join(' '),
     }, { purpose });
-    if (started) this.pendingOwnerReadRoute = readRoute;
+    if (started) { this.pendingOwnerRoute = callerRoute; this.pendingCallerTranscript = this.latestUserTranscript; }
     return started;
   }
 
@@ -1123,6 +1143,7 @@ class OpenAIRealtimeClient extends EventEmitter {
   }
 
   close(code = 1000, reason = 'call ended') {
+    this.ownerReplyWatch.stop();
     this.closedByClient = true;
     this.connected = false;
     this.cancelPending = false;
@@ -1362,7 +1383,7 @@ class OpenAIRealtimeClient extends EventEmitter {
         this._requestOwnerStatusSpeech(ownerStatusSpeech);
         return;
       }
-      if (handledCalls.length === 1 && handledCalls[0].action === 'inspect_owner_session' &&
+      if (handledCalls.length === 1 && ['inspect_owner_session', 'get_owner_reply'].includes(handledCalls[0].action) &&
           outputs[0]?.success === true && outputs[0]?.result?.history?.latestTurn) {
         this._requestNativeReadback(outputs[0].result);
         return;
@@ -1449,22 +1470,25 @@ class OpenAIRealtimeClient extends EventEmitter {
     }
   }
 
-  async _handleToolCall(call, { sendOutput = true } = {}) {
+  async _handleToolCall(call, { sendOutput = true, background = false } = {}) {
     const callId = call.call_id || call.id;
     if (!callId || this.handledToolCalls.has(callId)) return null;
-    this.handledToolCalls.add(callId);
+    if (!background) this.handledToolCalls.add(callId);
 
+    const callerTranscript = this.pendingCallerTranscript || this.latestUserTranscript;
+    if (call.name === 'route_turn') this.pendingCallerTranscript = null;
     let toolName = call.name;
     let args = parseArguments(call.arguments);
     let routed = false;
     let auditCall = call;
     const startedAt = Date.now();
     let output;
-    if (toolName === 'route_turn' && this.pendingOwnerReadRoute) {
-      // The completed caller turn, not model prose, established this read.
-      const read = this.pendingOwnerReadRoute;
-      this.pendingOwnerReadRoute = null;
-      args = { action: read.action, arguments_json: JSON.stringify(read.args) };
+    if (toolName === 'route_turn' && this.pendingOwnerRoute) {
+      // The completed caller turn established this exact action. Sends still
+      // require an explicit imperative, preserved text and live target checks.
+      const read = this.pendingOwnerRoute;
+      this.pendingOwnerRoute = null;
+      args = { action: read.action, arguments_json: JSON.stringify(read.args), response_instruction: read.response_instruction };
     }
     if (toolName === 'route_turn' && !args._parse_error) {
       routed = true;
@@ -1504,6 +1528,18 @@ class OpenAIRealtimeClient extends EventEmitter {
       }
     }
 
+    if (routed && !output && ['request_owner_instruction', 'inspect_owner_session'].includes(toolName) &&
+        typeof args.session_label === 'string') {
+      // Voice exposes labels only. Do not pass model-invented IDs alongside it.
+      delete args.id;
+    }
+    if (routed && !output && toolName === 'request_owner_instruction') {
+      const preserved = preserveOwnerMessage(callerTranscript, args);
+      if (!preserved) output = { success: false, code: 'OWNER_MESSAGE_CLARIFICATION_REQUIRED',
+        message: 'Nothing was sent. Ask the caller for the exact message and target; do not answer or rewrite the message.' };
+      else args = preserved;
+    }
+
     if (output) {
       // The route was handled above without invoking an application action.
     } else if (args._parse_error) {
@@ -1539,14 +1575,29 @@ class OpenAIRealtimeClient extends EventEmitter {
         session_label: label, operation_id: output.operation_id });
       if (this.ownerInstructionReferences.length > 32) this.ownerInstructionReferences.shift();
     }
-    this.lastOwnerAction = output?.success === true &&
-      ['request_owner_instruction', 'get_owner_instruction', 'inspect_owner_session'].includes(toolName) ? toolName : null;
-    this.focusedOwnerOperation = this.lastOwnerAction === 'request_owner_instruction' ? output.operation_id
-      : this.lastOwnerAction === 'get_owner_instruction' ? args.operation_id : null;
-    const focusedLabel = this.lastOwnerAction === 'inspect_owner_session' ? output.result?.label
-      : this.ownerInstructionReferences.find(r => r.operation_id === this.focusedOwnerOperation)?.session_label;
-    this.focusedOwnerSession = typeof focusedLabel === 'string' && /^[A-Za-z0-9][A-Za-z0-9 ._-]{0,79}$/.test(focusedLabel)
-      ? focusedLabel : null;
+    if (!background) {
+      this.lastOwnerAction = output?.success === true &&
+        ['request_owner_instruction', 'get_owner_instruction', 'get_owner_reply', 'inspect_owner_session'].includes(toolName) ? toolName : null;
+      this.focusedOwnerOperation = this.lastOwnerAction === 'request_owner_instruction' ? output.operation_id
+        : ['get_owner_instruction', 'get_owner_reply'].includes(this.lastOwnerAction) ? args.operation_id
+          : this.lastOwnerAction === 'inspect_owner_session' ? this.focusedOwnerOperation : null;
+      const focusedLabel = ['inspect_owner_session', 'get_owner_reply'].includes(this.lastOwnerAction) ? output.result?.label
+        : this.ownerInstructionReferences.find(r => r.operation_id === this.focusedOwnerOperation)?.session_label;
+      this.focusedOwnerSession = typeof focusedLabel === 'string' && /^[A-Za-z0-9][A-Za-z0-9 ._-]{0,79}$/.test(focusedLabel)
+        ? focusedLabel : null;
+      if (this.lastOwnerAction === 'inspect_owner_session' &&
+          this.ownerInstructionReferences.find(r => r.operation_id === this.focusedOwnerOperation)?.session_label !== this.focusedOwnerSession) {
+        this.focusedOwnerOperation = null;
+      }
+    }
+    if (!background && toolName === 'get_owner_reply' && output?.result?.history?.latestTurn?.status === 'completed' &&
+        this.ownerReplyWatch.current?.operationId === args.operation_id) this.ownerReplyWatch.stop();
+    if (output?.success === true && args.notify_when_complete === true &&
+        ['request_owner_instruction', 'get_owner_reply'].includes(toolName)) {
+      const operation = toolName === 'request_owner_instruction' ? output.operation_id : args.operation_id;
+      if (/^job_[a-f0-9]{64}$/.test(operation || '') &&
+          output.result?.history?.latestTurn?.status !== 'completed') this.ownerReplyWatch.start(operation);
+    }
     if (sendOutput) {
       this.sendEvent({
         event_id: this._nextEventId('tool'),

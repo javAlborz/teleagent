@@ -117,6 +117,7 @@ test('pending owner approval starts no competing model speech and other states g
       toolHandler: async () => ({ success: true, result: { state },
         ...(state === 'pending_approval' ? { response_behavior: 'earcon_then_quiet' } : {}) }) });
     t.after(() => client.close());
+    client.latestUserTranscript = 'Send Review to teletest';
     const before = client.ws.sentEvents().filter((event) => event.type === 'response.create').length;
     await client._handleResponseDone({ output: [{ type: 'function_call', name: 'route_turn',
       call_id: 'owner-request', arguments: JSON.stringify({ action: 'request_owner_instruction',
@@ -139,6 +140,7 @@ test('incorrect owner delivery audio is suppressed and speech retry never resend
     toolHandler: async () => { deliveries += 1; return { success: true, result: { state: 'dispatching' } }; },
   });
   t.after(() => client.close());
+  client.latestUserTranscript = 'Send ok to teletest';
   const played = [];
   client.on('audio', () => played.push('audio'));
   client.on('audio.done', () => played.push('done'));
@@ -1009,6 +1011,7 @@ test('delivery references survive routed tools, distinguish first from latest, a
       : { success: true, result: { state: 'accepted' } };
   } });
   t.after(() => client.close());
+  client.latestUserTranscript = 'Send PRIVATE MESSAGE';
   for (const label of ['drizzy', 'phoneA']) await client._handleToolCall({ name: 'route_turn', call_id: label,
     arguments: JSON.stringify({ action: 'request_owner_instruction', arguments_json: JSON.stringify({ session_label: label, message: 'PRIVATE MESSAGE' }) }) }, { sendOutput: false });
   assert.equal(client.ownerInstructionReferences.length, 2);
@@ -1065,7 +1068,7 @@ test('a completed explicit read turn overrides a mistaken respond route without 
   const result = await client._handleToolCall({ name: 'route_turn', call_id: 'wrong-route', arguments: JSON.stringify({ action: 'respond', response_instruction: 'Say you cannot check.' }) }, { sendOutput: false });
   assert.equal(result.action, 'get_owner_instruction');
   assert.deepEqual(calls, [{ name: 'get_owner_instruction', args: { operation_id: operation } }]);
-  assert.equal(client.pendingOwnerReadRoute, null);
+  assert.equal(client.pendingOwnerRoute, null);
   assert.equal(client.focusedOwnerOperation, operation);
 });
 
@@ -1122,4 +1125,54 @@ test('attended reply follow-ups override stale receipt routes and re-read only t
   assert.deepEqual(calls, Array(3).fill({ name: 'inspect_owner_session', args: { session_label: 'drizzy', history: true } }));
   await client._handleToolCall({ name: 'respond', call_id: 'unrelated', arguments: '{}' }, { sendOutput: false });
   assert.equal(client.focusedOwnerSession, null);
+});
+
+test('actual routed correction overrides wrong model target and strips an invented ID', async t => {
+  const capabilities = { ...require('./controller-capabilities-fixture').READY_CAPABILITIES, ownerSessionsAvailable: true };
+  const calls = [];
+  const client = await createConnectedClient({ capabilities, toolHandler: async (name, args) => {
+    calls.push({ name, args }); return { success: true, result: { label: args.session_label } };
+  } });t.after(() => client.close());
+  client.focusedOwnerSession = 'tmuxp';client.lastOwnerAction = 'inspect_owner_session';
+  client.latestUserTranscript = 'No, no, I mean the drizzy session.';
+  client.requestRoutedResponse();
+  await client._handleToolCall({ name: 'route_turn', call_id: 'correction', arguments: JSON.stringify({
+    action: 'inspect_owner_session', arguments_json: JSON.stringify({ session_label: 'tmuxp', id: null, history: true }),
+  }) });
+  assert.deepEqual(calls, [{ name: 'inspect_owner_session', args: { session_label: 'drizzy', history: true } }]);
+});
+
+test('a send preserves the caller question and arms one reply watcher; reminders never resend', async t => {
+  const operation = 'job_' + 'a'.repeat(64);const calls = [];
+  const capabilities = { ...require('./controller-capabilities-fixture').READY_CAPABILITIES, ownerSessionsAvailable: true };
+  const client = await createConnectedClient({ capabilities, toolHandler: async (name, args) => {
+    calls.push({ name, args });return name === 'request_owner_instruction'
+      ? { success: true, operation_id: operation, result: { state: 'dispatching' } }
+      : { success: true, result: { label: 'drizzy', history: { latestTurn: { status: 'inProgress', reply: null } } } };
+  } });t.after(() => client.close());
+  client.latestUserTranscript = 'Ask it what is ten times ten and immediately read it back when done.';
+  await client._handleToolCall({ name: 'route_turn', call_id: 'send', arguments: JSON.stringify({ action: 'request_owner_instruction',
+    arguments_json: JSON.stringify({ session_label: 'drizzy', id: null, message: '100' }) }) });
+  assert.equal(calls[0].args.message, 'what is ten times ten');
+  assert.equal(calls[0].args.id, undefined);assert.equal(client.ownerReplyWatch.current.operationId, operation);
+  client.latestUserTranscript = 'But I asked it to, back once it was done, right?';
+  client.requestRoutedResponse();
+  await client._handleToolCall({ name: 'route_turn', call_id: 'reminder', arguments: JSON.stringify({ action: 'request_owner_instruction',
+    arguments_json: JSON.stringify({ session_label: 'drizzy', message: 'Please answer again' }) }) });
+  assert.deepEqual(calls.map(c => c.name), ['request_owner_instruction', 'get_owner_reply']);
+  assert.equal(client.ownerReplyWatch.current.operationId, operation);
+  client.close();assert.equal(client.ownerReplyWatch.current, null);
+});
+
+
+test('a late transcript cannot rewrite the message of an already routed caller turn', async t => {
+  const calls = [];
+  const capabilities = { ...require('./controller-capabilities-fixture').READY_CAPABILITIES, ownerSessionsAvailable: true };
+  const client = await createConnectedClient({ capabilities, ownerSessionLabels: ['drizzy'], toolHandler: async (name, args) => {
+    calls.push({ name, args }); return { success: true, result: { state: 'dispatching' } };
+  } });t.after(() => client.close());
+  client.latestUserTranscript = 'Ask Drizzy what is two plus two?';client.requestRoutedResponse();
+  client.latestUserTranscript = 'What is the latest reply?';
+  await client._handleToolCall({ name: 'route_turn', call_id: 'bound-caller', arguments: JSON.stringify({action: 'respond'}) });
+  assert.equal(calls.length, 1);assert.equal(calls[0].args.message, 'what is two plus two?');
 });

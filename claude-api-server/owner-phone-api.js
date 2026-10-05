@@ -27,6 +27,15 @@ function createOwnerPhoneApi({ broker, coordinator, assertUnlocked }) {
         const { sipCallId, ...input } = body;
         return coordinator.request(input, { sipCallId });
       }
+      if (action === 'reply') {
+        exact(body, ['operationId']);
+        if (typeof body.operationId !== 'string' || !/^job_[a-f0-9]{64}$/.test(body.operationId)) {
+          throw sessionError('OWNER_PHONE_REQUEST_INVALID');
+        }
+        const row = coordinator.store.get(body.operationId);
+        if (!row) throw sessionError('OWNER_PHONE_OPERATION_NOT_FOUND');
+        return broker.reply({ id: row.catalog_id, request: JSON.parse(row.request_json) });
+      }
       if (action === 'status') {
         exact(body, ['operationId']);
         if (typeof body.operationId !== 'string' || !/^job_[A-Za-z0-9]{1,128}$/.test(body.operationId)) {
@@ -46,7 +55,7 @@ function createOwnerPhoneApi({ broker, coordinator, assertUnlocked }) {
 }
 
 function installOwnerPhoneRoutes(app, getRuntime) {
-  for (const action of ['list', 'inspect', 'request', 'status', 'cancel']) {
+  for (const action of ['list', 'inspect', 'request', 'status', 'reply', 'cancel']) {
     app.post(`/voice-control/owner/${action}`, async (req, res) => {
       try {
         const runtime = getRuntime();

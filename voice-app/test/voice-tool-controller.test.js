@@ -559,7 +559,9 @@ test('previous-call scope selects one prior call, preserves both speakers, and e
   assert.equal(history.selected_call.id, previous.id);
   assert.deepEqual(history.conversation_context.map((e) => e.text), ['Multiply 17 by 32.', '544']);
   assert.ok(history.conversation_context.every((e) => e.call_id === previous.id));
-  assert.doesNotMatch(JSON.stringify(history), /608|private answer|What was/);
+  // Random call IDs can contain the digits 608; inspect message content only.
+  assert.doesNotMatch(JSON.stringify([history.exact_text, ...history.events.map(event => event.text),
+    ...history.conversation_context.map(event => event.text)]), /608|private answer|What was/);
   const broad = await controller.handle('get_voice_history', { scope: 'older_calls' });
   assert.match(broad.exact_text, /608/);
   assert.doesNotMatch(JSON.stringify(broad), /private answer|What was/);
