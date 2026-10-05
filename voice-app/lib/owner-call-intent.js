@@ -39,7 +39,9 @@ function preserveOwnerMessage(transcript, args) {
   if (/\b(?:i|we) (?:asked|told|said|wanted)\b/i.test(transcript) ||
       !/\b(?:ask|tell|write|send|follow up|message)\b/i.test(transcript)) return null;
   let message = args.message;
-  const question = /\bask (?:it|them|that session)\s+([\s\S]+?)(?:\s+and (?:then )?(?:immediately )?(?:read|tell|report)\b[\s\S]*)?$/i.exec(transcript);
+  const label = typeof args.session_label === 'string' && /^[A-Za-z0-9][A-Za-z0-9 ._-]{0,79}$/.test(args.session_label)
+    ? args.session_label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/ +/g, '\\s*') : '(?!)';
+  const question = new RegExp('\\bask (?:it|them|that session|' + label + ')\\s+([\\s\\S]+?)(?:\\s+and (?:then )?(?:immediately )?(?:read|tell|report)\\b[\\s\\S]*)?$', 'i').exec(transcript);
   const what = /\b(?:write|send)\s+(what (?:is|are)\b[\s\S]+?)(?:\s+in that same syntax)?[?.!]*$/i.exec(transcript);
   if (question || what) message = (question || what)[1].trim();
   const normalize = value => String(value || '').toLowerCase().replace(/\bcomma\b/g, ',')

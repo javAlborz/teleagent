@@ -17,6 +17,8 @@ test('explicit name corrections beat old focus; readback reminders cannot send',
 test('forwarded questions stay questions; invented or expanded messages are refused', () => {
   assert.equal(preserveOwnerMessage('All right, could you write what is two plus two in that same syntax?',
     { session_label: 'drizzy', message: '2+2 is 4.' }).message, 'what is two plus two');
+  assert.equal(preserveOwnerMessage('Ask Drizzy what is ten times ten and immediately read it back when done.',
+    { session_label: 'drizzy', message: 'What is 10 times 10?' }).message, 'what is ten times ten');
   const input = preserveOwnerMessage('Okay, now ask it what is 36 times 36?', { session_label: 'drizzy', message: '1296' });
   assert.equal(input.message, 'what is 36 times 36?');
   assert.equal(preserveOwnerMessage('Ask it what is ten times ten and immediately read it back when done.',
