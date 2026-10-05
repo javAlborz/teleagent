@@ -285,7 +285,7 @@ test('Realtime session uses 24 kHz PCM, manual semantic VAD, tuned transcription
   assert.deepEqual(update.session.audio.input.noise_reduction, { type: 'near_field' });
   assert.deepEqual(update.session.audio.input.turn_detection, {
     type: 'semantic_vad',
-    eagerness: 'low',
+    eagerness: 'medium',
     create_response: false,
     interrupt_response: false,
   });
@@ -1175,4 +1175,93 @@ test('a late transcript cannot rewrite the message of an already routed caller t
   client.latestUserTranscript = 'What is the latest reply?';
   await client._handleToolCall({ name: 'route_turn', call_id: 'bound-caller', arguments: JSON.stringify({action: 'respond'}) });
   assert.equal(calls.length, 1);assert.equal(calls[0].args.message, 'what is two plus two?');
+});
+
+test('partial transcripts stop no work and exclude stale or completed turns', async t => {
+  let tools = 0;
+  const client = await createConnectedClient({ toolHandler: async () => { tools++; } });
+  t.after(() => client.close());
+  const seen = [];
+  client.on('user_transcript_partial', text => seen.push(text));
+  await client._handleEvent({ type: 'input_audio_buffer.speech_started', item_id: 'new' });
+  const delta = (id, text) => client._handleEvent({ type: 'conversation.item.input_audio_transcription.delta', item_id: id, delta: text });
+  await delta('old', 'Stop');
+  await delta('new', 'Wait, '); await delta('new', 'read Drizzy');
+  assert.deepEqual(seen, ['Wait, ', 'Wait, read Drizzy']);
+  assert.equal(client.latestUserTranscript, null);
+  assert.equal(client.awaitingUserTranscript, true);
+  assert.equal(client.ws.sentEvents().filter(e => e.type === 'response.create').length, 0);
+  assert.equal(tools, 0);
+  await client._handleEvent({ type: 'input_audio_buffer.speech_stopped', item_id: 'new' });
+  assert.equal(client.awaitingUserTranscript, true);
+  await client._handleEvent({ type: 'conversation.item.input_audio_transcription.completed', item_id: 'new', transcript: 'Wait, read Drizzy.' });
+  assert.equal(client.awaitingUserTranscript, false);
+  await delta('new', ' stale');
+  assert.equal(seen.length, 2);
+  assert.equal(client.partialTranscripts.size, 0);
+});
+
+test('automatic readback waits for phone playback, pending transcripts and debounce', async t => {
+  let playing = true, debouncing = false, reads = 0;
+  const client = await createConnectedClient({ isPlaybackActive: () => playing, isUserTurnPending: () => debouncing });
+  t.after(() => client.close());
+  const watch = client.ownerReplyWatch;
+  watch.schedule = () => 1; watch.cancel = () => {};
+  watch.read = async () => { reads++; playing = true; return { success: true, result: { label: 'drizzy', history: { latestTurn: { status: 'completed', reply: { text: '42' } } } } }; };
+  watch.start('job_' + 'a'.repeat(64)); const current = watch.current;
+  await watch.tick(current); assert.equal(reads, 0);
+  playing = false; client.awaitingUserTranscript = true;
+  await watch.tick(current); assert.equal(reads, 0);
+  client.awaitingUserTranscript = false; debouncing = true;
+  await watch.tick(current); assert.equal(reads, 0);
+  debouncing = false;
+  await watch.tick(current); assert.equal(reads, 1);
+  assert.equal(client.ws.sentEvents().filter(e => e.type === 'response.create').length, 0);
+  playing = false;
+  await watch.tick(current);
+  assert.equal(reads, 1); assert.equal(watch.current, null);
+  assert.equal(client.ws.sentEvents().filter(e => e.type === 'response.create').length, 1);
+});
+
+test('patient semantic turn detection remains configurable without automatic actions', async t => {
+  const client = await createConnectedClient({ vadEagerness: 'low' });
+  t.after(() => client.close());
+  const turn = client.ws.sentEvents().find(e => e.type === 'session.update').session.audio.input.turn_detection;
+  assert.deepEqual(turn, {type: 'semantic_vad', eagerness: 'low', create_response: false, interrupt_response: false});
+});
+
+
+test('caller interruption suppresses in-flight audio even before response.created', async t => {
+  for (const beforeCreated of [false, true]) {
+    const client = await createConnectedClient();
+    t.after(() => client.close());
+    const outputs = [];
+    for (const type of ['audio', 'audio.done', 'assistant_transcript']) client.on(type, () => outputs.push(type));
+    client.requestResponse({ tool_choice: 'none' }, { purpose: 'routed_speech' });
+    if (beforeCreated) client.cancelResponse({ discardOutput: true });
+    await client._handleEvent({ type: 'response.created', response: { id: 'interrupted' } });
+    if (!beforeCreated) client.cancelResponse({ discardOutput: true });
+    const late = { response_id: 'interrupted', item_id: 'speech' };
+    await client._handleEvent({ ...late, type: 'response.output_audio.delta', delta: Buffer.from([1, 2]).toString('base64') });
+    await client._handleEvent({ ...late, type: 'response.output_audio.done' });
+    await client._handleEvent({ ...late, type: 'response.output_audio_transcript.done', transcript: 'Unheard late words.' });
+    await client._handleEvent({ type: 'response.done', response: { id: 'interrupted', status: 'completed', output: [] } });
+    assert.deepEqual(outputs, []);
+    client.requestResponse({ tool_choice: 'none' }, { purpose: 'routed_speech' });
+    await client._handleEvent({ type: 'response.created', response: { id: 'next' } });
+    await client._handleEvent({ type: 'response.output_audio.delta', response_id: 'next', delta: Buffer.from([3, 4]).toString('base64') });
+    assert.deepEqual(outputs, ['audio']);
+  }
+});
+
+test('failed transcription releases the readback wait without creating a caller request', async t => {
+  const client = await createConnectedClient();
+  t.after(() => client.close());
+  await client._handleEvent({ type: 'input_audio_buffer.speech_started', item_id: 'failed' });
+  await client._handleEvent({ type: 'input_audio_buffer.speech_stopped', item_id: 'failed' });
+  assert.equal(client.ownerReplyWatch.available(), false);
+  await client._handleEvent({ type: 'conversation.item.input_audio_transcription.failed', item_id: 'failed' });
+  assert.equal(client.ownerReplyWatch.available(), true);
+  assert.equal(client.latestUserTranscript, null);
+  assert.equal(client.ws.sentEvents().some(e => e.type === 'response.create'), false);
 });

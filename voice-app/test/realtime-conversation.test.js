@@ -1435,3 +1435,31 @@ test('call startup supplies enrolled owner labels to both routing and transcript
   assert.match(options.instructions, /inspect_owner_session with session_label and history true/);
   assert.doesNotMatch(options.instructions, /os_private|private\/path/);
 });
+
+test('recognizable partial interruptions stop playout without dispatching or canceling native work', async t => {
+  const f = createCallFixture(t, {autoDestroyGreeting: false});
+  const call = runRealtimeConversation(f.endpoint, f.dialog, 'early-interruption', {
+    audioForkServer: f.audioForkServer, wsPort: 3001, stateStore: f.stateStore,
+    jobBroker: f.jobBroker, callerId: '1001', responseDebounceMs: 5, openaiClientFactory: f.openaiClientFactory,
+  });
+  while (!f.getRealtimeClient()) await new Promise(resolve => setImmediate(resolve));
+  const client = f.getRealtimeClient();
+  await new Promise(resolve => setImmediate(resolve));
+  client.emit('assistant_transcript', 'The task completed successfully.', {item_id: 'answer'});
+  f.audioSession.nextPlayback = {itemId: 'answer', audioEndMs: 600};
+  for (const text of ['Mm-hmm.', 'the', 'The task completed successfully.']) {
+    client.emit('user_transcript_partial', text, {item_id: 'caller'});
+  }
+  assert.equal(f.audioSession.stopPlaybackCalls, 0);
+  client.emit('user_transcript_partial', 'Wait,', {item_id: 'caller'});
+  assert.equal(f.audioSession.stopPlaybackCalls, 1);
+  assert.deepEqual(client.truncations, [{itemId: 'answer', audioEndMs: 600}]);
+  assert.equal(client.queuedResponses.length, 0);
+  assert.equal(f.stateStore.listAuditEvents({limit: 30}).filter(e => e.action === 'realtime_early_interruption').length, 1);
+  client.emit('user_transcript_partial', 'Wait, read Drizzy instead.', {item_id: 'caller'});
+  assert.equal(f.audioSession.stopPlaybackCalls, 1);
+  client.emit('user_transcript', 'Wait, read Drizzy instead.', {item_id: 'caller'});
+  await new Promise(resolve => setTimeout(resolve, 15));
+  assert.equal(client.queuedResponses.length, 1);
+  await f.dialog.destroy(); await call;
+});

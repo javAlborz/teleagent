@@ -138,16 +138,27 @@ bodies and captured pane/file content are deliberately excluded.
 
 ## Conversation behavior
 
-The input uses OpenAI `near_field` noise reduction followed by low-eagerness
+The input uses OpenAI `near_field` noise reduction followed by medium-eagerness
 semantic VAD, with automatic response creation and interruption disabled.
 Teleagent waits for a completed, substantive transcript and creates exactly one
 response itself. Missing or fragmentary transcriptions are ignored quietly.
 
-- Raw VAD starts are provisional and never destroy playout. A substantive final
-  transcript stops active speech and reports the amount actually heard with an
-  item truncation. Backchannels, fragmentary transcripts, and likely acoustic
+- Raw VAD starts are provisional and never destroy playout. Recognizable partial
+  transcript text
+  (an explicit interruption or a substantive phrase) stops active speech early;
+  final transcript handling remains the fallback. The app stops playback, discards
+  late response audio, and reports its playback-duration estimate with an item
+  truncation. Backchannels, fragmentary transcripts, and likely acoustic
   copies of the current assistant response are suppressed. None of these actions
-  cancels background agent jobs.
+  cancels background agent jobs. Partial text never creates a response or sends
+  an instruction. Its arrival depends on transcription timing; there is no
+  claim of a fixed interruption latency. Stale/completed-turn deltas are ignored.
+- Automatic personal-session readback waits for phone playback to drain, final
+  transcription to arrive, and the 250 ms response debounce to finish. It also
+  rechecks these conditions after reading the native result.
+- Set `OPENAI_REALTIME_VAD_EAGERNESS=low` for more patient turn detection;
+  `medium` is the conversational default. These settings do not enable automatic
+  tool execution or cancel native work.
 - Tool-capable responses are held at the audio boundary until the response is
   known to contain no function call. If one selects a tool, any attempted
   spoken preamble is discarded and only the post-tool answer can reach the
@@ -230,7 +241,8 @@ OPENAI_REALTIME_TRANSCRIPTION_DELAY=medium
 OPENAI_REALTIME_MAX_SPOKEN_WORDS=35
 OPENAI_REALTIME_HARD_MAX_SPOKEN_WORDS=240
 OPENAI_REALTIME_NOISE_REDUCTION=near_field
-OPENAI_REALTIME_RESPONSE_DEBOUNCE_MS=500
+OPENAI_REALTIME_VAD_EAGERNESS=medium
+OPENAI_REALTIME_RESPONSE_DEBOUNCE_MS=250
 OPENAI_REALTIME_CONTEXT_TOKEN_LIMIT=16000
 OPENAI_REALTIME_CONTEXT_RETENTION_RATIO=0.8
 OPENAI_SAFETY_IDENTIFIER_SALT=replace-with-random-secret

@@ -556,6 +556,9 @@ class OpenAIRealtimeClient extends EventEmitter {
     transcriptionLanguages = ['en'],
     transcriptionDelay = 'medium',
     noiseReductionType = 'near_field',
+    vadEagerness = 'medium',
+    isPlaybackActive = () => false,
+    isUserTurnPending = () => false,
     instructions,
     profiles = [],
     capabilities = UNAVAILABLE,
@@ -595,6 +598,13 @@ class OpenAIRealtimeClient extends EventEmitter {
     this.noiseReductionType = ['near_field', 'far_field'].includes(noiseReductionType)
       ? noiseReductionType
       : null;
+    this.vadEagerness = ['low', 'medium', 'high', 'auto'].includes(vadEagerness) ? vadEagerness : 'medium';
+    this.isPlaybackActive = isPlaybackActive;
+    this.isUserTurnPending = isUserTurnPending;
+    this.partialTranscripts = new Map();
+    this.finishedTranscriptItems = new Set();
+    this.awaitingUserTranscript = false;
+    this.latestSpeechItemId = null;
     this.instructions = instructions;
     this.profiles = profiles;
     this.capabilities = Object.freeze({ ...capabilities });
@@ -620,6 +630,7 @@ class OpenAIRealtimeClient extends EventEmitter {
     this.closedByClient = false;
     this.responseActive = false;
     this.cancelPending = false;
+    this.discardActiveOutput = false;
     this.userSpeaking = false;
     this.pendingNotices = [];
     this.pendingUserResponse = false;
@@ -637,7 +648,9 @@ class OpenAIRealtimeClient extends EventEmitter {
       read: async operationId => (await this._handleToolCall({ name: 'get_owner_reply',
         call_id: this._nextEventId('owner-watch'), arguments: JSON.stringify({ operation_id: operationId }) },
       { sendOutput: false, background: true }))?.output,
-      available: () => this.connected && !this.closedByClient && !this.responseActive && !this.userSpeaking && !this.pendingUserResponse,
+      available: () => this.connected && !this.closedByClient && !this.responseActive &&
+        !this.userSpeaking && !this.awaitingUserTranscript && !this.pendingUserResponse &&
+        !this.isPlaybackActive() && !this.isUserTurnPending(),
       speak: result => this._requestNativeReadback(result, true),
     });
     this.activeResponsePurpose = null;
@@ -779,7 +792,7 @@ class OpenAIRealtimeClient extends EventEmitter {
     }
     return {
       rejected,
-      retryInstructions: validation.retryInstructions || null,
+      retryInstructions: wasSuppressed ? null : (validation.retryInstructions || null),
       retryPurpose: validation.retryPurpose || 'validation_retry',
       retrySpeech: rejected && verifiedSpeech && verifiedSpeech.attempt === 0 &&
         status === 'completed' && !wasSuppressed && !this.userSpeaking && !this.pendingUserResponse
@@ -888,10 +901,10 @@ class OpenAIRealtimeClient extends EventEmitter {
         : null,
       turn_detection: {
         type: 'semantic_vad',
-        eagerness: 'low',
+        eagerness: this.vadEagerness,
         create_response: false,
-        // Teleagent classifies the completed transcript before deciding
-        // whether caller audio is a real barge-in or a harmless backchannel.
+        // Teleagent classifies transcript text before interrupting playback.
+        // Partial text can stop speech; only final text can dispatch work.
         interrupt_response: false,
       },
     };
@@ -1135,8 +1148,13 @@ class OpenAIRealtimeClient extends EventEmitter {
     return true;
   }
 
-  cancelResponse() {
-    if (!this.responseActive || this.cancelPending) return false;
+  cancelResponse({ discardOutput = false } = {}) {
+    if (!this.responseActive) return false;
+    // Caller interruption must suppress chunks already in flight, including
+    // cancellation before response.created. The word limiter still drains its
+    // already-generated audio and therefore leaves this option off.
+    if (discardOutput) this.discardActiveOutput = true;
+    if (this.cancelPending) return false;
     this.cancelPending = true;
     this.sendEvent({ event_id: this._nextEventId('cancel'), type: 'response.cancel' });
     return true;
@@ -1144,6 +1162,8 @@ class OpenAIRealtimeClient extends EventEmitter {
 
   close(code = 1000, reason = 'call ended') {
     this.ownerReplyWatch.stop();
+    this.partialTranscripts.clear();
+    this.finishedTranscriptItems.clear();
     this.closedByClient = true;
     this.connected = false;
     this.cancelPending = false;
@@ -1176,6 +1196,8 @@ class OpenAIRealtimeClient extends EventEmitter {
 
       case 'input_audio_buffer.speech_started':
         this.userSpeaking = true;
+        this.awaitingUserTranscript = true;
+        this.latestSpeechItemId = event.item_id || null;
         this.emit('speech_started', event);
         break;
 
@@ -1184,7 +1206,25 @@ class OpenAIRealtimeClient extends EventEmitter {
         this.emit('speech_stopped', event);
         break;
 
+      case 'conversation.item.input_audio_transcription.delta': {
+        // Partial text is a playback hint only, never a caller request. Do not
+        // let late deltas from an older/completed turn interrupt a newer reply.
+        const id = event.item_id;
+        if (!id || id !== this.latestSpeechItemId || this.finishedTranscriptItems.has(id) ||
+            typeof event.delta !== 'string' || !event.delta) break;
+        const text = (this.partialTranscripts.get(id) || '') + event.delta;
+        if (text.length > 4096) break;
+        this.partialTranscripts.set(id, text);
+        while (this.partialTranscripts.size > 8) this.partialTranscripts.delete(this.partialTranscripts.keys().next().value);
+        this.emit('user_transcript_partial', text, event);
+        break;
+      }
+
       case 'conversation.item.input_audio_transcription.completed':
+        this.partialTranscripts.delete(event.item_id);
+        this.finishedTranscriptItems.add(event.item_id);
+        while (this.finishedTranscriptItems.size > 64) this.finishedTranscriptItems.delete(this.finishedTranscriptItems.values().next().value);
+        if (!this.latestSpeechItemId || event.item_id === this.latestSpeechItemId) this.awaitingUserTranscript = false;
         if (event.usage) {
           this.emit('usage', {
             kind: 'transcription',
@@ -1198,6 +1238,14 @@ class OpenAIRealtimeClient extends EventEmitter {
           this.emit('user_transcript', event.transcript, event);
         }
         else this.emit('transcription.empty', event);
+        break;
+
+      case 'conversation.item.input_audio_transcription.failed':
+        this.partialTranscripts.delete(event.item_id);
+        this.finishedTranscriptItems.add(event.item_id);
+        while (this.finishedTranscriptItems.size > 64) this.finishedTranscriptItems.delete(this.finishedTranscriptItems.values().next().value);
+        if (!this.latestSpeechItemId || event.item_id === this.latestSpeechItemId) this.awaitingUserTranscript = false;
+        this.emit('transcription.empty', event);
         break;
 
       case 'response.created':
@@ -1216,6 +1264,7 @@ class OpenAIRealtimeClient extends EventEmitter {
         break;
 
       case 'response.output_audio.delta':
+        if (this.discardActiveOutput) break;
         if (event.delta) {
           const audio = Buffer.from(event.delta, 'base64');
           if (this.activeVerifiedSpeech || responseMaySelectTool(this.activeResponsePurpose)) this._bufferAudio(event, audio);
@@ -1230,6 +1279,7 @@ class OpenAIRealtimeClient extends EventEmitter {
         break;
 
       case 'response.output_audio.done':
+        if (this.discardActiveOutput) break;
         // This is the authoritative upstream boundary: all audio deltas for
         // the exact response item have been emitted by Realtime. Handset
         // authorization still waits for a separate downstream playout mark.
@@ -1238,6 +1288,7 @@ class OpenAIRealtimeClient extends EventEmitter {
         break;
 
       case 'response.output_audio_transcript.delta': {
+        if (this.discardActiveOutput) break;
         const key = event.item_id || event.response_id || 'current';
         const transcript = `${this.outputTranscripts.get(key) || ''}${event.delta || ''}`;
         this.outputTranscripts.set(key, transcript);
@@ -1266,7 +1317,7 @@ class OpenAIRealtimeClient extends EventEmitter {
         const transcript = event.transcript || this.outputTranscripts.get(key) || '';
         this.outputTranscripts.delete(key);
         this.clippedResponses.delete(key);
-        if (transcript) {
+        if (transcript && !this.discardActiveOutput) {
           if (this.activeVerifiedSpeech || responseMaySelectTool(this.activeResponsePurpose)) {
             this._bufferAssistantTranscript(event, transcript);
           } else {
@@ -1278,7 +1329,9 @@ class OpenAIRealtimeClient extends EventEmitter {
 
       case 'response.done':
         {
+          if (this.discardActiveOutput) this.suppressedResponseIds.add(this._responseKey(event));
           const finalization = this._finalizeBufferedResponse(event.response || {});
+          this.discardActiveOutput = false;
           const completedNotice = this.activeNotice;
           const completedPurpose = this.activeResponsePurpose;
           const completedStatus = String(event.response?.status || 'completed');

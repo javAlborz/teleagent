@@ -438,7 +438,7 @@ async function runRealtimeConversation(endpoint, dialog, callUuid, {
   const configuredResponseDebounceMs = Math.max(
     0,
     Math.min(
-      Number.parseInt(responseDebounceMs ?? process.env.OPENAI_REALTIME_RESPONSE_DEBOUNCE_MS, 10) || 500,
+      Number.parseInt(responseDebounceMs ?? process.env.OPENAI_REALTIME_RESPONSE_DEBOUNCE_MS, 10) || 250,
       2000
     )
   );
@@ -457,7 +457,7 @@ async function runRealtimeConversation(endpoint, dialog, callUuid, {
   };
   const interruptAssistantForSubstantiveTurn = () => {
     const playback = audioSession?.stopPlayback?.() || null;
-    realtime?.cancelResponse?.();
+    realtime?.cancelResponse?.({ discardOutput: true });
     if (playback?.itemId) {
       try {
         realtime?.truncatePlayback?.(playback);
@@ -593,6 +593,9 @@ async function runRealtimeConversation(endpoint, dialog, callUuid, {
       noiseReductionType: process.env.OPENAI_REALTIME_NOISE_REDUCTION === 'off'
         ? null
         : (process.env.OPENAI_REALTIME_NOISE_REDUCTION || 'near_field'),
+      vadEagerness: process.env.OPENAI_REALTIME_VAD_EAGERNESS || 'medium',
+      isPlaybackActive: () => Boolean(audioSession?.isPlaybackActive?.()),
+      isUserTurnPending: () => Boolean(userResponseTimer),
       maxSpokenWords: process.env.OPENAI_REALTIME_MAX_SPOKEN_WORDS || 35,
       hardMaxSpokenWords: process.env.OPENAI_REALTIME_HARD_MAX_SPOKEN_WORDS || 240,
       contextTokenLimit: process.env.OPENAI_REALTIME_CONTEXT_TOKEN_LIMIT || 16000,
@@ -758,6 +761,23 @@ async function runRealtimeConversation(endpoint, dialog, callUuid, {
 
     realtime.on('session.created', (session) => {
       stateStore.markRealtimeSessionConnected(realtimeState.id, session.id || null);
+    });
+    realtime.on('user_transcript_partial', (transcript, event = {}) => {
+      if (!callActive || hangupRequested || !audioSession?.isPlaybackActive?.()) return;
+      const value = normalizeShortUtterance(transcript);
+      // An early recognizable interruption can stop speech, but cannot route a
+      // tool, change session focus, cancel native work, or create a response.
+      const explicit = /^(?:stop|wait|hold on|actually)(?:$| )/.test(value);
+      const substantive = value.split(' ').length >= 4;
+      if ((!explicit && !substantive) || isLikelyUnclearTranscript(transcript) ||
+          isBackchannelOnly(transcript, { duringAssistantPlayback: true }) ||
+          isLikelyPlaybackEcho(transcript, lastAssistantTranscript)) return;
+      interruptAssistantForSubstantiveTurn();
+      stateStore.appendAuditEvent({
+        voiceThreadId: thread.id, realtimeSessionId: realtimeState.id, callerId,
+        action: 'realtime_early_interruption', riskLevel: 'read_only',
+        metadata: { item_id: event.item_id || null, partial: true, instructionsDispatched: false },
+      });
     });
     realtime.on('user_transcript', (transcript, transcriptEvent = {}) => {
       if (!callActive) return;
@@ -1007,8 +1027,8 @@ async function runRealtimeConversation(endpoint, dialog, callUuid, {
     });
     realtime.on('speech_started', () => {
       // Raw VAD starts are provisional. Acoustic echo and line noise can hold
-      // them open, so only a completed substantive transcript may destroy
-      // assistant playout or cancel a queued response.
+      // them open, so transcript evidence is required to stop assistant
+      // playout. Only a completed turn may create a response or dispatch work.
       turnBeganDuringAssistantPlayback = Boolean(audioSession?.isPlaybackActive?.());
     });
     realtime.on('speech_stopped', () => {
