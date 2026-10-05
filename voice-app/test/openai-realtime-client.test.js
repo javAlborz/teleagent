@@ -1163,3 +1163,16 @@ test('a send preserves the caller question and arms one reply watcher; reminders
   assert.equal(client.ownerReplyWatch.current.operationId, operation);
   client.close();assert.equal(client.ownerReplyWatch.current, null);
 });
+
+
+test('a late transcript cannot rewrite the message of an already routed caller turn', async t => {
+  const calls = [];
+  const capabilities = { ...require('./controller-capabilities-fixture').READY_CAPABILITIES, ownerSessionsAvailable: true };
+  const client = await createConnectedClient({ capabilities, ownerSessionLabels: ['drizzy'], toolHandler: async (name, args) => {
+    calls.push({ name, args }); return { success: true, result: { state: 'dispatching' } };
+  } });t.after(() => client.close());
+  client.latestUserTranscript = 'Ask Drizzy what is two plus two?';client.requestRoutedResponse();
+  client.latestUserTranscript = 'What is the latest reply?';
+  await client._handleToolCall({ name: 'route_turn', call_id: 'bound-caller', arguments: JSON.stringify({action: 'respond'}) });
+  assert.equal(calls.length, 1);assert.equal(calls[0].args.message, 'what is two plus two?');
+});

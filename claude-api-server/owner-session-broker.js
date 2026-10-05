@@ -71,7 +71,7 @@ class OwnerSessionBroker {
         throw sessionError('OWNER_SESSION_IDENTITY_CHANGED');
       }
       if (typeof this.assertAdmission !== 'function') throw sessionError('OWNER_BROKER_ADMISSION_UNAVAILABLE');
-      this.assertAdmission(entry);
+      await this.assertAdmission(entry);
       const delivered = this.store.get(plan.operationId, hash(plan));
       if (!delivered || !['accepted', 'submitted_unconfirmed'].includes(delivered.state)) {
         return { operationId: plan.operationId, history: { latestTurn: { status: 'unknown', reply: null } } };

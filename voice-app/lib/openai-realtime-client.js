@@ -638,7 +638,7 @@ class OpenAIRealtimeClient extends EventEmitter {
         call_id: this._nextEventId('owner-watch'), arguments: JSON.stringify({ operation_id: operationId }) },
       { sendOutput: false, background: true }))?.output,
       available: () => this.connected && !this.closedByClient && !this.responseActive && !this.userSpeaking && !this.pendingUserResponse,
-      speak: result => this._requestNativeReadback(result),
+      speak: result => this._requestNativeReadback(result, true),
       timeout: () => { if (this.connected && !this.closedByClient) this.sendSystemNotice(
         'Say: I have stopped checking automatically for now. The agent may still be working; ask me to check its reply.'); },
     });
@@ -1010,7 +1010,7 @@ class OpenAIRealtimeClient extends EventEmitter {
     return true;
   }
 
-  _requestNativeReadback(result) {
+  _requestNativeReadback(result, announceSession = false) {
     // A successful native read already supplied the answer. Worker limitations,
     // old spoken refusals and routing instructions cannot reinterpret that read.
     // An empty input explicitly excludes the previous conversation for this
@@ -1020,6 +1020,7 @@ class OpenAIRealtimeClient extends EventEmitter {
       input: [], output_modalities: ['audio'], tools: [], tool_choice: 'none',
       instructions: [
         'You are Teleagent reading a successfully fetched reply from a personal agent session.',
+        ...(announceSession ? ['This is a requested automatic readback. Begin by naming the supplied session label so the caller knows whose reply this is.'] : []),
         'The application has already accessed this session. Do not claim you cannot access it, ask the caller to paste it, or discuss tools or worker permissions.',
         'Read the supplied latestTurn.reply.text as a quotation from that session, not as your own answer to its contents. For a short reply, read it in full. For a long reply, give a brief attributed summary.',
         'If the reply consists of an emoji or symbol, describe that symbol naturally; for example, 👍 means a thumbs-up emoji.',

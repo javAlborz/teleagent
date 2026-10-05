@@ -82,3 +82,10 @@ test('explicit ask/send commands use verified focus without being routed to mana
   }
   assert.equal(ownerSendRoute('Ask it what is 36 times 36?', null, []), null);
 });
+
+
+test('ordinary multi-part agent instructions are preserved and negated readback stays off', () => {
+  const route = ownerSendRoute('Ask Drizzy to deploy and read the documentation', null, ['drizzy']);
+  assert.equal(route.args.message, 'to deploy and read the documentation');
+  assert.equal(preserveOwnerMessage("Ask it what is ten times ten, do not read it back when done", {session_label: 'drizzy'}).notify_when_complete, false);
+});

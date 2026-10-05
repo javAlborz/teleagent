@@ -3,7 +3,7 @@
 // Read corrections and explicit caller imperatives are bound to caller text.
 // Never infer permission to send from a session's output.
 function wantsReplyWatch(text) {
-  return typeof text === 'string' && /\b(?:read|reader|tell|report|back)\b[\s\S]{0,100}\b(?:done|finished|comes back|responds|replies)\b/i.test(text);
+  return typeof text === 'string' && !/\b(?:don't|do not|never|no need to) (?:read|tell|report)\b/i.test(text) && /\b(?:read|reader|tell|report|back)\b[\s\S]{0,100}\b(?:done|finished|comes back|responds|replies)\b/i.test(text);
 }
 
 function ownerCorrectionRoute(text, focusedSession, operationId, labels = []) {
@@ -41,9 +41,10 @@ function preserveOwnerMessage(transcript, args) {
   let message = args.message;
   const label = typeof args.session_label === 'string' && /^[A-Za-z0-9][A-Za-z0-9 ._-]{0,79}$/.test(args.session_label)
     ? args.session_label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/ +/g, '\\s*') : '(?!)';
-  const question = new RegExp('\\bask (?:it|them|that session|' + label + ')\\s+([\\s\\S]+?)(?:\\s+and (?:then )?(?:immediately )?(?:read|tell|report)\\b[\\s\\S]*)?$', 'i').exec(transcript);
+  const question = new RegExp('\\bask (?:it|them|that session|' + label + ')\\s+([\\s\\S]+)$', 'i').exec(transcript);
   const what = /\b(?:write|send)\s+(what (?:is|are)\b[\s\S]+?)(?:\s+in that same syntax)?[?.!]*$/i.exec(transcript);
   if (question || what) message = (question || what)[1].trim();
+  if (typeof message === 'string' && wantsReplyWatch(transcript)) message = message.replace(/\s+and (?:then )?(?:immediately )?(?:read|tell|report)\b[\s\S]*\b(?:done|finished|comes back|responds|replies)\b[\s\S]*$/i, '').trim();
   const normalize = value => String(value || '').toLowerCase().replace(/\bcomma\b/g, ',')
     .replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
   // A model may extract the message, but cannot answer, rewrite or expand it.
