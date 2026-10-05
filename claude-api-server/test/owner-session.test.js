@@ -421,3 +421,42 @@ test('operation-bound Claude reply cannot read the answer to a different user me
   assert.equal(f.client.history(SESSION, { operationId }).latestTurn.reply, null);
   assert.equal(f.received.length, 0);
 });
+
+test('Codex selects historical messages by role and direction without falling back to latest', async t => {
+  const {client, state} = await codexFixture(t);
+  const turn = n => ({id: `turn_${n}`, status: 'completed', items: [
+    {type: 'userMessage', content: [{type: 'text', text: `question ${n}`}]},
+    {type: 'agentMessage', text: `answer ${n} token=fixture-sensitive`}]});
+  state.historyTurns = [turn(3), turn(2), turn(1)];
+  let result = await client.history(SESSION, null, {anchor: 'end', index: 2, role: 'assistant'});
+  assert.match(result.selectedMessage.text, /answer 2/);
+  assert.doesNotMatch(JSON.stringify(result), /fixture-sensitive/);
+  assert.equal(result.latestTurn, undefined);
+  state.historyTurns = [turn(1), turn(2), turn(3)];
+  result = await client.history(SESSION, null, {anchor: 'start', index: 1, role: 'any'});
+  assert.equal(result.selectedMessage.text, 'question 1');
+  assert.equal(state.calls.at(-1).params.sortDirection, 'asc');
+  assert.equal(state.calls.at(-1).params.itemsView, 'summary');
+  result = await client.history(SESSION, null, {anchor: 'start', index: 6, role: 'assistant'});
+  assert.equal(result.selectedMessage, null); assert.equal(result.selectionUnavailable, true);
+  await assert.rejects(client.history(SESSION, null, {anchor: 'end', index: 7, role: 'any'}), {code: 'OWNER_HISTORY_SELECTION_INVALID'});
+  assert.ok(state.calls.every(c => !['turn/start', 'turn/steer'].includes(c.method)));
+});
+
+test('Claude reads first from the bounded file head and previous from the tail', async t => {
+  const f = await claudeFixture(t);
+  const logs = path.join(f.root, 'projects', f.root.replace(/[^a-zA-Z0-9]/g, '-'));
+  fs.mkdirSync(logs, {recursive: true});
+  const record = (type, text) => JSON.stringify({type, sessionId: SESSION, message: {content: text}});
+  const content = [record('user', 'original question'), record('assistant', 'original answer'),
+    JSON.stringify({type: 'progress', padding: 'x'.repeat(300000)}),
+    record('user', 'recent question'), record('assistant', 'recent answer'),
+    record('user', 'latest question'), record('assistant', 'latest answer')].join('\n');
+  fs.writeFileSync(path.join(logs, `${SESSION}.jsonl`), content, {mode: 0o600});
+  const first = f.client.history(SESSION, null, {anchor: 'start', index: 1, role: 'any'});
+  assert.equal(first.selectedMessage.text, 'original question'); assert.equal(first.limited, true);
+  const previous = f.client.history(SESSION, null, {anchor: 'end', index: 2, role: 'assistant'});
+  assert.equal(previous.selectedMessage.text, 'recent answer');
+  assert.equal(f.client.history(SESSION, null, {anchor: 'end', index: 6, role: 'assistant'}).selectedMessage, null);
+  assert.equal(f.received.length, 0);
+});

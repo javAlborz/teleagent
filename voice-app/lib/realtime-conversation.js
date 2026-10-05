@@ -193,9 +193,11 @@ function isQuietWaitRequest(transcript) {
 }
 
 function isDefinitiveGoodbye(transcript) {
-  const value = String(transcript || '').toLowerCase().trim();
-  if (/\b(?:what|how|when|if|can|could|would)\b.{0,30}\b(?:goodbye|hang up|end (?:the )?call)\b/.test(value)) return false;
-  return /\b(?:good\s*bye(?: for now)?|bye(?: for now)?|hang up(?: now)?|end the call|i(?:'m| am) done|that's all|that is all)\b/.test(value);
+  // Only a complete farewell utterance ends the call. Quoted message bodies,
+  // task completion, questions and conditional requests are ordinary input.
+  const value = String(transcript || '').normalize('NFKC').toLowerCase()
+    .replace(/[’]/g, "'").replace(/[,.!?;:]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return /^(?:(?:okay|ok|all right|thanks|thank you|please|now|and) )*(?:good\s*bye(?: for now)?|bye(?: for now)?|hang up(?: now)?|end the call|i(?:'m| am) done|that's all|that is all)(?: (?:please|now|thanks|thank you|good\s*bye(?: for now)?|bye(?: for now)?|hang up(?: now)?))*$/.test(value);
 }
 
 function normalizeShortUtterance(transcript) {

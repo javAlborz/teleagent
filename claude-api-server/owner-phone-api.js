@@ -16,9 +16,11 @@ function createOwnerPhoneApi({ broker, coordinator, assertUnlocked }) {
           inventoryProvesLiveness: false, tmuxPaneBinding: false };
       }
       if (action === 'inspect') {
-        exact(body, ['id', 'history']);
+        exact(body, ['id', 'history', ...(Object.hasOwn(body, 'selection') ? ['selection'] : [])]);
+        const selection = require('./owner-session-history').validateSelection(body.selection);
+        if (selection && body.history !== true) throw sessionError('OWNER_HISTORY_SELECTION_INVALID');
         if (typeof body.history !== 'boolean') throw sessionError('OWNER_PHONE_REQUEST_INVALID');
-        const result = await broker.inspect(body.id, body.history);
+        const result = await broker.inspect(body.id, body.history, selection);
         return { id: result.id, label: result.label, provider: result.provider, status: result.status,
           ...(result.history ? { history: result.history } : {}), scope: 'exact_enrolled_native_session' };
       }

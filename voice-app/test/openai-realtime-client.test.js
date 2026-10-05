@@ -1271,3 +1271,83 @@ test('failed transcription releases the readback wait without creating a caller 
   assert.equal(client.latestUserTranscript, null);
   assert.equal(client.ws.sentEvents().some(e => e.type === 'response.create'), false);
 });
+
+test('queued farewell waits for speech and final transcript in either event order', async t => {
+  for (const order of ['speech-first', 'transcript-first']) {
+    const client = await createConnectedClient(); t.after(() => client.close());
+    await client._handleEvent({ type: 'input_audio_buffer.speech_started', item_id: 'bye' });
+    client.sendSystemNotice('Say goodbye.', { key: 'hangup', priority: 1000 });
+    const stop = { type: 'input_audio_buffer.speech_stopped', item_id: 'bye' };
+    const transcript = { type: 'conversation.item.input_audio_transcription.completed', item_id: 'bye', transcript: 'Goodbye' };
+    await client._handleEvent(order === 'speech-first' ? stop : transcript);
+    assert.equal(client.pendingNotices.length, 1);
+    await client._handleEvent(order === 'speech-first' ? transcript : stop);
+    assert.equal(client.pendingNotices.length, 0);
+    const responses = client.ws.sentEvents().filter(e => e.type === 'response.create');
+    assert.equal(responses.length, 1);
+    assert.equal(responses[0].response.conversation, 'none');
+  }
+});
+
+test('inventory includes all seventeen names and offers truthful continuation for long catalogs', async t => {
+  const client = await createConnectedClient(); t.after(() => client.close());
+  let speech; client._requestOwnerStatusSpeech = text => { speech = text; };
+  const sessions = Array.from({length: 17}, (_, i) => ({label: `session${i}`}));
+  assert.equal(client._requestOwnerInventorySpeech({sessions}), true);
+  for (const {label} of sessions) assert.ok(speech.includes(label));
+  assert.doesNotMatch(speech, /more are enrolled/);
+  const long = Array.from({length: 32}, (_, i) => ({label: `session ${i} has a long valid name`}));
+  client._requestOwnerInventorySpeech({sessions: long});
+  assert.match(speech, /Say next sessions/);
+  const offset = client.ownerInventoryOffset;
+  client.latestUserTranscript = 'next sessions'; client._requestOwnerInventorySpeech({sessions: long});
+  assert.ok(speech.includes(long[offset].label));
+  assert.ok(!speech.includes(long[0].label));
+});
+
+test('selected historical message speech excludes latest reply and unavailable selection is honest', async t => {
+  const client = await createConnectedClient(); t.after(() => client.close());
+  client._requestNativeReadback({label: 'phoneA', history: {selection: {anchor: 'start', index: 1, role: 'any'},
+    selectedMessage: {role: 'user', text: 'original message', clipped: false}}});
+  const response = client.ws.sentEvents().filter(e => e.type === 'response.create').at(-1).response;
+  assert.deepEqual(response.input, []); assert.deepEqual(response.tools, []);
+  assert.match(response.instructions, /original message/);
+  assert.equal(client.ownerHistorySelection.anchor, 'start');
+  let spoken; client._requestOwnerStatusSpeech = text => { spoken = text; };
+  client._requestNativeReadback({label: 'phoneA', history: {selection: {anchor: 'end', index: 6, role: 'any'}, selectedMessage: null}});
+  assert.match(spoken, /not available/);
+});
+
+test('call ordinal corrections override a model latest-read and retain successive selection', async t => {
+  const calls = [];
+  const client = await createConnectedClient({capabilities: {...require('./controller-capabilities-fixture').READY_CAPABILITIES, ownerSessionsAvailable: true}, toolHandler: async (name, args) => {
+    calls.push({name, args});
+    return {success: true, result: {label: 'phoneA', history: {selection: args.selection,
+      selectedMessage: {role: 'user', text: `selected ${args.selection.index}`, clipped: false}}}};
+  }}); t.after(() => client.close());
+  client.focusedOwnerSession = 'phoneA';
+  const read = async (text, id) => {
+    client.latestUserTranscript = text; client.responseActive = false;
+    await client._handleResponseDone({output: [{type: 'function_call', name: 'route_turn', call_id: id,
+      arguments: JSON.stringify({action: 'inspect_owner_session', arguments_json: JSON.stringify({session_label: 'phone A', history: true})})}]});
+  };
+  await read('What is the second to last message in phone A?', 'ordinal1');
+  assert.deepEqual(calls.at(-1).args.selection, {anchor: 'end', index: 2, role: 'any'});
+  await read('No, the one before that.', 'ordinal2');
+  assert.equal(calls.at(-1).args.selection.index, 3);
+  await read('What is the very first message?', 'ordinal3');
+  assert.deepEqual(calls.at(-1).args.selection, {anchor: 'start', index: 1, role: 'any'});
+  assert.ok(calls.every(c => c.name === 'inspect_owner_session'));
+});
+
+test('requested completion readback is acknowledged without claiming completion', async t => {
+  const operation = 'job_' + 'a'.repeat(64);
+  const client = await createConnectedClient({capabilities: {...require('./controller-capabilities-fixture').READY_CAPABILITIES, ownerSessionsAvailable: true}, toolHandler: async () => ({success: true, operation_id: operation,
+    result: {state: 'dispatching'}})}); t.after(() => client.close());
+  client.latestUserTranscript = 'Tell phoneA test and read the reply when it finishes';
+  await client._handleResponseDone({output: [{type: 'function_call', name: 'route_turn', call_id: 'watched-send',
+    arguments: JSON.stringify({action: 'request_owner_instruction', arguments_json: JSON.stringify({session_label: 'phoneA', message: 'test'})})}]});
+  const speech = client.ws.sentEvents().filter(e => e.type === 'response.create').at(-1).response;
+  assert.equal(client.ownerReplyWatch.current.operationId, operation);
+  assert.match(speech.instructions, /not confirmed.*read the reply when it finishes/);
+});

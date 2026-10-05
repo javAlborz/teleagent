@@ -53,9 +53,9 @@ class OwnerSessionBroker {
     return this.catalog.entries().map(({ id, label, provider }) => ({ id, label, provider,
       availability: 'unchecked' }));
   }
-  inspect(id, { history = false } = {}) {
+  inspect(id, { history = false, selection = null } = {}) {
     return this.serial(() => this.session(id, async ({ entry, client, session, assertEnrolled }) => {
-      const recent = history ? await client.history(entry.sessionId) : null;
+      const recent = history ? await client.history(entry.sessionId, null, selection) : null;
       assertEnrolled();
       return { id: entry.id, label: entry.label, provider: entry.provider,
         status: session.status, sessionFingerprint: session.sessionFingerprint,

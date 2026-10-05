@@ -304,7 +304,7 @@ class VoiceToolController {
         case 'inspect_owner_session': {
           const target = await this._ownerSessionId(args);
           if (target.failure) return target.failure;
-          return this.agentBridge.ownerSessionAction('inspect', { id: target.id, history: args.history === true });
+          return this.agentBridge.ownerSessionAction('inspect', { id: target.id, history: args.history === true, ...(args.selection ? { selection: args.selection } : {}) });
         }
         case 'get_owner_reply':
           return this.agentBridge.ownerSessionAction('reply', { operationId: args.operation_id });

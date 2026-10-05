@@ -44,7 +44,7 @@ function createOwnerSessionProxy({ socketPath = SOCKET_PATH, timeoutMs = 15000 }
     });
   }
   return Object.freeze({ health: () => call('/v1/health'), list: () => call('/v1/sessions'),
-    inspect: (id, history = false) => call('/v1/inspect', { id, history }),
+    inspect: (id, history = false, selection = null) => call('/v1/inspect', { id, history, ...(selection ? { selection } : {}) }),
     reply: (input) => call('/v1/reply', input),
     prepare: (input) => call('/v1/prepare', input), deliver: (input) => call('/v1/deliver', input),
     forward: (input) => call('/v1/forward', input),

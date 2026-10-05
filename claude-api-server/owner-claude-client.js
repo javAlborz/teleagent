@@ -5,7 +5,7 @@ const path = require('node:path');
 const net = require('node:net');
 const crypto = require('node:crypto');
 const { sessionError, endpointIdentity, assertSameIdentity } = require('./owner-session-endpoint');
-const { boundedMessages } = require('./owner-session-history');
+const { boundedMessages, validateSelection, selectMessage } = require('./owner-session-history');
 
 const UUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
 
@@ -95,7 +95,9 @@ class OwnerClaudeClient {
     return { id: current.id, cwd: current.cwd, status: current.status };
   }
 
-  history(sessionId, binding = null) {
+  history(sessionId, binding = null, selection = null) {
+    validateSelection(selection);
+    if (binding && selection) throw sessionError('OWNER_HISTORY_SELECTION_INVALID');
     const current = this.read(sessionId);
     const projectsRoot = path.join(path.dirname(this.registration.registryRoot), 'projects');
     const directory = path.join(projectsRoot, current.cwd.replace(/[^a-zA-Z0-9]/g, '-'));
@@ -103,6 +105,7 @@ class OwnerClaudeClient {
     const fd = fs.openSync(path.join(directory, `${sessionId}.jsonl`),
       fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
     const messages = [];
+    let limited = false;
     let latestReply = null;
     let completed = false;
     let bound = !binding;
@@ -111,7 +114,8 @@ class OwnerClaudeClient {
       if (!stat.isFile() || stat.uid !== this.registration.uid || (stat.mode & 0o022)) {
         throw sessionError('OWNER_SESSION_HISTORY_UNSAFE');
       }
-      const start = Math.max(0, stat.size - 256 * 1024);
+      const start = selection?.anchor === 'start' ? 0 : Math.max(0, stat.size - 256 * 1024);
+      limited = stat.size > 256 * 1024;
       const buffer = Buffer.alloc(Math.min(stat.size, 256 * 1024));
       const bytes = fs.readSync(fd, buffer, 0, buffer.length, start);
       const lines = buffer.subarray(0, bytes).toString('utf8').split('\n');
@@ -139,6 +143,7 @@ class OwnerClaudeClient {
       }
     } finally { fs.closeSync(fd); }
     this.assertIdentity();
+    if (selection) return selectMessage(messages, selection, { limited });
     const status = this.read(sessionId).status;
     return { messages: binding ? [] : boundedMessages(messages), limited: true,
       latestTurn: { status: status === 'busy' ? 'inProgress'

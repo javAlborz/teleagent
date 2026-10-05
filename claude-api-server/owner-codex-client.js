@@ -3,7 +3,7 @@
 const net = require('node:net');
 const WebSocket = require('ws');
 const { sessionError, endpointIdentity, assertSameIdentity } = require('./owner-session-endpoint');
-const { boundedMessages } = require('./owner-session-history');
+const { boundedMessages, validateSelection, selectMessage } = require('./owner-session-history');
 const METHODS = new Set(['initialize', 'thread/loaded/list', 'thread/read',
   'thread/turns/list', 'turn/start', 'turn/steer']);
 
@@ -141,18 +141,20 @@ class OwnerCodexClient {
     return turn.id;
   }
 
-  async history(threadId, binding = null) {
+  async history(threadId, binding = null, selection = null) {
+    validateSelection(selection);
+    if (binding && selection) throw sessionError('OWNER_HISTORY_SELECTION_INVALID');
     if (!(await this.loaded()).includes(threadId)) throw sessionError('OWNER_SESSION_NOT_LOADED');
     const result = await this._request('thread/turns/list', {
       // Native summary contains user/assistant messages without tool-output payloads.
-      threadId, limit: 3, sortDirection: 'desc', itemsView: 'summary',
+      threadId, limit: selection ? 6 : 3, sortDirection: selection?.anchor === 'start' ? 'asc' : 'desc', itemsView: 'summary',
     });
-    if (!Array.isArray(result?.data) || result.data.length > 3) {
+    if (!Array.isArray(result?.data) || result.data.length > (selection ? 6 : 3)) {
       throw sessionError('OWNER_SESSION_RESPONSE_INVALID');
     }
     this.assertIdentity();
     const messages = [];
-    for (const turn of [...result.data].reverse()) {
+    for (const turn of (selection?.anchor === 'start' ? result.data : [...result.data].reverse())) {
       if (!Array.isArray(turn.items)) throw sessionError('OWNER_SESSION_RESPONSE_INVALID');
       for (const item of turn.items) {
         if (item.type === 'agentMessage' && typeof item.text === 'string') {
@@ -163,6 +165,7 @@ class OwnerCodexClient {
         }
       }
     }
+    if (selection) return selectMessage(messages, selection, { limited: Boolean(result.nextCursor) });
     // Never identify a reply from an older turn as the latest turn's result.
     // Use the same redaction/bounds as history, and expose no native IDs.
     const latest = binding ? result.data.find(turn => turn.id === binding.turnId) : result.data[0];
