@@ -639,8 +639,6 @@ class OpenAIRealtimeClient extends EventEmitter {
       { sendOutput: false, background: true }))?.output,
       available: () => this.connected && !this.closedByClient && !this.responseActive && !this.userSpeaking && !this.pendingUserResponse,
       speak: result => this._requestNativeReadback(result, true),
-      timeout: () => { if (this.connected && !this.closedByClient) this.sendSystemNotice(
-        'Say: I have stopped checking automatically for now. The agent may still be working; ask me to check its reply.'); },
     });
     this.activeResponsePurpose = null;
     this.nextResponsePurpose = null;
@@ -1475,7 +1473,7 @@ class OpenAIRealtimeClient extends EventEmitter {
   async _handleToolCall(call, { sendOutput = true, background = false } = {}) {
     const callId = call.call_id || call.id;
     if (!callId || this.handledToolCalls.has(callId)) return null;
-    this.handledToolCalls.add(callId);
+    if (!background) this.handledToolCalls.add(callId);
 
     const callerTranscript = this.pendingCallerTranscript || this.latestUserTranscript;
     if (call.name === 'route_turn') this.pendingCallerTranscript = null;

@@ -372,9 +372,9 @@ older result, in which case Teleagent cannot confirm it through this path.
 
 Only one requested automatic readback is active per call. A new watch replaces
 the previous watch, and a repeated reminder about the same operation does not
-send it again. After sixty unsuccessful reads, Teleagent says it has stopped
-checking automatically. This ends only reply checking, not the agent's work.
-Call termination or transport loss also stops checking; this feature does not
+send it again. Checking continues while the call remains open, without adding
+a task-duration limit. Call termination or transport loss stops checking without
+cancelling the agent's work; this feature does not
 promise a callback or restart-persistent notification. A manual reply read is
 still available afterwards.
 

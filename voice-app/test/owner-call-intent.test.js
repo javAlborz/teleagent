@@ -52,12 +52,13 @@ test('ending the call fences a pending read; user speech defers checks', async (
   assert.equal(g.read.length, 0);assert.equal(g.spoken.length, 0);
 });
 
-test('unknown replies expire the watcher without canceling or sending native work', async () => {
-  let timedOut = 0;
-  const f = watcher({ read: async () => ({ success: true, result: { history: { latestTurn: { status: 'unknown', reply: null } } } }), timeout: () => timedOut++ });
-  f.watch.start(operation);
-  for (let i = 0; i < 60; i++) await f.watch.tick(f.watch.current);
-  assert.equal(timedOut, 1); assert.equal(f.spoken.length, 0); assert.equal(f.watch.current, null);
+test('a long-running instruction keeps its single watch until call end without resending', async () => {
+  let checks = 0;
+  const f = watcher({ read: async () => { checks++; return { success: true, result: { history: { latestTurn: { status: 'inProgress', reply: null } } } }; } });
+  f.watch.start(operation);const original = f.watch.current;
+  for (let i = 0; i < 100; i++) await f.watch.tick(original);
+  assert.equal(checks, 100);assert.equal(f.watch.current, original);assert.equal(f.spoken.length, 0);
+  f.watch.stop();assert.equal(f.watch.current, null);
 });
 
 test('explicit enrolled names override context and compound targets require clarification', () => {
