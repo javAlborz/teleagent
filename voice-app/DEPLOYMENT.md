@@ -260,7 +260,7 @@ environment):
 | `OPENAI_REALTIME_MAX_SPOKEN_WORDS` | Advisory spoken-response target recorded with limiter telemetry |
 | `OPENAI_REALTIME_HARD_MAX_SPOKEN_WORDS` | High absolute runaway cutoff; defaults to 240 words |
 | `OPENAI_REALTIME_NOISE_REDUCTION` | Input filter before VAD: `near_field` for Linphone handsets/headsets, `far_field` for speakerphones, or `off`; defaults to `near_field` |
-| `OPENAI_REALTIME_RESPONSE_DEBOUNCE_MS` | Delay used to coalesce adjacent final transcript fragments; defaults to 500 ms |
+| `OPENAI_REALTIME_RESPONSE_DEBOUNCE_MS` | Delay used to coalesce adjacent final transcript fragments; defaults to 250 ms |
 | `OPENAI_REALTIME_CONTEXT_TOKEN_LIMIT` | Post-instruction Realtime context target before retention truncation |
 | `OPENAI_REALTIME_CONTEXT_RETENTION_RATIO` | Fraction retained when long-call context is truncated |
 | `VOICE_INSPECTION_ROOTS` | Host roots available to authenticated bounded read-only inspection |
