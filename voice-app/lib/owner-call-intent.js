@@ -1,7 +1,7 @@
 'use strict';
 
-// These overrides only choose reads or preserve text inside an independently
-// selected send. Never infer permission to send from a session's output.
+// Read corrections and explicit caller imperatives are bound to caller text.
+// Never infer permission to send from a session's output.
 function wantsReplyWatch(text) {
   return typeof text === 'string' && /\b(?:read|reader|tell|report|back)\b[\s\S]{0,100}\b(?:done|finished|comes back|responds|replies)\b/i.test(text);
 }
@@ -48,9 +48,34 @@ function preserveOwnerMessage(transcript, args) {
     .replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
   // A model may extract the message, but cannot answer, rewrite or expand it.
   const exact = normalize(message);
-  if (!exact || !normalize(transcript).includes(exact)) return null;
+  if (!exact || typeof message !== 'string' || message.length > 1200 || !normalize(transcript).includes(exact)) return null;
   return { session_label: args.session_label, message,
     notify_when_complete: wantsReplyWatch(transcript) };
 }
 
-module.exports = { ownerCorrectionRoute, preserveOwnerMessage, wantsReplyWatch };
+function ownerSendRoute(transcript, focusedSession, labels = []) {
+  if (typeof transcript !== 'string' || transcript.length > 1400) return null;
+  const text = transcript.trim().replace(/^(?:(?:okay|ok|all right|now)[, ]+)+/i, '')
+    .replace(/^(?:could|can|would) you (?:please )?/i, '').replace(/^please /i, '');
+  // A fresh explicit imperative is required. Questions/reminders about an
+  // earlier send never enter this branch. Enrollment is rechecked at dispatch.
+  const match = /^(ask|tell|write)\s+([\s\S]+)$/i.exec(text);
+  if (!match) return null;
+  let label = null; let message = null;
+  const rest = match[2];
+  const named = labels.filter(value => typeof value === 'string' &&
+    /^[A-Za-z0-9][A-Za-z0-9 ._-]{0,79}$/.test(value) &&
+    rest.toLowerCase().startsWith(value.toLowerCase() + ' '));
+  if (named.length === 1) { label = named[0]; message = rest.slice(label.length).trim(); }
+  else if (/^(?:it|them|that session) /i.test(rest) && focusedSession) {
+    label = focusedSession; message = rest.replace(/^(?:it|them|that session) /i, '');
+  } else if (match[1].toLowerCase() === 'write' && /^what (?:is|are) /i.test(rest) && focusedSession) {
+    label = focusedSession; message = rest.replace(/\s+in that same syntax[?.!]*$/i, '');
+  }
+  if (!label || !message) return null;
+  message = message.replace(/\s+and (?:then )?(?:immediately )?(?:read|tell|report)\b[\s\S]*\b(?:done|finished|comes back|responds|replies)\b[\s\S]*$/i, '').trim();
+  const args = preserveOwnerMessage(transcript, { session_label: label, message });
+  return args ? { action: 'request_owner_instruction', args } : null;
+}
+
+module.exports = { ownerCorrectionRoute, ownerSendRoute, preserveOwnerMessage, wantsReplyWatch };

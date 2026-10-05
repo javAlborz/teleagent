@@ -1068,7 +1068,7 @@ test('a completed explicit read turn overrides a mistaken respond route without 
   const result = await client._handleToolCall({ name: 'route_turn', call_id: 'wrong-route', arguments: JSON.stringify({ action: 'respond', response_instruction: 'Say you cannot check.' }) }, { sendOutput: false });
   assert.equal(result.action, 'get_owner_instruction');
   assert.deepEqual(calls, [{ name: 'get_owner_instruction', args: { operation_id: operation } }]);
-  assert.equal(client.pendingOwnerReadRoute, null);
+  assert.equal(client.pendingOwnerRoute, null);
   assert.equal(client.focusedOwnerOperation, operation);
 });
 

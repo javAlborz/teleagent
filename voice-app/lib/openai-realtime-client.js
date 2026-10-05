@@ -1,6 +1,6 @@
 'use strict';
 
-const { ownerCorrectionRoute, preserveOwnerMessage } = require('./owner-call-intent');
+const { ownerCorrectionRoute, ownerSendRoute, preserveOwnerMessage } = require('./owner-call-intent');
 const { OwnerReplyWatch } = require('./owner-reply-watch');
 
 const { EventEmitter } = require('node:events');
@@ -628,7 +628,8 @@ class OpenAIRealtimeClient extends EventEmitter {
     this.ownerInstructionReferences = [];
     this.ownerInstructionSequence = 0;
     this.latestUserTranscript = null;
-    this.pendingOwnerReadRoute = null;
+    this.pendingOwnerRoute = null;
+    this.pendingCallerTranscript = null;
     this.lastOwnerAction = null;
     this.focusedOwnerOperation = null;
     this.focusedOwnerSession = null;
@@ -1031,8 +1032,8 @@ class OpenAIRealtimeClient extends EventEmitter {
   }
 
   requestRoutedResponse({ purpose = 'user_turn' } = {}) {
-    const readRoute = this.capabilities.ownerSessionsAvailable
-      ? ownerCorrectionRoute(this.latestUserTranscript, this.focusedOwnerSession, this.focusedOwnerOperation, this.ownerSessionLabels) || ownerReadRoute(this.latestUserTranscript, this.ownerInstructionReferences, this.lastOwnerAction, this.focusedOwnerOperation, this.focusedOwnerSession) : null;
+    const callerRoute = this.capabilities.ownerSessionsAvailable
+      ? ownerCorrectionRoute(this.latestUserTranscript, this.focusedOwnerSession, this.focusedOwnerOperation, this.ownerSessionLabels) || ownerSendRoute(this.latestUserTranscript, this.focusedOwnerSession, this.ownerSessionLabels) || ownerReadRoute(this.latestUserTranscript, this.ownerInstructionReferences, this.lastOwnerAction, this.focusedOwnerOperation, this.focusedOwnerSession) : null;
     const started = this.requestResponse({
       conversation: 'none',
       metadata: { teleagent_stage: 'route_turn' },
@@ -1058,7 +1059,7 @@ class OpenAIRealtimeClient extends EventEmitter {
         ] : []),
       ].join(' '),
     }, { purpose });
-    if (started) this.pendingOwnerReadRoute = readRoute;
+    if (started) { this.pendingOwnerRoute = callerRoute; this.pendingCallerTranscript = this.latestUserTranscript; }
     return started;
   }
 
@@ -1475,16 +1476,19 @@ class OpenAIRealtimeClient extends EventEmitter {
     if (!callId || this.handledToolCalls.has(callId)) return null;
     this.handledToolCalls.add(callId);
 
+    const callerTranscript = this.pendingCallerTranscript || this.latestUserTranscript;
+    if (call.name === 'route_turn') this.pendingCallerTranscript = null;
     let toolName = call.name;
     let args = parseArguments(call.arguments);
     let routed = false;
     let auditCall = call;
     const startedAt = Date.now();
     let output;
-    if (toolName === 'route_turn' && this.pendingOwnerReadRoute) {
-      // The completed caller turn, not model prose, established this read.
-      const read = this.pendingOwnerReadRoute;
-      this.pendingOwnerReadRoute = null;
+    if (toolName === 'route_turn' && this.pendingOwnerRoute) {
+      // The completed caller turn established this exact action. Sends still
+      // require an explicit imperative, preserved text and live target checks.
+      const read = this.pendingOwnerRoute;
+      this.pendingOwnerRoute = null;
       args = { action: read.action, arguments_json: JSON.stringify(read.args), response_instruction: read.response_instruction };
     }
     if (toolName === 'route_turn' && !args._parse_error) {
@@ -1531,7 +1535,7 @@ class OpenAIRealtimeClient extends EventEmitter {
       delete args.id;
     }
     if (routed && !output && toolName === 'request_owner_instruction') {
-      const preserved = preserveOwnerMessage(this.latestUserTranscript, args);
+      const preserved = preserveOwnerMessage(callerTranscript, args);
       if (!preserved) output = { success: false, code: 'OWNER_MESSAGE_CLARIFICATION_REQUIRED',
         message: 'Nothing was sent. Ask the caller for the exact message and target; do not answer or rewrite the message.' };
       else args = preserved;

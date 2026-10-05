@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { ownerCorrectionRoute, preserveOwnerMessage } = require('../lib/owner-call-intent');
+const { ownerCorrectionRoute, ownerSendRoute, preserveOwnerMessage } = require('../lib/owner-call-intent');
 const { OwnerReplyWatch } = require('../lib/owner-reply-watch');
 const operation = 'job_' + 'a'.repeat(64);
 
@@ -67,4 +67,18 @@ test('explicit enrolled names override context and compound targets require clar
 
 test('reading words inside a new message do not turn a send into a read', () => {
   assert.equal(ownerCorrectionRoute('Tell Drizzy to read the README', 'phoneA', operation, ['drizzy', 'phoneA']), null);
+});
+
+
+test('explicit ask/send commands use verified focus without being routed to managed work', () => {
+  for (const text of ['Okay, now ask it what is 36 times 36?', 'Could you write what is two plus two in that same syntax?']) {
+    const route = ownerSendRoute(text, 'drizzy', ['drizzy']);
+    assert.equal(route.action, 'request_owner_instruction');assert.equal(route.args.session_label, 'drizzy');
+    assert.match(route.args.message, /^what is /);
+  }
+  assert.equal(ownerSendRoute('Ask Drizzy what is ten times ten and read it back when done.', null, ['drizzy']).args.notify_when_complete, true);
+  for (const text of ['But I asked it to read back when done', 'Did you tell it what is 36 times 36?', 'Read the message: ask it to deploy', 'What does ask it mean?']) {
+    assert.equal(ownerSendRoute(text, 'drizzy', ['drizzy']), null);
+  }
+  assert.equal(ownerSendRoute('Ask it what is 36 times 36?', null, []), null);
 });
