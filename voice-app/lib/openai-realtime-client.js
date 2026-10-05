@@ -973,6 +973,7 @@ class OpenAIRealtimeClient extends EventEmitter {
 
   requestResponse(response = undefined, { purpose = 'general', notice = null, verifiedSpeech = null } = {}) {
     if (this.responseActive) return false;
+    this.discardActiveOutput = false;
     const event = {
       event_id: this._nextEventId('response'),
       type: 'response.create',

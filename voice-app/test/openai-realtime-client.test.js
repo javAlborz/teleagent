@@ -1251,6 +1251,12 @@ test('caller interruption suppresses in-flight audio even before response.create
     await client._handleEvent({ type: 'response.created', response: { id: 'next' } });
     await client._handleEvent({ type: 'response.output_audio.delta', response_id: 'next', delta: Buffer.from([3, 4]).toString('base64') });
     assert.deepEqual(outputs, ['audio']);
+    client.cancelResponse({ discardOutput: true });
+    await client._handleEvent({ type: 'error', error: { code: 'response_cancel_not_active' } });
+    client.requestResponse({ tool_choice: 'none' }, { purpose: 'routed_speech' });
+    await client._handleEvent({ type: 'response.created', response: { id: 'after-race' } });
+    await client._handleEvent({ type: 'response.output_audio.delta', response_id: 'after-race', delta: Buffer.from([5, 6]).toString('base64') });
+    assert.deepEqual(outputs, ['audio', 'audio']);
   }
 });
 
