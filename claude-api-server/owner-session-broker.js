@@ -62,6 +62,30 @@ class OwnerSessionBroker {
         activeTurnId: session.activeTurnId, ...(recent ? { history: recent } : {}) };
     }));
   }
+  reply(input) {
+    exact(input, ['id', 'request']);
+    const plan = requestPlan(input.request);
+    return this.serial(async () => {
+      const entry = this.catalog.get(input.id);
+      if (entry.provider !== plan.provider || entry.sessionId !== plan.sessionId) {
+        throw sessionError('OWNER_SESSION_IDENTITY_CHANGED');
+      }
+      if (typeof this.assertAdmission !== 'function') throw sessionError('OWNER_BROKER_ADMISSION_UNAVAILABLE');
+      this.assertAdmission(entry);
+      const delivered = this.store.get(plan.operationId, hash(plan));
+      if (!delivered || !['accepted', 'submitted_unconfirmed'].includes(delivered.state)) {
+        return { operationId: plan.operationId, history: { latestTurn: { status: 'unknown', reply: null } } };
+      }
+      return this.session(input.id, async ({ client, session, assertEnrolled }) => {
+        if (session.sessionFingerprint !== plan.sessionFingerprint) throw sessionError('OWNER_SESSION_IDENTITY_CHANGED');
+        const history = await client.history(entry.sessionId, {
+          operationId: plan.operationId, turnId: delivered.receipt?.turnId,
+        });
+        assertEnrolled();
+        return { operationId: plan.operationId, label: entry.label, history };
+      });
+    });
+  }
   prepare(input) {
     exact(input, ['id', 'operationId', 'message']);
     return this.serial(() => this.session(input.id, ({ entry, session, assertEnrolled }) => {

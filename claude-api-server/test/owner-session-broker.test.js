@@ -309,3 +309,17 @@ test('broker readiness checks current enrollment and durable lock without native
   assert.equal(broker.health().ready, true); assert.equal(state.calls.length, 0);
   store.lock(); assert.throws(() => broker.health(), { code: 'OWNER_BROKER_UNAVAILABLE' });
 });
+
+test('bound reply verifies durable plan, identity and admission without delivering', async t => {
+  const { broker, store, state } = await fixture(t);
+  const prepared = await broker.prepare({ id: 'os_fixture', operationId: 'job_' + 'a'.repeat(64), message: 'Question' });
+  const plan = requestPlan(prepared.request);
+  assert.equal((await broker.reply({ id: prepared.id, request: prepared.request })).history.latestTurn.reply, null);
+  store.admitNative(plan);store.finish(plan, { state: 'accepted', turnId: 'turn_fixture' });
+  // Fixture has no matching marker: its generic progress must not escape.
+  assert.equal((await broker.reply({ id: prepared.id, request: prepared.request })).history.latestTurn.reply, null);
+  await assert.rejects(broker.reply({ id: prepared.id, request: { ...prepared.request, message: 'changed' } }), { code: 'OWNER_SESSION_IDEMPOTENCY_CONFLICT' });
+  broker.assertAdmission = () => { throw Object.assign(new Error('capacity'), { code: 'OWNER_SESSION_CAPACITY' }); };
+  await assert.rejects(broker.reply({ id: prepared.id, request: prepared.request }), { code: 'OWNER_SESSION_CAPACITY' });
+  assert.ok(state.calls.every(c => !['turn/start', 'turn/steer'].includes(c.method)));
+});

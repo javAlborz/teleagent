@@ -71,12 +71,12 @@ function buildToolAudit({ call = {}, args = {}, output = {}, durationMs = 0 } = 
       status: output?.status || output?.job?.status || null,
       job_id: output?.job_id || output?.job?.job_id || null,
       end_call: Boolean(output?.end_call),
-      ...(call.name === 'inspect_owner_session' ? {
+      ...(['inspect_owner_session', 'get_owner_reply'].includes(call.name) ? {
         owner_history_returned: Boolean(output?.result?.history),
         owner_latest_turn_status: output?.result?.history?.latestTurn?.status || null,
         owner_latest_reply_present: typeof output?.result?.history?.latestTurn?.reply?.text === 'string',
       } : {}),
-      ...(['request_owner_instruction', 'get_owner_instruction'].includes(call.name) ? {
+      ...(['request_owner_instruction', 'get_owner_instruction', 'get_owner_reply'].includes(call.name) ? {
         owner_operation_id: output?.operation_id || output?.result?.operationId || null,
         owner_delivery_state: output?.result?.state || null,
       } : {}),
@@ -613,6 +613,7 @@ async function runRealtimeConversation(endpoint, dialog, callUuid, {
             : 'Starting a fresh voice thread.'
         ),
       }),
+      ownerSessionLabels: ownerSessionContext.labels || [],
       toolHandler: (name, args, context) => toolController.handle(name, args, context),
       responseValidator: ({ purpose, transcript }) => {
         const awaitingApproval = jobBroker.listAgentTasks(thread.id, { activeOnly: true }).jobs

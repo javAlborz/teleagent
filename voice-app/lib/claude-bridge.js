@@ -706,7 +706,7 @@ async function unlockVoiceExecution(source = 'operator') {
 }
 
 async function ownerSessionAction(action, body) {
-  if (!['list', 'inspect', 'request', 'status', 'cancel'].includes(action)) {
+  if (!['list', 'inspect', 'request', 'status', 'reply', 'cancel'].includes(action)) {
     return { success: false, code: 'OWNER_PHONE_ACTION_INVALID' };
   }
   try {

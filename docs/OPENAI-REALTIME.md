@@ -358,3 +358,28 @@ application resolves its label against fresh enrollment. After a reply read,
 “what about now?” and “recheck” inspect the same session again. An unrelated or
 failed action clears that focus. Each read speaks only the newest native turn;
 an accepted delivery receipt is never used as evidence that no reply exists.
+
+### Personal-session follow-ups
+
+Say “Ask Drizzy what is ten times ten and read it back when done” to request
+an in-call reply notification. Teleagent preserves the question, records one
+native delivery, and checks its reply serially every five seconds while the
+call is quiet. It requires the stored target, native identity, delivery record,
+and matching user operation marker; Codex also requires the acknowledged turn
+ID. Another user message in the same turn prevents attribution. An old or
+unrelated reply is never a substitute. The bounded native history can omit an
+older result, in which case Teleagent cannot confirm it through this path.
+
+Only one requested automatic readback is active per call. A new watch replaces
+the previous watch, and a repeated reminder about the same operation does not
+send it again. After sixty unsuccessful reads, Teleagent says it has stopped
+checking automatically. This ends only reply checking, not the agent's work.
+Call termination or transport loss also stops checking; this feature does not
+promise a callback or restart-persistent notification. A manual reply read is
+still available afterwards.
+
+Explicit session corrections override the previous focus. Ambiguous compound
+targets require clarification. Voice sends must preserve a message extractable
+from the caller's current transcript; uncertain, fragmented or rewritten text
+requires clarification before anything is sent. Native permissions and approval
+prompts remain unchanged.

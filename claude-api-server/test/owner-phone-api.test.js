@@ -40,3 +40,16 @@ test('authority epochs require three distinct Ed25519 public keys with exact rol
   const rsa = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
   assert.throws(() => parseEpoch(JSON.stringify({ ...input, pbx: { keyId: 'pbx', publicKey: rsa.publicKey.export({ type: 'spki', format: 'pem' }) } })), { code: 'OWNER_AUTHORITY_CONFIG_INVALID' });
 });
+
+test('operation reply uses the stored request and target, rejects injected identities', async () => {
+  const operationId = 'job_' + 'a'.repeat(64); const calls = [];
+  const request = { operationId, message: 'test' };
+  const api = createOwnerPhoneApi({ assertUnlocked() {}, coordinator: { store: {
+    assertUnlocked() {}, get: id => id === operationId ? { catalog_id: 'os_original', request_json: JSON.stringify(request) } : null,
+  } }, broker: { reply: input => { calls.push(input); return { history: { latestTurn: { status: 'unknown', reply: null } } }; } } });
+  await api.handle('reply', { operationId });
+  assert.deepEqual(calls, [{ id: 'os_original', request }]);
+  await assert.rejects(api.handle('reply', { operationId, id: 'os_other' }));
+  await assert.rejects(api.handle('reply', { operationId: 'job_' + 'b'.repeat(64) }), { code: 'OWNER_PHONE_OPERATION_NOT_FOUND' });
+  assert.equal(calls.length, 1);
+});

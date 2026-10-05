@@ -141,7 +141,7 @@ class OwnerCodexClient {
     return turn.id;
   }
 
-  async history(threadId) {
+  async history(threadId, binding = null) {
     if (!(await this.loaded()).includes(threadId)) throw sessionError('OWNER_SESSION_NOT_LOADED');
     const result = await this._request('thread/turns/list', {
       // Native summary contains user/assistant messages without tool-output payloads.
@@ -165,11 +165,23 @@ class OwnerCodexClient {
     }
     // Never identify a reply from an older turn as the latest turn's result.
     // Use the same redaction/bounds as history, and expose no native IDs.
-    const latest = result.data[0];
-    const latestReplies = boundedMessages((latest?.items || [])
+    const latest = binding ? result.data.find(turn => turn.id === binding.turnId) : result.data[0];
+    // A steered turn can contain earlier answers. Only accept a reply after
+    // this operation's exact user marker, with no intervening user message.
+    let replyItems = latest?.items || [];
+    if (binding) {
+      const marker = `[teleagent-operation:${binding.operationId}]`;
+      const userItems = replyItems.filter(item => item.type === 'userMessage');
+      const lastUser = userItems.at(-1);
+      const matches = lastUser?.content?.some(part => part.type === 'text' &&
+        typeof part.text === 'string' && part.text.endsWith('\n' + marker));
+      replyItems = matches ? replyItems.slice(replyItems.indexOf(lastUser) + 1) : [];
+      if (!matches) return { messages: [], limited: true, latestTurn: { status: 'unknown', reply: null } };
+    }
+    const latestReplies = boundedMessages(replyItems
       .filter((item) => item.type === 'agentMessage')
       .map((item) => ({ role: 'assistant', text: item.text })));
-    return { messages: boundedMessages(messages), limited: true,
+    return { messages: binding ? [] : boundedMessages(messages), limited: true,
       latestTurn: {
         status: ['completed', 'inProgress', 'failed', 'interrupted'].includes(latest?.status)
           ? latest.status : 'unknown',

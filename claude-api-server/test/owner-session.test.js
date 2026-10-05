@@ -388,3 +388,36 @@ test('voice and controller cannot directly import native owner delivery', () => 
       /owner-(?:codex-client|claude-client|session-delivery)/);
   }
 });
+
+test('operation reply requires both delivered Codex turn and last user marker, never prior progress', async t => {
+  const { client, state } = await codexFixture(t);
+  const operationId = 'job_' + 'a'.repeat(64);
+  const user = text => ({ type: 'userMessage', content: [{ type: 'text', text }] });
+  const answer = { type: 'agentMessage', text: '100' };
+  const turn = { id: 'bound-turn', status: 'completed', items: [user('older'), answer,
+    user('ten times ten\n[teleagent-operation:' + operationId + ']')] };
+  state.historyTurns = [turn];
+  const binding = { operationId, turnId: turn.id };
+  assert.equal((await client.history(SESSION, binding)).latestTurn.reply, null);
+  turn.items.push(answer);
+  assert.equal((await client.history(SESSION, binding)).latestTurn.reply.text, '100');
+  assert.equal((await client.history(SESSION, { ...binding, turnId: 'wrong' })).latestTurn.reply, null);
+  turn.items.push(user('unrelated'), { type: 'agentMessage', text: 'unrelated answer' });
+  assert.equal((await client.history(SESSION, binding)).latestTurn.reply, null);
+  assert.ok(state.calls.every(c => !['turn/start', 'turn/steer'].includes(c.method)));
+});
+
+test('operation-bound Claude reply cannot read the answer to a different user message', async t => {
+  const f = await claudeFixture(t);
+  const logs = path.join(f.root, 'projects', f.root.replace(/[^a-zA-Z0-9]/g, '-'));
+  fs.mkdirSync(logs, { recursive: true });
+  const file = path.join(logs, `${SESSION}.jsonl`);
+  const operationId = 'job_' + 'a'.repeat(64);
+  const record = (type, text) => ({ type, sessionId: SESSION, message: { content: text, stop_reason: type === 'assistant' ? 'end_turn' : null } });
+  const rows = [record('user', 'question\n[teleagent-operation:' + operationId + ']'), record('assistant', '100')];
+  const write = () => fs.writeFileSync(file, rows.map(JSON.stringify).join('\n'), { mode: 0o600 });
+  write(); assert.equal(f.client.history(SESSION, { operationId }).latestTurn.reply.text, '100');
+  rows.push(record('user', 'another question'), record('assistant', 'other answer'));write();
+  assert.equal(f.client.history(SESSION, { operationId }).latestTurn.reply, null);
+  assert.equal(f.received.length, 0);
+});

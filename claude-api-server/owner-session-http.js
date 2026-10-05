@@ -50,7 +50,8 @@ function createOwnerSessionServer(broker) {
           exact(body, ['id', 'history']);
           if (typeof body.history !== 'boolean') throw sessionError('OWNER_BROKER_REQUEST_INVALID');
           result = await broker.inspect(body.id, { history: body.history });
-        } else if (req.method === 'POST' && req.url === '/v1/prepare') result = await broker.prepare(body);
+        } else if (req.method === 'POST' && req.url === '/v1/reply') result = await broker.reply(body);
+        else if (req.method === 'POST' && req.url === '/v1/prepare') result = await broker.prepare(body);
         else if (req.method === 'POST' && req.url === '/v1/deliver') result = await broker.deliver(body);
         else if (req.method === 'POST' && req.url === '/v1/forward') result = await broker.forward(body);
         else if (req.method === 'POST' && req.url === '/v1/result') result = broker.result(body);
