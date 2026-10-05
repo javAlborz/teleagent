@@ -1463,3 +1463,15 @@ test('recognizable partial interruptions stop playout without dispatching or can
   assert.equal(client.queuedResponses.length, 1);
   await f.dialog.destroy(); await call;
 });
+
+test('only a complete farewell ends a call, never quoted instructions or task completion', () => {
+  for (const text of ["All right, now send a message to that session saying that I'm done",
+    "Tell phoneA goodbye", "Send 'hang up' to drizzy", "I'm done editing, what is next?",
+    'Wait until I say goodbye', 'Can you say goodbye?', 'The task is done']) {
+    assert.equal(isDefinitiveGoodbye(text), false, text);
+  }
+  for (const text of ["I'm done", 'Goodbye', 'Please end the call.', "That's all, goodbye.",
+    'Goodbye, hang up.', 'Okay, thank you, goodbye for now.']) {
+    assert.equal(isDefinitiveGoodbye(text), true, text);
+  }
+});

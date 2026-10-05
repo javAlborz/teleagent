@@ -395,3 +395,24 @@ targets require clarification. Voice sends must preserve a message extractable
 from the caller's current transcript; uncertain, fragmented or rewritten text
 requires clarification before anything is sent. Native permissions and approval
 prompts remain unchanged.
+
+### Personal session conversation controls
+
+A complete farewell such as “goodbye” or “please end the call” ends a call.
+Farewell words inside a forwarded instruction (for example, “send phoneA a
+message saying I’m done”) remain message content. Queued notices wait for
+speech and its final transcription before continuing.
+
+Named-session history supports first, previous, and second-to-last messages.
+Message ordinals count user and assistant text messages; “reply” selects
+assistant messages only. “One before that” continues the last selection.
+Reads remain bounded to six native Codex turns or a 256 KiB Claude history
+window, with at most a 2,000-character redacted message excerpt. The first
+message is read from the beginning, not the oldest item in a recent tail.
+Unavailable selections are reported explicitly, never replaced by a newer reply.
+
+Session inventory reads all names that fit in one response. For long catalogs,
+“next sessions” continues the list. For automatic readback, say “read the reply
+when it finishes” with the instruction; Teleagent acknowledges the watch.
+The watch lasts during this call and does not promise a callback or cancel
+native work when the call ends.

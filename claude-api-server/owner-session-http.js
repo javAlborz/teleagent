@@ -47,9 +47,11 @@ function createOwnerSessionServer(broker) {
         if (req.method === 'GET' && req.url === '/v1/health') result = broker.health();
         else if (req.method === 'GET' && req.url === '/v1/sessions') result = broker.list();
         else if (req.method === 'POST' && req.url === '/v1/inspect') {
-          exact(body, ['id', 'history']);
+          exact(body, ['id', 'history', ...(Object.hasOwn(body, 'selection') ? ['selection'] : [])]);
+          const selection = require('./owner-session-history').validateSelection(body.selection);
+          if (selection && body.history !== true) throw sessionError('OWNER_HISTORY_SELECTION_INVALID');
           if (typeof body.history !== 'boolean') throw sessionError('OWNER_BROKER_REQUEST_INVALID');
-          result = await broker.inspect(body.id, { history: body.history });
+          result = await broker.inspect(body.id, { history: body.history, selection });
         } else if (req.method === 'POST' && req.url === '/v1/reply') result = await broker.reply(body);
         else if (req.method === 'POST' && req.url === '/v1/prepare') result = await broker.prepare(body);
         else if (req.method === 'POST' && req.url === '/v1/deliver') result = await broker.deliver(body);

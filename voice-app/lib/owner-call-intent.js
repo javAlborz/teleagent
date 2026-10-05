@@ -3,7 +3,7 @@
 // Read corrections and explicit caller imperatives are bound to caller text.
 // Never infer permission to send from a session's output.
 function wantsReplyWatch(text) {
-  return typeof text === 'string' && !/\b(?:don't|do not|never|no need to) (?:read|tell|report)\b/i.test(text) && /\b(?:read|reader|tell|report|back)\b[\s\S]{0,100}\b(?:done|finished|comes back|responds|replies)\b/i.test(text);
+  return typeof text === 'string' && !/\b(?:don't|do not|never|no need to) (?:read|tell|report)\b/i.test(text) && /\b(?:read|reader|tell|report|back)\b[\s\S]{0,100}\b(?:done|finished|finishes|complete|completed|comes back|responds|replies)\b/i.test(text);
 }
 
 function ownerCorrectionRoute(text, focusedSession, operationId, labels = []) {
@@ -44,7 +44,7 @@ function preserveOwnerMessage(transcript, args) {
   const question = new RegExp('\\bask (?:it|them|that session|' + label + ')\\s+([\\s\\S]+)$', 'i').exec(transcript);
   const what = /\b(?:write|send)\s+(what (?:is|are)\b[\s\S]+?)(?:\s+in that same syntax)?[?.!]*$/i.exec(transcript);
   if (question || what) message = (question || what)[1].trim();
-  if (typeof message === 'string' && wantsReplyWatch(transcript)) message = message.replace(/\s+and (?:then )?(?:immediately )?(?:read|tell|report)\b[\s\S]*\b(?:done|finished|comes back|responds|replies)\b[\s\S]*$/i, '').trim();
+  if (typeof message === 'string' && wantsReplyWatch(transcript)) message = message.replace(/\s+and (?:then )?(?:immediately )?(?:read|tell|report)\b[\s\S]*\b(?:done|finished|finishes|complete|completed|comes back|responds|replies)\b[\s\S]*$/i, '').trim();
   const normalize = value => String(value || '').toLowerCase().replace(/\bcomma\b/g, ',')
     .replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
   // A model may extract the message, but cannot answer, rewrite or expand it.
@@ -74,9 +74,23 @@ function ownerSendRoute(transcript, focusedSession, labels = []) {
     label = focusedSession; message = rest.replace(/\s+in that same syntax[?.!]*$/i, '');
   }
   if (!label || !message) return null;
-  message = message.replace(/\s+and (?:then )?(?:immediately )?(?:read|tell|report)\b[\s\S]*\b(?:done|finished|comes back|responds|replies)\b[\s\S]*$/i, '').trim();
+  message = message.replace(/\s+and (?:then )?(?:immediately )?(?:read|tell|report)\b[\s\S]*\b(?:done|finished|finishes|complete|completed|comes back|responds|replies)\b[\s\S]*$/i, '').trim();
   const args = preserveOwnerMessage(transcript, { session_label: label, message });
   return args ? { action: 'request_owner_instruction', args } : null;
 }
 
-module.exports = { ownerCorrectionRoute, ownerSendRoute, preserveOwnerMessage, wantsReplyWatch };
+// Selection is caller-owned; a model cannot silently turn an ordinal into latest.
+function ownerHistorySelection(text, previous = null) {
+  if (typeof text !== 'string' || /\b(?:send|tell|write|ask|message to)\b/i.test(text)) return null;
+  const role = /\b(?:reply|replies|answer|answers|response)\b/i.test(text) ? 'assistant'
+    : /\b(?:user|my) message\b/i.test(text) ? 'user' : 'any';
+  if (/\b(?:very first|first|oldest)\b/i.test(text)) return { anchor: 'start', index: 1, role };
+  if (/\bsecond[ -]to[ -]last\b/i.test(text)) return { anchor: 'end', index: 2, role };
+  if (/\b(?:one before that|previous|earlier|before that)\b/i.test(text)) {
+    if (previous?.anchor === 'start') return { ...previous, index: previous.index - 1 };
+    return { anchor: 'end', index: (previous?.index || 1) + 1, role: previous?.role || role };
+  }
+  return null;
+}
+
+module.exports = { ownerHistorySelection, ownerCorrectionRoute, ownerSendRoute, preserveOwnerMessage, wantsReplyWatch };

@@ -90,3 +90,13 @@ test('ordinary multi-part agent instructions are preserved and negated readback 
   assert.equal(route.args.message, 'to deploy and read the documentation');
   assert.equal(preserveOwnerMessage("Ask it what is ten times ten, do not read it back when done", {session_label: 'drizzy'}).notify_when_complete, false);
 });
+
+test('history ordinals preserve direction and continuation, never forwarded message content', () => {
+  const {ownerHistorySelection, wantsReplyWatch} = require('../lib/owner-call-intent');
+  assert.deepEqual(ownerHistorySelection('What is the second to last message in phone A?'), {anchor: 'end', index: 2, role: 'any'});
+  assert.deepEqual(ownerHistorySelection('No, the one before that.', {anchor: 'end', index: 2, role: 'any'}), {anchor: 'end', index: 3, role: 'any'});
+  assert.deepEqual(ownerHistorySelection('What is the very first reply?'), {anchor: 'start', index: 1, role: 'assistant'});
+  assert.equal(ownerHistorySelection('Tell phoneA to read the first message'), null);
+  assert.equal(wantsReplyWatch('Tell phoneA test and read the reply when it finishes'), true);
+  assert.equal(wantsReplyWatch('Tell phoneA test and do not read the reply when it finishes'), false);
+});
