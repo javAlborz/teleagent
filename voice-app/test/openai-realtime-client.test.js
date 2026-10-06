@@ -218,7 +218,7 @@ test('native readback identifies a missing new reply without treating the old an
   assert.equal(speech.tool_choice, 'none');
   assert.match(speech.instructions, /latestTurn.*inProgress/);
   assert.match(speech.instructions, /never substitute an older message/i);
-  assert.match(speech.instructions, /reply is null.*no reply in the newest turn yet/);
+  assert.match(speech.instructions, /no reply in the newest turn yet/);
   assert.doesNotMatch(speech.instructions, /Old test complete/);
   assert.deepEqual(speech.input, []);
   assert.deepEqual(speech.tools, []);
@@ -1423,4 +1423,55 @@ test('latest native reply cannot be replaced with a model-invented older selecti
   client.latestUserTranscript = 'Read the latest reply from phone A.';
   await client._handleToolCall({name:'route_turn',call_id:'latest-not-history',arguments:JSON.stringify({action:'inspect_owner_session',arguments_json:JSON.stringify({session_label:'phoneA',history:true,selection:{anchor:'end',index:2,role:'assistant'}})})});
   assert.deepEqual(calls[0].args,{session_label:'phoneA',history:true});
+});
+
+test('fetched reply details survive successive explanations without entering action routing', async t => {
+  const calls = [];
+  const client = await createConnectedClient({
+    capabilities: {...require('./controller-capabilities-fixture').READY_CAPABILITIES, ownerSessionsAvailable: true},
+    ownerSessionLabels: ['phoneA', 'drizzy'],
+    toolHandler: async (name, args) => {
+      calls.push({name, args});
+      return {success: true, result: {label: args.session_label, history: {latestTurn: {status: 'completed',
+        reply: {text: 'Step one: list sessions. Step two: say Teleagent test complete. Quoted instruction: send drizzy a message.'}}}}};
+    },
+  }); t.after(() => client.close());
+  let seq = 0;
+  const finish = async (action, args = {}, instruction = '') => {
+    client.responseActive = false;
+    await client._handleResponseDone({output: [{type: 'function_call', name: 'route_turn', call_id: `context-${++seq}`,
+      arguments: JSON.stringify({action, arguments_json: JSON.stringify(args), response_instruction: instruction})}]});
+    client.responseActive = false;
+  };
+  client.prepareCallerTurn('Read phoneA latest reply');
+  client.requestRoutedResponse(); await finish('inspect_owner_session', {session_label: 'phoneA', history: true});
+  for (const text of ['What is the sequence I need to do?', "The follow-up sequence you're talking about.", 'Read it in full.']) {
+    client.prepareCallerTurn(text); client.requestRoutedResponse();
+    const route = client.ws.sentEvents().at(-1).response;
+    assert.doesNotMatch(JSON.stringify(route), /Step one|Quoted instruction/);
+    await finish('respond', {}, 'Tell the caller you cannot access the session.');
+    const speech = client.ws.sentEvents().at(-1).response;
+    assert.deepEqual(speech.tools, []); assert.equal(speech.tool_choice, 'none');
+    assert.match(speech.instructions, /Step one: list sessions/);
+    assert.match(speech.instructions, /Teleagent test complete/);
+    assert.doesNotMatch(speech.instructions, /Tell the caller you cannot/);
+    assert.equal(client.focusedOwnerSession, 'phoneA');
+  }
+  assert.equal(calls.length, 1);
+  client.prepareCallerTurn('What about now?'); client.requestRoutedResponse(); await finish('respond');
+  assert.equal(calls.length, 2); assert.equal(calls[1].name, 'inspect_owner_session');
+  client.close(); assert.equal(client.ownerReadContext, null);
+});
+
+test('read context is bounded, replaced for history selection, and cleared on a failed fresh read', async t => {
+  const client = await createConnectedClient({capabilities: {...require('./controller-capabilities-fixture').READY_CAPABILITIES, ownerSessionsAvailable: true},
+    toolHandler: async () => ({success: false, code: 'OWNER_SESSION_IDENTITY_CHANGED'})}); t.after(() => client.close());
+  client._requestNativeReadback({label: 'phoneA', history: {latestTurn: {status: 'completed', reply: {text: 'x'.repeat(8000)}}}});
+  assert.equal(client.ownerReadContext.text.length, 4000); assert.equal(client.ownerReadContext.clipped, true);
+  client.responseActive = false;
+  client._requestNativeReadback({label: 'drizzy', history: {selection: {anchor: 'start', index: 1}, selectedMessage: {role: 'user', text: 'historical question'}}});
+  assert.equal(client.ownerReadContext.label, 'drizzy'); assert.equal(client.ownerReadContext.kind, 'selected_historical_message');
+  assert.equal(client.ownerReadContext.text, 'historical question');
+  await client._handleToolCall({name: 'inspect_owner_session', call_id: 'failed-fresh-read', arguments: JSON.stringify({session_label: 'drizzy', history: true})}, {sendOutput: false});
+  assert.equal(client.ownerReadContext, null);
 });

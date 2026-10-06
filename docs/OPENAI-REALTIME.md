@@ -432,3 +432,17 @@ Session inventory reads all names that fit in one response. For long catalogs,
 when it finishes” with the instruction; Teleagent acknowledges the watch.
 The watch lasts during this call and does not promise a callback or cancel
 native work when the call ends.
+
+Fetched replies remain available as bounded, call-local quoted context for
+follow-up explanations and detailed readback. Ordinary questions preserve the
+selected session. The quotation is supplied only to speech with tools disabled;
+action routing receives the caller's request and session references, never the
+quoted instructions. Current-status requests still perform a fresh read. A new
+read or instruction clears the old snapshot, including when that read fails,
+and ending the call clears the context. Longer readbacks preserve concrete
+steps instead of replacing them with a statement that a sequence exists.
+
+Playback echo suppression requires a contiguous repeated phrase of at least
+three words. Shared vocabulary alone does not suppress a caller's clarification,
+and short repeated choices remain eligible caller turns. Text matching cannot
+perfectly distinguish physical echo from an intentional verbatim repetition.

@@ -244,12 +244,10 @@ function isLikelyPlaybackEcho(transcript, assistantTranscript) {
   const heard = normalizeShortUtterance(transcript);
   const spoken = normalizeShortUtterance(assistantTranscript);
   if (!heard || !spoken || heard.length < 4) return false;
-  if (spoken.includes(heard)) return true;
-  const heardWords = heard.split(' ').filter((word) => word.length > 2);
-  if (heardWords.length < 3) return false;
-  const spokenWords = new Set(spoken.split(' '));
-  const overlap = heardWords.filter((word) => spokenWords.has(word)).length;
-  return overlap / heardWords.length >= 0.8;
+  // Shared vocabulary is normal in answers and corrections. Only suppress an
+  // exact contiguous phrase; a bag-of-words match loses legitimate barge-ins.
+  // Short repeated choices are ambiguous and should reach the conversation.
+  return heard.split(' ').length >= 3 && (` ${spoken} `).includes(` ${heard} `);
 }
 
 function isVoiceCancelRequest(transcript) {
