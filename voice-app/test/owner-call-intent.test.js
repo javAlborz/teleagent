@@ -125,3 +125,20 @@ test('known spoken-name reads are deterministic and ambiguous aliases never sele
   assert.deepEqual(ownerCorrectionRoute('Read the latest reply from phone A.', null, null, ['phoneA']), {action: 'inspect_owner_session', args: {session_label: 'phoneA', history: true}});
   assert.equal(ownerCorrectionRoute('Read the latest reply from phone A.', null, null, ['phoneA', 'phone A']).action, 'respond');
 });
+
+test('misheard call-to-reply commands require a fresh action instead of reading or sending', () => {
+  for (const text of ['Call phone A to reply exactly teleagent test complete and read its reply when it finishes.', 'Could you call drizzy to respond when done?']) {
+    assert.deepEqual(ownerCorrectionRoute(text, 'phoneA', operation, ['phoneA','drizzy']), {action:'respond',args:{},clarification:'owner_action'});
+    assert.equal(ownerSendRoute(text, 'phoneA', ['phoneA','drizzy']),null);
+  }
+  assert.equal(ownerCorrectionRoute('Read the latest reply about a call from phone A.',null,null,['phoneA']).action,'inspect_owner_session');
+});
+
+test('spoken send connectors tolerate punctuation without rewriting message content', () => {
+  for (const connector of ['saying, ', 'saying: ', 'that, ', 'that ']) {
+    const route=ownerSendRoute(`Send a message to phone A ${connector}reply exactly: Teleagent test complete, and read its reply when it finishes.`,null,['phoneA']);
+    assert.equal(route.args.message,'reply exactly: Teleagent test complete,');
+    assert.equal(route.args.notify_when_complete,true);
+  }
+  assert.equal(ownerSendRoute('Message phone A sayings should remain untouched.',null,['phoneA']).args.message,'sayings should remain untouched.');
+});

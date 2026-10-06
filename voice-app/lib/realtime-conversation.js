@@ -1185,10 +1185,16 @@ async function runRealtimeConversation(endpoint, dialog, callUuid, {
       if (!hangupRequested || !callActive) return;
       if (meta.purpose && !['farewell', 'system_notice', 'notice:hangup'].includes(meta.purpose)) return;
       if (hangupTimer) clearTimeout(hangupTimer);
+      // Generation can finish well before downstream audio finishes playing.
+      // Keep the dialog alive for the queued farewell, including the playout
+      // margin supplied by AudioForkSession, instead of cutting it at 1.4s.
+      const playback = audioSession?.getPlaybackStatus?.();
+      const remainingMs = playback?.active && Number.isFinite(playback.remainingMs)
+        ? Math.max(0, Math.ceil(playback.remainingMs)) : 0;
       hangupTimer = setTimeout(() => {
         hangupTimer = null;
         void requestLocalHangup('farewell_completed');
-      }, Math.max(0, Number.parseInt(hangupDelayMs, 10) || 0));
+      }, Math.max(remainingMs, Number.parseInt(hangupDelayMs, 10) || 0));
     });
     realtime.on('cancel_race', (error) => {
       logger.info('Ignored benign Realtime cancellation race', {

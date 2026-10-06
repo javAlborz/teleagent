@@ -13,6 +13,11 @@ function spokenLabelPattern(label) {
 function ownerCorrectionRoute(text, focusedSession, operationId, labels = []) {
   if (typeof text !== 'string' || text.length > 400) return null;
   const clean = text.trim().replace(/[?.!]+$/, '');
+  // A misheard "tell" is not permission to send, and its trailing readback
+  // clause is not an independent history request. Ask for a fresh imperative.
+  if (/^call\s/i.test(callerCommand(clean)) && /\b(?:reply|respond|message|instruction)\b/i.test(clean)) {
+    return { action: 'respond', args: {}, clarification: 'owner_action' };
+  }
   const correction = /^(?:no[, ]+)+(?:i mean|i meant|the session is) (?:the )?([A-Za-z0-9][A-Za-z0-9 ._-]{0,79}?)(?: session)?$/i.exec(clean);
   if (correction) return { action: 'inspect_owner_session', args: { session_label: correction[1], history: true } };
   const reading = /\b(?:read|latest|reply|response|output)\b/i.test(clean);
@@ -23,7 +28,7 @@ function ownerCorrectionRoute(text, focusedSession, operationId, labels = []) {
       return { action: 'inspect_owner_session', args: { session_label: named[0], history: true } };
     }
     if (named.length > 1 || /\b(?:for|from|of)\b.*\band\b/i.test(clean)) {
-      return { action: 'respond', args: {}, response_instruction: 'Ask which single named session the caller wants to read first. Do not read or send anything yet.' };
+      return { action: 'respond', args: {}, clarification: 'owner_target', response_instruction: 'Ask which single named session the caller wants to read first. Do not read or send anything yet.' };
     }
   }
   // A reminder about an earlier instruction is never a new send.
@@ -86,7 +91,7 @@ function ownerSendRoute(transcript, focusedSession, labels = []) {
     const found = new RegExp('^' + pattern + '(?:\\s*[:,]\\s*|\\s+)([\\s\\S]+)$', 'i').exec(rest);
     return found ? [{ label: value, message: found[1] }] : [];
   });
-  if (named.length > 1) return { action: 'respond', args: {},
+  if (named.length > 1) return { action: 'respond', args: {}, clarification: 'owner_target',
     response_instruction: 'Ask for the exact single session name. Nothing has been sent because the spoken name matches multiple enrolled sessions.' };
   if (named.length === 1) { label = named[0].label; message = named[0].message.trim(); }
   else if (/^(?:it|them|that session) /i.test(rest) && focusedSession) {
@@ -95,7 +100,7 @@ function ownerSendRoute(transcript, focusedSession, labels = []) {
     label = focusedSession; message = rest.replace(/\s+in that same syntax[?.!]*$/i, '');
   }
   if (!label || !message) return null;
-  if (/^(?:send|message)/i.test(match[1])) message = message.replace(/^(?:that|saying)\s+/i, '');
+  if (/^(?:send|message)/i.test(match[1])) message = message.replace(/^(?:that|saying)(?:\s*[:,]\s*|\s+)/i, '');
   message = message.replace(/\s+and (?:then )?(?:immediately )?(?:read|tell|report)\b[\s\S]*\b(?:done|finished|finishes|complete|completed|comes back|responds|replies)\b[\s\S]*$/i, '').trim();
   const args = preserveOwnerMessage(transcript, { session_label: label, message });
   return args ? { action: 'request_owner_instruction', args } : null;
