@@ -446,6 +446,7 @@ Playback echo suppression requires a contiguous repeated phrase of at least
 three words. Shared vocabulary alone does not suppress a caller's clarification,
 and short repeated choices remain eligible caller turns. Text matching cannot
 perfectly distinguish physical echo from an intentional verbatim repetition.
+
 # V68 synthetic speech findings
 
 Unknown or ambiguous enrolled names produce a short, transcript-verified
@@ -455,6 +456,10 @@ is ambiguous: it asks whether to send or read, without doing either. A fresh
 explicit request is required; the app never silently changes “call” to “tell”.
 Recognized send connectors such as “saying,” are removed before forwarding while
 the actual message remains a substring of the caller transcript.
+
+Goodbye waits for the queued audio's remaining playout time as well as the
+configured hangup delay. A model response finishing generation does not mean
+the caller has heard its final words.
 
 These cases came from real-audio synthetic tests using installed conversation
 code and OpenAI Realtime, with simulated SIP/media peers and native sessions.

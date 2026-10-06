@@ -1240,6 +1240,24 @@ test('an explicit goodbye produces one farewell lifecycle and destroys the SIP d
   assert.equal(realtime.discardedResponses, 1);
 });
 
+test('goodbye waits for queued farewell playout after generation finishes', async t => {
+  const fixture=createCallFixture(t,{autoDestroyGreeting:false});
+  const call=runRealtimeConversation(fixture.endpoint,fixture.dialog,'call-long-goodbye',{
+    audioForkServer:fixture.audioForkServer,stateStore:fixture.stateStore,jobBroker:fixture.jobBroker,
+    callerId:'1001',hangupDelayMs:10,openaiClientFactory:fixture.openaiClientFactory,
+  });
+  while(!fixture.getRealtimeClient())await new Promise(resolve=>setImmediate(resolve));
+  await new Promise(resolve=>setImmediate(resolve));
+  const realtime=fixture.getRealtimeClient();
+  t.mock.timers.enable({apis:['setTimeout']});
+  realtime.emit('user_transcript','Goodbye.');
+  fixture.audioSession.playbackStatus={active:true,sourceComplete:true,remainingMs:2504};
+  realtime.emit('response.done',{status:'completed'},{purpose:'notice:hangup'});
+  t.mock.timers.tick(2503);assert.equal(fixture.dialog.destroyed,false);
+  t.mock.timers.tick(1);await call;
+  assert.equal(fixture.dialog.destroyCalls,1);
+});
+
 test('local hangup always resolves cleanup when SIP destroy rejects without emitting destroy', async (t) => {
   const fixture = createCallFixture(t, {
     autoDestroyGreeting: false,
