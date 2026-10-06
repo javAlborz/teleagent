@@ -896,6 +896,7 @@ async function runRealtimeConversation(endpoint, dialog, callUuid, {
         );
         return;
       }
+      realtime.prepareCallerTurn?.(transcript);
       queueDebouncedUserResponse('user_turn');
     });
     realtime.on('response.created', (response = {}, meta = {}) => {

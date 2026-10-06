@@ -100,3 +100,28 @@ test('history ordinals preserve direction and continuation, never forwarded mess
   assert.equal(wantsReplyWatch('Tell phoneA test and read the reply when it finishes'), true);
   assert.equal(wantsReplyWatch('Tell phoneA test and do not read the reply when it finishes'), false);
 });
+
+test('ordinary inventory requests are reads even after historic instructions were quoted', () => {
+  const { ownerInventoryRoute } = require('../lib/owner-call-intent');
+  for (const text of ['List all sessions.', "All right, let's start by doing the first step. Would you list all sessions?", 'Could you show my available sessions?']) {
+    assert.deepEqual(ownerInventoryRoute(text), { action: 'list_owner_sessions', args: {} });
+  }
+  for (const text of ['Tell phoneA list all sessions', 'The message says list all sessions', 'Do not list all sessions', 'List all sessions and send test to one']) assert.equal(ownerInventoryRoute(text), null);
+});
+
+test('send/message imperatives resolve only unique known spoken names and preserve forwarded farewell', () => {
+  for (const text of ["All right, send a message to phone A that I'm done", "Send phoneA: I'm done", "Message phone A I'm done", "Tell phone A: I'm done"]) {
+    const route = ownerSendRoute(text, null, ['phoneA']);
+    assert.deepEqual(route, { action: 'request_owner_instruction', args: {session_label: 'phoneA', message: "I'm done", notify_when_complete: false} });
+  }
+  assert.equal(ownerSendRoute("Send phone A I'm done", null, ['phoneA', 'phone A']).action, 'respond');
+  assert.equal(ownerSendRoute('Send phone B test', 'phoneA', ['phoneA']), null);
+  for (const text of ['Do not send phoneA test', 'Did you send phoneA test?', 'The reply says send phoneA test', 'Read the message: send phoneA test']) assert.equal(ownerSendRoute(text, 'phoneA', ['phoneA']), null);
+  const route = ownerSendRoute('Send phone A: test and read its reply when it finishes', null, ['phoneA']);
+  assert.equal(route.args.message, 'test'); assert.equal(route.args.notify_when_complete, true);
+});
+
+test('known spoken-name reads are deterministic and ambiguous aliases never select a target', () => {
+  assert.deepEqual(ownerCorrectionRoute('Read the latest reply from phone A.', null, null, ['phoneA']), {action: 'inspect_owner_session', args: {session_label: 'phoneA', history: true}});
+  assert.equal(ownerCorrectionRoute('Read the latest reply from phone A.', null, null, ['phoneA', 'phone A']).action, 'respond');
+});

@@ -396,6 +396,22 @@ from the caller's current transcript; uncertain, fragmented or rewritten text
 requires clarification before anything is sent. Native permissions and approval
 prompts remain unchanged.
 
+### Caller routing isolation
+
+Each routing response receives only the accepted final caller text, plus
+application-owned session focus and instruction references. Quoted history is
+excluded from routing input. `conversation: "none"` alone only prevents writing
+the routing result into the conversation; the explicit `input` also excludes
+old conversation content, as described in the [Realtime conversation guide](https://developers.openai.com/api/docs/guides/realtime-conversations).
+
+Ordinary session-list requests and explicit send/message commands have local
+routing rules. Spoken spacing such as “phone A” resolves only to a unique known
+label. A continuing “and…” fragment joins an unfinished send before dispatch;
+a late or canceled routing response cannot execute the superseded request.
+After dispatch, additions never resend or rewrite that instruction. Unclear
+additions ask for a complete new message. Message-validation failures speak a
+checked clarification, not a claim that session tools are unavailable.
+
 ### Personal session conversation controls
 
 A complete farewell such as “goodbye” or “please end the call” ends a call.

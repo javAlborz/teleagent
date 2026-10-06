@@ -61,6 +61,7 @@ class FakeRealtimeClient extends EventEmitter {
     this.closed = false;
     this.autoDestroyGreeting = autoDestroyGreeting;
     this.queuedResponses = [];
+    this.preparedCallerTurns = [];
     this.requestedResponses = [];
     this.discardedResponses = 0;
     this.deletedItems = [];
@@ -83,6 +84,10 @@ class FakeRealtimeClient extends EventEmitter {
       setImmediate(() => this.dialog.destroy());
     }
     return true;
+  }
+
+  prepareCallerTurn(text) {
+    this.preparedCallerTurns.push(text);
   }
 
   queueUserResponse(options) {
@@ -1474,4 +1479,24 @@ test('only a complete farewell ends a call, never quoted instructions or task co
     'Goodbye, hang up.', 'Okay, thank you, goodbye for now.']) {
     assert.equal(isDefinitiveGoodbye(text), true, text);
   }
+});
+
+
+test('accepted final caller turns reach routing preparation; farewell does not', async t => {
+  const fixture = createCallFixture(t, {autoDestroyGreeting: false});
+  const call = runRealtimeConversation(fixture.endpoint, fixture.dialog, 'call-route-preparation', {
+    audioForkServer: fixture.audioForkServer, wsPort: 3001, stateStore: fixture.stateStore,
+    jobBroker: fixture.jobBroker, callerId: '1001', hangupDelayMs: 0,
+    openaiClientFactory: fixture.openaiClientFactory,
+  });
+  while (!fixture.getRealtimeClient()) await new Promise(resolve => setImmediate(resolve));
+  const realtime = fixture.getRealtimeClient();
+  await new Promise(resolve => setImmediate(resolve));
+  realtime.emit('user_transcript', "Send a message to phone A that I'm done");
+  realtime.emit('user_transcript', 'And that it should inspect the logs.');
+  assert.deepEqual(realtime.preparedCallerTurns, ["Send a message to phone A that I'm done", 'And that it should inspect the logs.']);
+  realtime.emit('user_transcript', 'Goodbye');
+  assert.equal(realtime.preparedCallerTurns.length, 2);
+  realtime.emit('response.done', {}, {purpose: 'notice:hangup'});
+  await call; assert.equal(fixture.dialog.destroyed, true);
 });
