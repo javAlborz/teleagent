@@ -1500,3 +1500,31 @@ test('accepted final caller turns reach routing preparation; farewell does not',
   realtime.emit('response.done', {}, {purpose: 'notice:hangup'});
   await call; assert.equal(fixture.dialog.destroyed, true);
 });
+
+test('clarifications sharing assistant vocabulary survive partial and final interruption handling', async t => {
+  const assistant = 'I am not sure which sequence you mean. Are you talking about the follow-up calls and actions from a job, or something else, like a setup workflow or a game order?';
+  const clarification = "The follow-up sequence you're talking about.";
+  assert.equal(isLikelyPlaybackEcho(clarification, assistant), false);
+  assert.equal(isLikelyPlaybackEcho('follow-up sequence', 'The follow-up sequence is ready.'), false);
+  assert.equal(isLikelyPlaybackEcho('The task completed successfully.', 'The task completed successfully.'), true);
+  const fixture = createCallFixture(t, {autoDestroyGreeting: false});
+  const call = runRealtimeConversation(fixture.endpoint, fixture.dialog, 'clarification-echo-regression', {
+    audioForkServer: fixture.audioForkServer, wsPort: 3001, stateStore: fixture.stateStore,
+    jobBroker: fixture.jobBroker, callerId: '1001', responseDebounceMs: 5, openaiClientFactory: fixture.openaiClientFactory,
+  });
+  while (!fixture.getRealtimeClient()) await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  const realtime = fixture.getRealtimeClient();
+  realtime.emit('assistant_transcript', assistant, {item_id: 'question'});
+  fixture.audioSession.nextPlayback = {itemId: 'question', audioEndMs: 5404};
+  realtime.emit('speech_started');
+  realtime.emit('user_transcript_partial', clarification, {item_id: 'clarification'});
+  realtime.emit('user_transcript', clarification, {item_id: 'clarification'});
+  await new Promise(resolve => setTimeout(resolve, 30));
+  assert.deepEqual(realtime.preparedCallerTurns, [clarification]);
+  assert.equal(realtime.queuedResponses.length, 1);
+  assert.deepEqual(realtime.deletedItems, []);
+  assert.ok(fixture.audioSession.stopPlaybackCalls > 0);
+  assert.ok(!fixture.stateStore.listAuditEvents({limit: 20}).some(e => e.action === 'playback_echo_suppressed'));
+  await fixture.dialog.destroy(); await call;
+});
