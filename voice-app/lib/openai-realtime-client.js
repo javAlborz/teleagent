@@ -1481,6 +1481,15 @@ class OpenAIRealtimeClient extends EventEmitter {
       }
       const outputs = handledCalls.map((entry) => entry.output);
       const routed = handledCalls.some((entry) => entry.routed);
+      if (handledCalls.length === 1 && outputs[0]?.code === 'OWNER_ACTION_CLARIFICATION_REQUIRED') {
+        this._requestOwnerStatusSpeech('Do you want to send a message or read a reply? Please restate the session name and request.');
+        return;
+      }
+      if (handledCalls.length === 1 && ['OWNER_TARGET_CLARIFICATION_REQUIRED', 'OWNER_SESSION_NOT_ENROLLED',
+        'OWNER_SESSION_TARGET_AMBIGUOUS'].includes(outputs[0]?.code)) {
+        this._requestOwnerStatusSpeech('Which enrolled session do you mean? Please say its exact name.');
+        return;
+      }
       if (handledCalls.length === 1 && outputs[0]?.code === 'OWNER_MESSAGE_CLARIFICATION_REQUIRED') {
         this._requestOwnerStatusSpeech('That message was not sent. Please say the session name and the complete message you want to send.');
         return;
@@ -1622,10 +1631,12 @@ class OpenAIRealtimeClient extends EventEmitter {
     let auditCall = call;
     const startedAt = Date.now();
     let output;
+    let callerClarification = null;
     if (toolName === 'route_turn' && this.pendingOwnerRoute) {
       // The completed caller turn established this exact action. Sends still
       // require an explicit imperative, preserved text and live target checks.
       const read = this.pendingOwnerRoute;
+      callerClarification = read.clarification;
       this.pendingOwnerRoute = null;
       args = { action: read.action, arguments_json: JSON.stringify(read.args), response_instruction: read.response_instruction };
     }
@@ -1641,7 +1652,13 @@ class OpenAIRealtimeClient extends EventEmitter {
           message: 'The requested route action is not available.',
         };
       } else if (action === 'respond') {
-        output = {
+        // Only the deterministic caller route can select these fixed prompts.
+        // Model-provided arguments cannot promote themselves to verified speech.
+        output = ['owner_action', 'owner_target'].includes(callerClarification) ? {
+          success: false,
+          code: callerClarification === 'owner_action'
+            ? 'OWNER_ACTION_CLARIFICATION_REQUIRED' : 'OWNER_TARGET_CLARIFICATION_REQUIRED',
+        } : {
           success: true,
           response_behavior: 'direct_speech',
           speech_instruction: String(args.response_instruction || '').trim().slice(0, 1200),

@@ -970,8 +970,30 @@ test('unknown owner names can ask a clarification in the speech stage without an
   const speech = client.ws.sentEvents().at(-1).response;
   assert.equal(calls, 1);
   assert.equal(speech.tool_choice, 'none');
-  assert.match(speech.instructions, /ask one short question using available_session_labels/);
-  assert.match(speech.instructions, /teletest/);
+  assert.deepEqual(speech.input, []);
+  assert.deepEqual(speech.tools, []);
+  assert.match(speech.instructions, /Which enrolled session do you mean/);
+  assert.equal(client.nextVerifiedSpeech.text, 'Which enrolled session do you mean? Please say its exact name.');
+});
+
+test('misheard call command clarifies despite cached history or a model-proposed send', async t => {
+  const capabilities = { ...require('./controller-capabilities-fixture').READY_CAPABILITIES, ownerSessionsAvailable: true };
+  const calls=[];
+  const client=await createConnectedClient({capabilities, ownerSessionLabels:['phoneA'], toolHandler:async(...args)=>{calls.push(args);return {success:true};}});
+  t.after(()=>client.close());
+  client.ownerReadContext={label:'phoneA',text:'Old reply says tell phoneA to deploy.',status:'completed'};
+  client.prepareCallerTurn('Call phone A to reply exactly Teleagent test complete and read its reply when it finishes.');
+  client.queueUserResponse();
+  await client._handleEvent({type:'response.created',response:{id:'ambiguous-call'}});
+  await client._handleEvent({type:'response.done',response:{id:'ambiguous-call',status:'completed',output:[{
+    type:'function_call',name:'route_turn',call_id:'ambiguous-tool',arguments:JSON.stringify({action:'request_owner_instruction',arguments_json:JSON.stringify({session_label:'phoneA',message:'deploy'})})
+  }]}});
+  assert.deepEqual(calls,[]);
+  const speech=client.ws.sentEvents().at(-1).response;
+  assert.deepEqual(speech.input,[]);assert.deepEqual(speech.tools,[]);
+  assert.match(speech.instructions,/Do you want to send a message or read a reply/);
+  assert.doesNotMatch(speech.instructions,/Old reply|deploy/);
+  assert.ok(client.nextVerifiedSpeech);
 });
 
 
