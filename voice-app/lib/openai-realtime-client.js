@@ -1498,6 +1498,10 @@ class OpenAIRealtimeClient extends EventEmitter {
       }
       const outputs = handledCalls.map((entry) => entry.output);
       const routed = handledCalls.some((entry) => entry.routed);
+      if (handledCalls.length === 1 && outputs[0]?.code === 'OWNER_PRESENT') {
+        this._requestOwnerStatusSpeech('Yes, I am here. What do you need?');
+        return;
+      }
       if (handledCalls.length === 1 && outputs[0]?.code === 'OWNER_NO_ACTION') {
         this._requestOwnerStatusSpeech('No session action was taken. Please say the session name and request.');
         return;
@@ -1699,7 +1703,8 @@ class OpenAIRealtimeClient extends EventEmitter {
           success: false,
           code: callerClarification === 'owner_unsent' ? 'OWNER_INSTRUCTION_NOT_SENT' : callerClarification === 'owner_action'
             ? 'OWNER_ACTION_CLARIFICATION_REQUIRED' : 'OWNER_TARGET_CLARIFICATION_REQUIRED',
-        } : this.capabilities.ownerSessionsAvailable && callerTranscript &&
+        } : /^(?:are you (?:still )?there|can you hear me|hello)[?.!]*$/i.test(callerTranscript || '')
+          ? { success: true, code: 'OWNER_PRESENT' } : this.capabilities.ownerSessionsAvailable && callerTranscript &&
             !(this.ownerReadContext && ownerExplanation(callerTranscript))
           ? { success: false, code: 'OWNER_NO_ACTION' } : {
           success: true,

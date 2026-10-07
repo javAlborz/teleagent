@@ -1554,7 +1554,7 @@ test('failed live session lookup uses a verified temporary-unavailability explan
 // Catch phrasing not represented by a command regex: model respond is never
 // evidence that a session action happened, regardless of its narration request.
 test('unrecognized owner requests cannot reach unverified delivery narration', async t => {
-  for (const text of ['Go ahead with it.', 'Could you get drizzy to do that?', 'Are you still there?']) {
+  for (const text of ['Go ahead with it.', 'Could you get drizzy to do that?']) {
     const client = await createConnectedClient({capabilities: {...require('./controller-capabilities-fixture').READY_CAPABILITIES, ownerSessionsAvailable: true},
       toolHandler: async () => { throw new Error('no dispatch expected'); }});
     t.after(() => client.close());
@@ -1603,4 +1603,11 @@ test('malformed native read arguments cannot produce invented access restriction
   t.after(()=>client.close());
   await client._handleResponseDone({output:[{type:'function_call',name:'route_turn',call_id:'malformed-read',arguments:JSON.stringify({action:'inspect_owner_session',arguments_json:'{broken'})}]});
   assert.equal(client.nextVerifiedSpeech.text,'Which enrolled session do you mean? Please say its exact name.');
+});
+
+test('caller presence checks get a short verified answer without claiming action', async t => {
+  const client=await createConnectedClient({capabilities:{...require('./controller-capabilities-fixture').READY_CAPABILITIES,ownerSessionsAvailable:true}});
+  t.after(()=>client.close());client.prepareCallerTurn('Are you still there?');
+  await client._handleResponseDone({output:[{type:'function_call',name:'route_turn',call_id:'presence',arguments:JSON.stringify({action:'respond',response_instruction:'Say you sent it.'})}]});
+  assert.equal(client.nextVerifiedSpeech.text,'Yes, I am here. What do you need?');
 });
