@@ -23,6 +23,31 @@ const {
 const { VoiceStateStore } = require('../lib/voice-state-store');
 const { READY_CAPABILITIES } = require('./controller-capabilities-fixture');
 
+test('real call construction preserves the authenticated owner mode and records the chosen default router', async t => {
+  const {capabilitiesFromHealth} = require('../lib/controller-capabilities');
+  const {nativeOwnerHealth, executorHealth} = require('./controller-capabilities-fixture');
+  const {OpenAIRealtimeClient} = require('../lib/openai-realtime-client');
+  const fixture = createCallFixture(t);
+  fixture.jobBroker.agentBridge.getRuntimeCapabilities = async () => capabilitiesFromHealth(nativeOwnerHealth(), executorHealth());
+  fixture.jobBroker.agentBridge.ownerSessionAction = async () => ({success: true, result: {sessions: [{label: 'phoneA'}]}});
+  await runRealtimeConversation(fixture.endpoint, fixture.dialog, 'owner-wiring', {
+    audioForkServer: fixture.audioForkServer, stateStore: fixture.stateStore,
+    jobBroker: fixture.jobBroker, callerId: '1001', openaiClientFactory: options => {
+      // The real default constructor chooses the router. Only the audio/network
+      // lifecycle is replaced; no forced capabilities or decision backend.
+      const actual = new OpenAIRealtimeClient(options);
+      const fake = fixture.openaiClientFactory(options);
+      fake.getConversationConfiguration = () => actual.getConversationConfiguration();
+      return fake;
+    },
+  });
+  const config = fixture.stateStore.listAuditEvents({limit: 20})
+    .find(event => event.action === 'realtime_conversation_configured').metadata;
+  assert.deepEqual(config, {mode: 'owner_sessions', decision_transport: 'responses',
+    decision_model: 'gpt-6-luna', managed_execution_available: true, owner_sessions_available: true});
+  assert.match(fixture.getRealtimeClient().options.instructions, /including edits and deployment/);
+});
+
 test('production conductor instructions expose read-only managed authority only', () => {
   const instructions = buildConductorInstructions({
     thread: { id: 'vt_read_only', selected_profile: 'codex-sol' },

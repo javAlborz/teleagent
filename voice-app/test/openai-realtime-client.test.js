@@ -1421,6 +1421,20 @@ test('a failed decision has no action and closing a call fences any late result'
   await new Promise(resolve=>setImmediate(resolve));assert.deepEqual(actions,[]);
 });
 
+test('a decision deadline is diagnosed separately without claiming an action or retrying delivery', async t => {
+  const actions = [], errors = [];
+  const client = await createConnectedClient({capabilities: ownerCapabilities,
+    ownerDecisionRouter: {decide: async () => {throw new Error('OWNER_DECISION_TIMEOUT');}},
+    toolHandler: async (...args) => actions.push(args)});
+  t.after(() => client.close());
+  client.on('owner_decision_error', event => errors.push(event));
+  client.prepareCallerTurn('Send hello to drizzy');client.requestRoutedResponse();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(actions, []);
+  assert.deepEqual(errors, [{code: 'OWNER_DECISION_TIMEOUT'}]);
+  assert.match(client.nextVerifiedSpeech.text, /decision service took too long/);
+});
+
 test('a conversational next step can present a precise draft for a later send-it request',async t=>{
   const calls=[];
   const client=await createConnectedClient({capabilities:ownerCapabilities,toolHandler:async(name,args)=>{calls.push({name,args});return {success:true,operation_id:'job_'+'c'.repeat(64),result:{state:'accepted'}}}});
@@ -1438,10 +1452,35 @@ test('a conversational next step can present a precise draft for a later send-it
   assert.equal(calls.length,1);assert.equal(calls[0].args.message,draft.message);assert.equal(client.ownerDraft,null);
 });
 
-test('an unspoken message cannot attach itself to a conversational answer as a sendable draft',async t=>{
+test('a structured draft absent from the prose must be presented explicitly before it becomes sendable',async t=>{
   const client=await createConnectedClient({capabilities:ownerCapabilities});t.after(()=>client.close());
   await client._handleResponseDone({output:[ownerRoute('answer','respond',{response_text:'The next step is to review.',proposed_message:{session_label:'drizzy',message:'Deploy everything.'}})]});
-  assert.equal(client.ownerDraft,null);assert.equal(client.nextVerifiedSpeech.text,'The next step is to review.');
+  assert.equal(client.ownerDraft.presented,false);
+  assert.equal(client.nextVerifiedSpeech.text,'The next step is to review. Message for drizzy: Deploy everything.');
+  client.prepareCallerTurn('Send that to drizzy.');
+  const attempted = await client._handleToolCall(ownerRoute('unheard','request_owner_instruction',
+    {session_label:'drizzy',message:'Deploy everything.'},{kind:'draft',draft_id:client.ownerDraft.id}));
+  assert.equal(attempted.output.code,'OWNER_MESSAGE_CLARIFICATION_REQUIRED');
+});
+
+test('a quoted next-step draft retains spoken bytes despite outer punctuation, without changing operators', async t => {
+  const client = await createConnectedClient({capabilities: ownerCapabilities});
+  t.after(() => client.close());
+  const text = 'Tell drizzy, “Reply exactly Teleagent test complete,” then wait for its reply.';
+  await client._handleResponseDone({output: [ownerRoute('quoted', 'respond', {
+    response_text: text, proposed_message: {session_label: 'drizzy', message: 'Reply exactly Teleagent test complete.'},
+  })]});
+  assert.equal(client.ownerDraft.message, 'Reply exactly Teleagent test complete,');
+  assert.equal(client.ownerDraft.presented, false);
+  const operators = await createConnectedClient({capabilities: ownerCapabilities});
+  t.after(() => operators.close());
+  await operators._handleResponseDone({output: [ownerRoute('operators', 'respond', {
+    response_text: 'Tell drizzy: build && test',
+    proposed_message: {session_label: 'drizzy', message: 'build; test'},
+  })]});
+  assert.equal(operators.ownerDraft.message, 'build; test');
+  assert.equal(operators.ownerDraft.presented, false);
+  assert.match(operators.nextVerifiedSpeech.text, /Message for drizzy: build; test$/);
 });
 
 test('delivery checks do not deny an already observed completed native reply',async t=>{

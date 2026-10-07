@@ -1,6 +1,6 @@
 'use strict';
 
-const { labelKey, validLabel, validateOwnerInstruction, ownerDialogueContext, OWNER_DIALOGUE_INSTRUCTIONS } = require('./owner-call-intent');
+const { labelKey, validLabel, verbatimMessageSpan, validateOwnerInstruction, ownerDialogueContext, OWNER_DIALOGUE_INSTRUCTIONS } = require('./owner-call-intent');
 const { OwnerReplyWatch } = require('./owner-reply-watch');
 const { OwnerDecisionRouter, OWNER_DECISION_MODEL } = require('./owner-decision-router');
 
@@ -9,7 +9,7 @@ const { URL } = require('node:url');
 const WebSocket = require('ws');
 const { realtimeWebSocketOptions } = require('./voice-egress-transport');
 const { getRuntimeSecret } = require('./runtime-secrets');
-const { UNAVAILABLE, isToolAvailable, unavailableResult } = require('./controller-capabilities');
+const { UNAVAILABLE, isToolAvailable, unavailableResult, isOwnerSessionConversation } = require('./controller-capabilities');
 
 const DEFAULT_BASE_URL = 'wss://api.openai.com/v1/realtime';
 const DEFAULT_MODEL = 'gpt-realtime-2.1-mini';
@@ -433,7 +433,7 @@ function buildRealtimeTools(profiles) {
 }
 
 function buildRealtimeRouterTool(profiles, capabilities = UNAVAILABLE) {
-  const ownerMvp = capabilities.ownerSessionsAvailable === true && capabilities.managedExecutionAvailable !== true;
+  const ownerMvp = isOwnerSessionConversation(capabilities);
   const tools = buildRealtimeTools(profiles).filter((tool) => isToolAvailable(tool.name, capabilities) &&
     (!ownerMvp || ['list_owner_sessions', 'inspect_owner_session', 'request_owner_instruction',
       'get_owner_reply', 'get_owner_instruction', 'end_call'].includes(tool.name)));
@@ -455,9 +455,9 @@ function buildRealtimeRouterTool(profiles, capabilities = UNAVAILABLE) {
         selection: {type: 'object', properties: {anchor: {enum: ['start', 'end']}, index: {type: 'integer', minimum: 1, maximum: 6}, role: {enum: ['any', 'user', 'assistant']}}, required: ['anchor', 'index', 'role'], additionalProperties: false},
         missing: {type: 'string', enum: ['target', 'message', 'request'], description: 'For clarify_owner_request only.'},
         response_text: {type: 'string', maxLength: 1200, description: 'For respond: the exact concise spoken answer, grounded in application state. No claims of a new action.'},
-        proposed_message: {type: 'object', properties: {session_label: {type: 'string', maxLength: 80}, message: {type: 'string', maxLength: 1000}}, required: ['session_label', 'message'], additionalProperties: false,
-          description: 'Optional for respond: a concrete message you are presenting as a next step. response_text must include this exact message and target. Presenting never sends it.'},
-      }, required: ['action'], additionalProperties: false,
+        proposed_message: {type: ['object', 'null'], properties: {session_label: {type: 'string', maxLength: 80}, message: {type: 'string', maxLength: 1000}}, required: ['session_label', 'message'], additionalProperties: false,
+          description: 'Required field. For respond that explains a step involving a message to a session, supply that exact target and complete message here AND in response_text. Otherwise null. Presenting never sends it.'},
+      }, required: ['action', 'proposed_message'], additionalProperties: false,
     },
   };
   return {
@@ -625,7 +625,7 @@ class OpenAIRealtimeClient extends EventEmitter {
     this.toolHandler = toolHandler;
     this.ownerSessionLabels = ownerSessionLabels.slice(0, 32);
     this.ownerDecisionRouter = ownerDecisionRouter === undefined
-      ? (capabilities.ownerSessionsAvailable === true && capabilities.managedExecutionAvailable !== true
+      ? (isOwnerSessionConversation(capabilities)
         ? new OwnerDecisionRouter({apiKey, project, organization}) : null)
       : ownerDecisionRouter;
     this.pendingOwnerDecision = null;
@@ -690,6 +690,16 @@ class OpenAIRealtimeClient extends EventEmitter {
     this.activeVerifiedSpeech = null;
     this.bufferedAudioDone = new Map();
     this.eventSequence = 0;
+  }
+
+  getConversationConfiguration() {
+    return {
+      mode: isOwnerSessionConversation(this.capabilities) ? 'owner_sessions' : 'managed',
+      decision_transport: this.ownerDecisionRouter ? 'responses' : 'realtime',
+      decision_model: this.ownerDecisionRouter ? OWNER_DECISION_MODEL : this.model,
+      managed_execution_available: this.capabilities.managedExecutionAvailable === true,
+      owner_sessions_available: this.capabilities.ownerSessionsAvailable === true,
+    };
   }
 
   _responseKey(event = {}) {
@@ -1157,9 +1167,12 @@ class OpenAIRealtimeClient extends EventEmitter {
     this.nextVerifiedSpeech = null;
     void (async () => {
       await this._handleEvent({type: 'response.created', response: {id: pending.id}});
-      let result; let failed = false;
+      let result; let failed = false; let failureCode = 'OWNER_DECISION_REQUEST_FAILED';
       try { result = await this.ownerDecisionRouter.decide(request, {signal: pending.abort.signal}); }
-      catch { failed = true; }
+      catch (error) {
+        failed = true;
+        if (/^OWNER_DECISION_[A-Z_0-9]{1,50}$/.test(error?.message || '')) failureCode = error.message;
+      }
       if (this.closedByClient || this.pendingOwnerDecision !== pending) return;
       this.pendingOwnerDecision = null;
       if (result?.usage) {
@@ -1173,11 +1186,14 @@ class OpenAIRealtimeClient extends EventEmitter {
         });
       }
       const canceled = pending.abort.signal.aborted || pending.revision !== this.callerTurnRevision;
+      if (failed && !canceled) this.emit('owner_decision_error', {code: failureCode});
       await this._handleEvent({type: 'response.done', response: {id: pending.id,
         status: canceled ? 'cancelled' : failed ? 'failed' : 'completed',
         output: canceled || failed ? [] : result.calls}});
       if (failed && !canceled && !this.responseActive && !this.userSpeaking && !this.pendingUserResponse) {
-        this._requestOwnerStatusSpeech('I could not interpret that request. Please repeat it.');
+        this._requestOwnerStatusSpeech(failureCode === 'OWNER_DECISION_TIMEOUT'
+          ? 'The decision service took too long to answer. Please repeat your request.'
+          : 'I could not interpret that request. Please repeat it.');
       }
     })().catch(() => {
       // Handler failures never trigger a retry or a second delivery attempt.
@@ -1756,8 +1772,7 @@ class OpenAIRealtimeClient extends EventEmitter {
     const startedAt = Date.now();
     let output;
     let actionInvoked = false;
-    const typedOwnerRoute = toolName === 'route_turn' && this.capabilities.ownerSessionsAvailable === true &&
-      this.capabilities.managedExecutionAvailable !== true;
+    const typedOwnerRoute = toolName === 'route_turn' && isOwnerSessionConversation(this.capabilities);
     const messageSource = typedOwnerRoute
       ? {kind: args.message_source, text: args.message, draft_id: args.draft_id} : args.message_source;
     if (typedOwnerRoute && !args._parse_error) {
@@ -1788,19 +1803,28 @@ class OpenAIRealtimeClient extends EventEmitter {
       } else if (action === 'respond') {
         if (typedOwnerRoute) {
           const answer = parseRoutedArguments(args.arguments_json);
-          const text = typeof answer.response_text === 'string' ? answer.response_text.trim() : '';
+          let text = typeof answer.response_text === 'string' ? answer.response_text.trim() : '';
           const draft = answer.proposed_message;
           if (!text || text.length > 1200) output = {success: false, code: 'OWNER_CLARIFY', missing: 'request'};
           else {
             let draftId;
+            const spokenMessage = draft && typeof draft.message === 'string'
+              ? verbatimMessageSpan(text, draft.message) : null;
             if (draft && validLabel(draft.session_label) && typeof draft.message === 'string' &&
-                draft.message.trim() && draft.message.length <= 1000 && text.includes(draft.message) &&
-                labelKey(text).includes(labelKey(draft.session_label))) {
+                draft.message.trim() && draft.message.length <= 1000) {
+              // The application presents the canonical proposal itself when
+              // prose omits or reformats it. A hidden structured field never
+              // becomes sendable without verified speech of that message.
+              const included = spokenMessage && labelKey(text).includes(labelKey(draft.session_label));
+              if (!included) text += ` Message for ${draft.session_label}: ${draft.message}`;
               this.ownerDraft = {id: this._nextEventId('draft'), session_label: draft.session_label,
-                message: draft.message, presented: false};
+                message: included ? spokenMessage : draft.message, presented: false};
               draftId = this.ownerDraft.id;
             }
-            output = {success: true, code: 'OWNER_CONVERSATION', text, draftId};
+            if (text.length > 2400) {
+              this.ownerDraft = null;
+              output = {success: false, code: 'OWNER_CLARIFY', missing: 'request'};
+            } else output = {success: true, code: 'OWNER_CONVERSATION', text, draftId};
           }
         } else output = { success: true, response_behavior: 'direct_speech',
           speech_instruction: String(args.response_instruction || '').trim().slice(0, 1200) };

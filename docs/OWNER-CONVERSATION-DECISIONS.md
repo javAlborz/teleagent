@@ -27,6 +27,27 @@ for content instead of forwarding a trailing word. See
 
 ## Evaluation on 2026-10-07
 
+The first deployed call exposed a configuration gap: the probes below forced
+managed execution unavailable, while authenticated production health reported
+both managed and personal-session capabilities available. The old mode inference
+therefore selected the managed router, not Luna. Those probes did not establish
+the production decision path.
+
+Conversation mode now comes explicitly from authenticated owner-plane health
+and survives the capability snapshot used by call construction. Managed executor
+readiness remains truthful and cannot change the personal prompt, flat schema or
+default decision backend. A call-start `realtime_conversation_configured` audit
+records the chosen mode, transport and model without credentials or content.
+Integration checks must exercise health derivation, snapshot, call construction
+and default backend together, including a healthy managed executor and emergency
+locks. Model/audio probes must use that same health-derived configuration with
+only native delivery and media peers simulated.
+
+Replay the failed call's contextual shortening, referenced step and literal
+single-word sends. A clarification referring to earlier content is not itself a
+message to forward. A presented next-step draft retains the recipient's complete
+instruction, including “Reply exactly,” separately from phone readback requests.
+
 These are bounded engineering probes, not statistical performance guarantees.
 The initial 25 cases included failed-call phrasing, contextual summaries,
 referential sends, exact questions, negation, target corrections, history

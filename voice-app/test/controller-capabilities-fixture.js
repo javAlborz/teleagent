@@ -26,4 +26,11 @@ function executorHealth() {
   return { service: 'claude-api-server', scope: 'executor', ready: true, status: 'ready' };
 }
 
-module.exports = { READY_CAPABILITIES, operatorHealth, executorHealth };
+function nativeOwnerHealth() {
+  return {...operatorHealth(),
+    phoneAuthority: {mode: 'owner_session_native', status: 'native_owner_configured'},
+    ownerSessions: {configured: true, available: true, protocol: 'independent-pbx-owner-v1',
+      deliveryPolicy: 'native-session-permissions-v1'}};
+}
+
+module.exports = { READY_CAPABILITIES, operatorHealth, executorHealth, nativeOwnerHealth };

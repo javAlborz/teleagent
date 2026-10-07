@@ -61,6 +61,14 @@ function toolCapability(name) {
   return Object.hasOwn(TOOL_CAPABILITIES, name) ? TOOL_CAPABILITIES[name] : 'disabled';
 }
 
+// Conversation selection is independent of backend readiness. In particular,
+// a healthy managed executor must not switch a personal-session call to the
+// legacy managed prompt, schema or decision transport.
+function isOwnerSessionConversation(capabilities = UNAVAILABLE) {
+  return capabilities.conversationMode === 'owner_sessions' ||
+    (capabilities.ownerSessionsAvailable === true && capabilities.managedExecutionAvailable !== true);
+}
+
 function isToolAvailable(name, capabilities = UNAVAILABLE) {
   const controller = capabilities?.controllerAvailable === true;
   const worker = controller && capabilities?.workerInspectionAvailable === true;
@@ -140,6 +148,8 @@ function capabilitiesFromHealth(operator, executor) {
     controllerAvailable: true,
     workerInspectionAvailable: worker,
     managedExecutionAvailable: managed,
+    ...(['owner_session_native', 'owner_session_approval'].includes(operator.phoneAuthority.mode)
+      ? { conversationMode: 'owner_sessions' } : {}),
     ...(operator?.ownerSessions?.configured === true ? { ownerSessionsAvailable: !locked &&
       operator?.ownerSessions?.available === true && operator?.ownerSessions?.protocol === 'independent-pbx-owner-v1' } : {}),
     reasonCode: locked ? 'VOICE_EXECUTION_LOCKED' : (managed ? null : UNAVAILABLE.reasonCode),
@@ -156,6 +166,7 @@ async function readControllerCapabilities(agentBridge) {
       controllerAvailable: true,
       workerInspectionAvailable: value.workerInspectionAvailable === true,
       managedExecutionAvailable: value.managedExecutionAvailable === true,
+      ...(value.conversationMode === 'owner_sessions' ? { conversationMode: 'owner_sessions' } : {}),
       ...(value.ownerSessionsAvailable !== undefined ? { ownerSessionsAvailable: value.ownerSessionsAvailable === true } : {}),
       reasonCode: value.reasonCode === 'VOICE_EXECUTION_LOCKED' ? value.reasonCode
         : (value.managedExecutionAvailable === true ? null : UNAVAILABLE.reasonCode),
@@ -168,4 +179,5 @@ async function readControllerCapabilities(agentBridge) {
 module.exports = {
   UNAVAILABLE, TOOL_CAPABILITIES, capabilitiesFromHealth, isToolAvailable,
   readControllerCapabilities, toolCapability, unavailableResult,
+  isOwnerSessionConversation,
 };
