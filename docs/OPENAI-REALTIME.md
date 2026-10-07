@@ -390,27 +390,52 @@ cancelling the agent's work; this feature does not
 promise a callback or restart-persistent notification. A manual reply read is
 still available afterwards.
 
-Explicit session corrections override the previous focus. Ambiguous compound
-targets require clarification. Voice sends must preserve a message extractable
-from the caller's current transcript; uncertain, fragmented or rewritten text
-requires clarification before anything is sent. Native permissions and approval
-prompts remain unchanged.
+Explicit session corrections override previous focus. Ambiguous targets or missing
+message content require one short clarification. Clear instructions are forwarded
+using native session permissions without an extra phone approval.
 
-### Caller routing isolation
+### Personal-session conversation decisions
 
-Each routing response receives only the accepted final caller text, plus
-application-owned session focus and instruction references. Quoted history is
-excluded from routing input. `conversation: "none"` alone only prevents writing
-the routing result into the conversation; the explicit `input` also excludes
-old conversation content, as described in the [Realtime conversation guide](https://developers.openai.com/api/docs/guides/realtime-conversations).
+The owner-session MVP uses `gpt-6-luna` with medium reasoning through the Responses
+API for structured decisions and concise conversational answers. The existing
+`gpt-realtime-2.1-mini` connection retains speech recognition, semantic turn
+detection, speech generation, interruption, and audio lifecycle handling. Both use
+the dedicated phone-project key through the same fixed, admitted OpenAI TLS
+receiver. That key must permit Realtime and Responses. No Codex CLI credential,
+new native-agent process, arbitrary network destination, or shell is exposed.
 
-Ordinary session-list requests and explicit send/message commands have local
-routing rules. Spoken spacing such as “phone A” resolves only to a unique known
-label. A continuing “and…” fragment joins an unfinished send before dispatch;
-a late or canceled routing response cannot execute the superseded request.
-After dispatch, additions never resend or rewrite that instruction. Unclear
-additions ask for a complete new message. Message-validation failures speak a
-checked clarification, not a claim that session tools are unavailable.
+The decision receives accepted caller text and bounded application state: selected
+session, fetched reply, history selection, proposed message, recent conversation,
+and operation references. Quoted history is explicitly untrusted data. It can
+support an explanation but cannot directly supply caller-message provenance.
+Ordinary follow-ups use this context instead of English-command regular
+expressions or a blanket no-action refusal. The owner-only schema advertises
+listing, reading, drafting and forwarding existing-session requests, delivery and
+reply lookups, conversation, and hangup; managed-agent features stay out of this
+MVP interface.
+
+A new message must be extracted from the current caller text. The application
+recovers original text while tolerating capitalization and outer punctuation;
+changed words and internal operators are rejected. An entire unframed utterance
+is not a message unless Teleagent has asked for its content. Alternatively, the
+caller can refer to a presented draft. A conversational next-step answer can
+present a draft only if the exact target and message appear in its spoken text.
+The speech transcript is checked before the draft becomes available. A send is
+bound to that exact draft and target, consumes it before IO, and cannot dispatch
+twice for one caller revision. Uncertain delivery never triggers an automatic
+resend.
+
+Luna produces concise conversational text; the audio model must speak it
+verbatim. Application receipts and clarification prompts also retain transcript
+verification. Caller corrections and call closure cancel pending decisions;
+late results cannot dispatch. The decision request has an absolute deadline,
+bounded request/response bodies and output, no HTTP redirects or retry, and only
+a fixed `route_turn` schema. Tokens are recorded under the decision model in the
+existing usage ledger. These per-request bounds do not limit the native agent's
+task duration.
+
+See [conversation architecture and evaluation](OWNER-CONVERSATION-DECISIONS.md)
+for the measured model comparison and synthetic-test scope.
 
 ### Personal session conversation controls
 
@@ -434,34 +459,22 @@ The watch lasts during this call and does not promise a callback or cancel
 native work when the call ends.
 
 Fetched replies remain available as bounded, call-local quoted context for
-follow-up explanations and detailed readback. Ordinary questions preserve the
-selected session. The quotation is supplied only to speech with tools disabled;
-action routing receives the caller's request and session references, never the
-quoted instructions. Current-status requests still perform a fresh read. A new
-read or instruction clears the old snapshot, including when that read fails,
-and ending the call clears the context. Longer readbacks preserve concrete
-steps instead of replacing them with a statement that a sequence exists.
+follow-up explanations and detailed readback. Current-status requests still
+perform a fresh read. A new read or instruction supersedes the old snapshot,
+including when a fresh read fails, and ending the call clears the context.
+A delivery-status answer describes acceptance without contradicting a previously
+read completed reply. A pending native turn gets a short, verified no-reply-yet
+answer rather than an improvised offer or an older reply.
 
 Playback echo suppression requires a contiguous repeated phrase of at least
 three words. Shared vocabulary alone does not suppress a caller's clarification,
 and short repeated choices remain eligible caller turns. Text matching cannot
 perfectly distinguish physical echo from an intentional verbatim repetition.
 
-# V68 synthetic speech findings
+### Synthetic speech validation
 
-Unknown or ambiguous enrolled names produce a short, transcript-verified
-clarification. Prior reply excerpts cannot replace that question with an access
-refusal. A caller command starting with “Call …” that asks for a reply or message
-is ambiguous: it asks whether to send or read, without doing either. A fresh
-explicit request is required; the app never silently changes “call” to “tell”.
-Recognized send connectors such as “saying,” are removed before forwarding while
-the actual message remains a substring of the caller transcript.
-
-Goodbye waits for the queued audio's remaining playout time as well as the
-configured hangup delay. A model response finishing generation does not mean
-the caller has heard its final words.
-
-These cases came from real-audio synthetic tests using installed conversation
-code and OpenAI Realtime, with simulated SIP/media peers and native sessions.
-Such tests do not establish handset acoustics, actual SIP/SRTP teardown, or
-native-agent delivery. Keep their evidence separate from live call acceptance.
+Real-audio synthetic tests exercise the conversation code, caller transcription,
+semantic decisions, generated speech, interruption, application playback, and
+farewell drain with simulated SIP/media peers and native sessions. They do not
+establish handset acoustics, actual SIP/SRTP teardown, or native-agent delivery.
+Keep that evidence separate from live acceptance.

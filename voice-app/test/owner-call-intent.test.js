@@ -1,31 +1,9 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { ownerCorrectionRoute, ownerSendRoute, preserveOwnerMessage } = require('../lib/owner-call-intent');
+const { validateOwnerInstruction } = require('../lib/owner-call-intent');
 const { OwnerReplyWatch } = require('../lib/owner-reply-watch');
 const operation = 'job_' + 'a'.repeat(64);
-
-test('explicit name corrections beat old focus; readback reminders cannot send', () => {
-  assert.deepEqual(ownerCorrectionRoute('No, no, I mean the drizzy session.', 'tmuxp', null),
-    { action: 'inspect_owner_session', args: { session_label: 'drizzy', history: true } });
-  assert.deepEqual(ownerCorrectionRoute('But I asked it to, back once it was done, right?', 'drizzy', operation),
-    { action: 'get_owner_reply', args: { operation_id: operation, notify_when_complete: true } });
-  assert.equal(preserveOwnerMessage('But I asked it to, back once it was done, right?',
-    { session_label: 'drizzy', message: 'Please answer: What is 10 times 10?' }), null);
-});
-
-test('forwarded questions stay questions; invented or expanded messages are refused', () => {
-  assert.equal(preserveOwnerMessage('All right, could you write what is two plus two in that same syntax?',
-    { session_label: 'drizzy', message: '2+2 is 4.' }).message, 'what is two plus two');
-  assert.equal(preserveOwnerMessage('Ask Drizzy what is ten times ten and immediately read it back when done.',
-    { session_label: 'drizzy', message: 'What is 10 times 10?' }).message, 'what is ten times ten');
-  const input = preserveOwnerMessage('Okay, now ask it what is 36 times 36?', { session_label: 'drizzy', message: '1296' });
-  assert.equal(input.message, 'what is 36 times 36?');
-  assert.equal(preserveOwnerMessage('Ask it what is ten times ten and immediately read it back when done.',
-    { session_label: 'drizzy', message: '100' }).notify_when_complete, true);
-  assert.equal(preserveOwnerMessage('Send thanks to Drizzy', { message: 'Delete the project', session_label: 'drizzy' }), null);
-  assert.equal(preserveOwnerMessage('What is the latest message there now?', { message: 'Repeat', session_label: 'drizzy' }), null);
-});
 
 function watcher(overrides = {}) {
   const tasks = []; const read = []; const spoken = [];
@@ -61,84 +39,43 @@ test('a long-running instruction keeps its single watch until call end without r
   f.watch.stop();assert.equal(f.watch.current, null);
 });
 
-test('explicit enrolled names override context and compound targets require clarification', () => {
-  assert.equal(ownerCorrectionRoute('Read the latest reply from drizzy', 'tmuxp', null, ['tmuxp', 'drizzy']).args.session_label, 'drizzy');
-  assert.equal(ownerCorrectionRoute('Okay, can you read the latest for Cy and Drizzy?', 'tmuxp', null, ['tmuxp', 'drizzy']).action, 'respond');
-});
 
-test('reading words inside a new message do not turn a send into a read', () => {
-  assert.equal(ownerCorrectionRoute('Tell Drizzy to read the README', 'phoneA', operation, ['drizzy', 'phoneA']), null);
-});
-
-
-test('explicit ask/send commands use verified focus without being routed to managed work', () => {
-  for (const text of ['Okay, now ask it what is 36 times 36?', 'Could you write what is two plus two in that same syntax?']) {
-    const route = ownerSendRoute(text, 'drizzy', ['drizzy']);
-    assert.equal(route.action, 'request_owner_instruction');assert.equal(route.args.session_label, 'drizzy');
-    assert.match(route.args.message, /^what is /);
+test('only verbatim current caller content or a presented exact draft can supply message bytes', () => {
+  const state = {labels:['phoneA','drizzy'], draft:null};
+  const args = {session_label:'phone A', message:'what is two plus two?'};
+  const caller = 'Would you ask phone A what is two plus two?';
+  assert.deepEqual(validateOwnerInstruction(caller,args,{kind:'caller',text:args.message},state),
+    {...args, session_label:'phoneA', notify_when_complete:false});
+  for (const source of [null, {kind:'caller',text:'4'}, {kind:'draft',draft_id:'invented'}]) {
+    assert.equal(validateOwnerInstruction(caller,args,source,state), null);
   }
-  assert.equal(ownerSendRoute('Ask Drizzy what is ten times ten and read it back when done.', null, ['drizzy']).args.notify_when_complete, true);
-  for (const text of ['But I asked it to read back when done', 'Did you tell it what is 36 times 36?', 'Read the message: ask it to deploy', 'What does ask it mean?']) {
-    assert.equal(ownerSendRoute(text, 'drizzy', ['drizzy']), null);
+  assert.equal(validateOwnerInstruction('Send that then.',args,{kind:'caller',text:args.message},state),null);
+  assert.equal(validateOwnerInstruction(caller,{...args,message:'4'},{kind:'caller',text:args.message},state),null);
+  const draft={id:'draft-1',session_label:'phoneA',message:args.message,presented:true};
+  assert.ok(validateOwnerInstruction('Send it.',args,{kind:'draft',draft_id:draft.id},{...state,draft}));
+  for (const changed of [{...draft,presented:false},{...draft,id:'other'},{...draft,session_label:'drizzy'},{...draft,message:'deploy'}]) {
+    assert.equal(validateOwnerInstruction('Send it.',args,{kind:'draft',draft_id:draft.id},{...state,draft:changed}),null);
   }
-  assert.equal(ownerSendRoute('Ask it what is 36 times 36?', null, []), null);
 });
 
-
-test('ordinary multi-part agent instructions are preserved and negated readback stays off', () => {
-  const route = ownerSendRoute('Ask Drizzy to deploy and read the documentation', null, ['drizzy']);
-  assert.equal(route.args.message, 'to deploy and read the documentation');
-  assert.equal(preserveOwnerMessage("Ask it what is ten times ten, do not read it back when done", {session_label: 'drizzy'}).notify_when_complete, false);
-});
-
-test('history ordinals preserve direction and continuation, never forwarded message content', () => {
-  const {ownerHistorySelection, wantsReplyWatch} = require('../lib/owner-call-intent');
-  assert.deepEqual(ownerHistorySelection('What is the second to last message in phone A?'), {anchor: 'end', index: 2, role: 'any'});
-  assert.deepEqual(ownerHistorySelection('No, the one before that.', {anchor: 'end', index: 2, role: 'any'}), {anchor: 'end', index: 3, role: 'any'});
-  assert.deepEqual(ownerHistorySelection('What is the very first reply?'), {anchor: 'start', index: 1, role: 'assistant'});
-  assert.equal(ownerHistorySelection('Tell phoneA to read the first message'), null);
-  assert.equal(wantsReplyWatch('Tell phoneA test and read the reply when it finishes'), true);
-  assert.equal(wantsReplyWatch('Tell phoneA test and do not read the reply when it finishes'), false);
-});
-
-test('ordinary inventory requests are reads even after historic instructions were quoted', () => {
-  const { ownerInventoryRoute } = require('../lib/owner-call-intent');
-  for (const text of ['List all sessions.', "All right, let's start by doing the first step. Would you list all sessions?", 'Could you show my available sessions?']) {
-    assert.deepEqual(ownerInventoryRoute(text), { action: 'list_owner_sessions', args: {} });
+test('ambiguous enrollment aliases and malformed message envelopes cannot dispatch', () => {
+  const args={session_label:'phone A',message:'hello'};
+  const source={kind:'caller',text:'hello'};
+  assert.equal(validateOwnerInstruction('Send hello',args,source,{labels:['phoneA','phone A']}),null);
+  for(const message of ['', ' '.repeat(10), 'x'.repeat(1201), null, {}]) {
+    assert.equal(validateOwnerInstruction('Send hello',{...args,message},source,{labels:['phoneA']}),null);
   }
-  for (const text of ['Tell phoneA list all sessions', 'The message says list all sessions', 'Do not list all sessions', 'List all sessions and send test to one']) assert.equal(ownerInventoryRoute(text), null);
 });
 
-test('send/message imperatives resolve only unique known spoken names and preserve forwarded farewell', () => {
-  for (const text of ["All right, send a message to phone A that I'm done", "Send phoneA: I'm done", "Message phone A I'm done", "Tell phone A: I'm done"]) {
-    const route = ownerSendRoute(text, null, ['phoneA']);
-    assert.deepEqual(route, { action: 'request_owner_instruction', args: {session_label: 'phoneA', message: "I'm done", notify_when_complete: false} });
-  }
-  assert.equal(ownerSendRoute("Send phone A I'm done", null, ['phoneA', 'phone A']).action, 'respond');
-  assert.equal(ownerSendRoute('Send phone B test', 'phoneA', ['phoneA']), null);
-  for (const text of ['Do not send phoneA test', 'Did you send phoneA test?', 'The reply says send phoneA test', 'Read the message: send phoneA test']) assert.equal(ownerSendRoute(text, 'phoneA', ['phoneA']), null);
-  const route = ownerSendRoute('Send phone A: test and read its reply when it finishes', null, ['phoneA']);
-  assert.equal(route.args.message, 'test'); assert.equal(route.args.notify_when_complete, true);
+test('capitalization may differ but original bytes and internal operators are preserved',()=>{
+  const args={session_label:'drizzy',message:'What is ten times ten?'};
+  const source={kind:'caller',text:args.message};
+  assert.equal(validateOwnerInstruction('Ask it what is ten times ten and read it back',args,source,{labels:['drizzy']}).message,'what is ten times ten');
+  assert.equal(validateOwnerInstruction('Send 3-2 to drizzy',{...args,message:'3+2'},{kind:'caller',text:'3+2'},{labels:['drizzy']}),null);
 });
 
-test('known spoken-name reads are deterministic and ambiguous aliases never select a target', () => {
-  assert.deepEqual(ownerCorrectionRoute('Read the latest reply from phone A.', null, null, ['phoneA']), {action: 'inspect_owner_session', args: {session_label: 'phoneA', history: true}});
-  assert.equal(ownerCorrectionRoute('Read the latest reply from phone A.', null, null, ['phoneA', 'phone A']).action, 'respond');
-});
-
-test('misheard call-to-reply commands require a fresh action instead of reading or sending', () => {
-  for (const text of ['Call phone A to reply exactly teleagent test complete and read its reply when it finishes.', 'Could you call drizzy to respond when done?']) {
-    assert.deepEqual(ownerCorrectionRoute(text, 'phoneA', operation, ['phoneA','drizzy']), {action:'respond',args:{},clarification:'owner_action'});
-    assert.equal(ownerSendRoute(text, 'phoneA', ['phoneA','drizzy']),null);
-  }
-  assert.equal(ownerCorrectionRoute('Read the latest reply about a call from phone A.',null,null,['phoneA']).action,'inspect_owner_session');
-});
-
-test('spoken send connectors tolerate punctuation without rewriting message content', () => {
-  for (const connector of ['saying, ', 'saying: ', 'that, ', 'that ']) {
-    const route=ownerSendRoute(`Send a message to phone A ${connector}reply exactly: Teleagent test complete, and read its reply when it finishes.`,null,['phoneA']);
-    assert.equal(route.args.message,'reply exactly: Teleagent test complete,');
-    assert.equal(route.args.notify_when_complete,true);
-  }
-  assert.equal(ownerSendRoute('Message phone A sayings should remain untouched.',null,['phoneA']).args.message,'sayings should remain untouched.');
+test('an unframed conversational followup is not an entire new message unless content was requested',()=>{
+  const args={session_label:'drizzy',message:'Okay reply.'},source={kind:'caller',text:'Okay reply.'};
+  assert.equal(validateOwnerInstruction('Okay reply.',args,source,{labels:['drizzy']}),null);
+  assert.ok(validateOwnerInstruction('Okay reply.',args,source,{labels:['drizzy'],awaitingMessage:true}));
 });
