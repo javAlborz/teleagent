@@ -1100,8 +1100,14 @@ class OpenAIRealtimeClient extends EventEmitter {
     const historyContinuation = historySelection && this.focusedOwnerSession && /^(?:no[, ]+|not |the one|one before|previous|earlier)/i.test(this.latestUserTranscript || '');
     let callerRoute = this.capabilities.ownerSessionsAvailable
       ? ownerInventoryRoute(this.latestUserTranscript) || (inventoryContinuation ? { action: 'list_owner_sessions', args: {} } : null) || (historyContinuation ? { action: 'inspect_owner_session', args: { session_label: this.focusedOwnerSession, history: true, selection: historySelection } } : null) || ownerCorrectionRoute(this.latestUserTranscript, this.focusedOwnerSession, this.focusedOwnerOperation, this.ownerSessionLabels) || ownerSendRoute(this.latestUserTranscript, this.focusedOwnerSession, this.ownerSessionLabels) || ownerReadRoute(this.latestUserTranscript, this.ownerInstructionReferences, this.lastOwnerAction, this.focusedOwnerOperation, this.focusedOwnerSession) || ownerUnsentRoute(this.latestUserTranscript, this.focusedOwnerSession, this.ownerSessionLabels) : null;
-    if (this.ownerInstructionUnsent && /\b(?:reply|response|answered)\b/i.test(this.latestUserTranscript || '') &&
-        !this.ownerSessionLabels.some(label => new RegExp('\\b' + label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b', 'i').test(this.latestUserTranscript)) &&
+    const readingFocusedSession = callerRoute?.action === 'inspect_owner_session' &&
+      callerRoute.args?.session_label === this.focusedOwnerSession;
+    if (!historySelection && readingFocusedSession && /^job_[a-f0-9]{64}$/.test(this.focusedOwnerOperation || '') &&
+        this.ownerInstructionReferences.some(r => r.operation_id === this.focusedOwnerOperation && r.session_label === this.focusedOwnerSession)) {
+      callerRoute = { action: 'get_owner_reply', args: { operation_id: this.focusedOwnerOperation } };
+    }
+    if (this.ownerInstructionUnsent && !historySelection && /\b(?:reply|response|answered)\b/i.test(this.latestUserTranscript || '') &&
+        (callerRoute?.action !== 'inspect_owner_session' || readingFocusedSession) &&
         callerRoute?.action !== 'request_owner_instruction') {
       callerRoute = { action: 'respond', args: {}, clarification: 'owner_unsent' };
     }
@@ -1552,6 +1558,12 @@ class OpenAIRealtimeClient extends EventEmitter {
         this._requestNativeReadback(outputs[0].result);
         return;
       }
+      if (handledCalls.length === 1 && ['inspect_owner_session', 'get_owner_reply'].includes(handledCalls[0].action)) {
+        this._requestOwnerStatusSpeech(outputs[0]?.code === 'INVALID_TOOL_ARGUMENTS'
+          ? 'Which enrolled session do you mean? Please say its exact name.'
+          : 'I could not retrieve that session reply. Please try again shortly.');
+        return;
+      }
       const behaviors = outputs.map((output) => output?.response_behavior).filter(Boolean);
       if (behaviors.includes('earcon_then_quiet') && outputs.every((output) => (
         output.response_behavior === 'earcon_then_quiet'
@@ -1779,7 +1791,9 @@ class OpenAIRealtimeClient extends EventEmitter {
         session_label: label, operation_id: output.operation_id });
       if (this.ownerInstructionReferences.length > 32) this.ownerInstructionReferences.shift();
     }
-    if (!background && toolName !== 'route_turn' && !callerClarification && output?.response_behavior !== 'direct_speech') {
+    const retryingBoundReply = toolName === 'get_owner_reply' && output?.success !== true &&
+      this.ownerInstructionReferences.some(r => r.operation_id === args.operation_id && r.operation_id === this.focusedOwnerOperation);
+    if (!background && toolName !== 'route_turn' && !callerClarification && !retryingBoundReply && output?.response_behavior !== 'direct_speech') {
       this.lastOwnerAction = output?.success === true &&
         ['request_owner_instruction', 'get_owner_instruction', 'get_owner_reply', 'inspect_owner_session'].includes(toolName) ? toolName : null;
       this.focusedOwnerOperation = this.lastOwnerAction === 'request_owner_instruction' ? output.operation_id

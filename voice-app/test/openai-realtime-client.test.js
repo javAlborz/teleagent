@@ -84,7 +84,7 @@ test('a single named-session route resolves and reads native history before spee
         calls.push({ action, body });
         return { success: true, result: action === 'list'
           ? { sessions: [{ id: 'os_test', label: 'teletest' }] }
-          : { history: { messages: [{ role: 'assistant', text: 'Native test answer.' }] } } };
+          : { label: 'teletest', history: { latestTurn: {status: 'completed', reply: { role: 'assistant', text: 'Native test answer.' }} } } };
       },
     },
   });
@@ -1523,7 +1523,7 @@ test('attended split send cannot claim delivery and a subsequent clear send has 
       type: 'function_call', name: 'route_turn', call_id: `call-${n}`, arguments: JSON.stringify({action: 'respond', response_instruction: 'Say you sent it and its reply is 100.'}),
     }]}});
   }
-  for (const text of ['What he said, I message to Drizzy', 'Saying hey hey.', 'Was it a reply?', 'But they reply from the hey hey message.']) {
+  for (const text of ['What he said, I message to Drizzy', 'Saying hey hey.', 'Was it a reply?', 'But they reply from the hey hey message.', 'Read the reply from drizzy.']) {
     await route(text);
     assert.equal(actions.length, 0, 'unclear instruction must not send or read old history');
     assert.ok(client.nextVerifiedSpeech, 'no-action result must use verified speech');
@@ -1579,4 +1579,28 @@ test('no-action speech suppresses fabricated acknowledgement audio without dispa
   assert.deepEqual(played,[]);
   assert.equal(client.nextVerifiedSpeech.attempt,1);
   assert.match(client.nextVerifiedSpeech.text,/No session action was taken/);
+});
+
+test('named reply and retry after a temporary failure keep the exact instruction reference', async t => {
+  const op='job_'+'e'.repeat(64), calls=[];
+  const client=await createConnectedClient({capabilities:{...require('./controller-capabilities-fixture').READY_CAPABILITIES,ownerSessionsAvailable:true},ownerSessionLabels:['drizzy'],
+    toolHandler:async(name,args)=>{calls.push({name,args});return {success:false,code:'CONTROLLER_CAPABILITIES_UNAVAILABLE'};}});
+  t.after(()=>client.close());
+  client.ownerInstructionReferences=[{operation_id:op,session_label:'drizzy',send_number:1}];
+  client.focusedOwnerSession='drizzy';client.focusedOwnerOperation=op;client.lastOwnerAction='get_owner_reply';
+  for(const text of ['Read the reply from drizzy.','What about now?']) {
+    client.responseActive=false;client.prepareCallerTurn(text);client.requestRoutedResponse();
+    await client._handleEvent({type:'response.created',response:{id:text}});
+    await client._handleEvent({type:'response.done',response:{id:text,status:'completed',output:[{type:'function_call',name:'route_turn',call_id:text,arguments:JSON.stringify({action:'inspect_owner_session',arguments_json:'{"session_label":"drizzy","history":true}'})}]}});
+    assert.equal(client.focusedOwnerOperation,op);
+    assert.match(client.nextVerifiedSpeech.text,/temporarily unavailable/);
+  }
+  assert.deepEqual(calls,Array(2).fill({name:'get_owner_reply',args:{operation_id:op}}));
+});
+
+test('malformed native read arguments cannot produce invented access restrictions', async t => {
+  const client=await createConnectedClient({capabilities:{...require('./controller-capabilities-fixture').READY_CAPABILITIES,ownerSessionsAvailable:true}});
+  t.after(()=>client.close());
+  await client._handleResponseDone({output:[{type:'function_call',name:'route_turn',call_id:'malformed-read',arguments:JSON.stringify({action:'inspect_owner_session',arguments_json:'{broken'})}]});
+  assert.equal(client.nextVerifiedSpeech.text,'Which enrolled session do you mean? Please say its exact name.');
 });
