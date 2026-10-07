@@ -69,7 +69,9 @@ class PbxAriCallRouter {
     if (!call) return;
     if (['StasisEnd', 'ChannelDestroyed', 'ChannelHangupRequest'].includes(event.type) &&
         [call.ownerId, call.trunkId].includes(event.channel?.id)) { await this.stop(); return; }
-    if (event.type.includes('Transfer') || (event.type === 'BridgeDestroyed' && event.bridge?.id === call.bridgeId)) {
+    // Our own DELETE can emit BridgeDestroyed before its HTTP acknowledgement.
+    // stop() still requires every DELETE to succeed; an uncertain response locks.
+    if (event.type.includes('Transfer') || (event.type === 'BridgeDestroyed' && event.bridge?.id === call.bridgeId && call.phase !== 'stopping')) {
       this.locked = true; await this.stop(); return;
     }
     if (event.type === 'ChannelDtmfReceived' && event.channel?.id === call.ownerId && event.digit === '*' &&
