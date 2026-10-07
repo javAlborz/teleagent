@@ -10,6 +10,7 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const {
+  prepareHostRuntimeAdmission,
   publishContainerAdmission,
   assertPanicQuiesced,
   assertVoiceExit,
@@ -50,6 +51,45 @@ const {
   MAX_CONTROL_RESPONSE_BYTES,
 } = require('../../deploy/voice-stack/teleagent-voice-stack-launch');
 const voiceAppRuntimeContract = require('../../lib/voice-app-runtime-env');
+
+test('runtime preparation has bounded room for both release checks and requires exact evidence', () => {
+  let executions = 0;
+  const dependencies = {
+    inspectPreparer: (program, policy) => {
+      assert.equal(program, '/usr/local/libexec/stage-teleagent-media-runtime');
+      assert.deepEqual(policy, { mode: 0o555, nlink: 1 });
+    },
+    runPreparation: (program, args, options) => {
+      executions += 1;
+      assert.equal(program, '/usr/local/libexec/stage-teleagent-media-runtime');
+      assert.deepEqual(args, ['prepare', '85']);
+      assert.ok(options.timeout > 30000 && options.timeout < 120000);
+      assert.deepEqual(options.stdio, ['ignore', 'pipe', 'pipe', 7]);
+      assert.deepEqual(options.env, { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C', LC_ALL: 'C' });
+      return { status: 0, stdout: JSON.stringify({ generation: 85, phase: 'prepared', runtimePublished: false }) };
+    },
+  };
+  prepareHostRuntimeAdmission(85, 7, dependencies);
+  assert.equal(executions, 1);
+  for (const [result, error] of [
+    [{ status: null, error: { code: 'ETIMEDOUT', message: 'private diagnostic' } }, /preparation timed out/],
+    [{ status: 77, stderr: 'private diagnostic' }, /preparation refused/],
+    [{ status: 0, stdout: 'x'.repeat(1025) }, /preparation refused/],
+    [{ status: 0, stdout: 'invalid' }, /preparation is unreadable/],
+    [{ status: 0, stdout: JSON.stringify({ generation: 84, phase: 'prepared', runtimePublished: false }) }, /unexpected evidence/],
+    [{ status: 0, stdout: JSON.stringify({ generation: 85, phase: 'prepared', runtimePublished: true }) }, /unexpected evidence/],
+    [{ status: 0, stdout: JSON.stringify({ generation: 85, phase: 'prepared', runtimePublished: false, extra: true }) }, /unexpected evidence/],
+  ]) {
+    let attempts = 0;
+    assert.throws(() => prepareHostRuntimeAdmission(85, 7, { ...dependencies,
+      runPreparation: () => { attempts += 1; return result; },
+    }), failure => error.test(failure.message) && !failure.message.includes('private diagnostic'));
+    assert.equal(attempts, 1);
+  }
+  assert.throws(() => prepareHostRuntimeAdmission(0, 7, dependencies), /no activation generation/);
+  assert.throws(() => prepareHostRuntimeAdmission(85, 2, dependencies), /no activation generation/);
+  assert.equal(executions, 1);
+});
 
 test('running admission keeps a bounded process-proof budget and verifies committed evidence', () => {
   const ownership = { activationGeneration: 68, services: [
