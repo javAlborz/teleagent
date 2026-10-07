@@ -55,7 +55,7 @@ test('a caller cancellation and the absolute deadline terminate a pending decisi
   const abort=new AbortController();const f=fixture({hang:true});
   const pending=f.router.decide(decision,{signal:abort.signal});abort.abort();
   await assert.rejects(pending,/ABORTED/);
-  await assert.rejects(fixture({hang:true,timeoutMs:10}).router.decide(decision),/REQUEST_FAILED/);
+  await assert.rejects(fixture({hang:true,timeoutMs:10}).router.decide(decision),/OWNER_DECISION_TIMEOUT/);
 });
 
 test('a missing admitted connector cannot fall back to a normal network agent',async()=>{

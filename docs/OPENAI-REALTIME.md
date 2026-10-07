@@ -420,6 +420,9 @@ changed words and internal operators are rejected. An entire unframed utterance
 is not a message unless Teleagent has asked for its content. Alternatively, the
 caller can refer to a presented draft. A conversational next-step answer can
 present a draft only if the exact target and message appear in its spoken text.
+The application adds a canonical target/message sentence if conversational prose
+omits or reformats the structured proposal; hidden draft fields alone never count
+as presentation. Referencing earlier content after a clarification is not dictation.
 The speech transcript is checked before the draft becomes available. A send is
 bound to that exact draft and target, consumes it before IO, and cannot dispatch
 twice for one caller revision. Uncertain delivery never triggers an automatic

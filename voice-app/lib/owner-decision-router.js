@@ -76,7 +76,9 @@ class OwnerDecisionRouter {
       });
       // Absolute deadline, including connect and a slow stream, not idle time.
       timer = setTimeout(() => req.destroy(new Error('OWNER_DECISION_TIMEOUT')), this.timeoutMs);
-      req.on('error', () => finish(new Error(signal?.aborted ? 'OWNER_DECISION_ABORTED' : 'OWNER_DECISION_REQUEST_FAILED')));
+      req.on('error', error => finish(new Error(signal?.aborted ? 'OWNER_DECISION_ABORTED'
+        : ['OWNER_DECISION_TIMEOUT', 'OWNER_DECISION_RESPONSE_TOO_LARGE'].includes(error?.message)
+          ? error.message : 'OWNER_DECISION_REQUEST_FAILED')));
       req.end(body);
     });
   }
