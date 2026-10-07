@@ -77,3 +77,41 @@ test('lost originate or disconnect cannot redial and uncertain cleanup stays loc
   await f.router.event(f.event('StasisStart', 'other', ['owner', '7']), 'epoch');
   assert.equal(f.router.current, null);
 });
+
+// Asterisk can emit BridgeDestroyed before acknowledging our own DELETE.
+test('three consecutive calls survive their own bridge teardown events', async t => {
+  const f = fixture(t);
+  f.ari.destroyBridge = async id => {
+    f.ari.emit('event', { type: 'BridgeDestroyed', application: APP, bridge: { id } }, 'epoch');
+    await new Promise(resolve => setImmediate(resolve));
+  };
+  for (let i = 0; i < 3; i++) {
+    const owner = `owner-${i}`;
+    await f.router.event(f.event('StasisStart', owner, ['owner', '7']), 'epoch');
+    const call = f.router.current;
+    assert.ok(call, 'next caller must be admitted after proved cleanup');
+    await f.router.event(f.event('StasisStart', call.trunkId, ['trunk', owner]), 'epoch');
+    await f.router.event(f.event('ChannelHangupRequest', owner), 'epoch');
+    await Promise.allSettled([...f.router.pending]);
+    assert.equal(f.router.locked, false);
+    assert.equal(f.router.current, null);
+  }
+});
+
+test('unexpected bridge destruction and uncertain owned cleanup still lock the router', async t => {
+  for (const uncertain of [false, true]) {
+    const f = fixture(t);
+    await f.router.event(f.event('StasisStart', 'owner', ['owner', '7']), 'epoch');
+    const call = f.router.current;
+    if (uncertain) {
+      f.ari.destroyBridge = async id => {
+        f.ari.emit('event', { type: 'BridgeDestroyed', application: APP, bridge: { id } }, 'epoch');
+        throw new Error('DELETE acknowledgement lost');
+      };
+      await assert.rejects(f.router.stop(), { code: 'PBX_ROUTER_STOP_UNCONFIRMED' });
+    } else {
+      await f.router.event({ type: 'BridgeDestroyed', application: APP, bridge: { id: call.bridgeId } }, 'epoch');
+    }
+    assert.equal(f.router.locked, true);
+  }
+});

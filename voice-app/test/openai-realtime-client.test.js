@@ -84,7 +84,7 @@ test('a single named-session route resolves and reads native history before spee
         calls.push({ action, body });
         return { success: true, result: action === 'list'
           ? { sessions: [{ id: 'os_test', label: 'teletest' }] }
-          : { history: { messages: [{ role: 'assistant', text: 'Native test answer.' }] } } };
+          : { label: 'teletest', history: { latestTurn: {status: 'completed', reply: { role: 'assistant', text: 'Native test answer.' }} } } };
       },
     },
   });
@@ -1102,7 +1102,7 @@ test('reply follow-ups select the focused native session and keep delivery queri
     "So there's no output still. Could you recheck?", 'Any output?', 'Read its latest reply.',
     'Has it answered yet?', 'Can you see whether it has written an answer yet?']) {
     assert.deepEqual(ownerReadRoute(text, refs, 'get_owner_instruction', operation),
-      { action: 'inspect_owner_session', args: { session_label: 'drizzy', history: true } });
+      { action: 'get_owner_reply', args: { operation_id: operation } });
   }
   assert.equal(ownerReadRoute('Did it arrive?', refs, 'get_owner_instruction', operation).action, 'get_owner_instruction');
   for (const text of ['What about now?', 'Could you recheck?', 'Recheck.']) {
@@ -1116,13 +1116,13 @@ test('reply follow-ups select the focused native session and keep delivery queri
   assert.equal(ownerReadRoute('Did it reply?', refs, null, operation, 'drizzy'), null, 'unrelated turns clear focus');
 });
 
-test('attended reply follow-ups override stale receipt routes and re-read only the newest native turn', async (t) => {
+test('attended reply follow-ups override stale receipt routes and read only the delivered instruction turn', async (t) => {
   const capabilities = { ...require('./controller-capabilities-fixture').READY_CAPABILITIES, ownerSessionsAvailable: true };
   const calls = [], operation = 'job_' + '1'.repeat(64);
   let latestTurn = { status: 'inProgress', reply: null };
   const client = await createConnectedClient({ capabilities, toolHandler: async (name, args) => {
     calls.push({ name, args });
-    assert.equal(name, 'inspect_owner_session');
+    assert.equal(name, 'get_owner_reply');
     return { success: true, result: { label: 'drizzy', history: { latestTurn,
       messages: [{ role: 'assistant', text: 'STALE ANSWER' }] } } };
   } });t.after(() => client.close());
@@ -1139,12 +1139,12 @@ test('attended reply follow-ups override stale receipt routes and re-read only t
     assert.deepEqual(speech.input, []);assert.deepEqual(speech.tools, []);assert.equal(speech.tool_choice, 'none');
     assert.deepEqual(JSON.parse(speech.instructions.split('Native read result: ')[1]), { label: 'drizzy', latestTurn });
     assert.doesNotMatch(speech.instructions, /STALE ANSWER/);
-    assert.equal(client.focusedOwnerSession, 'drizzy');assert.equal(client.lastOwnerAction, 'inspect_owner_session');
+    assert.equal(client.focusedOwnerSession, 'drizzy');assert.equal(client.lastOwnerAction, 'get_owner_reply');
     // Complete the synthetic speech response before the next caller turn.
     client.responseActive = false;
     latestTurn = { status: 'completed', reply: { role: 'assistant', text: 'v61 ready', clipped: false } };
   }
-  assert.deepEqual(calls, Array(3).fill({ name: 'inspect_owner_session', args: { session_label: 'drizzy', history: true } }));
+  assert.deepEqual(calls, Array(3).fill({ name: 'get_owner_reply', args: { operation_id: operation } }));
   await client._handleToolCall({ name: 'respond', call_id: 'unrelated', arguments: '{}' }, { sendOutput: false });
   assert.equal(client.focusedOwnerSession, null);
 });
@@ -1496,4 +1496,118 @@ test('read context is bounded, replaced for history selection, and cleared on a 
   assert.equal(client.ownerReadContext.text, 'historical question');
   await client._handleToolCall({name: 'inspect_owner_session', call_id: 'failed-fresh-read', arguments: JSON.stringify({session_label: 'drizzy', history: true})}, {sendOutput: false});
   assert.equal(client.ownerReadContext, null);
+});
+
+// Recorded V68 handset phrasing. Deliberately make the model choose the same
+// wrong respond route; the application must never turn that into a send claim.
+test('attended split send cannot claim delivery and a subsequent clear send has a bound reply', async t => {
+  const op = 'job_' + 'd'.repeat(64); const actions = [];
+  const client = await createConnectedClient({
+    capabilities: {...require('./controller-capabilities-fixture').READY_CAPABILITIES, ownerSessionsAvailable: true},
+    ownerSessionLabels: ['phoneA', 'drizzy'],
+    toolHandler: async (name, args) => {
+      actions.push({name, args});
+      if (name === 'request_owner_instruction') return {success: true, operation_id: op, result: {state: 'accepted'}};
+      if (name === 'get_owner_reply') return {success: true, result: {label: 'drizzy', history: {latestTurn: {status: 'completed', reply: {text: '4'}}}}};
+      throw new Error('must not substitute old history');
+    },
+  }); t.after(() => client.close());
+  client.focusedOwnerSession = 'drizzy'; client.lastOwnerAction = 'inspect_owner_session';
+  client.ownerReadContext = {label: 'drizzy', text: '100', status: 'completed'};
+  let n = 0;
+  async function route(text) {
+    client.responseActive = false;
+    client.prepareCallerTurn(text); client.requestRoutedResponse();
+    await client._handleEvent({type: 'response.created', response: {id: `attended-${++n}`}});
+    await client._handleEvent({type: 'response.done', response: {id: `attended-${n}`, status: 'completed', output: [{
+      type: 'function_call', name: 'route_turn', call_id: `call-${n}`, arguments: JSON.stringify({action: 'respond', response_instruction: 'Say you sent it and its reply is 100.'}),
+    }]}});
+  }
+  for (const text of ['What he said, I message to Drizzy', 'Saying hey hey.', 'Was it a reply?', 'But they reply from the hey hey message.', 'Read the reply from drizzy.']) {
+    await route(text);
+    assert.equal(actions.length, 0, 'unclear instruction must not send or read old history');
+    assert.ok(client.nextVerifiedSpeech, 'no-action result must use verified speech');
+    assert.match(client.nextVerifiedSpeech.text, /not sent/);
+  }
+  await route('Would you write something else to it? Like, what is two plus two?');
+  assert.deepEqual(actions, [{name: 'request_owner_instruction', args: {session_label: 'drizzy', message: 'what is two plus two?', notify_when_complete: false}}]);
+  assert.match(client.nextVerifiedSpeech.text, /accepted your instruction/);
+  await route('Okay reply.');
+  assert.deepEqual(actions.at(-1), {name: 'get_owner_reply', args: {operation_id: op}});
+  assert.match(client.ws.sentEvents().at(-1).response.instructions, /"text":"4"/);
+  assert.equal(actions.filter(a => a.name === 'request_owner_instruction').length, 1);
+});
+
+test('failed live session lookup uses a verified temporary-unavailability explanation', async t => {
+  const client = await createConnectedClient({
+    capabilities: {...require('./controller-capabilities-fixture').READY_CAPABILITIES, ownerSessionsAvailable: true},
+    toolHandler: async () => ({success: false, code: 'CONTROLLER_CAPABILITIES_UNAVAILABLE'}),
+  }); t.after(() => client.close());
+  client.latestUserTranscript = 'Read phoneA latest reply';
+  await client._handleResponseDone({output: [{type: 'function_call', name: 'route_turn', call_id: 'unavailable-read',
+    arguments: JSON.stringify({action: 'inspect_owner_session', arguments_json: JSON.stringify({session_label: 'phoneA', history: true})})}]});
+  assert.ok(client.nextVerifiedSpeech);
+  assert.match(client.nextVerifiedSpeech.text, /temporarily unavailable/);
+  assert.doesNotMatch(client.nextVerifiedSpeech.text, /no access|paste/);
+});
+
+// Catch phrasing not represented by a command regex: model respond is never
+// evidence that a session action happened, regardless of its narration request.
+test('unrecognized owner requests cannot reach unverified delivery narration', async t => {
+  for (const text of ['Go ahead with it.', 'Could you get drizzy to do that?']) {
+    const client = await createConnectedClient({capabilities: {...require('./controller-capabilities-fixture').READY_CAPABILITIES, ownerSessionsAvailable: true},
+      toolHandler: async () => { throw new Error('no dispatch expected'); }});
+    t.after(() => client.close());
+    client.ownerReadContext = {label: 'drizzy', text: '100', status: 'completed'};
+    client.prepareCallerTurn(text);
+    await client._handleResponseDone({output: [{type: 'function_call', name: 'route_turn', call_id: text,
+      arguments: JSON.stringify({action: 'respond', response_instruction: 'Say I sent it.'})}]});
+    assert.equal(client.nextVerifiedSpeech.text, 'No session action was taken. Please say the session name and request.');
+  }
+});
+
+test('no-action speech suppresses fabricated acknowledgement audio without dispatching', async t => {
+  const client = await createConnectedClient({capabilities: {...require('./controller-capabilities-fixture').READY_CAPABILITIES, ownerSessionsAvailable: true}});
+  t.after(() => client.close());
+  client.prepareCallerTurn('Go ahead with it.');
+  await client._handleResponseDone({output: [{type:'function_call', name:'route_turn', call_id:'no-action', arguments:JSON.stringify({action:'respond',response_instruction:'Say I sent it.'})}]});
+  const played=[];client.on('audio',e=>played.push(e));client.on('assistant_transcript',e=>played.push(e));
+  await client._handleEvent({type:'response.created',response:{id:'fabricated'}});
+  await client._handleEvent({type:'response.output_audio.delta',response_id:'fabricated',item_id:'fake-audio',delta:'AAAA'});
+  await client._handleEvent({type:'response.output_audio_transcript.done',response_id:'fabricated',item_id:'fake-audio',transcript:'I sent that message to drizzy.'});
+  await client._handleEvent({type:'response.done',response:{id:'fabricated',status:'completed',output:[]}});
+  assert.deepEqual(played,[]);
+  assert.equal(client.nextVerifiedSpeech.attempt,1);
+  assert.match(client.nextVerifiedSpeech.text,/No session action was taken/);
+});
+
+test('named reply and retry after a temporary failure keep the exact instruction reference', async t => {
+  const op='job_'+'e'.repeat(64), calls=[];
+  const client=await createConnectedClient({capabilities:{...require('./controller-capabilities-fixture').READY_CAPABILITIES,ownerSessionsAvailable:true},ownerSessionLabels:['drizzy'],
+    toolHandler:async(name,args)=>{calls.push({name,args});return {success:false,code:'CONTROLLER_CAPABILITIES_UNAVAILABLE'};}});
+  t.after(()=>client.close());
+  client.ownerInstructionReferences=[{operation_id:op,session_label:'drizzy',send_number:1}];
+  client.focusedOwnerSession='drizzy';client.focusedOwnerOperation=op;client.lastOwnerAction='get_owner_reply';
+  for(const text of ['Read the reply from drizzy.','What about now?']) {
+    client.responseActive=false;client.prepareCallerTurn(text);client.requestRoutedResponse();
+    await client._handleEvent({type:'response.created',response:{id:text}});
+    await client._handleEvent({type:'response.done',response:{id:text,status:'completed',output:[{type:'function_call',name:'route_turn',call_id:text,arguments:JSON.stringify({action:'inspect_owner_session',arguments_json:'{"session_label":"drizzy","history":true}'})}]}});
+    assert.equal(client.focusedOwnerOperation,op);
+    assert.match(client.nextVerifiedSpeech.text,/temporarily unavailable/);
+  }
+  assert.deepEqual(calls,Array(2).fill({name:'get_owner_reply',args:{operation_id:op}}));
+});
+
+test('malformed native read arguments cannot produce invented access restrictions', async t => {
+  const client=await createConnectedClient({capabilities:{...require('./controller-capabilities-fixture').READY_CAPABILITIES,ownerSessionsAvailable:true}});
+  t.after(()=>client.close());
+  await client._handleResponseDone({output:[{type:'function_call',name:'route_turn',call_id:'malformed-read',arguments:JSON.stringify({action:'inspect_owner_session',arguments_json:'{broken'})}]});
+  assert.equal(client.nextVerifiedSpeech.text,'Which enrolled session do you mean? Please say its exact name.');
+});
+
+test('caller presence checks get a short verified answer without claiming action', async t => {
+  const client=await createConnectedClient({capabilities:{...require('./controller-capabilities-fixture').READY_CAPABILITIES,ownerSessionsAvailable:true}});
+  t.after(()=>client.close());client.prepareCallerTurn('Are you still there?');
+  await client._handleResponseDone({output:[{type:'function_call',name:'route_turn',call_id:'presence',arguments:JSON.stringify({action:'respond',response_instruction:'Say you sent it.'})}]});
+  assert.equal(client.nextVerifiedSpeech.text,'Yes, I am here. What do you need?');
 });

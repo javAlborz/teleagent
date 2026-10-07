@@ -84,7 +84,11 @@ function ownerSendRoute(transcript, focusedSession, labels = []) {
   const match = /^(ask|tell|write|send(?: (?:a |the )?message to)?|message)\s+([\s\S]+)$/i.exec(text);
   if (!match) return null;
   let label = null; let message = null;
-  const rest = match[2];
+  let rest = match[2];
+  // Natural caller wording: keep the question verbatim, not a model answer.
+  if (match[1].toLowerCase() === 'write') rest = rest.replace(
+    /^something (?:else )?to (it|them|that session)[?.!,]*\s+(?:like[,:]?\s+)?/i, '$1 ');
+
   const named = [...new Set([...labels, focusedSession].filter(Boolean))].flatMap(value => {
     if (typeof value !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9 ._-]{0,79}$/.test(value)) return [];
     const pattern = spokenLabelPattern(value);
@@ -106,6 +110,31 @@ function ownerSendRoute(transcript, focusedSession, labels = []) {
   return args ? { action: 'request_owner_instruction', args } : null;
 }
 
+// Only caller questions about a fetched quotation enter free-form explanation.
+// Delivery/status questions and fresh actions keep their application-owned path.
+function ownerExplanation(text) {
+  if (typeof text !== 'string' || text.length > 1400) return false;
+  const command = callerCommand(text).replace(/^wait[, —-]+/i, '');
+  return /^(?:explain\b|summarize\b|repeat\b|read it in full\b|what (?:does|did)\b|what is the (?:sequence|meaning|next step)\b|(?:the )?follow.up sequence\b|how (?:do|should) i\b)/i.test(command) &&
+    !/\b(?:send|write|tell|message to)\b/i.test(command);
+}
+
+// Unresolved instructions must never be narrated as completed actions. This
+// route only clarifies; it cannot promote ambiguous speech into a send.
+function ownerUnsentRoute(text, focusedSession, labels = []) {
+  if (typeof text !== 'string' || text.length > 1400) return null;
+  const command = callerCommand(text);
+  const named = labels.some(label => typeof label === 'string' &&
+    /^[A-Za-z0-9][A-Za-z0-9 ._-]{0,79}$/.test(label) &&
+    new RegExp('(?:^|[^A-Za-z0-9])' + spokenLabelPattern(label) + '(?:$|[^A-Za-z0-9])', 'i').test(text));
+  if ((focusedSession || named) && (/^(?:saying|that is saying)\b/i.test(command) ||
+      /^(?:send|write|tell|ask|message)\b/i.test(command) ||
+      /\bi message to\b/i.test(command))) {
+    return { action: 'respond', args: {}, clarification: 'owner_unsent' };
+  }
+  return null;
+}
+
 // Selection is caller-owned; a model cannot silently turn an ordinal into latest.
 function ownerHistorySelection(text, previous = null) {
   if (typeof text !== 'string' || /\b(?:send|tell|write|ask|message to)\b/i.test(text)) return null;
@@ -120,4 +149,4 @@ function ownerHistorySelection(text, previous = null) {
   return null;
 }
 
-module.exports = { ownerInventoryRoute, ownerHistorySelection, ownerCorrectionRoute, ownerSendRoute, preserveOwnerMessage, wantsReplyWatch };
+module.exports = { ownerExplanation, ownerUnsentRoute, ownerInventoryRoute, ownerHistorySelection, ownerCorrectionRoute, ownerSendRoute, preserveOwnerMessage, wantsReplyWatch };
