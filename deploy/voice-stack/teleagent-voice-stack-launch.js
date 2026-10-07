@@ -956,21 +956,29 @@ function projectPrivateCompose(contract, projection, environment) {
   });
 }
 
-function prepareHostRuntimeAdmission(activationGeneration, lifecycleFd) {
+function prepareHostRuntimeAdmission(activationGeneration, lifecycleFd, {
+  inspectPreparer = inspectRootPath,
+  runPreparation = spawnSync,
+} = {}) {
   if (!Number.isSafeInteger(activationGeneration) || activationGeneration < 1 ||
       !Number.isSafeInteger(lifecycleFd) || lifecycleFd < 3) {
     refuse('voice runtime preparation has no activation generation or lifecycle lock');
   }
-  inspectRootPath(MEDIA_RUNTIME_PREPARER, { mode: 0o555, nlink: 1 });
-  const result = spawnSync(MEDIA_RUNTIME_PREPARER,
+  inspectPreparer(MEDIA_RUNTIME_PREPARER, { mode: 0o555, nlink: 1 });
+  // Preparation independently checks the release gate twice. At the service's
+  // 256 MiB / one-CPU boundary those checks alone can exhaust 30 seconds.
+  // Keep a fixed budget within the existing five-minute service startup bound.
+  const result = runPreparation(MEDIA_RUNTIME_PREPARER,
     ['prepare', String(activationGeneration)], {
-      encoding: 'utf8', timeout: 30000, maxBuffer: 4096,
+      encoding: 'utf8', timeout: 90000, maxBuffer: 4096,
       env: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C', LC_ALL: 'C' },
       stdio: ['ignore', 'pipe', 'pipe', lifecycleFd],
     });
   if (result.error || result.status !== 0 ||
       Buffer.byteLength(result.stdout || '') > 1024) {
-    refuse('independent voice runtime preparation refused');
+    refuse(result.error?.code === 'ETIMEDOUT' ?
+      'independent voice runtime preparation timed out' :
+      'independent voice runtime preparation refused');
   }
   let prepared;
   try { prepared = JSON.parse(result.stdout); } catch {
@@ -2056,6 +2064,7 @@ async function main() {
 }
 
 module.exports = {
+  prepareHostRuntimeAdmission,
   publishContainerAdmission,
   assertPanicQuiesced,
   assertVoiceExit,
