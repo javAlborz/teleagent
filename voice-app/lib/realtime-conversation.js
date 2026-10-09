@@ -31,7 +31,7 @@ const AUDIT_SCOPE_KEYS = new Set([
 ]);
 
 function redactAuditText(value) {
-  return String(value || '')
+  return String(value ?? '')
     .replace(/\bsk-(?:proj-)?[A-Za-z0-9_-]{12,}\b/g, '[REDACTED_OPENAI_KEY]')
     .replace(/\b(api[_-]?key|token|secret|password)\s*[:=]\s*[^\s]+/gi, '$1=[REDACTED]')
     .replace(/\b(?:ghp|github_pat|xox[baprs]|AKIA)[A-Za-z0-9_-]{12,}\b/g, '[REDACTED_CREDENTIAL]')
@@ -79,6 +79,9 @@ function buildToolAudit({ call = {}, args = {}, output = {}, durationMs = 0 } = 
       ...(['request_owner_instruction', 'get_owner_instruction', 'get_owner_reply'].includes(call.name) ? {
         owner_operation_id: output?.operation_id || output?.result?.operationId || null,
         owner_delivery_state: output?.result?.state || null,
+        owner_message_reason: ['invalid_envelope', 'ambiguous_target', 'draft_mismatch',
+          'caller_source_mismatch', 'caller_span_mismatch', 'unframed_message',
+          'missing_source', 'already_dispatched'].includes(output?.message_reason) ? output.message_reason : null,
       } : {}),
     },
   };
@@ -379,6 +382,7 @@ async function runRealtimeConversation(endpoint, dialog, callUuid, {
   defaultProfile = 'codex-terra',
   resumeTtlSeconds = 86400,
   hangupDelayMs = 1400,
+  farewellTimeoutMs = 20000,
   responseDebounceMs = null,
   approvalMarkerTimeoutMs: configuredApprovalMarkerTimeoutMs = 30000,
   openaiClientFactory = null,
@@ -435,6 +439,7 @@ async function runRealtimeConversation(endpoint, dialog, callUuid, {
   let sessionError = null;
   let userResponseTimer = null;
   let hangupTimer = null;
+  let farewellDeadlineTimer = null;
   let hangupRequested = false;
   let localHangupStarted = false;
   let conversationEndReason = null;
@@ -491,6 +496,10 @@ async function runRealtimeConversation(endpoint, dialog, callUuid, {
       clearTimeout(hangupTimer);
       hangupTimer = null;
     }
+    if (farewellDeadlineTimer) {
+      clearTimeout(farewellDeadlineTimer);
+      farewellDeadlineTimer = null;
+    }
     realtime?.close(1000, 'SIP call ended');
     resolveConversationEnd();
     return true;
@@ -524,6 +533,18 @@ async function runRealtimeConversation(endpoint, dialog, callUuid, {
   };
   const onDialogDestroy = () => concludeConversation('sip_dialog_destroyed');
   dialog.on('destroy', onDialogDestroy);
+  const beginHangup = () => {
+    if (hangupRequested || !callActive) return;
+    hangupRequested = true;
+    cancelQueuedUserResponse();
+    realtime?.beginHangup?.();
+    // Only an explicitly ended call has this deadline. A failed/cancelled or
+    // missing model completion must not leave a permanently silent SIP call.
+    farewellDeadlineTimer = setTimeout(() => {
+      farewellDeadlineTimer = null;
+      void requestLocalHangup('farewell_timeout');
+    }, Math.max(1, Math.min(Number(farewellTimeoutMs) || 20000, 60000)));
+  };
 
   try {
     const audioExpectation = audioForkServer.expectSession(callUuid, {
@@ -837,8 +858,7 @@ async function runRealtimeConversation(endpoint, dialog, callUuid, {
         return;
       }
       if (isDefinitiveGoodbye(transcript)) {
-        hangupRequested = true;
-        cancelQueuedUserResponse();
+        beginHangup();
         discardModelTurn();
         interruptAssistantForSubstantiveTurn();
         realtime.sendSystemNotice(
@@ -1199,7 +1219,7 @@ async function runRealtimeConversation(endpoint, dialog, callUuid, {
           logger.warn('Realtime job acknowledgement tone failed', { callUuid, error: error.message });
         });
       }
-      if (output?.end_call) hangupRequested = true;
+      if (output?.end_call) beginHangup();
     });
     realtime.on('response.done', (response, meta = {}) => {
       if (meta.purpose === 'approval_prompt' && callActive) {
@@ -1213,7 +1233,7 @@ async function runRealtimeConversation(endpoint, dialog, callUuid, {
         }
       }
       if (!hangupRequested || !callActive) return;
-      if (meta.purpose && !['farewell', 'system_notice', 'notice:hangup'].includes(meta.purpose)) return;
+      if (!['farewell', 'notice:hangup'].includes(meta.purpose)) return;
       if (hangupTimer) clearTimeout(hangupTimer);
       // Generation can finish well before downstream audio finishes playing.
       // Keep the dialog alive for the queued farewell, including the playout
@@ -1258,7 +1278,7 @@ async function runRealtimeConversation(endpoint, dialog, callUuid, {
     audioSession.on('audio', audioHandler);
 
     const queueJobCompletionNotice = (job) => {
-      if (job.voice_thread_id !== thread.id || !callActive) return;
+      if (job.voice_thread_id !== thread.id || !callActive || hangupRequested) return;
       if (job.notification_status === 'delivered' || pendingJobNoticeIds.has(job.id)) return;
       pendingJobNoticeIds.add(job.id);
       quietJobIds.delete(job.id);
@@ -1377,11 +1397,12 @@ async function runRealtimeConversation(endpoint, dialog, callUuid, {
     approvalResponses.clear();
     cancelQueuedUserResponse();
     if (hangupTimer) clearTimeout(hangupTimer);
+    if (farewellDeadlineTimer) clearTimeout(farewellDeadlineTimer);
     dialog.off('destroy', onDialogDestroy);
     if (dtmfHandler) endpoint.off('dtmf', dtmfHandler);
     if (audioHandler && audioSession) audioSession.off('audio', audioHandler);
     if (completionHandler) jobBroker.off('job.completed', completionHandler);
-    if (conversationEndReason === 'farewell_completed') {
+    if (hangupRequested) {
       jobBroker.cancelPendingApprovals?.(
         thread.id,
         'Call ended explicitly before pound confirmation',

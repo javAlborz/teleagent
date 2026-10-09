@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { validateOwnerInstruction } = require('../lib/owner-call-intent');
+const { validateOwnerInstruction, checkOwnerInstruction, verbatimMessageSpan } = require('../lib/owner-call-intent');
 const { OwnerReplyWatch } = require('../lib/owner-reply-watch');
 const operation = 'job_' + 'a'.repeat(64);
 
@@ -78,4 +78,19 @@ test('an unframed conversational followup is not an entire new message unless co
   const args={session_label:'drizzy',message:'Okay reply.'},source={kind:'caller',text:'Okay reply.'};
   assert.equal(validateOwnerInstruction('Okay reply.',args,source,{labels:['drizzy']}),null);
   assert.ok(validateOwnerInstruction('Okay reply.',args,source,{labels:['drizzy'],awaitingMessage:true}));
+});
+
+test('paused dictation tolerates boundary punctuation but returns exact caller bytes', () => {
+  const transcript = 'Would you now go to the phone A session and reply to that. The reply should be, I just did some texting\nInvestigate logs.\nAnd read the reply to me afterwards when it is done.';
+  const args = {session_label: 'phone A', message: 'I just did some texting. Investigate logs.', notify_when_complete: true};
+  const result = checkOwnerInstruction(transcript, args, {kind: 'caller', text: args.message}, {labels: ['phoneA']});
+  assert.deepEqual(result, {reason: null, instruction: {session_label: 'phoneA',
+    message: 'I just did some texting\nInvestigate logs.', notify_when_complete: true}});
+  assert.equal(verbatimMessageSpan('Send first.\nSecond!', 'first Second'), 'first.\nSecond!');
+  assert.equal(verbatimMessageSpan('Send first second', 'first. second'), null);
+  assert.equal(verbatimMessageSpan('Send 3-2\nthen report', '3+2. then report'), null);
+  assert.equal(verbatimMessageSpan('Send first\nsecond or first\nsecond', 'first. second'), null);
+  assert.equal(verbatimMessageSpan('Send change\nthen report', 'change then deploy'), null);
+  assert.equal(checkOwnerInstruction('Read the reply', args, {kind: 'caller', text: args.message},
+    {labels: ['phoneA']}).reason, 'caller_span_mismatch');
 });
