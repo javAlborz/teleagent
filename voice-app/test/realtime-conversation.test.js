@@ -1320,7 +1320,7 @@ test('explicit hangup has a one-shot fallback even without the expected model co
     const fixture = createCallFixture(t, {autoDestroyGreeting: false});
     const call = runRealtimeConversation(fixture.endpoint, fixture.dialog, 'missing-farewell-' + route, {
       audioForkServer: fixture.audioForkServer, stateStore: fixture.stateStore, jobBroker: fixture.jobBroker,
-      callerId: '1001', farewellTimeoutMs: 500, openaiClientFactory: fixture.openaiClientFactory,
+      callerId: '1001', hangupDelayMs: 0, farewellTimeoutMs: 500, openaiClientFactory: fixture.openaiClientFactory,
     });
     while (!fixture.getRealtimeClient()) await new Promise(resolve => setImmediate(resolve));
     await new Promise(resolve => setImmediate(resolve));
