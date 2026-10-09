@@ -1113,6 +1113,83 @@ test('queued farewell waits for speech and final transcript in either event orde
   }
 });
 
+test('routed farewell preserves hangup purpose, fences queued work, and excludes old answers', async t => {
+  const actions = [];
+  const client = await createConnectedClient({capabilities: ownerCapabilities,
+    instructions: 'Previously read a very long answer.', toolHandler: async name => {
+      actions.push(name); return {success: true, end_call: true, response_behavior: 'farewell_then_hangup'};
+    }});
+  t.after(() => client.close());
+  client.prepareCallerTurn('Never mind, goodbye.');
+  client.ownerReplyWatch.start('job_' + 'a'.repeat(64));
+  client.pendingUserResponse = true;
+  client.pendingNotices = [{content: 'Old result', key: 'job:old'}];
+  await client._handleResponseDone({output: [ownerRoute('bye', 'end_call', {})]});
+  assert.equal(client.nextResponsePurpose, 'farewell');
+  assert.equal(client.ownerReplyWatch.current, null);
+  assert.equal(client.pendingUserResponse, false);
+  assert.deepEqual(client.pendingNotices, []);
+  const response = client.ws.sentEvents().filter(e => e.type === 'response.create').at(-1).response;
+  assert.deepEqual(response.input, []); assert.deepEqual(response.tools, []);
+  assert.doesNotMatch(response.instructions, /long answer/);
+  assert.equal(client.queueUserResponse(), false);
+  assert.equal(client.sendSystemNotice('Late result', {key: 'job:late'}), false);
+  assert.equal(await client._handleToolCall(ownerRoute('late', 'list_owner_sessions', {})), null);
+  assert.deepEqual(actions, ['end_call']);
+});
+
+test('successful native status does not become a failed reply or get rewritten as a bound reply', async t => {
+  const calls = [];
+  const client = await createConnectedClient({capabilities: ownerCapabilities, toolHandler: async (name, args) => {
+    calls.push({name, args}); return {success: true, result: {label: 'msc', status: 'active'}};
+  }});
+  t.after(() => client.close());
+  client.focusedOwnerSession = 'msc'; client.focusedOwnerOperation = 'job_' + 'a'.repeat(64);
+  client.ownerInstructionReferences = [{session_label: 'msc', operation_id: client.focusedOwnerOperation}];
+  client.prepareCallerTurn('Is MSC working now?');
+  await client._handleResponseDone({output: [ownerRoute('status', 'inspect_owner_session', {session_label: 'msc', history: false})]});
+  assert.deepEqual(calls, [{name: 'inspect_owner_session', args: {session_label: 'msc', history: false}}]);
+  assert.match(client.nextVerifiedSpeech.text, /msc is working/);
+  assert.match(client.nextVerifiedSpeech.text, /does not show whether tokens/);
+  assert.doesNotMatch(client.nextVerifiedSpeech.text, /could not retrieve/);
+});
+
+test('an in-progress saved reply is not presented as a current token stream', async t => {
+  const client = await createConnectedClient(); t.after(() => client.close());
+  client._requestNativeReadback({label: 'msc', history: {latestTurn: {status: 'inProgress', reply: {text: 'Earlier question'}}}});
+  assert.equal(client.nextVerifiedSpeech.text, 'msc is still working. Its latest saved reply says: Earlier question');
+  let played = 0; client.on('audio', () => played++);
+  await client._handleEvent({type: 'response.created', response: {id: 'old-answer'}});
+  await client._handleEvent({type: 'response.output_audio.delta', response_id: 'old-answer', delta: Buffer.from([1, 2]).toString('base64')});
+  await client._handleEvent({type: 'response.output_audio_transcript.done', response_id: 'old-answer', transcript: 'Earlier question'});
+  await client._handleEvent({type: 'response.done', response: {id: 'old-answer', status: 'completed', output: []}});
+  assert.equal(played, 0); assert.equal(client.nextVerifiedSpeech.attempt, 1);
+  client.responseActive = false;
+  client._requestNativeReadback({label: 'msc', history: {latestTurn: {status: 'inProgress', reply: {text: 'word '.repeat(1000)}}}});
+  assert.match(client.nextVerifiedSpeech.text, /partial excerpt/);
+  assert.ok(client.nextVerifiedSpeech.text.split(/\s+/).length < 100);
+});
+
+test('paused message routes exact original fragments once and never reuses them on a later turn', async t => {
+  const calls = [];
+  const client = await createConnectedClient({capabilities: ownerCapabilities, toolHandler: async (name, args) => {
+    calls.push({name, args}); return {success: true, operation_id: 'job_' + 'c'.repeat(64), result: {state: 'accepted'}};
+  }}); t.after(() => client.close());
+  client.prepareCallerTurn('Tell phoneA I just did some texting');
+  client.prepareCallerTurn('Investigate logs.');
+  client.prepareCallerTurn('And read the reply to me afterwards when it is done.');
+  client.requestRoutedResponse();
+  const args = {session_label: 'phoneA', message: 'I just did some texting. Investigate logs.', notify_when_complete: true};
+  await client._handleToolCall(ownerRoute('paused-send', 'request_owner_instruction', args, {kind: 'caller', text: args.message}));
+  assert.equal(calls.length, 1); assert.equal(calls[0].args.message, 'I just did some texting\nInvestigate logs.');
+  await client._handleToolCall(ownerRoute('duplicate-send', 'request_owner_instruction', args, {kind: 'caller', text: args.message}));
+  assert.equal(calls.length, 1);
+  client.prepareCallerTurn('And read it when it is done.');
+  const rejected = await client._handleToolCall(ownerRoute('old-message', 'request_owner_instruction', args, {kind: 'caller', text: args.message}));
+  assert.equal(rejected.output.message_reason, 'caller_span_mismatch');
+  assert.equal(calls.length, 1);
+});
+
 test('inventory includes all seventeen names and offers truthful continuation for long catalogs', async t => {
   const client = await createConnectedClient(); t.after(() => client.close());
   let speech; client._requestOwnerStatusSpeech = text => { speech = text; };

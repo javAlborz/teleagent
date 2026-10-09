@@ -1283,6 +1283,67 @@ test('goodbye waits for queued farewell playout after generation finishes', asyn
   assert.equal(fixture.dialog.destroyCalls,1);
 });
 
+test('real routed end_call completion disconnects SIP after its farewell', async t => {
+  const {OpenAIRealtimeClient} = require('../lib/openai-realtime-client');
+  const fixture = createCallFixture(t, {autoDestroyGreeting: false});
+  let client;
+  const call = runRealtimeConversation(fixture.endpoint, fixture.dialog, 'routed-goodbye', {
+    audioForkServer: fixture.audioForkServer, stateStore: fixture.stateStore, jobBroker: fixture.jobBroker,
+    callerId: '1001', hangupDelayMs: 0, openaiClientFactory: options => {
+      client = new OpenAIRealtimeClient({...options, ownerDecisionRouter: null});
+      // Replace only the external wire. Keep real response-purpose bookkeeping,
+      // tool dispatch, event handlers and SIP teardown together in this test.
+      client.connect = async () => {
+        client.connected = true;
+        client.ws = {readyState: 1, send() {}, close() {}};
+      };
+      return client;
+    },
+  });
+  while (!client) await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  await client._handleEvent({type: 'response.created', response: {id: 'greeting'}});
+  await client._handleEvent({type: 'response.done', response: {id: 'greeting', status: 'completed', output: []}});
+  client.emit('user_transcript', 'Never mind, goodbye.');
+  await client._handleResponseDone({status: 'completed', output: [{type: 'function_call', name: 'route_turn',
+    call_id: 'end-the-call', arguments: JSON.stringify({action: 'end_call', arguments_json: '{}'})}]});
+  await client._handleEvent({type: 'response.created', response: {id: 'farewell'}});
+  await client._handleEvent({type: 'response.done', response: {id: 'farewell', status: 'completed', output: []}});
+  await call;
+  assert.equal(fixture.dialog.destroyCalls, 1);
+  const audit = fixture.stateStore.listAuditEvents({limit: 20}).filter(e => e.action === 'sip_hangup_requested');
+  assert.equal(audit.length, 1); assert.equal(audit[0].metadata.reason, 'farewell_completed');
+});
+
+test('explicit hangup has a one-shot fallback even without the expected model completion', async t => {
+  for (const route of ['direct', 'routed']) {
+    const fixture = createCallFixture(t, {autoDestroyGreeting: false});
+    const call = runRealtimeConversation(fixture.endpoint, fixture.dialog, 'missing-farewell-' + route, {
+      audioForkServer: fixture.audioForkServer, stateStore: fixture.stateStore, jobBroker: fixture.jobBroker,
+      callerId: '1001', farewellTimeoutMs: 500, openaiClientFactory: fixture.openaiClientFactory,
+    });
+    while (!fixture.getRealtimeClient()) await new Promise(resolve => setImmediate(resolve));
+    await new Promise(resolve => setImmediate(resolve));
+    const client = fixture.getRealtimeClient();
+    t.mock.timers.enable({apis: ['setTimeout']});
+    t.mock.timers.tick(20000); assert.equal(fixture.dialog.destroyed, false);
+    if (route === 'direct') client.emit('user_transcript', 'Goodbye.');
+    else client.emit('tool.completed', {output: {end_call: true}});
+    // Neither an unrelated completion nor repeated goodbye may extend the deadline.
+    client.emit('response.done', {status: 'cancelled'}, {purpose: 'tool_result'});
+    t.mock.timers.tick(499); assert.equal(fixture.dialog.destroyed, false);
+    client.emit('user_transcript', 'Goodbye.');
+    client.emit('tool.completed', {output: {end_call: true}});
+    t.mock.timers.tick(1); await call;
+    assert.equal(fixture.dialog.destroyCalls, 1);
+    assert.equal(fixture.audioSession.closed, true);
+    assert.equal(client.queuedResponses.length, 0);
+    assert.equal(fixture.stateStore.listAuditEvents({limit: 20})
+      .find(e => e.action === 'sip_hangup_requested').metadata.reason, 'farewell_timeout');
+    t.mock.timers.reset();
+  }
+});
+
 test('local hangup always resolves cleanup when SIP destroy rejects without emitting destroy', async (t) => {
   const fixture = createCallFixture(t, {
     autoDestroyGreeting: false,
