@@ -1331,6 +1331,8 @@ test('explicit hangup has a one-shot fallback even without the expected model co
     else client.emit('tool.completed', {output: {end_call: true}});
     // Neither an unrelated completion nor repeated goodbye may extend the deadline.
     client.emit('response.done', {status: 'cancelled'}, {purpose: 'tool_result'});
+    client.emit('response.done', {status: 'completed'}, {purpose: 'system_notice'});
+    client.emit('response.done', {status: 'completed'}, {});
     t.mock.timers.tick(499); assert.equal(fixture.dialog.destroyed, false);
     client.emit('user_transcript', 'Goodbye.');
     client.emit('tool.completed', {output: {end_call: true}});

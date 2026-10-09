@@ -1233,7 +1233,7 @@ async function runRealtimeConversation(endpoint, dialog, callUuid, {
         }
       }
       if (!hangupRequested || !callActive) return;
-      if (meta.purpose && !['farewell', 'system_notice', 'notice:hangup'].includes(meta.purpose)) return;
+      if (!['farewell', 'notice:hangup'].includes(meta.purpose)) return;
       if (hangupTimer) clearTimeout(hangupTimer);
       // Generation can finish well before downstream audio finishes playing.
       // Keep the dialog alive for the queued farewell, including the playout
