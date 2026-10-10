@@ -239,14 +239,18 @@ async function runPlan(tasks, {memory, execute, current, delay = ms => new Promi
     }
     const result = resultSnapshot(output);
     const state = task.action === 'request_owner_instruction'
-      ? (result.delivery_state || (result.success || output?.delivery_attempted === true ? 'outcome_unknown' : 'failed'))
+      ? (result.delivery_state === 'not_found' ? 'outcome_unknown' : result.delivery_state ||
+        (result.success || output?.delivery_attempted === true ? 'outcome_unknown' : 'failed'))
       : result.success ? 'read' : 'failed';
     memory.update(task, {state, result});
     if (task.action === 'get_owner_reply' && result.success && op) {
       const original = memory.value.tasks.find(t => t.action === 'request_owner_instruction' && t.operation_id === op);
       if (original) memory.update(original, {work_state: result.turn_status});
     }
-    if (task.action === 'get_owner_instruction' && result.success && op && result.delivery_state) {
+    // A GET can overtake a still-preparing POST. Absence of a row does not
+    // prove that the earlier send is quiescent or authorize a fresh attempt.
+    if (task.action === 'get_owner_instruction' && result.success && op && result.delivery_state &&
+        result.delivery_state !== 'not_found') {
       const original = memory.value.tasks.find(t => t.action === 'request_owner_instruction' && t.operation_id === op);
       if (original) memory.update(original, {state: result.delivery_state});
     }
