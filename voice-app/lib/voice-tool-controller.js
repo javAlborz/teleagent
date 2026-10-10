@@ -1,6 +1,6 @@
 'use strict';
 
-const crypto = require('node:crypto');
+const {makeOperationId} = require('./owner-task-plan');
 const { URL } = require('node:url');
 const {
   UNAVAILABLE, isToolAvailable, readControllerCapabilities, toolCapability, unavailableResult,
@@ -317,12 +317,21 @@ class VoiceToolController {
           }
           const target = await this._ownerSessionId(args);
           if (target.failure) return target.failure;
-          const operationId = 'job_' + crypto.createHash('sha256')
-            .update(JSON.stringify([this.realtimeSessionId, context.callId])).digest('hex');
-          const result = await this.agentBridge.ownerSessionAction('request', {
-            id: target.id, message: args.message, operationId, sipCallId: this.sipCallId,
-          });
+          const operationId = makeOperationId(this.realtimeSessionId, context.callId);
+          let result;
+          try {
+            result = await this.agentBridge.ownerSessionAction('request', {
+              id: target.id, message: args.message, operationId, sipCallId: this.sipCallId,
+            });
+          } catch (error) {
+            // The stable ID is known before IO. A lost response must retain it
+            // for read-only reconciliation, never become permission to retry.
+            return {success: false, operation_id: operationId, delivery_attempted: true,
+              completed: false, code: error.code || 'OWNER_SESSION_DELIVERY_OUTCOME_UNKNOWN',
+              result: {state: 'outcome_unknown'}};
+          }
           return { ...result, operation_id: operationId, completed: false,
+            delivery_attempted: !['OWNER_APPROVAL_BUSY', 'OWNER_BROKER_BUSY'].includes(result?.code),
             // The independent PBX owns this prompt. A simultaneous model
             // explanation can contradict it or talk over the approval audio.
             ...(result?.success === true && result.result?.state === 'pending_approval'

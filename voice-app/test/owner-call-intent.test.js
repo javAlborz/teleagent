@@ -94,3 +94,27 @@ test('paused dictation tolerates boundary punctuation but returns exact caller b
   assert.equal(checkOwnerInstruction('Read the reply', args, {kind: 'caller', text: args.message},
     {labels: ['phoneA']}).reason, 'caller_span_mismatch');
 });
+
+
+test('watches rotate waiting tasks and do not overlap a canceled in-flight read', async () => {
+  const a=operation,b='job_'+'b'.repeat(64);let release,active=0,maxActive=0;
+  const f=watcher({read:async id=>{
+    active++;maxActive=Math.max(maxActive,active);
+    if(id===a)await new Promise(resolve=>{release=resolve;});
+    active--;
+    return {success:true,result:{history:{latestTurn:{status:'completed',reply:{text:id}}}}};
+  }});
+  f.watch.start(a);f.watch.start(b);
+  const pending=f.watch.tick(f.watch.current);
+  f.watch.stop(a);await f.watch.tick(f.watch.current);
+  assert.equal(active,1);assert.equal(f.spoken.length,0);
+  release();await pending;
+  await f.watch.tick(f.watch.current);
+  assert.equal(maxActive,1);assert.equal(f.spoken.length,1);assert.equal(f.watch.current,null);
+  const g=watcher({read:async id=>({success:true,result:{history:{latestTurn:
+    id===a?{status:'inProgress'}:{status:'failed',reply:null}}}})});
+  g.watch.start(a);g.watch.start(b);
+  await g.watch.tick(g.watch.current);assert.equal(g.watch.current.operationId,b);
+  await g.watch.tick(g.watch.current);assert.equal(g.spoken.length,1);
+  assert.equal(g.watch.current.operationId,a);g.watch.stop();
+});

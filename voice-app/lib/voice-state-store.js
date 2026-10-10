@@ -147,6 +147,13 @@ class VoiceStateStore {
       CREATE INDEX IF NOT EXISTS voice_threads_caller_updated_idx
         ON voice_threads(caller_id, updated_at DESC);
 
+      CREATE TABLE IF NOT EXISTS owner_dialogue_state (
+        voice_thread_id TEXT PRIMARY KEY REFERENCES voice_threads(id) ON DELETE CASCADE,
+        revision INTEGER NOT NULL,
+        state_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS realtime_sessions (
         id TEXT PRIMARY KEY,
         voice_thread_id TEXT NOT NULL REFERENCES voice_threads(id) ON DELETE CASCADE,
@@ -622,6 +629,29 @@ class VoiceStateStore {
     return normalizeThread(
       this.db.prepare('SELECT * FROM voice_threads WHERE id = ?').get(threadId)
     );
+  }
+
+  loadOwnerDialogue(threadId) {
+    const row = this.db.prepare('SELECT revision, state_json FROM owner_dialogue_state WHERE voice_thread_id = ?').get(threadId);
+    return row ? {revision: row.revision, state: JSON.parse(row.state_json)} : null;
+  }
+
+  saveOwnerDialogue(threadId, revision, state) {
+    const json = JSON.stringify(state);
+    if (!Number.isSafeInteger(revision) || revision < 0 || Buffer.byteLength(json) > 512 * 1024) {
+      throw Object.assign(new Error('Invalid dialogue state'), {code: 'OWNER_DIALOGUE_STATE_INVALID'});
+    }
+    return this.db.transaction(() => {
+      const current = this.loadOwnerDialogue(threadId);
+      if ((current?.revision || 0) !== revision) {
+        throw Object.assign(new Error('The conversation changed'), {code: 'OWNER_DIALOGUE_STATE_CONFLICT'});
+      }
+      this.db.prepare(`INSERT INTO owner_dialogue_state (voice_thread_id, revision, state_json, updated_at)
+        VALUES (?, ?, ?, ?) ON CONFLICT(voice_thread_id) DO UPDATE SET
+        revision = excluded.revision, state_json = excluded.state_json, updated_at = excluded.updated_at`)
+        .run(threadId, revision + 1, json, nowIso());
+      return revision + 1;
+    })();
   }
 
   findResumableThread(callerId, { ttlSeconds = null } = {}) {

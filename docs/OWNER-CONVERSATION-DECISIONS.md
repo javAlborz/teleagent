@@ -83,3 +83,51 @@ All probes ran serially within host resource bounds. Live approval, delivery,
 attestation, and phone-session counts were unchanged by the probes. Raw call audio
 was not saved. Protected release validation and current live verification remain
 separate obligations; these results alone are not handset acceptance.
+
+## Durable plans for multiple personal sessions
+
+A routed caller turn can contain an ordered plan with separate tasks for each
+session. The app records the complete plan before dispatch, executes serially,
+and retains delivery and work status separately. The model uses session names
+for latest results and short application task references for earlier requests;
+the app resolves controller receipt IDs. A result after a send in the same plan
+binds that new send. A failed or unstarted send cannot fall back to an old greeting.
+
+Phone-thread state persists selected sessions, named groups, message references
+and task outcomes in SQLite with compare-and-swap revisions. Resume never replays
+instructions. Interruption fences unstarted tasks; a fresh caller request can
+continue them without repeating accepted or uncertain deliveries. Lost responses
+retain preallocated operation IDs for status reconciliation. Readback watches use
+one serial scheduler and never start an agent or resend an instruction.
+
+Exact dictation retains the original caller bytes. Natural delegation can compose
+a faithful instruction, bound to a current caller authorization excerpt. Reusing
+a task message also requires current caller authorization. Native output, older
+conversation and saved task state provide context, never independent authority.
+The existing native permission, enrollment, identity and emergency gates remain
+in charge of every delivery. Managed execution remains read-only.
+
+The bounded task journal retains unfinished work; terminal snapshots are collected
+first. This is an application-state/resource bound, not a daily usage allowance.
+The phone still cannot answer native approval requests or promise live token
+streaming. Native replies and terminal failure states can report progress and
+blockers; absence of a reply does not prove either completion or a specific blocker.
+
+Cross-host session enrollment is a separate deployment boundary. Its first target
+must be selected and its local broker/identity checks installed before the phone
+can advertise those sessions. It must preserve host-qualified names and exact
+native identity, keep transport credentials outside voice, and never accept a
+model-selected SSH destination. The present catalog and broker remain local to
+Hermes. New-session creation, a dashboard and media replacement are deferred.
+
+### Candidate evidence, October 10
+
+The focused production-path suite passed 199 tests. A 12-turn real Responses
+conversation passed group creation, three-target sends/reads, delivery checks,
+message references, natural delegation, phone-thread reload, a failed target,
+quoted-output handling and goodbye. Its native backend and SIP/audio peers were
+simulated; live delivery, approval, attestation and call counts did not change.
+Two earlier diagnostic runs are preserved: a copied long receipt became invalid,
+and a send-then-read plan exposed a missing intra-plan dependency. The final
+implementation resolves latest receipts internally and binds reads within plans.
+This evidence does not replace signed deployment or physical handset acceptance.

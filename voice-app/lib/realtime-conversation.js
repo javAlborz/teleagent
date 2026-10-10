@@ -654,6 +654,11 @@ async function runRealtimeConversation(endpoint, dialog, callUuid, {
         ),
       }),
       ownerSessionLabels: ownerSessionContext.labels || [],
+      ownerCallId: realtimeState.id,
+      ownerTaskStore: {
+        load: () => stateStore.loadOwnerDialogue(thread.id),
+        save: (revision, value) => stateStore.saveOwnerDialogue(thread.id, revision, value),
+      },
       toolHandler: (name, args, context) => toolController.handle(name, args, context),
       responseValidator: ({ purpose, transcript }) => {
         const awaitingApproval = jobBroker.listAgentTasks(thread.id, { activeOnly: true }).jobs
