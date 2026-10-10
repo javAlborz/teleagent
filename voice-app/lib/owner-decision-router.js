@@ -31,7 +31,7 @@ class OwnerDecisionRouter {
       tools: [{type: 'function', name: tool.name, description: tool.description,
         parameters: tool.parameters, strict: false}],
       tool_choice: {type: 'function', name: tool.name}, parallel_tool_calls: false,
-      reasoning: {effort: 'medium'}, max_output_tokens: 2000,
+      reasoning: {effort: 'medium'}, max_output_tokens: 8000,
     }));
     if (body.length > MAX_BODY_BYTES) return Promise.reject(new Error('OWNER_DECISION_CONTEXT_TOO_LARGE'));
     const agent = new https.Agent({keepAlive: false, maxSockets: 1, maxTotalSockets: 1});

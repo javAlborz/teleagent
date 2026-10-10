@@ -1331,7 +1331,7 @@ const ownerCapabilities = {...require('./controller-capabilities-fixture').READY
 test('personal-session MVP advertises only conversation and existing-session actions', () => {
   assert.deepEqual(buildRealtimeRouterTool(['codex-sol'],ownerCapabilities).parameters.properties.action.enum,
     ['respond','list_owner_sessions','inspect_owner_session','request_owner_instruction','get_owner_reply',
-      'get_owner_instruction','end_call','clarify_owner_request','propose_owner_message']);
+      'get_owner_instruction','end_call','clarify_owner_request','propose_owner_message','execute_owner_plan']);
 });
 
 test('missing-message clarification retains the target and cannot send a trailing connective', async t => {

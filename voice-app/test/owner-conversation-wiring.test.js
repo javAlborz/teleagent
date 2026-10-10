@@ -30,7 +30,7 @@ test('authenticated native health selects Luna and the personal prompt/schema ev
   assert.equal(properties.arguments_json, undefined);
   assert.deepEqual(properties.action.enum, ['respond', 'list_owner_sessions', 'inspect_owner_session',
     'request_owner_instruction', 'get_owner_reply', 'get_owner_instruction', 'end_call',
-    'clarify_owner_request', 'propose_owner_message']);
+    'clarify_owner_request', 'propose_owner_message', 'execute_owner_plan']);
 });
 
 test('executor outages do not change personal conversation selection; emergency locks still remove actions', async () => {
