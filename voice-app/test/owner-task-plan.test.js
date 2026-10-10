@@ -16,6 +16,37 @@ function checked(memory, value = plan, text = transcript) {
   return validatePlan(value, {transcript: text, labels, memory});
 }
 
+for (const firstState of ['dispatching', 'outcome_unknown']) {
+  test(`a not-found status cannot make a ${firstState} send eligible for retry`, async () => {
+    const memory = new OwnerTaskMemory(null, id => makeOperationId('call', id));
+    const [task] = memory.reserve(checked(memory, {actions: [plan.actions[0]]}).actions, 'send');
+    memory.update(task, {state: firstState});
+    const reads = memory.reserve(checked(memory, {actions: [
+      {action: 'get_owner_instruction', session_label: 'alpha'},
+    ]}).actions, 'status');
+    await runPlan(reads, {memory, current: () => true, execute: async () =>
+      ({success: true, result: {state: 'not_found'}})});
+    assert.equal(task.state, firstState);
+    const text = 'Continue that instruction.';
+    assert.throws(() => checked(memory, {actions: [{action: 'request_owner_instruction',
+      session_label: 'alpha', message_source: 'reference', task_id: task.id,
+      authorization_text: text}]}, text), {code: 'OWNER_PLAN_ALREADY_ATTEMPTED'});
+    assert.equal(reads[0].result.delivery_state, 'not_found');
+  });
+}
+
+test('a not-found poll after dispatch retains uncertainty and fences later sends', async () => {
+  const memory = new OwnerTaskMemory(null, id => makeOperationId('call', id));
+  const tasks = memory.reserve(checked(memory).actions, 'send'); const calls = [];
+  await runPlan(tasks, {memory, current: () => true, delay: async () => {}, execute: async task => {
+    calls.push(task.action);
+    return {success: true, operation_id: task.operation_id,
+      result: {state: task.action === 'request_owner_instruction' ? 'dispatching' : 'not_found'}};
+  }});
+  assert.deepEqual(calls, ['request_owner_instruction', 'get_owner_instruction']);
+  assert.deepEqual(tasks.map(t => t.state), ['outcome_unknown', 'pending', 'pending']);
+});
+
 test('three-target caller request keeps every mapping and dispatches serially with separate receipts', async () => {
   const memory = new OwnerTaskMemory();
   const validated = checked(memory); memory.select(validated.selected, 'math');
