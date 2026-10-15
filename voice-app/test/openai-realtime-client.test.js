@@ -148,7 +148,7 @@ test('a single named-session route resolves and reads native history before spee
 test('pending owner approval starts no competing model speech and other states get precise status', async (t) => {
   const capabilities = { ...require('./controller-capabilities-fixture').READY_CAPABILITIES, ownerSessionsAvailable: true };
   for (const [state, expected] of [
-    ['pending_approval', null], ['accepted', /accepted your instruction.*not confirmed/],
+    ['pending_approval', null], ['accepted', /Say exactly: "The session accepted your instruction\."/],
     ['dispatching', /being sent.*not confirmed/], ['submitted_unconfirmed', /acceptance is not confirmed/],
     ['outcome_unknown', /Delivery is uncertain/], ['refused', /was not sent/],
   ]) {
@@ -1493,7 +1493,7 @@ test('reply watch is tied to one operation and acknowledges delivery without cla
   client.prepareCallerTurn('Tell phoneA test and read the reply when it finishes');
   await client._handleResponseDone({output:[ownerRoute('watched','request_owner_instruction',{session_label:'phoneA',message:'test',notify_when_complete:true},{kind:'caller',text:'test'})]});
   assert.equal(client.ownerReplyWatch.current.operationId,op);
-  assert.match(client.nextVerifiedSpeech.text,/not confirmed.*read the reply when it finishes/);
+  assert.equal(client.nextVerifiedSpeech.text, 'Your instruction is being sent. Delivery is not confirmed yet.');
 });
 
 test('text decisions execute through the same route boundary and record separate model usage',async t=>{
@@ -1610,4 +1610,24 @@ test('delivery checks do not deny an already observed completed native reply',as
   await client._handleResponseDone({output:[ownerRoute('receipt','get_owner_instruction',{operation_id:op})]});
   assert.equal(client.nextVerifiedSpeech.text,'That instruction was accepted by the session.');
   assert.doesNotMatch(client.nextVerifiedSpeech.text,/not confirmed|not complete|no reply/i);
+});
+
+
+test('normal native sends watch once by default; send-only and refused sends never watch', async t => {
+  for (const [notify, success] of [[undefined,true],[false,true],[undefined,false]]) {
+    const op = 'job_' + 'd'.repeat(64); const calls = [];
+    const client = await createConnectedClient({capabilities:ownerCapabilities,
+      toolHandler:async(name,args)=>{calls.push({name,args}); return success
+        ? {success:true,operation_id:op,result:{state:'accepted'}}
+        : {success:false,code:'OWNER_PHONE_MESSAGE_INVALID'};}});
+    t.after(()=>client.close());
+    client.prepareCallerTurn((notify === false ? 'Send only: ' : '') + 'Tell phoneA hello');
+    await client._handleResponseDone({output:[ownerRoute('auto','request_owner_instruction',
+      {session_label:'phoneA',message:'hello',...(notify === undefined ? {} : {notify_when_complete:notify})},
+      {kind:'caller',text:'hello'})]});
+    assert.equal(calls.length,1); assert.equal(calls[0].args.message,'hello');
+    assert.equal(client.ownerReplyWatch.has(op), success && notify !== false);
+    if (success) assert.equal(client.nextVerifiedSpeech.text,'The session accepted your instruction.');
+    client.close(); assert.equal(client.ownerReplyWatch.current,null);
+  }
 });

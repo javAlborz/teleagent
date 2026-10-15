@@ -246,3 +246,14 @@ test('read-after-send actions bind this plan and never read older replies after 
   assert.equal(calls[3].operation_id,tasks[0].operation_id);
   assert.equal(calls[4].operation_id,tasks[2].operation_id);
 });
+
+
+test('send plans default to in-call readback and retain per-target send-only preferences', () => {
+  const memory = new OwnerTaskMemory();
+  const mixed = structuredClone(plan); mixed.actions[1].notify_when_complete = false;
+  const actions = checked(memory, mixed).actions;
+  assert.deepEqual(actions.map(a => a.notify_when_complete), [true, false, true]);
+  assert.deepEqual(actions.map(a => a.message), checked(new OwnerTaskMemory()).actions.map(a => a.message));
+  assert.equal(renderPlan([{session_label:'alpha',action:'request_owner_instruction',state:'accepted',result:{}}]),
+    'alpha: instruction accepted.');
+});

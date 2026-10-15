@@ -178,7 +178,7 @@ function validatePlan(plan, {transcript, labels, memory, draft, awaitingMessage}
     catch { fail('OWNER_PLAN_MESSAGE_INVALID'); }
     Object.assign(action, {message, message_source: source,
       reference_task_id: source === 'reference' ? item.task_id : null,
-      authorization_text: item.authorization_text || null, notify_when_complete: item.notify_when_complete === true});
+      authorization_text: item.authorization_text || null, notify_when_complete: item.notify_when_complete !== false});
     plannedSends.set(labelKey(action.session_label), {label: action.session_label, index});
     return action;
   });
@@ -274,7 +274,7 @@ function renderPlan(tasks) {
       if (result.code === 'OWNER_SESSION_TARGET_AMBIGUOUS') return `${label}: name is ambiguous; instruction not sent.`;
       if (['OWNER_APPROVAL_BUSY', 'OWNER_BROKER_BUSY'].includes(result.code)) return `${label}: busy; instruction not sent.`;
       if (result.code === 'OWNER_PHONE_MESSAGE_INVALID') return `${label}: the message format was rejected; instruction not sent.`;
-      return `${label}: ` + ({accepted: 'instruction accepted; its work is not confirmed complete.',
+      return `${label}: ` + ({accepted: 'instruction accepted.',
         dispatching: 'delivery is still pending.', submitted_unconfirmed: 'submitted; acceptance is not confirmed.',
         outcome_unknown: 'delivery is uncertain; I will not resend it.', refused: 'instruction was not sent.',
         canceled: 'delivery canceled.', not_found: 'no delivery record found.'}[state] || 'delivery could not be confirmed.');

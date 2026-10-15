@@ -1,3 +1,17 @@
+## In-call reply defaults
+
+New personal-session instructions automatically watch for one reply during the
+current call. Explicit send-only/no-readback requests disable the watch for the
+selected instruction or group. Completion checks are serial, pause for caller
+speech and playback, and stop when the call ends. They never resend work or
+promise a callback. A manual completed-reply read consumes the same watch.
+
+Routine acceptance uses a short acknowledgement; uncertain and unconfirmed
+submission remain explicit. Reply correlation still uses the original native
+operation tag. Only historical user-message presentation strips that trailing
+tag, after the native adapter has performed its binding checks. No permissions
+or output-format instructions are added to the target agent's message.
+
 ## Personal-session discovery and Claude readback
 
 The operator is extending discovery to existing personal Codex and Claude Code
