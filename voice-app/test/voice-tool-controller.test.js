@@ -118,6 +118,18 @@ test('owner request errors and other delivery states are not silenced as pending
   }
 });
 
+test('known format refusal is unsent while transport and idempotency failures remain uncertain', async (t) => {
+  for (const code of ['OWNER_PHONE_MESSAGE_INVALID', 'OWNER_PHONE_UNCONFIRMED', 'OWNER_APPROVAL_IDEMPOTENCY_CONFLICT']) {
+    const {controller} = configureNamedOwner(t);
+    controller.agentBridge.ownerSessionAction = async () => ({success: false, code});
+    const result = await controller.handle('request_owner_instruction',
+      {id: 'os_beta', message: 'Question'}, {callId: 'format-test'});
+    assert.equal(result.delivery_attempted, code !== 'OWNER_PHONE_MESSAGE_INVALID');
+    assert.match(result.operation_id, /^job_[a-f0-9]{64}$/);
+    assert.equal(result.code, code);
+  }
+});
+
 test('unknown or ambiguous labels never inspect or request an instruction', async (t) => {
   for (const sessions of [[], [{ id: 'os_one', label: 'teletest' }, { id: 'os_two', label: 'Tele Test' }]]) {
     const { controller, calls } = configureNamedOwner(t, sessions);

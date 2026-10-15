@@ -716,7 +716,12 @@ async function ownerSessionAction(action, body) {
       maxRedirects: 0, maxContentLength: 32768, maxBodyLength: 4096, proxy: false,
     });
     return response.data;
-  } catch {
+  } catch (error) {
+    const rejection = error.response?.data;
+    if (error.response?.status === 409 && rejection?.success === false &&
+        /^OWNER_[A-Z_]{1,80}$/.test(rejection.code || '')) {
+      return {success: false, code: rejection.code};
+    }
     // No automatic request retry. The stable operation ID permits status-only
     // reconciliation if the controller committed the approval before disconnect.
     return { success: false, code: 'OWNER_PHONE_UNCONFIRMED' };

@@ -1,7 +1,7 @@
 'use strict';
 
 const crypto = require('node:crypto');
-const {labelKey, validLabel, checkOwnerInstruction} = require('./owner-call-intent');
+const {labelKey, validLabel, checkOwnerInstruction, ownerMessageLine} = require('./owner-call-intent');
 
 const ACTIONS = ['inspect_owner_session', 'request_owner_instruction', 'get_owner_reply', 'get_owner_instruction'];
 const MAX_ACTIONS = 32; // Matches the admitted session catalog, not a daily allowance.
@@ -174,6 +174,8 @@ function validatePlan(plan, {transcript, labels, memory, draft, awaitingMessage}
       } else message = item.message;
     } else fail('OWNER_PLAN_MESSAGE_SOURCE_INVALID');
     if (typeof message !== 'string' || !message.trim() || message.length > 1200) fail('OWNER_PLAN_MESSAGE_INVALID');
+    try { message = ownerMessageLine(message); }
+    catch { fail('OWNER_PLAN_MESSAGE_INVALID'); }
     Object.assign(action, {message, message_source: source,
       reference_task_id: source === 'reference' ? item.task_id : null,
       authorization_text: item.authorization_text || null, notify_when_complete: item.notify_when_complete === true});
@@ -271,6 +273,7 @@ function renderPlan(tasks) {
       if (result.code === 'OWNER_SESSION_NOT_ENROLLED') return `${label}: session not found; instruction not sent.`;
       if (result.code === 'OWNER_SESSION_TARGET_AMBIGUOUS') return `${label}: name is ambiguous; instruction not sent.`;
       if (['OWNER_APPROVAL_BUSY', 'OWNER_BROKER_BUSY'].includes(result.code)) return `${label}: busy; instruction not sent.`;
+      if (result.code === 'OWNER_PHONE_MESSAGE_INVALID') return `${label}: the message format was rejected; instruction not sent.`;
       return `${label}: ` + ({accepted: 'instruction accepted; its work is not confirmed complete.',
         dispatching: 'delivery is still pending.', submitted_unconfirmed: 'submitted; acceptance is not confirmed.',
         outcome_unknown: 'delivery is uncertain; I will not resend it.', refused: 'instruction was not sent.',

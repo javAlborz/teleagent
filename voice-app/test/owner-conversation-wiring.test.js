@@ -80,3 +80,43 @@ test('single-word caller payloads reach the handler once under actual production
     assert.equal(sent[0].args.session_label, 'phoneA');
   }
 });
+
+test('October 15 split dictation reaches the native message validator and either read route binds its receipt', async () => {
+  const {canonicalizeTargetSessionMessage} = require('../../lib/target-session-message');
+  const calls = []; let operation;
+  const client = await clientFromHealth(undefined, undefined, {ownerSessionLabels: ['alpha', 'beta'],
+    toolHandler: async (name, args) => {
+      calls.push({name, args});
+      if (name === 'request_owner_instruction') {
+        assert.equal(canonicalizeTargetSessionMessage(args.message), 'What is five plus five? Please reply.');
+        return {success: true, operation_id: operation, result: {state: 'accepted'}};
+      }
+      return {success: true, result: {label: 'beta', history: {latestTurn: {status: 'completed', reply: {text: '10'}}}}};
+    }});
+  operation = require('../lib/owner-task-plan').makeOperationId(client.ownerCallId, 'task_1');
+  client.prepareCallerTurn('Send beta the following message. What is five plus five?');
+  client.prepareCallerTurn('Please reply.');
+  client.pendingCallerTranscript = client.unsentCallerTranscript;
+  const route = (id, args) => client._handleToolCall({name: 'route_turn', call_id: id,
+    arguments: JSON.stringify(args)}, {sendOutput: false});
+  const sent = await route('split', {action: 'execute_owner_plan', actions: [
+    {action: 'request_owner_instruction', session_label: 'beta', message_source: 'caller',
+      message: 'What is five plus five? Please reply.'},
+  ]});
+  assert.match(sent.output.text, /beta: instruction accepted/);
+  for (const selectors of [{}, {session_label: 'beta'}, {task_id: 'task_1'}]) {
+    client.prepareCallerTurn('Did it respond yet?');
+    const result = await route('read-' + calls.length, {action: 'get_owner_reply', ...selectors});
+    assert.equal(result.output.result.history.latestTurn.reply.text, '10');
+    assert.equal(calls.at(-1).args.operation_id, operation);
+  }
+  const before = calls.length;
+  for (const selectors of [{session_label: 'alpha'}, {task_id: 'invented'},
+    {operation_id: 'job_' + 'b'.repeat(64)}, {task_id: 'task_1', session_label: 'alpha'},
+    {task_id: 'invented', operation_id: operation}]) {
+    const result = await route('bad-' + JSON.stringify(selectors), {action: 'get_owner_reply', ...selectors});
+    assert.equal(result.output.code, 'OWNER_REFERENCE_CLARIFICATION_REQUIRED');
+  }
+  assert.equal(calls.length, before);
+  assert.equal(calls.filter(c => c.name === 'request_owner_instruction').length, 1);
+});

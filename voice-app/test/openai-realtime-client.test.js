@@ -73,6 +73,45 @@ function spokenWords(count, { period = false } = {}) {
   return period ? `${text}.` : text;
 }
 
+for (const terminal of ['completed', 'failed']) for (const stopFirst of [false, true]) {
+  test(`queued dictated request resumes once after ${terminal} empty audio, stopFirst=${stopFirst}`, async (t) => {
+    const client = await createConnectedClient(); t.after(() => client.close());
+    const routed = [];
+    client.requestRoutedResponse = () => {routed.push(client.unsentCallerTranscript); return true;};
+    client.prepareCallerTurn('Send beta what is five plus five?');
+    await client._handleEvent({type: 'input_audio_buffer.speech_started', item_id: 'noise'});
+    assert.equal(client.queueUserResponse(), false);
+    const stop = {type: 'input_audio_buffer.speech_stopped', item_id: 'noise'};
+    const empty = {type: 'conversation.item.input_audio_transcription.' + terminal, item_id: 'noise', transcript: ''};
+    if (stopFirst) await client._handleEvent(stop);
+    await client._handleEvent(empty);
+    if (!stopFirst) {assert.equal(routed.length, 0); await client._handleEvent(stop);}
+    assert.deepEqual(routed, ['Send beta what is five plus five?']);
+    await client._handleEvent(empty);
+    assert.equal(routed.length, 1);
+  });
+}
+
+test('empty and stale audio cannot authorize a request or bypass a newer transcript/debounce', async (t) => {
+  let debouncing = false;
+  const client = await createConnectedClient({isUserTurnPending: () => debouncing}); t.after(() => client.close());
+  let count = 0; client.requestRoutedResponse = () => {count++; return true;};
+  await client._handleEvent({type: 'conversation.item.input_audio_transcription.completed', item_id: 'empty', transcript: ''});
+  assert.equal(count, 0);
+  client.prepareCallerTurn('Send beta question');
+  await client._handleEvent({type: 'input_audio_buffer.speech_started', item_id: 'newer'});
+  client.queueUserResponse();
+  await client._handleEvent({type: 'conversation.item.input_audio_transcription.completed', item_id: 'old', transcript: ''});
+  await client._handleEvent({type: 'input_audio_buffer.speech_stopped', item_id: 'newer'});
+  assert.equal(count, 0);
+  debouncing = true;
+  await client._handleEvent({type: 'conversation.item.input_audio_transcription.completed', item_id: 'newer', transcript: ''});
+  assert.equal(count, 0);
+  client.discardPendingUserResponse(); debouncing = false;
+  client._resumePendingCallerTurn();
+  assert.equal(count, 0);
+});
+
 test('a single named-session route resolves and reads native history before speech', async (t) => {
   const { VoiceToolController } = require('../lib/voice-tool-controller');
   const capabilities = { ...require('./controller-capabilities-fixture').READY_CAPABILITIES, ownerSessionsAvailable: true };
@@ -1181,7 +1220,7 @@ test('paused message routes exact original fragments once and never reuses them 
   client.requestRoutedResponse();
   const args = {session_label: 'phoneA', message: 'I just did some texting. Investigate logs.', notify_when_complete: true};
   await client._handleToolCall(ownerRoute('paused-send', 'request_owner_instruction', args, {kind: 'caller', text: args.message}));
-  assert.equal(calls.length, 1); assert.equal(calls[0].args.message, 'I just did some texting\nInvestigate logs.');
+  assert.equal(calls.length, 1); assert.equal(calls[0].args.message, 'I just did some texting Investigate logs.');
   await client._handleToolCall(ownerRoute('duplicate-send', 'request_owner_instruction', args, {kind: 'caller', text: args.message}));
   assert.equal(calls.length, 1);
   client.prepareCallerTurn('And read it when it is done.');

@@ -5,6 +5,16 @@ const { createOwnerPhoneApi } = require('../owner-phone-api');
 const { parseEpoch } = require('../owner-authority-config');
 const crypto = require('node:crypto');
 
+test('invalid line/control characters receive a pre-dispatch refusal without starting a coordinator', async () => {
+  const api = createOwnerPhoneApi({assertUnlocked() {}, broker: {}, coordinator: {
+    store: {assertUnlocked() {}}, request() {assert.fail('invalid message must not reach dispatch');},
+  }});
+  for (const message of ['what is five plus five?\nCan you', 'first\rsecond', 'hello\x1b[31m', 'a\u202eb', '']) {
+    await assert.rejects(api.handle('request', {id: 'os_beta', operationId: 'job_example', message,
+      sipCallId: 'call@pbx'}), {code: 'OWNER_PHONE_MESSAGE_INVALID'});
+  }
+});
+
 test('phone projection strips native identities and forwards only the exact canonical request', async () => {
   const calls = [];
   const api = createOwnerPhoneApi({ assertUnlocked() {}, broker: {

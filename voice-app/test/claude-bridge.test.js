@@ -13,6 +13,20 @@ const bridge = require('../lib/claude-bridge');
 const { READY_CAPABILITIES, operatorHealth, executorHealth } = require('./controller-capabilities-fixture');
 const { UNAVAILABLE } = require('../lib/controller-capabilities');
 
+test('owner bridge preserves typed rejection but keeps lost and malformed responses uncertain', async (t) => {
+  let response;
+  t.mock.method(axios, 'post', async () => { throw Object.assign(new Error('private detail'), {response}); });
+  response = {status: 409, data: {success: false, code: 'OWNER_PHONE_MESSAGE_INVALID', secret: 'private'}};
+  assert.deepEqual(await bridge.ownerSessionAction('request', {}),
+    {success: false, code: 'OWNER_PHONE_MESSAGE_INVALID'});
+  for (const value of [undefined, {status: 502, data: response.data},
+    {status: 409, data: {success: true, code: 'OWNER_PHONE_MESSAGE_INVALID'}},
+    {status: 409, data: {success: false, code: 'private detail'}}]) {
+    response = value;
+    assert.deepEqual(await bridge.ownerSessionAction('request', {}), {success: false, code: 'OWNER_PHONE_UNCONFIRMED'});
+  }
+});
+
 test('panic preserves typed owned shutdown evidence while generic failures stay unconfirmed', async (t) => {
   const partial = { success: false, ownedQuiesced: true, voiceExecution: { locked: true, persistent: true },
     ownerSessions: { configured: true, quiesced: false, deliveryQuiesced: true } };
