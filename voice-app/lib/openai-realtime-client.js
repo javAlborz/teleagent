@@ -453,6 +453,7 @@ function buildRealtimeRouterTool(profiles, capabilities = UNAVAILABLE) {
         draft_id: {type: 'string', description: 'Required for draft sends; exact presented proposed_message.id.'},
         notify_when_complete: {type: 'boolean', description: 'True only when asked to read the result when done; applies to sends or get_owner_reply.'},
         operation_id: {type: 'string', description: 'For get_owner_reply or get_owner_instruction: exact reference from application state, never invented.'},
+        task_id: {type: 'string', description: 'For reply/delivery reads of a particular earlier task: exact task_state ID. Otherwise use session_label for its latest instruction.'},
         history: {type: 'boolean', description: 'True for session reply/history reads.'},
         selection: {type: 'object', properties: {anchor: {enum: ['start', 'end']}, index: {type: 'integer', minimum: 1, maximum: 6}, role: {enum: ['any', 'user', 'assistant']}}, required: ['anchor', 'index', 'role'], additionalProperties: false},
         missing: {type: 'string', enum: ['target', 'message', 'request'], description: 'For clarify_owner_request only.'},
@@ -1269,6 +1270,16 @@ class OpenAIRealtimeClient extends EventEmitter {
     return this.requestRoutedResponse({ purpose });
   }
 
+  _resumePendingCallerTurn() {
+    // An empty/noise item must neither create a request nor strand an earlier
+    // completed transcript whose debounce expired while VAD was still open.
+    if (this.pendingUserResponse && this.unsentCallerTranscript &&
+        !this.isUserTurnPending() && !this.responseActive && !this.userSpeaking &&
+        !this.awaitingUserTranscript && !this.callEnding && !this.closedByClient) {
+      this.queueUserResponse({purpose: 'queued_user_turn'});
+    }
+  }
+
   discardPendingUserResponse() {
     this.pendingUserResponse = false;
     this.unsentCallerTranscript = null;
@@ -1408,6 +1419,7 @@ class OpenAIRealtimeClient extends EventEmitter {
       case 'input_audio_buffer.speech_stopped':
         this.userSpeaking = false;
         this.emit('speech_stopped', event);
+        this._resumePendingCallerTurn();
         this._flushNotice();
         break;
 
@@ -1443,6 +1455,7 @@ class OpenAIRealtimeClient extends EventEmitter {
           this.emit('user_transcript', event.transcript, event);
         }
         else this.emit('transcription.empty', event);
+        this._resumePendingCallerTurn();
         this._flushNotice();
         break;
 
@@ -1452,6 +1465,7 @@ class OpenAIRealtimeClient extends EventEmitter {
         while (this.finishedTranscriptItems.size > 64) this.finishedTranscriptItems.delete(this.finishedTranscriptItems.values().next().value);
         if (!this.latestSpeechItemId || event.item_id === this.latestSpeechItemId) this.awaitingUserTranscript = false;
         this.emit('transcription.empty', event);
+        this._resumePendingCallerTurn();
         this._flushNotice();
         break;
 
@@ -1696,6 +1710,10 @@ class OpenAIRealtimeClient extends EventEmitter {
         this._requestOwnerStatusSpeech(`What message should I send${this.focusedOwnerSession ? ` to ${this.focusedOwnerSession}` : ''}?`);
         return;
       }
+      if (handledCalls.length === 1 && outputs[0]?.code === 'OWNER_PHONE_MESSAGE_INVALID') {
+        this._requestOwnerStatusSpeech('The message format was rejected. The instruction was not sent.');
+        return;
+      }
       if (handledCalls.length === 1 && handledCalls[0].action === 'list_owner_sessions' &&
           outputs[0]?.success === true && this._requestOwnerInventorySpeech(outputs[0].result || {})) return;
       // Owner delivery state is not a managed read-only job. Give its status
@@ -1936,8 +1954,8 @@ class OpenAIRealtimeClient extends EventEmitter {
         propose_owner_message: ['session_label', 'message'],
         request_owner_instruction: ['session_label', 'message', 'notify_when_complete'],
         inspect_owner_session: ['session_label', 'history', 'selection'],
-        get_owner_reply: ['operation_id', 'notify_when_complete'],
-        get_owner_instruction: ['operation_id'], list_owner_sessions: ['session_label'], end_call: [],
+        get_owner_reply: ['operation_id', 'session_label', 'task_id', 'notify_when_complete'],
+        get_owner_instruction: ['operation_id', 'session_label', 'task_id'], list_owner_sessions: ['session_label'], end_call: [],
       }[action] || [];
       const selected = Object.fromEntries(fields.filter(key => Object.hasOwn(parameters, key)).map(key => [key, parameters[key]]));
       args = {action, arguments_json: JSON.stringify(selected)};
@@ -2029,9 +2047,22 @@ class OpenAIRealtimeClient extends EventEmitter {
       args = {operation_id: this.focusedOwnerOperation};
       auditCall = {...auditCall, name: toolName};
     }
-    if (!output && !ownerPlanAction && ['get_owner_reply', 'get_owner_instruction'].includes(toolName) && !background &&
-        !this.ownerInstructionReferences.some(r => r.operation_id === args.operation_id)) {
-      output = {success: false, code: 'OWNER_REFERENCE_CLARIFICATION_REQUIRED'};
+    if (!output && !ownerPlanAction && ['get_owner_reply', 'get_owner_instruction'].includes(toolName) && !background) {
+      const label = args.session_label || this.focusedOwnerSession;
+      const target = args.task_id ? this.ownerTaskMemory.get(args.task_id)
+        : args.operation_id ? this.ownerTaskMemory.value.tasks.find(t => t.operation_id === args.operation_id)
+          : validLabel(label) ? this.ownerTaskMemory.latest(label) : null;
+      const reference = target || (!args.task_id && this.ownerInstructionReferences.find(r =>
+        args.operation_id ? r.operation_id === args.operation_id :
+          labelKey(r.session_label) === labelKey(label) && r.operation_id === this.focusedOwnerOperation));
+      if (!reference || (args.session_label && labelKey(reference.session_label) !== labelKey(args.session_label)) ||
+          (args.operation_id && reference.operation_id !== args.operation_id) ||
+          !this.ownerInstructionReferences.some(r => r.operation_id === reference.operation_id)) {
+        output = {success: false, code: 'OWNER_REFERENCE_CLARIFICATION_REQUIRED'};
+      } else {
+        args = {operation_id: reference.operation_id,
+          ...(Object.hasOwn(args, 'notify_when_complete') ? {notify_when_complete: args.notify_when_complete} : {})};
+      }
     }
     if (!output && toolName === 'request_owner_instruction') {
       const alreadyDispatched = !ownerPlanAction && this.ownerDispatchRevision === this.callerTurnRevision;

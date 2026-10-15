@@ -331,7 +331,8 @@ class VoiceToolController {
               result: {state: 'outcome_unknown'}};
           }
           return { ...result, operation_id: operationId, completed: false,
-            delivery_attempted: !['OWNER_APPROVAL_BUSY', 'OWNER_BROKER_BUSY'].includes(result?.code),
+            delivery_attempted: !['OWNER_APPROVAL_BUSY', 'OWNER_BROKER_BUSY',
+              'OWNER_PHONE_MESSAGE_INVALID'].includes(result?.code),
             // The independent PBX owns this prompt. A simultaneous model
             // explanation can contradict it or talk over the approval audio.
             ...(result?.success === true && result.result?.state === 'pending_approval'

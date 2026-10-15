@@ -80,12 +80,12 @@ test('an unframed conversational followup is not an entire new message unless co
   assert.ok(validateOwnerInstruction('Okay reply.',args,source,{labels:['drizzy'],awaitingMessage:true}));
 });
 
-test('paused dictation tolerates boundary punctuation but returns exact caller bytes', () => {
+test('paused dictation preserves words and punctuation and joins only fragment boundaries', () => {
   const transcript = 'Would you now go to the phone A session and reply to that. The reply should be, I just did some texting\nInvestigate logs.\nAnd read the reply to me afterwards when it is done.';
   const args = {session_label: 'phone A', message: 'I just did some texting. Investigate logs.', notify_when_complete: true};
   const result = checkOwnerInstruction(transcript, args, {kind: 'caller', text: args.message}, {labels: ['phoneA']});
   assert.deepEqual(result, {reason: null, instruction: {session_label: 'phoneA',
-    message: 'I just did some texting\nInvestigate logs.', notify_when_complete: true}});
+    message: 'I just did some texting Investigate logs.', notify_when_complete: true}});
   assert.equal(verbatimMessageSpan('Send first.\nSecond!', 'first Second'), 'first.\nSecond!');
   assert.equal(verbatimMessageSpan('Send first second', 'first. second'), null);
   assert.equal(verbatimMessageSpan('Send 3-2\nthen report', '3+2. then report'), null);

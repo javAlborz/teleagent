@@ -3,6 +3,7 @@
 const { exact } = require('./owner-session-catalog');
 const { sessionError } = require('./owner-session-endpoint');
 const { hash } = require('./owner-session-delivery');
+const { canonicalizeTargetSessionMessage } = require('../lib/target-session-message');
 
 // The ordinary voice bearer can request a canonical approval, never submit
 // evidence, a capability, an endpoint, or a native session identifier.
@@ -26,6 +27,10 @@ function createOwnerPhoneApi({ broker, coordinator, assertUnlocked }) {
       }
       if (action === 'request') {
         exact(body, ['id', 'operationId', 'message', 'sipCallId']);
+        // This refusal is proven before any coordinator/native dispatch. Keep
+        // its code distinct from failures with an unknown external outcome.
+        try { canonicalizeTargetSessionMessage(body.message); }
+        catch { throw sessionError('OWNER_PHONE_MESSAGE_INVALID'); }
         const { sipCallId, ...input } = body;
         return coordinator.request(input, { sipCallId });
       }
