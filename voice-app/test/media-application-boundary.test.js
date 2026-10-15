@@ -313,6 +313,41 @@ test('host contract ownership and exact independent admission are mandatory', ()
   assert.throws(() => boundary.loadAdmission(RELEASE, 'running', evidence, { io, run: () => assert.fail('unsafe authority executed') }));
 });
 
+test('running authority has a bounded larger deadline and timeout never admits or retries', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../../deploy/voice-stack/media-application-boundary.js'), 'utf8');
+  const files = { [boundary.CONTRACT]: boundary.canonical(fixture()), [boundary.AUTHORITY]: '# authority' };
+  const metadata = (filename) => ({ uid: 0, gid: 0, mode: 0o644, nlink: 1, dev: 1, ino: 2,
+    size: files[filename]?.length || 0, isFile: () => Object.hasOwn(files, filename), isDirectory: () => !Object.hasOwn(files, filename) });
+  const io = { constants: fs.constants, lstatSync: metadata, fstatSync: metadata,
+    openSync: (filename) => filename, closeSync() {},
+    readFileSync: (filename) => filename === '/proc/sys/kernel/random/boot_id' ? BOOT : files[filename] };
+  const calls = [];
+  let failure = null;
+  const isolated = { exports: {} };
+  vm.runInNewContext('(function(require, module) {\n' + source + '\n})', {}, { filename: 'media-application-boundary.js' })(
+    (name) => name === 'node:fs' ? io : name === 'node:child_process' ? {
+      spawnSync(executable, args, options) {
+        calls.push({ executable, timeout: options.timeout, fd: options.stdio[3], signal: options.killSignal });
+        if (failure) return failure;
+        return { status: 0, stdout: JSON.stringify({ schema: 'teleagent.media-application-admission.v1',
+          stage: args[1], contractDigest: args[2], bootId: args[3], releaseRoot: args[4], evidenceDigest: args[5] }) };
+      },
+    } : require(name), isolated);
+  const admit = (stage) => isolated.exports.loadAdmission(RELEASE, stage, `sha256:${'a'.repeat(64)}`, { lifecycleFd: 7 });
+  for (const stage of ['bootstrap', 'bootstrap-app', 'created', 'running']) {
+    assert.equal(admit(stage).releaseRoot, RELEASE);
+    assert.deepEqual(calls.at(-1), { executable: boundary.AUTHORITY,
+      timeout: stage === 'running' ? 30000 : 15000, fd: 7, signal: 'SIGKILL' });
+  }
+  failure = { status: null, error: { code: 'ETIMEDOUT', message: 'private child details' } };
+  assert.throws(() => admit('running'), { code: 'MEDIA_APPLICATION_TIMEOUT',
+    message: 'protected media application verification timed out' });
+  assert.equal(calls.length, 5);
+  failure = { status: 77, stderr: 'private refusal details' };
+  assert.throws(() => admit('running'), { code: 'MEDIA_APPLICATION_REFUSED' });
+  assert.equal(calls.length, 6);
+});
+
 test('placement reuses only the independent host journal evidence while fenced', () => {
   const contract = fixture();
   const evidence = `sha256:${'a'.repeat(64)}`;
@@ -352,7 +387,7 @@ test('default Docker inspection inherits the retained lifecycle descriptor and r
   vm.runInNewContext('(function(require, module) {\n' + source + '\n})', {}, { filename: 'media-application-boundary.js' })(
     (name) => name === 'node:fs' ? io : name === 'node:child_process' ? {
       spawnSync(executable, args, options) {
-        calls.push({ executable, args: Array.from(args), stdio: Array.from(options.stdio) });
+        calls.push({ executable, args: Array.from(args), stdio: Array.from(options.stdio), timeout: options.timeout });
         return { status: 0, stdout: JSON.stringify({ id: IDS.drachtio }) };
       },
     } : require(name), isolated);
@@ -364,7 +399,7 @@ test('default Docker inspection inherits the retained lifecycle descriptor and r
   assert.equal(admit(7).id, IDS.drachtio);
   assert.deepEqual(calls, [{ executable: '/usr/bin/docker', args: ['--host', 'unix:///var/run/docker.sock',
     '--config', '/etc/teleagent-media/docker-client', 'inspect', '--type', 'container', '--format',
-    boundary.INSPECT, IDS.drachtio], stdio: ['ignore', 'pipe', 'pipe', 7] }]);
+    boundary.INSPECT, IDS.drachtio], stdio: ['ignore', 'pipe', 'pipe', 7], timeout: 15000 }]);
   for (const fd of [undefined, null, -1, 2, '7']) {
     assert.throws(() => admit(fd), { code: 'MEDIA_APPLICATION_REFUSED' });
   }
