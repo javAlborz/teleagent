@@ -6,7 +6,10 @@ function boundedMessages(messages) {
   return messages.filter((message) => ['user', 'assistant'].includes(message.role) &&
     typeof message.text === 'string' && message.text.trim())
     .slice(-6).map(({ role, text }) => {
-      const redacted = redactSensitiveText(text);
+      // Native adapters bind replies against the original transcript first. Only
+      // the user-facing copy loses the exact application-added trailing tag.
+      const display = role === 'user' ? text.replace(/\n\[teleagent-operation:job_[a-f0-9]{64}\]$/, '') : text;
+      const redacted = redactSensitiveText(display);
       return { role, text: redacted.slice(0, 2000), clipped: redacted.length > 2000 };
     });
 }

@@ -460,3 +460,17 @@ test('Claude reads first from the bounded file head and previous from the tail',
   assert.equal(f.client.history(SESSION, null, {anchor: 'end', index: 6, role: 'assistant'}).selectedMessage, null);
   assert.equal(f.received.length, 0);
 });
+
+
+test('historical user display removes only a trailing operation marker without altering native evidence', () => {
+  const {boundedMessages} = require('../owner-session-history');
+  const marker = '[teleagent-operation:job_' + 'a'.repeat(64) + ']';
+  const messages = [{role:'user',text:'What is five plus five?\n'+marker},
+    {role:'user',text:marker+' is an example'}, {role:'assistant',text:marker},
+    {role:'user',text:'Keep this\n[teleagent-operation:invalid]'}];
+  const original = structuredClone(messages);
+  const display = boundedMessages(messages);
+  assert.equal(display[0].text,'What is five plus five?');
+  assert.deepEqual(display.slice(1).map(m=>m.text),messages.slice(1).map(m=>m.text));
+  assert.deepEqual(messages,original);
+});

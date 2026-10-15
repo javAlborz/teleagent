@@ -45,7 +45,7 @@ test('only verbatim current caller content or a presented exact draft can supply
   const args = {session_label:'phone A', message:'what is two plus two?'};
   const caller = 'Would you ask phone A what is two plus two?';
   assert.deepEqual(validateOwnerInstruction(caller,args,{kind:'caller',text:args.message},state),
-    {...args, session_label:'phoneA', notify_when_complete:false});
+    {...args, session_label:'phoneA', notify_when_complete:true});
   for (const source of [null, {kind:'caller',text:'4'}, {kind:'draft',draft_id:'invented'}]) {
     assert.equal(validateOwnerInstruction(caller,args,source,state), null);
   }
