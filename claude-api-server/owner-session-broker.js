@@ -80,6 +80,7 @@ class OwnerSessionBroker {
         if (session.sessionFingerprint !== plan.sessionFingerprint) throw sessionError('OWNER_SESSION_IDENTITY_CHANGED');
         const history = await client.history(entry.sessionId, {
           operationId: plan.operationId, turnId: delivered.receipt?.turnId,
+          messageId: delivered.receipt?.messageId,
         });
         assertEnrolled();
         return { operationId: plan.operationId, label: entry.label, history };

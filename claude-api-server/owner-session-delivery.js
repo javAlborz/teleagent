@@ -31,6 +31,8 @@ function requestPlan(input) {
     sessionId: input.sessionId, sessionFingerprint: input.sessionFingerprint,
     expectedTurnId: input.expectedTurnId ?? null,
     message: canonicalizeTargetSessionMessage(input.message),
+    // Preserve v1 plan hashes for existing durable operations. This field is
+    // logical compatibility data; delivery no longer appends it to the message.
     marker: targetSessionOperationMarker(input.operationId) });
 }
 
@@ -139,7 +141,7 @@ class OwnerSessionDeliveryStore {
     const state = ['accepted', 'submitted_unconfirmed'].includes(receipt?.state)
       ? receipt.state : 'outcome_unknown';
     const safeReceipt = state === 'accepted'
-      ? { state, turnId: receipt.turnId, completed: false }
+      ? { state, turnId: receipt.turnId, ...(receipt.messageId ? { messageId: receipt.messageId } : {}), completed: false }
       : state === 'submitted_unconfirmed'
         ? { state, messageId: receipt.messageId, completed: false }
         : { state, completed: false };
@@ -190,7 +192,7 @@ async function deliverOwnerSession({ client, store, request, capability, authori
   let receipt;
   try {
     receipt = await client.deliver({ threadId: plan.sessionId,
-      message: `${plan.message}\n${plan.marker}`, expectedTurnId: plan.expectedTurnId });
+      message: plan.message, expectedTurnId: plan.expectedTurnId });
   } catch { receipt = { state: 'outcome_unknown' }; }
   return store.finish(plan, receipt);
 }

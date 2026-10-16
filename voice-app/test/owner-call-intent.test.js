@@ -39,6 +39,20 @@ test('a long-running instruction keeps its single watch until call end without r
   f.watch.stop();assert.equal(f.watch.current, null);
 });
 
+test('background unknown and empty completed reads stay silent until a real answer arrives', async () => {
+  let turn = {status: 'unknown', reply: null};
+  const f = watcher({read: async () => ({success: true, result: {history: {latestTurn: turn}}})});
+  f.watch.start(operation);
+  for (const status of ['unknown', 'inProgress', 'completed']) {
+    turn = {status, reply: null};
+    await f.watch.tick(f.watch.current);
+    assert.equal(f.spoken.length, 0); assert.ok(f.watch.current);
+  }
+  turn = {status: 'completed', reply: {text: 'Teal.'}};
+  await f.watch.tick(f.watch.current);
+  assert.equal(f.spoken.length, 1); assert.equal(f.watch.current, null);
+});
+
 
 test('only verbatim current caller content or a presented exact draft can supply message bytes', () => {
   const state = {labels:['phoneA','drizzy'], draft:null};

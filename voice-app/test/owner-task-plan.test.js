@@ -257,3 +257,21 @@ test('send plans default to in-call readback and retain per-target send-only pre
   assert.equal(renderPlan([{session_label:'alpha',action:'request_owner_instruction',state:'accepted',result:{}}]),
     'alpha: instruction accepted.');
 });
+
+test('an immediate reply peek stays quiet after sending; explicit status and failures remain audible', () => {
+  const sent = {id: 'send', operation_id: op(1), session_label: 'alpha',
+    action: 'request_owner_instruction', state: 'accepted', result: {delivery_state: 'accepted'}};
+  const read = {session_label: 'alpha', action: 'get_owner_reply', state: 'read',
+    source_task_id: 'send', operation_id: op(1), result: {success: true, reply: null}};
+  for (const status of ['unknown', 'inProgress', 'completed']) {
+    read.result.turn_status = status;
+    assert.equal(renderPlan([sent, read]), 'alpha: instruction accepted.');
+    assert.match(renderPlan([read]), /no reply/);
+  }
+  read.result.turn_status = 'failed';
+  assert.match(renderPlan([sent, read]), /failed; no reply/);
+  read.result = {success: false};
+  assert.match(renderPlan([sent, read]), /could not retrieve/);
+  read.result = {success: true, turn_status: 'completed', reply: 'Teal.'};
+  assert.match(renderPlan([sent, read]), /reply: Teal/);
+});

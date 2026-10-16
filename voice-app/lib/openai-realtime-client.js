@@ -2173,6 +2173,7 @@ class OpenAIRealtimeClient extends EventEmitter {
       }
     }
     if (!background && toolName === 'get_owner_reply' && output?.result?.history?.latestTurn?.status === 'completed' &&
+        output.result.history.latestTurn.reply?.text?.trim() &&
         this.ownerReplyWatch.has(args.operation_id)) this.ownerReplyWatch.stop(args.operation_id);
     if (output?.success === true && args.notify_when_complete === true &&
         ['request_owner_instruction', 'get_owner_reply'].includes(toolName)) {

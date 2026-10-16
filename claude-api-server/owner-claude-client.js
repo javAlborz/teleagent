@@ -123,8 +123,12 @@ class OwnerClaudeClient {
       for (const line of lines) {
         let record;
         try { record = JSON.parse(line); } catch { continue; }
+        // Native inbox messages are metadata user records. Their native origin
+        // carries the socket message ID outside the text/policy wrapper.
+        const peer = record?.type === 'user' && record.origin?.kind === 'peer' &&
+          UUID.test(record.origin.msg_id || '');
         if (record?.sessionId !== sessionId || !['user', 'assistant'].includes(record.type) ||
-            record.isMeta || record.toolUseResult) continue;
+            record.isSidechain || (record.isMeta && !peer) || record.toolUseResult) continue;
         const content = record.message?.content;
         const text = typeof content === 'string' ? content : Array.isArray(content)
           ? content.filter((part) => part.type === 'text' && typeof part.text === 'string')
@@ -134,7 +138,9 @@ class OwnerClaudeClient {
         if (text.trim() && record.type === 'user') {
           latestReply = null;
           completed = false;
-          bound = !binding || text.endsWith(`\n[teleagent-operation:${binding.operationId}]`);
+          bound = !binding || (binding.messageId
+            ? peer && record.origin.msg_id === binding.messageId
+            : !peer && text.endsWith(`\n[teleagent-operation:${binding.operationId}]`));
         } else if (bound && text.trim() && record.type === 'assistant') {
           latestReply = boundedMessages([{ role: 'assistant', text }])[0] || null;
           completed = record.message?.stop_reason === 'end_turn';

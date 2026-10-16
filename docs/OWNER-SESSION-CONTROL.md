@@ -7,10 +7,31 @@ speech and playback, and stop when the call ends. They never resend work or
 promise a callback. A manual completed-reply read consumes the same watch.
 
 Routine acceptance uses a short acknowledgement; uncertain and unconfirmed
-submission remain explicit. Reply correlation still uses the original native
-operation tag. Only historical user-message presentation strips that trailing
-tag, after the native adapter has performed its binding checks. No permissions
-or output-format instructions are added to the target agent's message.
+submission remain explicit. Same-plan reply checks stay silent while there is
+no answer; explicit later status questions and actual failures remain audible.
+Background checks announce a completed textual answer once, not empty results.
+
+New deliveries send only the normalized caller message. Codex's
+`clientUserMessageId` is persisted in the receipt and matched against the native
+user item's `clientId` within the exact delivered turn. Claude's native `msg_id`
+is matched against the transcript's `origin.msg_id` on a peer user record,
+including `isMeta` records. A newer user/peer message invalidates the earlier
+reply binding. IDs stay outside the message text. There is no text-based fallback
+for a new receipt whose native ID is absent or different.
+
+Codex receipts predating native-ID delivery retain the old operation-tag check.
+Existing Claude receipts already contain the native message ID, so old wrapped
+messages become readable without replay. The v1 logical plan and its hash stay
+unchanged for durable idempotency; its retained marker field is no longer sent.
+Historical user-message presentation still strips a trailing old operation tag.
+
+Codex receives normal user input. Claude's existing peer inbox still adds its
+own provenance/permission wrapper; this release does not claim plain terminal
+input for Claude. Teleagent adds no permission or output-format instructions,
+never impersonates a privileged peer, and does not inject tmux keystrokes or
+answer native approvals. Switching Claude to a different integration is separate
+work. Protocol fields were checked against the installed Codex schema, and the
+Claude binding was checked read-only against the actual October 16 call record.
 
 ## Personal-session discovery and Claude readback
 
