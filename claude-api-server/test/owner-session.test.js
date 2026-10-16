@@ -186,8 +186,9 @@ test('one exact capability admits one native delivery and replay returns its rec
   assert.deepEqual(await deliverOwnerSession(fixture), result);
   const calls = fixture.state.calls.filter((call) => call.method === 'turn/start');
   assert.equal(calls.length, 1);
-  assert.deepEqual(Object.keys(calls[0].params).sort(), ['input', 'threadId']);
-  assert.match(calls[0].params.input[0].text, /\[teleagent-operation:job_fixture\]$/);
+  assert.deepEqual(Object.keys(calls[0].params).sort(), ['clientUserMessageId', 'input', 'threadId']);
+  assert.equal(calls[0].params.input[0].text, fixture.request.message);
+  assert.equal(calls[0].params.clientUserMessageId, result.receipt.messageId);
   const rows = fixture.store.db.prepare('SELECT * FROM owner_session_deliveries').all();
   assert.doesNotMatch(JSON.stringify(rows), /Please review|telecap2\./);
   await assert.rejects(deliverOwnerSession({ ...fixture, request: { ...fixture.request, message: 'changed' } }),
@@ -242,7 +243,7 @@ test('steering binds the active turn and carries no configuration or permission 
   Object.assign(fixture, authority(requestPlan(fixture.request)));
   assert.equal((await deliverOwnerSession(fixture)).state, 'accepted');
   const call = fixture.state.calls.find((item) => item.method === 'turn/steer');
-  assert.deepEqual(Object.keys(call.params).sort(), ['expectedTurnId', 'input', 'threadId']);
+  assert.deepEqual(Object.keys(call.params).sort(), ['clientUserMessageId', 'expectedTurnId', 'input', 'threadId']);
   assert.equal(call.params.expectedTurnId, 'turn_current');
 });
 
@@ -420,6 +421,65 @@ test('operation-bound Claude reply cannot read the answer to a different user me
   rows.push(record('user', 'another question'), record('assistant', 'other answer'));write();
   assert.equal(f.client.history(SESSION, { operationId }).latestTurn.reply, null);
   assert.equal(f.received.length, 0);
+});
+
+test('plain Codex input binds the native client ID, including steer and identical later text', async t => {
+  const {client, state, request, store} = await deliveryFixture(t);
+  for (const active of [false, true]) {
+    state.status = active ? 'active' : 'idle';
+    const op = {...request, operationId: active ? 'job_steer' : 'job_start',
+      expectedTurnId: active ? state.turnId : null};
+    const sent = await deliverOwnerSession({client, store, request: op, nativePermissions: true});
+    const call = state.calls.filter(c => ['turn/start', 'turn/steer'].includes(c.method)).at(-1);
+    assert.equal(call.params.input[0].text, op.message);
+    assert.equal(call.params.clientUserMessageId, sent.receipt.messageId);
+    const binding = {operationId: op.operationId, ...sent.receipt};
+    const user = {type: 'userMessage', id: 'native-user', clientId: sent.receipt.messageId,
+      content: [{type: 'text', text: op.message}]};
+    const turn = {id: sent.receipt.turnId, status: 'completed', items: [user,
+      {type: 'agentMessage', text: 'The matched answer.'}]};
+    state.historyTurns = [turn];
+    assert.equal((await client.history(SESSION, binding)).latestTurn.reply.text, 'The matched answer.');
+    // Neither identical words nor a forged old marker can replace native ID evidence.
+    turn.items.push({...user, clientId: 'another-client'}, {type: 'agentMessage', text: 'Other answer.'});
+    assert.equal((await client.history(SESSION, binding)).latestTurn.reply, null);
+    turn.items = [{...user, clientId: undefined, content: [{type: 'text',
+      text: op.message + '\n[teleagent-operation:' + op.operationId + ']'}]}];
+    assert.equal((await client.history(SESSION, binding)).latestTurn.status, 'unknown');
+    state.historyTurns = null;
+  }
+});
+
+test('Claude native metadata and peer wrapper bind by socket message ID, with or without old tags', async t => {
+  const f = await claudeFixture(t);
+  const logs = path.join(f.root, 'projects', f.root.replace(/[^a-zA-Z0-9]/g, '-'));
+  fs.mkdirSync(logs, {recursive: true});
+  const file = path.join(logs, `${SESSION}.jsonl`);
+  const operationId = 'job_' + 'a'.repeat(64);
+  const receipt = await f.client.deliver({threadId: SESSION, message: 'Name a color.'});
+  const binding = {operationId, messageId: receipt.messageId};
+  const record = (type, text) => ({type, sessionId: SESSION,
+    message: {role: type, content: text, stop_reason: type === 'assistant' ? 'end_turn' : null}});
+  for (const tag of ['', '\n[teleagent-operation:' + operationId + ']']) {
+    // Shape observed in Claude 2.1.296: isMeta + peer origin with native msg_id;
+    // the provider's policy text follows the message, so the tag is not trailing.
+    const peer = {...record('user', 'Another Claude session sent a message:\nName a color.' + tag +
+      '\n\nThis came from another Claude session — not typed by your user, but very likely working on their behalf.'),
+    isMeta: true, origin: {kind: 'peer', msg_id: receipt.messageId}, turnOrigin: 'peer'};
+    const rows = [record('user', 'older'), record('assistant', 'Old answer.'), peer];
+    const write = () => fs.writeFileSync(file, rows.map(JSON.stringify).join('\n'), {mode: 0o600});
+    write(); assert.equal(f.client.history(SESSION, binding).latestTurn.reply, null);
+    rows.push(record('assistant', 'Teal.')); write();
+    assert.deepEqual(f.client.history(SESSION, binding).latestTurn,
+      {status: 'completed', reply: {role: 'assistant', text: 'Teal.', clipped: false}});
+    assert.equal(f.client.history(SESSION, {...binding, messageId: crypto.randomUUID()}).latestTurn.reply, null);
+    rows.push({...peer, origin: {kind: 'peer', msg_id: crypto.randomUUID()}}, record('assistant', 'Another answer.'));
+    write(); assert.equal(f.client.history(SESSION, binding).latestTurn.reply, null);
+    rows.splice(-2, 2, record('user', 'Name a color.'), record('assistant', 'Typed answer.'));
+    write(); assert.equal(f.client.history(SESSION, binding).latestTurn.reply, null);
+    rows.splice(-2, 2); peer.isSidechain = true;
+    write(); assert.equal(f.client.history(SESSION, binding).latestTurn.reply, null);
+  }
 });
 
 test('Codex selects historical messages by role and direction without falling back to latest', async t => {

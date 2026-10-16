@@ -1,6 +1,7 @@
 'use strict';
 
 const net = require('node:net');
+const crypto = require('node:crypto');
 const WebSocket = require('ws');
 const { sessionError, endpointIdentity, assertSameIdentity } = require('./owner-session-endpoint');
 const { boundedMessages, validateSelection, selectMessage } = require('./owner-session-history');
@@ -170,14 +171,18 @@ class OwnerCodexClient {
     // Use the same redaction/bounds as history, and expose no native IDs.
     const latest = binding ? result.data.find(turn => turn.id === binding.turnId) : result.data[0];
     // A steered turn can contain earlier answers. Only accept a reply after
-    // this operation's exact user marker, with no intervening user message.
+    // this operation's exact user item, with no intervening user message.
     let replyItems = latest?.items || [];
     if (binding) {
       const marker = `[teleagent-operation:${binding.operationId}]`;
       const userItems = replyItems.filter(item => item.type === 'userMessage');
       const lastUser = userItems.at(-1);
-      const matches = lastUser?.content?.some(part => part.type === 'text' &&
-        typeof part.text === 'string' && part.text.endsWith('\n' + marker));
+      // New deliveries use the app-server's out-of-band client ID. Keep the
+      // marker check only for receipts created before native-ID delivery.
+      const matches = binding.messageId
+        ? lastUser?.clientId === binding.messageId
+        : lastUser?.content?.some(part => part.type === 'text' &&
+          typeof part.text === 'string' && part.text.endsWith('\n' + marker));
       replyItems = matches ? replyItems.slice(replyItems.indexOf(lastUser) + 1) : [];
       if (!matches) return { messages: [], limited: true, latestTurn: { status: 'unknown', reply: null } };
     }
@@ -192,21 +197,22 @@ class OwnerCodexClient {
       } };
   }
 
-  async deliver({ threadId, message, expectedTurnId = null }) {
+  async deliver({ threadId, message, expectedTurnId = null, messageId = crypto.randomUUID() }) {
     if (!validId(threadId) || (expectedTurnId !== null && !validId(expectedTurnId)) ||
+        !validId(messageId) ||
         typeof message !== 'string' || Buffer.byteLength(message) > 20000) {
       throw sessionError('OWNER_SESSION_TARGET_INVALID');
     }
     this.assertIdentity();
     const input = [{ type: 'text', text: message }];
     const result = expectedTurnId === null
-      ? await this._request('turn/start', { threadId, input })
-      : await this._request('turn/steer', { threadId, input, expectedTurnId });
+      ? await this._request('turn/start', { threadId, input, clientUserMessageId: messageId })
+      : await this._request('turn/steer', { threadId, input, expectedTurnId, clientUserMessageId: messageId });
     const turnId = expectedTurnId === null ? result?.turn?.id : result?.turnId;
     if (!validId(turnId) || (expectedTurnId !== null && turnId !== expectedTurnId)) {
       throw sessionError('OWNER_SESSION_RESPONSE_INVALID');
     }
-    return { state: 'accepted', turnId, completed: false };
+    return { state: 'accepted', turnId, messageId, completed: false };
   }
 
   close() {

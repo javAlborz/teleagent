@@ -266,6 +266,15 @@ function renderPlan(tasks) {
   const lines = tasks.map(task => {
     const label = task.session_label;
     const result = task.result || {};
+    // A same-plan peek must not add a routine waiting announcement to the
+    // send acknowledgment. Explicit later status requests remain audible.
+    const justSent = task.action === 'get_owner_reply' && tasks.some(send =>
+      send.action === 'request_owner_instruction' &&
+      ['accepted', 'submitted_unconfirmed'].includes(send.state) &&
+      ((task.source_task_id && task.source_task_id === send.id) ||
+        (task.operation_id && task.operation_id === send.operation_id)));
+    if (justSent && result.success && !result.reply &&
+        !['failed', 'interrupted'].includes(result.turn_status)) return null;
     if (task.state === 'pending') return `${label}: not sent or checked yet; that part is still pending.`;
     if (task.state === 'not_sent') return `${label}: that instruction was not sent, so there is no result for it.`;
     if (task.action === 'request_owner_instruction' || task.action === 'get_owner_instruction') {
@@ -291,7 +300,7 @@ function renderPlan(tasks) {
         : ['failed', 'interrupted', 'unknown'].includes(result.turn_status) ? `${result.turn_status}; latest saved reply: ` : 'reply: ';
     return `${label}: ${prefix}${text}` +
       (words.length > perReplyWords ? ' [excerpt; ask to hear more].' : '');
-  });
+  }).filter(line => line !== null);
   const page = []; let words = 0;
   for (const line of lines) {
     const count = line.split(/\s+/).length;

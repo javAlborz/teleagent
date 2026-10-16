@@ -33,7 +33,7 @@ async function fixture(t) {
     else if (call.method === 'thread/loaded/list') result = { data: [SESSION] };
     else if (call.method === 'thread/read') result = { thread: { id: SESSION, cwd: state.cwd,
       status: { type: 'idle' }, canAcceptDirectInput: true } };
-    else if (call.method === 'thread/turns/list') result = { data: [{ items: [
+    else if (call.method === 'thread/turns/list') result = { data: state.history || [{ items: [
       { type: 'agentMessage', text: 'token=secret progress' },
     ] }] };
     else if (call.method === 'turn/start') result = { turn: { id: 'turn_fixture' } };
@@ -67,6 +67,24 @@ test('catalog lists enrollment and live inspection strips paths and redacts hist
   assert.equal(result.history.limited, true);
   assert.match(result.history.messages[0].text, /REDACTED/);
   assert.doesNotMatch(JSON.stringify(result), /native.sock|\/tmp\/|secret/);
+});
+
+test('broker carries the persisted native input ID into an exact reply read after reconnect', async t => {
+  const {broker, store, state} = await fixture(t);
+  const prepared = await broker.prepare({id: 'os_fixture', operationId: 'job_nativereply', message: 'Name a color.'});
+  const plan = requestPlan(prepared.request);
+  store.admitNative(plan);
+  const messageId = crypto.randomUUID();
+  store.finish(plan, {state: 'accepted', turnId: 'turn_fixture', messageId});
+  state.history = [{id: 'turn_fixture', status: 'completed', items: [
+    {type: 'userMessage', id: 'native_user', clientId: messageId,
+      content: [{type: 'text', text: 'Name a color.'}]},
+    {type: 'agentMessage', text: 'Teal.'},
+  ]}];
+  const result = await broker.reply({id: prepared.id, request: prepared.request});
+  assert.equal(result.history.latestTurn.status, 'completed');
+  assert.equal(result.history.latestTurn.reply.text, 'Teal.');
+  assert.ok(state.calls.every(c => !['turn/start', 'turn/steer'].includes(c.method)));
 });
 
 test('catalog refuses bridge work, duplicates, noncanonical paths and arbitrary endpoint options', async (t) => {
@@ -155,7 +173,7 @@ test('native forwarding is enabled by host policy only and preserves exact sessi
   assert.deepEqual(await broker.forward(input), result);
   const sends = state.calls.filter((call) => call.method === 'turn/start');
   assert.equal(sends.length, 1);
-  assert.deepEqual(Object.keys(sends[0].params).sort(), ['input', 'threadId']);
+  assert.deepEqual(Object.keys(sends[0].params).sort(), ['clientUserMessageId', 'input', 'threadId']);
   assert.match(sends[0].params.input[0].text, /^Edit the fixture\./);
   assert.equal(store.db.prepare('SELECT count(*) AS n FROM owner_session_replay').get().n, 0);
   await assert.rejects(broker.forward({ ...input, request: { ...prepared.request, message: 'Changed' } }),

@@ -32,7 +32,8 @@ class OwnerReplyWatch {
         const result = await this.read(watch.operationId);
         if (this.current !== watch) return;
         const turn = result?.success === true ? result.result?.history?.latestTurn : null;
-        if (['completed', 'failed', 'interrupted'].includes(turn?.status)) watch.result = result.result;
+        if ((turn?.status === 'completed' && turn.reply?.text?.trim()) ||
+            ['failed', 'interrupted'].includes(turn?.status)) watch.result = result.result;
       }
       if (watch.result && this.available() && this.speak(watch.result, watch.operationId)) {
         this.stop(watch.operationId); return;
