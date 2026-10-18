@@ -27,6 +27,10 @@ function verbatimMessageSpan(transcript, proposed) {
     return `(?:${escape(part)}[ \\t]+|${escape(word)}[.?!,;:]*[ \\t]*\\n\\s*)`;
   }).join('');
   const matches = [...transcript.matchAll(new RegExp(`(?<![\\p{L}\\p{N}])${expression}(?![\\p{L}\\p{N}])[.?!,;:]*`, 'giu'))];
+  // Repeated identical literal bytes are not ambiguous message content (e.g.
+  // “those three sessions ... one, two and three”). Do not choose between
+  // different capitalization, punctuation or transformed fragment boundaries.
+  if (matches.length > 1 && matches.every(match => match[0] === body)) return body;
   return matches.length === 1 ? matches[0][0] : null;
 }
 

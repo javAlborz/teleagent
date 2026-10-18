@@ -35,8 +35,18 @@ class OwnerReplyWatch {
         if ((turn?.status === 'completed' && turn.reply?.text?.trim()) ||
             ['failed', 'interrupted'].includes(turn?.status)) watch.result = result.result;
       }
-      if (watch.result && this.available() && this.speak(watch.result, watch.operationId)) {
-        this.stop(watch.operationId); return;
+      if (watch.result && this.available()) {
+        let finished;
+        try { finished = await this.speak(watch.result, watch.operationId); }
+        catch {
+          // Speech may already have played before its receipt failed to save.
+          // Keep that uncertainty; never automatically replay the answer.
+          if (this.watches.get(watch.operationId) === watch) this.stop(watch.operationId);
+          return;
+        }
+        if (finished && this.watches.get(watch.operationId) === watch) {
+          this.stop(watch.operationId); return;
+        }
       }
     } catch {
       // A read failure never causes a resend or claims completion.

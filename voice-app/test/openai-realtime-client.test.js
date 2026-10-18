@@ -1631,3 +1631,43 @@ test('normal native sends watch once by default; send-only and refused sends nev
     client.close(); assert.equal(client.ownerReplyWatch.current,null);
   }
 });
+
+
+test('external reply speech waits for actual playback and cancellation never sends a Realtime cancel', async () => {
+  let finish, signal; const spoken = [];
+  const client = await createConnectedClient({ownerSpeech: options => {
+    signal = options.signal; return new Promise(resolve => {finish = resolve;});
+  }});
+  client.on('assistant_transcript', text => spoken.push(text));
+  assert.equal(client._requestOwnerStatusSpeech('alpha: saved answer'), true);
+  await new Promise(setImmediate); assert.equal(client.responseActive, true); assert.deepEqual(spoken, []);
+  finish({state: 'played'}); await client.ownerSpeechCompletion;
+  assert.deepEqual(spoken, ['alpha: saved answer']); assert.equal(client.responseActive, false);
+  client._requestOwnerStatusSpeech('beta: another answer'); await new Promise(setImmediate);
+  const sentBefore = client.ws.sent.length;
+  client.cancelResponse({discardOutput: true}); assert.equal(signal.aborted, true);
+  finish({state: 'played'}); assert.equal((await client.ownerSpeechCompletion).state, 'interrupted');
+  assert.equal(client.ws.sent.length, sentBefore); assert.equal(spoken.length, 1);
+  assert.equal(client.truncatePlayback({itemId: 'tts_external', audioEndMs: 20}), false);
+  client.close();
+});
+
+test('a connection deadline retries once before any conversation, and old socket events cannot close the new one', async () => {
+  const instances = [];
+  class RetrySocket extends FakeWebSocket {
+    constructor(...args) {super(...args); instances.push(this);}
+    terminate() {this.close(1006);}
+    send(data) {
+      super.send(data);
+      if (instances.length === 2 && JSON.parse(data).type === 'session.update') {
+        queueMicrotask(() => this.serverSend({type: 'session.updated', session: {id: 'retry'}}));
+      }
+    }
+  }
+  const client = new OpenAIRealtimeClient({apiKey: 'fixture', instructions: 'fixture', ownerDecisionRouter: null,
+    WebSocketImpl: RetrySocket, connectTimeoutMs: 20});
+  let closed = 0; client.on('close', () => closed++);
+  await client.connect(); assert.equal(instances.length, 2); assert.equal(closed, 0);
+  instances[0].serverSend({type: 'session.updated', session: {id: 'stale'}});
+  assert.equal(client.connected, true); assert.equal(client.ws, instances[1]); client.close();
+});
