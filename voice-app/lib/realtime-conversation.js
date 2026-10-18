@@ -5,6 +5,7 @@ const { destroySipResource } = require('./sip-resource-cleanup');
 const crypto = require('node:crypto');
 const logger = require('./logger');
 const { redactAudioForkSecrets } = require('./audio-fork');
+const {OwnerSpeechClient, createOwnerSpeech} = require('./owner-speech');
 const { playbackUrl } = require('./media-playback-urls');
 const { VoiceToolController } = require('./voice-tool-controller');
 const { UNAVAILABLE, readControllerCapabilities, isOwnerSessionConversation } = require('./controller-capabilities');
@@ -617,6 +618,12 @@ async function runRealtimeConversation(endpoint, dialog, callUuid, {
     const Client = openaiClientFactory || ((options) => new OpenAIRealtimeClient(options));
     realtime = Client({
       apiKey: realtimeApiKey,
+      ownerSpeech: createOwnerSpeech({audioSession,
+        client: new OwnerSpeechClient({apiKey: realtimeApiKey, voice,
+          project: process.env.OPENAI_PROJECT || null, organization: process.env.OPENAI_ORGANIZATION || null}),
+        onState: metadata => stateStore.appendAuditEvent({voiceThreadId: thread.id,
+          realtimeSessionId: realtimeState.id, callerId, action: 'owner_speech_delivery', riskLevel: 'read_only', metadata}),
+      }),
       baseUrl: realtimeEndpoint.baseUrl,
       model,
       voice,
@@ -815,6 +822,11 @@ async function runRealtimeConversation(endpoint, dialog, callUuid, {
       return true;
     };
 
+    realtime.on('owner_speech_text', text => { lastAssistantTranscript = String(text); });
+    realtime.on('owner_plan_rejected', metadata => stateStore.appendAuditEvent({
+      voiceThreadId: thread.id, realtimeSessionId: realtimeState.id, callerId,
+      action: 'owner_plan_rejected', riskLevel: 'read_only', metadata,
+    }));
     realtime.on('session.created', (session) => {
       stateStore.markRealtimeSessionConnected(realtimeState.id, session.id || null);
     });

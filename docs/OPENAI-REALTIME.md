@@ -1,9 +1,40 @@
 # OpenAI Realtime Voice Control Plane
 
 Extensions `7` and `77` provide a Zeus-independent, full-duplex voice control
-plane on Hermes. OpenAI Realtime owns the live conversation; Claude Code and
-Codex remain the agents that inspect and analyze bounded state. Phone mutation,
-deployment, existing-session delivery, and administration are disabled.
+plane on Hermes. OpenAI Realtime owns the live conversation. Enrolled personal
+Codex and Claude sessions receive instructions under their existing native
+permissions, including edits and deployment when those permissions allow it.
+Managed jobs remain read-only; Teleagent does not answer native approval prompts
+or grant additional permissions.
+
+## Owner-session reply playback
+
+Stored replies and application-owned status text use `gpt-4o-mini-tts` with the
+`marin` voice over the existing admitted OpenAI TLS Unix relay. Text is supplied
+to the Speech API as input; no session tools accompany synthesis. Short chunks
+are generated serially, bounded in memory, and paced into the existing audio
+fork. No generated audio files are retained. Realtime still handles listening,
+conversational answers and the farewell.
+
+A reply notification remains pending through synthesis and playback. Only its
+matching downstream FreeSWITCH marker records `speech_state: played`; this is
+media-path evidence, not proof the handset user heard it. Interruption and
+failure remain separate states. A transient synthesis error may retry once
+before that chunk enters playback. Partial playback is never blindly repeated,
+and retrying speech never repeats an agent instruction. A failed readback is
+saved for an explicit later read. Audit events retain bounded delivery states
+and plan rejection codes without credentials or rejected model prose.
+
+At deployment, the host operator starts and checks the relay before opening
+phone ingress, including certificate-verified TLS to the fixed upstream. A
+call may retry a transient initial connection failure once; it does not retry
+authentication failures or established conversations. This bounds connection
+setup, not the duration of an ordinary call.
+
+Repeated identical literal message text in one caller turn is accepted when it
+has identical bytes at every occurrence. This handles “those three sessions …
+one, two and three respectively” without choosing between differently cased,
+punctuated or transformed spans. Every plan is validated before its first send.
 
 ## Extensions and profiles
 

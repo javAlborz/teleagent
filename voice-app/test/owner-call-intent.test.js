@@ -132,3 +132,11 @@ test('watches rotate waiting tasks and do not overlap a canceled in-flight read'
   await g.watch.tick(g.watch.current);assert.equal(g.spoken.length,1);
   assert.equal(g.watch.current.operationId,a);g.watch.stop();
 });
+
+
+test('repeated identical literal bytes bind safely without choosing between changed spans', () => {
+  const text = "We'll just send a message to each of those three sessions respectively with the message being the number one, two, and three respectively";
+  assert.equal(verbatimMessageSpan(text, 'three'), 'three');
+  assert.equal(verbatimMessageSpan('Use Three or three', 'three'), null);
+  assert.equal(verbatimMessageSpan('Use three? or three!', 'three'), null);
+});

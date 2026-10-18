@@ -275,3 +275,19 @@ test('an immediate reply peek stays quiet after sending; explicit status and fai
   read.result = {success: true, turn_status: 'completed', reply: 'Teal.'};
   assert.match(renderPlan([sent, read]), /reply: Teal/);
 });
+
+
+test('October 18 respectively request preserves the ordered group and dispatches each payload once', async () => {
+  const memory = new OwnerTaskMemory(null, id => makeOperationId('call', id));
+  memory.select(labels);
+  const text = "We'll just send a message to each of those three sessions respectively with the message being the number one, two, and three respectively";
+  const validated = checked(memory, {selected_sessions: labels,
+    actions: labels.map((label, index) => send(label, ['one', 'two', 'three'][index]))}, text);
+  const tasks = memory.reserve(validated.actions, 'group-request'); const sent = [];
+  await runPlan(tasks, {memory, current: () => true, execute: async action => {
+    sent.push([action.session_label, action.message]);
+    return {success: true, operation_id: action.operation_id, result: {state: 'accepted'}};
+  }});
+  assert.deepEqual(sent, [['alpha', 'one,'], ['beta', 'two,'], ['charlie', 'three']]);
+  await runPlan(tasks, {memory, current: () => true, execute: async () => assert.fail('duplicate')});
+});
