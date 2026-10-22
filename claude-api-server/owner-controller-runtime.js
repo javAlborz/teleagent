@@ -12,6 +12,22 @@ const { assertOwnerHostHeadroom } = require('./owner-session-admission');
 const { sessionError } = require('./owner-session-endpoint');
 const ENABLE = '/etc/teleagent/controller/OWNER_SESSION_ENABLE';
 
+const HEALTH_REASONS = new Set(['OWNER_HOST_RESOURCE_UNVERIFIED', 'OWNER_HOST_POOL_UNBOUNDED',
+  'OWNER_HOST_DISK_PRESSURE', 'OWNER_HOST_RESOURCE_PRESSURE', 'OWNER_PLANE_UNAVAILABLE',
+  'OWNER_APPROVAL_LOCKED']);
+
+function ownerSessionHealth(assertAvailable) {
+  const configured = { configured: true, protocol: 'independent-pbx-owner-v1',
+    deliveryPolicy: NATIVE_DELIVERY_POLICY };
+  try { assertAvailable(); return { ...configured, available: true }; }
+  catch (error) {
+    // Configuration survives an outage; availability never does. Keep private
+    // exception details out of the authenticated health response and audit.
+    return { ...configured, available: false, reasonCode: HEALTH_REASONS.has(error?.code)
+      ? error.code : 'OWNER_SESSIONS_UNAVAILABLE' };
+  }
+}
+
 // Cached readiness never contacts native agents. One bounded probe at a time;
 // a failed, stale or mismatched response withdraws the phone capability.
 class OwnerPlaneReadiness {
@@ -77,9 +93,7 @@ function createOwnerControllerRuntime({ db, assertUnlocked }) {
       catch { return false; }
     },
     health() {
-      try { assertAdmission(); coordinator.store.assertUnlocked(); return { configured: true, available: true,
-        protocol: 'independent-pbx-owner-v1', deliveryPolicy: NATIVE_DELIVERY_POLICY }; }
-      catch { return { configured: true, available: false, protocol: 'independent-pbx-owner-v1' }; }
+      return ownerSessionHealth(() => { assertAdmission(); coordinator.store.assertUnlocked(); });
     },
     async close() {
       closing = true;
@@ -90,4 +104,4 @@ function createOwnerControllerRuntime({ db, assertUnlocked }) {
     },
   };
 }
-module.exports = { createOwnerControllerRuntime, OwnerPlaneReadiness };
+module.exports = { createOwnerControllerRuntime, OwnerPlaneReadiness, ownerSessionHealth };

@@ -1510,6 +1510,75 @@ test('text decisions execute through the same route boundary and record separate
   assert.equal(client.ws.sentEvents().filter(e=>e.type==='response.create'&&e.response.output_modalities.includes('text')).length,0);
 });
 
+test('a failed first capability check recovers on a new caller turn without replaying a send', async t => {
+  const {UNAVAILABLE, capabilitiesFromHealth} = require('../lib/controller-capabilities');
+  const {nativeOwnerHealth, executorHealth} = require('./controller-capabilities-fixture');
+  const actions = [], decisions = [];
+  let available = false, checks = 0;
+  const client = await createConnectedClient({capabilities: {...UNAVAILABLE, conversationMode: 'owner_sessions'},
+    refreshCapabilities: async () => {
+      checks++;
+      return available ? capabilitiesFromHealth(nativeOwnerHealth(), executorHealth()) : UNAVAILABLE;
+    },
+    ownerDecisionRouter: {decide: async request => {
+      decisions.push(request);
+      assert.ok(request.tools[0].parameters.properties.action.enum.includes('list_owner_sessions'));
+      assert.ok(!request.tools[0].parameters.properties.action.enum.includes('list_agent_sessions'));
+      return {calls: [{type: 'function_call', name: 'route_turn', call_id: 'recovered',
+        arguments: JSON.stringify({action: 'list_owner_sessions', session_label: 'phoneA', proposed_message: null})}]};
+    }},
+    toolHandler: async (name, args) => {actions.push({name, args}); return {success: true, result: {sessions: [{label: 'phoneA'}]}};},
+  });
+  t.after(() => client.close());
+  client.prepareCallerTurn('Send apple to alpha');client.requestRoutedResponse();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(checks, 1);assert.equal(decisions.length, 0);assert.deepEqual(actions, []);
+  assert.match(client.nextVerifiedSpeech.text, /temporarily unavailable/);
+  available = true;
+  // Readiness recovering alone does not schedule work or replay the first turn.
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(actions, []);assert.equal(checks, 1);
+  client.responseActive = false;client.nextVerifiedSpeech = null;
+  client.prepareCallerTurn('Is there a phoneA session?');client.requestRoutedResponse();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(checks, 2);assert.equal(decisions.length, 1);
+  assert.equal(decisions[0].input[0].content[0].text, 'Is there a phoneA session?');
+  assert.deepEqual(actions, [{name: 'list_owner_sessions', args: {session_label: 'phoneA'}}]);
+  assert.equal(client.getConversationConfiguration().mode, 'owner_sessions');
+});
+
+for (const termination of ['interrupt', 'close']) test(`a ${termination} during readiness refresh cannot start a decision or delivery`, async t => {
+  let release, decisions = 0, actions = 0;
+  const client = await createConnectedClient({capabilities: {...ownerCapabilities, conversationMode: 'owner_sessions'},
+    refreshCapabilities: () => new Promise(resolve => {release = resolve;}),
+    ownerDecisionRouter: {decide: async () => {decisions++; throw new Error('must not run');}},
+    toolHandler: async () => {actions++;},
+  });
+  t.after(() => client.close());
+  client.prepareCallerTurn('Send apple to alpha');client.requestRoutedResponse();
+  await new Promise(resolve => setImmediate(resolve));
+  if (termination === 'close') client.close();
+  else {client.cancelResponse({discardOutput: true});client.prepareCallerTurn('Never mind.');}
+  const before = client.capabilities;
+  release({...ownerCapabilities, ownerSessionsAvailable: false});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(decisions, 0);assert.equal(actions, 0);
+  assert.equal(client.capabilities, before, 'discard stale readiness after interruption or close');
+});
+
+test('readiness lost between decision and dispatch reports temporary unavailability, not a missing session', async t => {
+  const {unavailableResult} = require('../lib/controller-capabilities');
+  const client = await createConnectedClient({capabilities: {...ownerCapabilities, conversationMode: 'owner_sessions'},
+    toolHandler: async () => unavailableResult('list_owner_sessions', {reasonCode: 'OWNER_HOST_RESOURCE_PRESSURE'}),
+  });
+  t.after(() => client.close());
+  client.prepareCallerTurn('Is there a phoneA session?');
+  await client._handleResponseDone({output: [{type: 'function_call', name: 'route_turn', call_id: 'lost-ready',
+    arguments: JSON.stringify({action: 'list_owner_sessions', session_label: 'phoneA', proposed_message: null})}]});
+  assert.match(client.nextVerifiedSpeech.text, /temporarily unavailable/);
+  assert.doesNotMatch(client.nextVerifiedSpeech.text, /empty|session name|read-only/);
+});
+
 test('superseded text decisions cannot dispatch even if the backend ignores abort',async t=>{
   let resolveDecision;const actions=[];
   const client=await createConnectedClient({capabilities:ownerCapabilities,
