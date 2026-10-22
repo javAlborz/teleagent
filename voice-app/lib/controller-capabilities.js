@@ -17,6 +17,19 @@ const UNAVAILABLE = Object.freeze({
   reasonCode: 'CONTROLLER_CAPABILITIES_UNAVAILABLE',
 });
 
+const REASON_CODES = new Set(['CONTROLLER_CAPABILITIES_UNAVAILABLE', 'CONTROLLER_HEALTH_TIMEOUT',
+  'CONTROLLER_HEALTH_REJECTED', 'CONTROLLER_HEALTH_UNREACHABLE', 'VOICE_EXECUTION_LOCKED',
+  'OWNER_HOST_RESOURCE_UNVERIFIED', 'OWNER_HOST_POOL_UNBOUNDED', 'OWNER_HOST_DISK_PRESSURE',
+  'OWNER_HOST_RESOURCE_PRESSURE', 'OWNER_PLANE_UNAVAILABLE', 'OWNER_APPROVAL_LOCKED',
+  'OWNER_SESSIONS_UNAVAILABLE']);
+function capabilityReason(code) {
+  return REASON_CODES.has(code) ? code : UNAVAILABLE.reasonCode;
+}
+function unavailableCapabilities(code) {
+  const reasonCode = capabilityReason(code);
+  return reasonCode === UNAVAILABLE.reasonCode ? UNAVAILABLE : Object.freeze({...UNAVAILABLE, reasonCode});
+}
+
 const TOOL_CAPABILITIES = Object.freeze({
   list_owner_sessions: 'owner',
   inspect_owner_session: 'owner',
@@ -102,6 +115,9 @@ function unavailableResult(name, capabilities = UNAVAILABLE) {
   } else if (locked) {
     code = 'VOICE_EXECUTION_LOCKED';
     message = 'Agent work is emergency-locked. Local voice history and saved session records remain available.';
+  } else if (toolCapability(name) === 'owner') {
+    code = capabilityReason(capabilities?.reasonCode);
+    message = 'Session access is temporarily unavailable. No instruction was sent for this request. Please try again.';
   }
   return {
     success: false,
@@ -152,7 +168,10 @@ function capabilitiesFromHealth(operator, executor) {
       ? { conversationMode: 'owner_sessions' } : {}),
     ...(operator?.ownerSessions?.configured === true ? { ownerSessionsAvailable: !locked &&
       operator?.ownerSessions?.available === true && operator?.ownerSessions?.protocol === 'independent-pbx-owner-v1' } : {}),
-    reasonCode: locked ? 'VOICE_EXECUTION_LOCKED' : (managed ? null : UNAVAILABLE.reasonCode),
+    reasonCode: locked ? 'VOICE_EXECUTION_LOCKED'
+      : operator?.ownerSessions?.configured === true && operator.ownerSessions.available !== true
+        ? capabilityReason(operator.ownerSessions.reasonCode || 'OWNER_SESSIONS_UNAVAILABLE')
+        : (managed ? null : UNAVAILABLE.reasonCode),
   });
 }
 
@@ -160,7 +179,7 @@ async function readControllerCapabilities(agentBridge) {
   if (typeof agentBridge?.getRuntimeCapabilities !== 'function') return UNAVAILABLE;
   try {
     const value = await agentBridge.getRuntimeCapabilities();
-    if (!value || value.controllerAvailable !== true) return UNAVAILABLE;
+    if (!value || value.controllerAvailable !== true) return unavailableCapabilities(value?.reasonCode);
     // Own immutable data only. Never retain a bridge response as a live alias.
     return Object.freeze({
       controllerAvailable: true,
@@ -168,7 +187,7 @@ async function readControllerCapabilities(agentBridge) {
       managedExecutionAvailable: value.managedExecutionAvailable === true,
       ...(value.conversationMode === 'owner_sessions' ? { conversationMode: 'owner_sessions' } : {}),
       ...(value.ownerSessionsAvailable !== undefined ? { ownerSessionsAvailable: value.ownerSessionsAvailable === true } : {}),
-      reasonCode: value.reasonCode === 'VOICE_EXECUTION_LOCKED' ? value.reasonCode
+      reasonCode: value.reasonCode ? capabilityReason(value.reasonCode)
         : (value.managedExecutionAvailable === true ? null : UNAVAILABLE.reasonCode),
     });
   } catch {
@@ -180,4 +199,5 @@ module.exports = {
   UNAVAILABLE, TOOL_CAPABILITIES, capabilitiesFromHealth, isToolAvailable,
   readControllerCapabilities, toolCapability, unavailableResult,
   isOwnerSessionConversation,
+  capabilityReason, unavailableCapabilities,
 };

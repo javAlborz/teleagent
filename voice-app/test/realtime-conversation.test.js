@@ -48,6 +48,32 @@ test('real call construction preserves the authenticated owner mode and records 
   assert.match(fixture.getRealtimeClient().options.instructions, /including edits and deployment/);
 });
 
+test('real call startup cannot fall back to managed conversation when the controller is unreachable', async t => {
+  const {UNAVAILABLE} = require('../lib/controller-capabilities');
+  const {OpenAIRealtimeClient} = require('../lib/openai-realtime-client');
+  const fixture = createCallFixture(t);
+  fixture.jobBroker.agentBridge.getRuntimeCapabilities = async () => ({...UNAVAILABLE,
+    reasonCode: 'CONTROLLER_HEALTH_TIMEOUT'});
+  fixture.jobBroker.agentBridge.ownerSessionAction = async () => assert.fail('no owner call while unavailable');
+  await runRealtimeConversation(fixture.endpoint, fixture.dialog, 'owner-unavailable', {
+    audioForkServer: fixture.audioForkServer, stateStore: fixture.stateStore,
+    jobBroker: fixture.jobBroker, callerId: '1001', openaiClientFactory: options => {
+      const actual = new OpenAIRealtimeClient(options);
+      assert.equal(typeof actual.refreshCapabilities, 'function');
+      const fake = fixture.openaiClientFactory(options);
+      fake.getConversationConfiguration = () => actual.getConversationConfiguration();
+      return fake;
+    },
+  });
+  const events = fixture.stateStore.listAuditEvents({limit: 20});
+  assert.deepEqual(events.find(e => e.action === 'realtime_conversation_configured').metadata,
+    {mode: 'owner_sessions', decision_transport: 'responses', decision_model: 'gpt-6-luna',
+      managed_execution_available: false, owner_sessions_available: false});
+  assert.deepEqual(events.find(e => e.action === 'controller_capabilities_checked').metadata,
+    {controller_available: false, owner_sessions_available: false, reason_code: 'CONTROLLER_HEALTH_TIMEOUT'});
+  assert.doesNotMatch(fixture.getRealtimeClient().options.instructions, /every managed phone job is forced read-only/);
+});
+
 test('production conductor instructions expose read-only managed authority only', () => {
   const instructions = buildConductorInstructions({
     thread: { id: 'vt_read_only', selected_profile: 'codex-sol' },
@@ -527,7 +553,7 @@ test('runtime transcription vocabulary includes live tmux conversation names', a
   assert.match(options.transcriptionPrompt, /8player-tooling/);
 });
 
-test('unavailable controller leaves useful local voice tools and tmux hints without probing the inspector', async (t) => {
+test('unavailable controller keeps personal conversation and vocabulary without probing the inspector', async (t) => {
   const fixture = createCallFixture(t);
   delete fixture.jobBroker.agentBridge.getRuntimeCapabilities;
   fixture.jobBroker.agentBridge.inspectOperator = async () => assert.fail('missing auth must not trigger inspection');
@@ -541,8 +567,9 @@ test('unavailable controller leaves useful local voice tools and tmux hints with
   const options = fixture.getRealtimeClient().options;
   assert.equal(options.capabilities.managedExecutionAvailable, false);
   assert.ok(options.transcriptionKeywords.includes('tmux'));
-  assert.match(options.instructions, /Read-only managed agent work: unavailable/);
-  assert.match(options.instructions, /not proof that a provider process is running/);
+  assert.equal(options.capabilities.conversationMode, 'owner_sessions');
+  assert.match(options.instructions, /existing Codex and Claude sessions/);
+  assert.doesNotMatch(options.instructions, /Read-only managed agent work|list_runtime_sessions/);
 });
 
 test('dynamic keywords cannot invalidate the Realtime session with forbidden characters', async (t) => {

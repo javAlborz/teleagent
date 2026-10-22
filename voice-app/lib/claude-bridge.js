@@ -11,7 +11,7 @@ const {
   buildVoiceControlApiHeaders,
 } = require('./claude-api-config');
 const { looksLikePhoneDeployRequest } = require('../../lib/phone-deploy-intent');
-const { UNAVAILABLE, capabilitiesFromHealth } = require('./controller-capabilities');
+const { UNAVAILABLE, capabilitiesFromHealth, unavailableCapabilities } = require('./controller-capabilities');
 // The controller permits up to 60 seconds for worker panic/unlock. Keep the
 // caller alive through that bounded response instead of abandoning recovery.
 const VOICE_CONTROL_MUTATION_TIMEOUT_MS = 65000;
@@ -914,8 +914,11 @@ async function getRuntimeCapabilities() {
       // executor auth failure need not erase the valid read-only scope.
       return inspected;
     }
-  } catch {
-    return UNAVAILABLE;
+  } catch (error) {
+    return unavailableCapabilities(['ECONNABORTED', 'ETIMEDOUT', 'ERR_CANCELED'].includes(error?.code)
+      ? 'CONTROLLER_HEALTH_TIMEOUT' : error?.response ? 'CONTROLLER_HEALTH_REJECTED'
+        : ['ENOENT', 'ECONNREFUSED', 'ECONNRESET'].includes(error?.code)
+          ? 'CONTROLLER_HEALTH_UNREACHABLE' : null);
   }
 }
 

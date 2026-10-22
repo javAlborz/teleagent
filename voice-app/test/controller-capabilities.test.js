@@ -36,6 +36,22 @@ test('native forwarding requires the explicit native controller policy and still
   assert.deepEqual(capabilitiesFromHealth(health, executorHealth()), UNAVAILABLE);
 });
 
+test('unavailable native health preserves conversation identity without enabling any owner action', async () => {
+  const {ownerSessionHealth} = require('../../claude-api-server/owner-controller-runtime');
+  const health = operatorHealth();
+  health.phoneAuthority = {mode: 'owner_session_native', status: 'native_owner_configured'};
+  health.ownerSessions = ownerSessionHealth(() => {
+    throw Object.assign(new Error('private'), {code: 'OWNER_HOST_RESOURCE_PRESSURE'});
+  });
+  const value = await readControllerCapabilities({getRuntimeCapabilities: async () => capabilitiesFromHealth(health, executorHealth())});
+  assert.equal(value.conversationMode, 'owner_sessions');
+  assert.equal(value.reasonCode, 'OWNER_HOST_RESOURCE_PRESSURE');
+  for (const action of ['list_owner_sessions', 'request_owner_instruction', 'inspect_owner_session']) {
+    assert.equal(isToolAvailable(action, value), false);
+  }
+  assert.equal(buildRealtimeRouterTool([], value).parameters.properties.action.enum.includes('list_agent_sessions'), false);
+});
+
 test('every advertised production tool has an explicit classification and unavailable defaults are local-only', () => {
   for (const tool of buildRealtimeTools(['codex-terra'])) {
     assert.notEqual(toolCapability(tool.name), 'disabled', tool.name);

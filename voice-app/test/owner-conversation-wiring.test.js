@@ -55,6 +55,9 @@ test('the managed-only deployment retains its existing router and no mode can ad
   const actions = buildRealtimeRouterTool([], capabilities).parameters.properties.action.enum;
   assert.equal(actions.includes('request_owner_instruction'), false);
   assert.equal(actions.includes('send_agent_message'), false);
+  const schema = buildRealtimeRouterTool([], capabilities).parameters;
+  assert.deepEqual(schema.properties.action.enum, ['respond', 'end_call']);
+  assert.equal(schema.properties.actions, undefined, 'no empty action enum in the initial session schema');
 });
 
 test('single-word caller payloads reach the handler once under actual production capabilities', async () => {

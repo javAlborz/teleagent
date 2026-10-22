@@ -88,6 +88,21 @@ test('HTTP not-ready status cannot be overridden by a ready-looking body', async
   assert.deepEqual(await bridge.getRuntimeCapabilities(), UNAVAILABLE);
 });
 
+test('capability failures retain only bounded diagnostic codes through the call snapshot', async t => {
+  const {readControllerCapabilities} = require('../lib/controller-capabilities');
+  for (const [error, code] of [
+    [{code: 'ECONNABORTED'}, 'CONTROLLER_HEALTH_TIMEOUT'],
+    [{code: 'ECONNREFUSED'}, 'CONTROLLER_HEALTH_UNREACHABLE'],
+    [{response: {status: 401, data: 'private'}}, 'CONTROLLER_HEALTH_REJECTED'],
+  ]) {
+    t.mock.method(axios, 'get', async () => {throw Object.assign(new Error('private'), error);});
+    const value = await readControllerCapabilities(bridge);
+    assert.equal(value.controllerAvailable, false);
+    assert.equal(value.reasonCode, code);
+    assert.doesNotMatch(JSON.stringify(value), /private/);
+  }
+});
+
 function executorTask(overrides = {}) {
   return {
     id: 'xtask_123',

@@ -43,6 +43,31 @@ and default backend together, including a healthy managed executor and emergency
 locks. Model/audio probes must use that same health-derived configuration with
 only native delivery and media peers simulated.
 
+### Temporary unavailability and recovery
+
+The October 22 call exposed a second selection failure: unavailable native health
+omitted its configured delivery policy, so the voice snapshot discarded the
+personal-session mode and selected the managed read-only conversation. The empty
+managed-session list then gave a misleading answer about existing personal
+sessions. Host pressure was observed just before the call; its exact initial
+health failure was not retained and must not be inferred as proven.
+
+Extensions 7/77 now keep the personal-session conversation regardless of initial
+readiness. Controller health retains its configured native policy while withdrawing
+availability, and emits only a bounded failure code. Conversation selection does
+not grant authority. Invalid health, emergency locks and failed admission continue
+to prevent owner tools and delivery.
+
+Each new caller turn performs one bounded readiness refresh before its decision.
+Unavailable turns receive a fixed temporary-unavailability response, without a
+model decision, empty-inventory claim, managed-session substitution or instruction.
+Recovery does not replay a failed request: a new caller turn is required. An
+interruption or hangup during the refresh fences late results. Tool dispatch
+still independently checks current readiness. The call audit records sanitized
+availability and failure codes, never raw health bodies, credentials or exception
+messages. Regression coverage includes actual call construction, failed-start
+recovery in the same client, late checks and unchanged delivery gates.
+
 Replay the failed call's contextual shortening, referenced step and literal
 single-word sends. A clarification referring to earlier content is not itself a
 message to forward. A presented next-step draft retains the recipient's complete

@@ -593,7 +593,19 @@ async function runRealtimeConversation(endpoint, dialog, callUuid, {
       sipCallId,
     });
 
-    const capabilities = await toolController.refreshCapabilities();
+    // Extensions 7/77 are the personal-session interface, even when the first
+    // health request fails. This selects conversation, never tool authority.
+    const refreshCapabilities = async () => {
+      const value = Object.freeze({...await toolController.refreshCapabilities(), conversationMode: 'owner_sessions'});
+      stateStore.appendAuditEvent({voiceThreadId: thread.id, realtimeSessionId: realtimeState.id,
+        callerId, action: 'controller_capabilities_checked', riskLevel: 'read_only', metadata: {
+          controller_available: value.controllerAvailable === true,
+          owner_sessions_available: value.ownerSessionsAvailable === true,
+          reason_code: value.reasonCode,
+        }});
+      return value;
+    };
+    const capabilities = await refreshCapabilities();
     const ownerSessionContext = await toolController.ownerSessionContext();
     // A handset may disconnect while the bounded controller probes are pending.
     // Do not open a provider connection for a call which already ended.
@@ -649,6 +661,7 @@ async function runRealtimeConversation(endpoint, dialog, callUuid, {
       safetyIdentifier: buildSafetyIdentifier(callerId),
       profiles: jobBroker.listProfiles(),
       capabilities,
+      refreshCapabilities,
       instructions: buildConductorInstructions({
         thread,
         resumeContext,

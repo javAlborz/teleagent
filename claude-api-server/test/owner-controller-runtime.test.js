@@ -1,7 +1,21 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { OwnerPlaneReadiness } = require('../owner-controller-runtime');
+const { OwnerPlaneReadiness, ownerSessionHealth } = require('../owner-controller-runtime');
+
+test('an admission outage retains native configuration, withdraws availability and sanitizes its reason', () => {
+  const healthy = ownerSessionHealth(() => {});
+  assert.deepEqual(healthy, {configured: true, available: true,
+    protocol: 'independent-pbx-owner-v1', deliveryPolicy: 'native-session-permissions-v1'});
+  for (const code of ['OWNER_HOST_RESOURCE_PRESSURE', 'OWNER_PLANE_UNAVAILABLE', 'private credential']) {
+    const health = ownerSessionHealth(() => {throw Object.assign(new Error('private details'), {code});});
+    assert.equal(health.deliveryPolicy, healthy.deliveryPolicy);
+    assert.equal(health.configured, true);
+    assert.equal(health.available, false);
+    assert.equal(health.reasonCode, code === 'private credential' ? 'OWNER_SESSIONS_UNAVAILABLE' : code);
+    assert.doesNotMatch(JSON.stringify(health), /private/);
+  }
+});
 
 function fixture() {
   const state = { time: 10000, calls: [], epoch: 'a'.repeat(64), failed: false, pause: null };
