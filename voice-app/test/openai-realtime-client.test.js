@@ -1559,9 +1559,11 @@ for (const termination of ['interrupt', 'close']) test(`a ${termination} during 
   await new Promise(resolve => setImmediate(resolve));
   if (termination === 'close') client.close();
   else {client.cancelResponse({discardOutput: true});client.prepareCallerTurn('Never mind.');}
-  release(ownerCapabilities);
+  const before = client.capabilities;
+  release({...ownerCapabilities, ownerSessionsAvailable: false});
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(decisions, 0);assert.equal(actions, 0);
+  assert.equal(client.capabilities, before, 'discard stale readiness after interruption or close');
 });
 
 test('readiness lost between decision and dispatch reports temporary unavailability, not a missing session', async t => {

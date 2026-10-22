@@ -1300,8 +1300,11 @@ class OpenAIRealtimeClient extends EventEmitter {
       try {
         if (typeof this.refreshCapabilities === 'function') {
           const current = await readControllerCapabilities({getRuntimeCapabilities: this.refreshCapabilities});
-          this.capabilities = Object.freeze({...current, conversationMode: 'owner_sessions'});
-          request.tools = [buildRealtimeRouterTool(this.profiles, this.capabilities)];
+          if (this.closedByClient || this.pendingOwnerDecision !== pending) return;
+          if (!pending.abort.signal.aborted && pending.revision === this.callerTurnRevision) {
+            this.capabilities = Object.freeze({...current, conversationMode: 'owner_sessions'});
+            request.tools = [buildRealtimeRouterTool(this.profiles, this.capabilities)];
+          }
         }
         // A caller interruption or hangup during the bounded read must not
         // trigger a model request or revive an earlier instruction.
