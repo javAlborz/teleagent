@@ -73,3 +73,46 @@ test('unavailable identities explain a refusal without converting uncertain deli
   assert.match(renderPlan([task]), /delivery is uncertain/);
   assert.doesNotMatch(renderPlan([task]), /not sent/);
 });
+
+for (const action of ['get_owner_reply', 'get_owner_instruction']) {
+  for (const byTask of [false, true]) {
+    test(`${action} explains a known unsent task by ${byTask ? 'task ID' : 'session name'} without native IO`, async t => {
+      const attempts = [], spoken = [];
+      const capabilities = capabilitiesFromHealth(nativeOwnerHealth(), executorHealth());
+      const client = new OpenAIRealtimeClient({apiKey: 'offline', ownerCallId: 'offline-unsent',
+        capabilities, ownerSessionLabels: ['beta'],
+        instructions: buildConductorInstructions({thread: {id: 'offline'}, capabilities,
+          ownerSessionContext: {available: true, labels: ['beta']}}), toolHandler: async (name, args) => {
+          attempts.push({name, args});
+          return {success: false, code: 'OWNER_SESSION_PROCESS_CHANGED'};
+        }});
+      t.after(() => client.close());
+      client.requestResponse = (_r, options) => {spoken.push(options.verifiedSpeech?.text); return true;};
+      async function turn(text, id, fields) {
+        client.prepareCallerTurn(text);
+        await client._handleResponseDone({output: [route(id, fields)]});
+        client.ownerReplyWatch.stop();
+      }
+      await turn('Send beta the word orange.', 'send', {action: 'execute_owner_plan', actions: [
+        {action: 'request_owner_instruction', session_label: 'beta', message: 'orange', message_source: 'caller'}]});
+      const task = client.ownerTaskMemory.latest('beta');
+      assert.equal(task.state, 'failed');
+      await turn('Has beta replied?', 'read', {action, session_label: 'beta', ...(byTask ? {task_id: task.id} : {})});
+      assert.equal(attempts.length, 1, 'status neither retries delivery nor reads unrelated history');
+      assert.match(spoken.at(-1), /beta: that instruction was not sent, so there is no result/);
+      assert.equal(task.state, 'failed');
+      // Explicit task IDs cannot override mismatching target/operation hints.
+      await turn('Has alpha replied?', 'mismatch', {action, session_label: 'alpha', task_id: task.id});
+      assert.match(spoken.at(-1), /Which earlier instruction/);
+      await turn('Has beta replied?', 'operation-mismatch', {action, session_label: 'beta', task_id: task.id,
+        operation_id: 'job_' + 'f'.repeat(64)});
+      assert.match(spoken.at(-1), /Which earlier instruction/);
+      for (const state of ['dispatching', 'accepted', 'submitted_unconfirmed', 'outcome_unknown']) {
+        client.ownerTaskMemory.update(task, {state});
+        await turn('Has beta replied?', 'uncertain-' + state, {action, session_label: 'beta', task_id: task.id});
+        assert.doesNotMatch(spoken.at(-1), /not sent/);
+      }
+      assert.equal(attempts.length, 1);
+    });
+  }
+}

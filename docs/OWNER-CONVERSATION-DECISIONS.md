@@ -186,3 +186,9 @@ Two earlier diagnostic runs are preserved: a copied long receipt became invalid,
 and a send-then-read plan exposed a missing intra-plan dependency. The final
 implementation resolves latest receipts internally and binds reads within plans.
 This evidence does not replace signed deployment or physical handset acceptance.
+
+A single reply or delivery-status action resolves known unsent tasks from the same
+durable task state as a multi-action plan. It says the instruction was not sent
+and performs no native read or retry. Explicit task IDs must agree with supplied
+session/operation hints. Dispatching, accepted and uncertain delivery remain
+distinct from an unsent task.
