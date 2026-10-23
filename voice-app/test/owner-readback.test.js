@@ -91,3 +91,33 @@ test('brief then full plan and direct reads use the same source and never forwar
   assert.deepEqual(schema.reply_detail.enum, ['brief', 'full']);
   assert.deepEqual(schema.actions.items.properties.reply_detail.enum, ['brief', 'full']);
 });
+
+test('an explicit full reply when finished survives the pending read and is played once', async t => {
+  const operation = 'job_' + 'b'.repeat(64), spoken = [], calls = [];
+  let completed = false;
+  const client = new OpenAIRealtimeClient({apiKey: 'fixture', capabilities, instructions: 'Offline fixture.',
+    ownerSpeech: async ({text}) => {spoken.push(text); return {state: 'played'};},
+    toolHandler: async (name, args) => {
+      calls.push(name); assert.equal(name, 'get_owner_reply'); assert.equal(args.operation_id, operation);
+      return {success: true, result: {label: 'alpha', history: {latestTurn: {
+        status: completed ? 'completed' : 'inProgress', reply: completed ? {text: reply} : null}}}};
+    }});
+  t.after(() => client.close());
+  client.connected = true; client.ws = {readyState: 1, send() {}, close() {}};
+  const [task] = client.ownerTaskMemory.reserve([{action: 'request_owner_instruction', session_label: 'alpha'}], 'prior');
+  client.ownerTaskMemory.update(task, {state: 'accepted', operation_id: operation});
+  client.ownerInstructionReferences.push({session_label: 'alpha', operation_id: operation});
+  client.prepareCallerTurn('Read the full alpha reply when it finishes.');
+  await client._handleResponseDone({output: [{type: 'function_call', name: 'route_turn', call_id: 'full-later',
+    arguments: JSON.stringify({action: 'get_owner_reply', session_label: 'alpha', reply_detail: 'full',
+      notify_when_complete: true, proposed_message: null})}]});
+  await client.ownerSpeechCompletion;
+  assert.match(spoken.at(-1), /no reply/);
+  completed = true;
+  const watch = client.ownerReplyWatch.current;
+  await client.ownerReplyWatch.tick(watch);
+  assert.match(spoken.at(-1), /final detail is violet/);
+  assert.doesNotMatch(spoken.at(-1), /brief excerpt/);
+  assert.equal(client.ownerReplyWatch.has(operation), false);
+  assert.deepEqual(calls, ['get_owner_reply', 'get_owner_reply']);
+});

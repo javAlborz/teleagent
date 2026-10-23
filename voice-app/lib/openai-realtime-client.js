@@ -719,7 +719,7 @@ class OpenAIRealtimeClient extends EventEmitter {
         const snapshot = resultSnapshot({success: true, result});
         this.ownerTaskMemory.update(task, {reply_result: snapshot, work_state: snapshot.turn_status, speech_state: 'pending'});
         const started = this._requestOwnerStatusSpeech(renderPlan([{action: 'get_owner_reply',
-          session_label: task.session_label, state: 'read', result: snapshot}]));
+          session_label: task.session_label, reply_detail: task.reply_detail, state: 'read', result: snapshot}]));
         if (!started) return false;
         return Promise.resolve(this.ownerSpeechCompletion || started).then(outcome => {
           // Only the downstream player can report played. A legacy request
@@ -2295,6 +2295,11 @@ class OpenAIRealtimeClient extends EventEmitter {
     if (output?.success === true && args.notify_when_complete === true &&
         ['request_owner_instruction', 'get_owner_reply'].includes(toolName)) {
       const operation = toolName === 'request_owner_instruction' ? output.operation_id : args.operation_id;
+      if (toolName === 'get_owner_reply' && replyDetail === 'full') {
+        const original = this.ownerTaskMemory.value.tasks.find(t =>
+          t.action === 'request_owner_instruction' && t.operation_id === operation);
+        if (original) this.ownerTaskMemory.update(original, {reply_detail: 'full'});
+      }
       if (/^job_[a-f0-9]{64}$/.test(operation || '') &&
           output.result?.history?.latestTurn?.status !== 'completed') this.ownerReplyWatch.start(operation);
     }
