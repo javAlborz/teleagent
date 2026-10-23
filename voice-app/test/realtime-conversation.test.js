@@ -1469,6 +1469,11 @@ test('assistant transcript deduplication is item-scoped and tool/limit events ar
       status: 'completed', reply: { role: 'assistant', text: 'PRIVATE_NATIVE_REPLY' },
     } } } }, durationMs: 3,
   });
+  realtime.emit('tool.completed', {
+    call: {name: 'route_turn', call_id: 'owner-clarification-audit'},
+    args: {action: 'clarify_owner_request', session_label: 'phone A'},
+    output: {success: true, code: 'OWNER_CLARIFY', missing: 'message'}, durationMs: 1,
+  });
   realtime.emit('response.clipped', {
     itemId: 'item-limited',
     responseId: 'response-limited',
@@ -1507,6 +1512,12 @@ test('assistant transcript deduplication is item-scoped and tool/limit events ar
   assert.equal(refusal.metadata.success, false);
   assert.equal(refusal.profile, 'codex-auto');
   const ownerAudit = auditRows.find((event) => event.metadata?.tool_call_id === 'owner-audit');
+  const clarification = auditRows.find((event) => event.metadata?.tool_call_id === 'owner-clarification-audit');
+  assert.equal(clarification.metadata.route_action, 'clarify_owner_request');
+  assert.equal(clarification.metadata.clarification_missing, 'message');
+  assert.equal(clarification.metadata.requested_session_label, 'phone A');
+  assert.equal(ownerAudit.metadata.route_action, 'inspect_owner_session');
+  assert.equal(ownerAudit.metadata.requested_session_label, 'Telefest');
   assert.match(ownerAudit.scope_text, /session_label=Telefest/);
   assert.match(ownerAudit.scope_text, /id=os_invented/);
   assert.match(ownerAudit.scope_text, /history=true/);

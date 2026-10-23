@@ -42,6 +42,13 @@ function redactAuditText(value) {
 }
 
 function buildToolAudit({ call = {}, args = {}, output = {}, durationMs = 0 } = {}) {
+  let routeArgs = args;
+  if (call.name === 'route_turn' && typeof args.arguments_json === 'string') {
+    try { routeArgs = JSON.parse(args.arguments_json); } catch { routeArgs = {}; }
+  }
+  const routeActions = new Set(['respond', 'clarify_owner_request', 'propose_owner_message',
+    'execute_owner_plan', 'list_owner_sessions', 'inspect_owner_session', 'request_owner_instruction',
+    'get_owner_reply', 'get_owner_instruction', 'end_call']);
   const scope = [];
   for (const [key, value] of Object.entries(args || {})) {
     if (!AUDIT_SCOPE_KEYS.has(key) || value === undefined || value === null) continue;
@@ -69,6 +76,11 @@ function buildToolAudit({ call = {}, args = {}, output = {}, durationMs = 0 } = 
       duration_ms: Math.max(0, Number.parseInt(durationMs, 10) || 0),
       success: output?.success !== false && output?.accepted !== false,
       code: output?.code ? redactAuditText(output.code) : null,
+      route_action: routeActions.has(args.action) ? args.action : routeActions.has(call.name) ? call.name : null,
+      clarification_missing: ['target', 'message', 'request'].includes(output?.missing) ? output.missing : null,
+      requested_session_label: typeof routeArgs?.session_label === 'string' &&
+        /^[A-Za-z0-9][A-Za-z0-9 ._-]{0,79}$/.test(routeArgs.session_label)
+        ? redactAuditText(routeArgs.session_label) : null,
       status: output?.status || output?.job?.status || null,
       job_id: output?.job_id || output?.job?.job_id || null,
       end_call: Boolean(output?.end_call),
@@ -607,6 +619,10 @@ async function runRealtimeConversation(endpoint, dialog, callUuid, {
     };
     const capabilities = await refreshCapabilities();
     const ownerSessionContext = await toolController.ownerSessionContext();
+    stateStore.appendAuditEvent({voiceThreadId: thread.id, realtimeSessionId: realtimeState.id,
+      callerId, action: 'owner_session_inventory_loaded', riskLevel: 'read_only', metadata: {
+        available: ownerSessionContext.available === true, label_count: ownerSessionContext.labels.length,
+      }});
     // A handset may disconnect while the bounded controller probes are pending.
     // Do not open a provider connection for a call which already ended.
     if (!callActive) return {

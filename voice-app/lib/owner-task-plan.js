@@ -94,7 +94,7 @@ class OwnerTaskMemory {
     }
     for (const task of tasks) {
       const prior = this.get(task.reference_task_id);
-      if (prior && !attempted(prior) && labelKey(prior.session_label) === labelKey(task.session_label)) {
+      if (prior && !attempted(prior)) {
         Object.assign(prior, {state: 'superseded', replacement: task.id});
       }
     }
@@ -107,7 +107,8 @@ class OwnerTaskMemory {
     return {selected_sessions: this.value.selected_sessions, groups: this.value.groups,
       tasks: this.value.tasks.slice(-48).map(t => ({id: t.id, session_label: t.session_label,
         action: t.action, message: t.message, state: t.state,
-        result: t.reply_result || t.result, work_state: t.work_state || null, notify_when_complete: t.notify_when_complete === true}))};
+        result: t.reply_result || t.result, replacement: t.replacement || null,
+        work_state: t.work_state || null, notify_when_complete: t.notify_when_complete === true}))};
   }
 }
 
@@ -167,6 +168,7 @@ function validatePlan(plan, {transcript, labels, memory, draft, awaitingMessage}
       if (source === 'reference') {
         const ref = memory.get(item.task_id);
         if (!ref || ref.action !== 'request_owner_instruction' || !ref.message) fail('OWNER_PLAN_REFERENCE_INVALID');
+        if (ref.state === 'superseded') fail('OWNER_PLAN_REFERENCE_SUPERSEDED');
         if (attempted(ref) && labelKey(ref.session_label) === labelKey(action.session_label) &&
             item.repeat_delivery !== true) fail('OWNER_PLAN_ALREADY_ATTEMPTED');
         if (item.message !== undefined && item.message !== ref.message) fail('OWNER_PLAN_REFERENCE_CHANGED');
@@ -279,8 +281,14 @@ function renderPlan(tasks) {
     if (task.state === 'not_sent') return `${label}: that instruction was not sent, so there is no result for it.`;
     if (task.action === 'request_owner_instruction' || task.action === 'get_owner_instruction') {
       const state = result.delivery_state || task.state;
-      if (result.code === 'OWNER_SESSION_NOT_ENROLLED') return `${label}: session not found; instruction not sent.`;
+      if (result.code === 'OWNER_SESSION_NOT_ENROLLED') return `${label}: session not found; instruction not sent. Which session should receive that message?`;
       if (result.code === 'OWNER_SESSION_TARGET_AMBIGUOUS') return `${label}: name is ambiguous; instruction not sent.`;
+      if (!['accepted', 'dispatching', 'submitted_unconfirmed', 'outcome_unknown'].includes(state) &&
+          ['OWNER_SESSION_PROCESS_CHANGED', 'OWNER_SESSION_ENDPOINT_CHANGED', 'OWNER_SESSION_NOT_LOADED',
+            'OWNER_SESSION_NOT_INTERACTIVE', 'OWNER_SESSION_CONNECT_FAILED',
+            'OWNER_SESSION_INVENTORY_UNAVAILABLE'].includes(result.code)) {
+        return `${label}: session access is unavailable; instruction not sent. The message is saved for a fresh request.`;
+      }
       if (['OWNER_APPROVAL_BUSY', 'OWNER_BROKER_BUSY'].includes(result.code)) return `${label}: busy; instruction not sent.`;
       if (result.code === 'OWNER_PHONE_MESSAGE_INVALID') return `${label}: the message format was rejected; instruction not sent.`;
       return `${label}: ` + ({accepted: 'instruction accepted.',

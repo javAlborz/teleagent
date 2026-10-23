@@ -111,6 +111,36 @@ separate obligations; these results alone are not handset acceptance.
 
 ## Durable plans for multiple personal sessions
 
+### Missing names and target corrections
+
+The October 23 call named Charlie, which was not an enrolled agent, and then
+changed the target to phone A. Repeated generic target questions lost the useful
+distinction between an unknown name and a missing name. Separately, native
+discovery had retained a stale Codex worker identity after connecting to the
+daemon supervisor's control socket instead of its live WebSocket worker.
+
+Named requests now reach the live application lookup even when a name is absent
+from the startup hint. An unknown target is named in the response, the message
+stays unsent, and its exact text remains in the task journal. A subsequent target
+correction can reference that text with fresh caller authorization. Replaced
+unsent tasks are marked superseded, including when their destination changes;
+their old references cannot replay delivery. Status questions never authorize a
+send, and uncertain delivery remains uncertain rather than being reported unsent.
+
+The call audit records bounded clarification reasons and requested labels, plus
+whether startup inventory was available. It does not add message bodies or raw
+native diagnostics. Host discovery separately distinguishes the worker listener
+by its executable, arguments and owned socket inode. It preserves org-session
+exclusions when an existing frontend executable has been replaced on disk.
+
+Eleven real Responses decision scenarios passed on October 23, covering unknown
+names, unclear replies, target corrections, status questions, stale identity,
+explicit retry after recovery and goodbye. Production task persistence and
+duplicate fencing also have offline regression coverage. Native delivery was
+simulated inside an isolated network namespace; live delivery, approval,
+attestation and call counters were unchanged. These checks do not establish SIP,
+speech playback or handset acceptance.
+
 A routed caller turn can contain an ordered plan with separate tasks for each
 session. The app records the complete plan before dispatch, executes serially,
 and retains delivery and work status separately. The model uses session names
