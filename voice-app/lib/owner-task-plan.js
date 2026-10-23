@@ -319,4 +319,4 @@ function renderPlan(tasks) {
   return page.join(' ') + (remaining ? ` ${remaining} more task results are saved; ask for the remaining results.` : '');
 }
 
-module.exports = {OwnerTaskMemory, validatePlan, runPlan, renderPlan, resultSnapshot, makeOperationId, MAX_ACTIONS, ACTIONS};
+module.exports = {OwnerTaskMemory, validatePlan, runPlan, renderPlan, resultSnapshot, makeOperationId, attempted, MAX_ACTIONS, ACTIONS};

@@ -2,7 +2,7 @@
 
 const { labelKey, validLabel, verbatimMessageSpan, checkOwnerInstruction, ownerDialogueContext, OWNER_DIALOGUE_INSTRUCTIONS } = require('./owner-call-intent');
 const { OwnerReplyWatch } = require('./owner-reply-watch');
-const {OwnerTaskMemory, validatePlan, runPlan, renderPlan, resultSnapshot, makeOperationId, MAX_ACTIONS, ACTIONS} = require('./owner-task-plan');
+const {OwnerTaskMemory, validatePlan, runPlan, renderPlan, resultSnapshot, makeOperationId, attempted, MAX_ACTIONS, ACTIONS} = require('./owner-task-plan');
 const { OwnerDecisionRouter, OWNER_DECISION_MODEL } = require('./owner-decision-router');
 
 const { EventEmitter } = require('node:events');
@@ -2158,8 +2158,14 @@ class OpenAIRealtimeClient extends EventEmitter {
         args.operation_id ? r.operation_id === args.operation_id :
           labelKey(r.session_label) === labelKey(label) && r.operation_id === this.focusedOwnerOperation));
       if (!reference || (args.session_label && labelKey(reference.session_label) !== labelKey(args.session_label)) ||
-          (args.operation_id && reference.operation_id !== args.operation_id) ||
-          !this.ownerInstructionReferences.some(r => r.operation_id === reference.operation_id)) {
+          (args.operation_id && reference.operation_id !== args.operation_id)) {
+        output = {success: false, code: 'OWNER_REFERENCE_CLARIFICATION_REQUIRED'};
+      } else if (target?.action === 'request_owner_instruction' && !attempted(target)) {
+        // A known unsent task has no delivery reference. Answer from durable
+        // task state without reading unrelated history or creating an attempt.
+        output = {success: true, code: 'OWNER_CONVERSATION',
+          text: renderPlan([{...target, state: 'not_sent'}])};
+      } else if (!this.ownerInstructionReferences.some(r => r.operation_id === reference.operation_id)) {
         output = {success: false, code: 'OWNER_REFERENCE_CLARIFICATION_REQUIRED'};
       } else {
         args = {operation_id: reference.operation_id,
