@@ -1804,7 +1804,11 @@ class OpenAIRealtimeClient extends EventEmitter {
       }
       if (handledCalls.length === 1 && ['OWNER_TARGET_CLARIFICATION_REQUIRED', 'OWNER_SESSION_NOT_ENROLLED',
         'OWNER_SESSION_TARGET_AMBIGUOUS'].includes(outputs[0]?.code)) {
-        this._requestOwnerStatusSpeech('Which enrolled session do you mean? Please say its exact name.');
+        const label = handledCalls[0].sessionLabel;
+        this._requestOwnerStatusSpeech(outputs[0].code === 'OWNER_SESSION_NOT_ENROLLED' && label
+          ? `${label} is not enrolled. Which session do you want?`
+          : label ? `${label} does not identify one enrolled session. Please clarify its name.`
+            : 'Which enrolled session do you mean? Please say its exact name.');
         return;
       }
       if (handledCalls.length === 1 && outputs[0]?.code === 'OWNER_MESSAGE_CLARIFICATION_REQUIRED') {
@@ -2099,6 +2103,7 @@ class OpenAIRealtimeClient extends EventEmitter {
       } else if (action === 'clarify_owner_request' || action === 'propose_owner_message') {
         const local = parseRoutedArguments(args.arguments_json);
         toolName = action;
+        args = {...local, action}; // Preserve bounded target/reason fields for the audit.
         if (action === 'clarify_owner_request') {
           this._selectOwnerSession(local.session_label);
           if (local.missing === 'message') {
@@ -2306,7 +2311,8 @@ class OpenAIRealtimeClient extends EventEmitter {
       durationMs: Date.now() - startedAt,
       routed,
     });
-    return { output, routed, action: toolName };
+    return { output, routed, action: toolName,
+      sessionLabel: validLabel(args.session_label) ? args.session_label : null };
   }
 
   _flushNotice() {
