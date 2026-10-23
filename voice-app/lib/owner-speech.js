@@ -2,6 +2,7 @@
 
 const https = require('node:https');
 const crypto = require('node:crypto');
+const {performance} = require('node:perf_hooks');
 const {setTimeout: delay} = require('node:timers/promises');
 const {realtimeWebSocketOptions} = require('./voice-egress-transport');
 
@@ -68,10 +69,13 @@ function speechChunks(text) {
   const chunks = [];
   let rest = text.trim();
   while (rest) {
-    let end = Math.min(rest.length, 1800);
+    // Start long readbacks with a small segment. Synthesis currently returns a
+    // complete PCM buffer, so the first segment controls time to first audio.
+    const limit = chunks.length ? 1800 : 420;
+    let end = Math.min(rest.length, limit);
     if (end < rest.length) {
       const boundary = rest.lastIndexOf(' ', end);
-      if (boundary > 900) end = boundary;
+      if (boundary > limit / 2) end = boundary;
     }
     chunks.push(rest.slice(0, end)); rest = rest.slice(end).trimStart();
   }
@@ -122,20 +126,23 @@ function playPcm(audioSession, pcm, itemId, signal, wait = delay) {
 function createOwnerSpeech({client, audioSession, onState = () => {}, wait = delay}) {
   return async ({text, id, signal}) => {
     let state = 'rendering', playedChunks = 0;
-    const report = (next, code = null) => { state = next; onState({id, state, code, playedChunks}); };
+    const report = (next, code = null, timing = {}) => { state = next; onState({id, state, code, playedChunks, ...timing}); };
     try {
       for (const [index, chunk] of speechChunks(text).entries()) {
         report('rendering');
-        let pcm;
+        let pcm, synthesisAttempts = 0;
+        const started = performance.now();
         for (let attempt = 0; attempt < 2; attempt++) {
           signal.throwIfAborted();
+          synthesisAttempts++;
           try { pcm = await client.synthesize(chunk, {signal}); break; }
           catch (error) {
             // A retry is safe only before any audio from this chunk was queued.
             if (signal.aborted || attempt || !/TIMEOUT|REQUEST_FAILED|RESPONSE_FAILED|HTTP_5\d\d/.test(error.code || '')) throw error;
           }
         }
-        signal.throwIfAborted(); report('playing');
+        signal.throwIfAborted(); report('playing', null, {chunkIndex: index, synthesisAttempts,
+          synthesisMs: Math.round(performance.now() - started), audioMs: Math.round(pcm.length / 48)});
         await playPcm(audioSession, pcm, `tts_${id}_${index}`, signal, wait);
         playedChunks++;
       }

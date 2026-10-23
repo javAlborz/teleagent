@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('node:crypto');
+const {spokenReply, missingSessionSpeech} = require('./owner-readback');
 const {labelKey, validLabel, checkOwnerInstruction, ownerMessageLine} = require('./owner-call-intent');
 
 const ACTIONS = ['inspect_owner_session', 'request_owner_instruction', 'get_owner_reply', 'get_owner_instruction'];
@@ -120,6 +121,11 @@ function validatePlan(plan, {transcript, labels, memory, draft, awaitingMessage}
   const actions = plan.actions.map((item, index) => {
     if (!item || !ACTIONS.includes(item.action)) fail('OWNER_PLAN_ACTION_INVALID');
     const action = {action: item.action};
+    if (item.reply_detail !== undefined) {
+      if (!['inspect_owner_session', 'get_owner_reply'].includes(item.action) ||
+          !['brief', 'full'].includes(item.reply_detail)) fail('OWNER_PLAN_READBACK_INVALID');
+      action.reply_detail = item.reply_detail;
+    }
     if (['get_owner_reply', 'get_owner_instruction'].includes(item.action)) {
       const planned = !item.task_id && !item.operation_id && plannedSends.get(labelKey(item.session_label));
       if (planned) return {...action, session_label: planned.label, depends_on: planned.index,
@@ -127,7 +133,8 @@ function validatePlan(plan, {transcript, labels, memory, draft, awaitingMessage}
       const target = item.task_id ? memory.get(item.task_id)
         : item.operation_id ? memory.value.tasks.find(t => t.operation_id === item.operation_id)
           : validLabel(item.session_label) ? memory.latest(item.session_label) : null;
-      if (!target) fail('OWNER_PLAN_REFERENCE_INVALID');
+      if (!target || (item.session_label && labelKey(item.session_label) !== labelKey(target.session_label)) ||
+          (item.operation_id && item.operation_id !== target.operation_id)) fail('OWNER_PLAN_REFERENCE_INVALID');
       if (target.action === 'request_owner_instruction' && !attempted(target)) {
         return {...action, session_label: target.session_label, unsent_task_id: target.id};
       }
@@ -205,7 +212,8 @@ function resultSnapshot(output) {
   const reply = selected ? result.history?.selectedMessage : turn?.reply;
   return {success: output?.success === true, code: output?.code || null,
     delivery_state: result.state || null, activity: result.status || null,
-    turn_status: selected ? null : turn?.status || null, reply: reply?.text ? excerpt(reply.text, 2400) : null,
+    turn_status: selected ? null : turn?.status || null, reply: reply?.text ? excerpt(reply.text, 4000) : null,
+    reply_clipped: reply?.clipped === true || (reply?.text?.length || 0) > 4000,
     ...(selected ? {selection: copy(selected), selected_role: reply?.role || null} : {})};
 }
 
@@ -264,7 +272,7 @@ async function runPlan(tasks, {memory, execute, current, delay = ms => new Promi
 }
 
 function renderPlan(tasks) {
-  const perReplyWords = Math.max(2, Math.floor(150 / Math.max(tasks.length, 1)));
+  const perReplyWords = Math.max(2, Math.floor(60 / Math.max(tasks.length, 1)));
   const lines = tasks.map(task => {
     const label = task.session_label;
     const result = task.result || {};
@@ -281,7 +289,7 @@ function renderPlan(tasks) {
     if (task.state === 'not_sent') return `${label}: that instruction was not sent, so there is no result for it.`;
     if (task.action === 'request_owner_instruction' || task.action === 'get_owner_instruction') {
       const state = result.delivery_state || task.state;
-      if (result.code === 'OWNER_SESSION_NOT_ENROLLED') return `${label}: session not found; instruction not sent. Which session should receive that message?`;
+      if (result.code === 'OWNER_SESSION_NOT_ENROLLED') return missingSessionSpeech(label, true);
       if (result.code === 'OWNER_SESSION_TARGET_AMBIGUOUS') return `${label}: name is ambiguous; instruction not sent.`;
       if (!['accepted', 'dispatching', 'submitted_unconfirmed', 'outcome_unknown'].includes(state) &&
           ['OWNER_SESSION_PROCESS_CHANGED', 'OWNER_SESSION_ENDPOINT_CHANGED', 'OWNER_SESSION_NOT_LOADED',
@@ -296,18 +304,17 @@ function renderPlan(tasks) {
         outcome_unknown: 'delivery is uncertain; I will not resend it.', refused: 'instruction was not sent.',
         canceled: 'delivery canceled.', not_found: 'no delivery record found.'}[state] || 'delivery could not be confirmed.');
     }
+    if (result.code === 'OWNER_SESSION_NOT_ENROLLED') return missingSessionSpeech(label);
     if (!result.success) return `${label}: I could not retrieve that result.`;
     if (task.history === false) return `${label}: ` +
       (['active', 'busy', 'running', 'inProgress'].includes(result.activity) ? 'working.' : result.activity === 'idle' ? 'idle.' : 'activity unknown.');
     if (!result.reply) return `${label}: ` + (result.turn_status === 'inProgress' ? 'still working; no reply yet.'
       : ['failed', 'interrupted'].includes(result.turn_status) ? `${result.turn_status}; no reply available.` : 'no reply available for that turn.');
-    const words = result.reply.trim().split(/\s+/);
-    const text = words.slice(0, perReplyWords).join(' ');
+    const text = spokenReply(result.reply, {detail: task.reply_detail, words: perReplyWords, clipped: result.reply_clipped});
     const prefix = result.selection ? `selected historical ${result.selected_role || 'message'}: `
       : result.turn_status === 'inProgress' ? 'still working; latest saved reply: '
         : ['failed', 'interrupted', 'unknown'].includes(result.turn_status) ? `${result.turn_status}; latest saved reply: ` : 'reply: ';
-    return `${label}: ${prefix}${text}` +
-      (words.length > perReplyWords ? ' [excerpt; ask to hear more].' : '');
+    return `${label}: ${prefix}${text}`;
   }).filter(line => line !== null);
   const page = []; let words = 0;
   for (const line of lines) {
