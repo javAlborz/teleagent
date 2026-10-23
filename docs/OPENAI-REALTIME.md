@@ -16,6 +16,23 @@ are generated serially, bounded in memory, and paced into the existing audio
 fork. No generated audio files are retained. Realtime still handles listening,
 conversational answers and the farewell.
 
+Reply playback defaults to a short, explicitly labeled excerpt. Say “read the
+full reply” or “read more” to request the longer saved text from that same
+session; this reads without sending another instruction. Native history remains
+bounded, and any clipped result is identified. Formatting and linked URLs are
+omitted from speech, while quoted commands remain intact. The original fetched
+text stays available to the conversation. A small first synthesis segment lets
+long readbacks start before the rest is generated. Timing records separate
+synthesis attempts and duration from audio duration without retaining audio.
+
+If Alpha reports creating another agent session, a question about the new
+agent's reply must read that new session. Alpha's creation report does not prove
+that the new session is enrolled or supply its reply. The host discovers new
+sessions between calls because catalog publication briefly withdraws ingress
+and restarts the owner broker. A missing-session response explains this delay;
+hang up and allow discovery before trying again. Unsent messages remain unsent
+until the caller requests delivery again. Discovery never sends them itself.
+
 A reply notification remains pending through synthesis and playback. Only its
 matching downstream FreeSWITCH marker records `speech_state: played`; this is
 media-path evidence, not proof the handset user heard it. Interruption and

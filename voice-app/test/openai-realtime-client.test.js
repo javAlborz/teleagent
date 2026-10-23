@@ -1010,8 +1010,9 @@ test('unknown owner names can ask a clarification in the speech stage without an
   assert.equal(speech.tool_choice, 'none');
   assert.deepEqual(speech.input, []);
   assert.deepEqual(speech.tools, []);
-  assert.match(speech.instructions, /Telefest is not enrolled/);
-  assert.equal(client.nextVerifiedSpeech.text, 'Telefest is not enrolled. Which session do you want?');
+  assert.match(speech.instructions, /Telefest: session not found/);
+  assert.match(client.nextVerifiedSpeech.text, /Telefest: session not found.*discovered between calls/);
+  assert.match(client.nextVerifiedSpeech.text, /Which session do you want to read/);
 });
 
 test('named enrollment speech is verified and excludes earlier false refusals', async (t) => {

@@ -74,13 +74,18 @@ test('reply is pending until its exact downstream marker; unrelated markers cann
 });
 
 test('transient synthesis failure retries once before audio; playback failure cannot replay', async () => {
-  let calls = 0; const audioSession = media();
-  const speech = createOwnerSpeech({audioSession, client: {synthesize: async () => {
+  let calls = 0; const audioSession = media(); const timing = [];
+  const speech = createOwnerSpeech({audioSession, onState: event => timing.push(event), client: {synthesize: async () => {
     if (++calls === 1) throw Object.assign(new Error('timeout'), {code: 'OWNER_SPEECH_TIMEOUT'});
     return Buffer.alloc(960);
   }}});
   assert.equal((await speech({text: 'saved reply', id: 'two', signal: new AbortController().signal})).state, 'played');
   assert.equal(calls, 2); assert.equal(audioSession.sent.length, 1);
+  const playing = timing.find(event => event.state === 'playing');
+  assert.equal(playing.synthesisAttempts, 2);
+  assert.equal(playing.audioMs, 20);
+  assert.ok(playing.synthesisMs >= 0);
+  assert.equal(playing.text, undefined, 'timing diagnostics do not duplicate reply text');
   for (const options of [{send: false}, {mismatched: true}]) {
     calls = 0; const failed = createOwnerSpeech({audioSession: media(options), client: {synthesize: async () => {calls++; return Buffer.alloc(960);}}});
     assert.equal((await failed({text: 'reply', id: 'failed', signal: new AbortController().signal})).state, 'failed');
@@ -102,6 +107,7 @@ test('long text is chunked without rewriting commands and audio remains serial',
   const text = 'Run `echo one && echo two`. '.repeat(100);
   const chunks = speechChunks(text); assert.ok(chunks.length > 1);
   assert.ok(chunks.every(c => c.length <= 1800));
+  assert.ok(chunks[0].length <= 420, 'first audio does not wait for a full long segment');
   assert.equal(chunks.join(' ').replace(/\s+/g, ' ').trim(), text.trim());
   assert.throws(() => speechChunks('x'.repeat(48001)), /TEXT_LIMIT/);
   const spoken = []; const speech = createOwnerSpeech({audioSession: media(),

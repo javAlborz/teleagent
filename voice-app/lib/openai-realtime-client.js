@@ -2,6 +2,7 @@
 
 const { labelKey, validLabel, verbatimMessageSpan, checkOwnerInstruction, ownerDialogueContext, OWNER_DIALOGUE_INSTRUCTIONS } = require('./owner-call-intent');
 const { OwnerReplyWatch } = require('./owner-reply-watch');
+const {spokenReply, missingSessionSpeech} = require('./owner-readback');
 const {OwnerTaskMemory, validatePlan, runPlan, renderPlan, resultSnapshot, makeOperationId, attempted, MAX_ACTIONS, ACTIONS} = require('./owner-task-plan');
 const { OwnerDecisionRouter, OWNER_DECISION_MODEL } = require('./owner-decision-router');
 
@@ -456,6 +457,7 @@ function buildRealtimeRouterTool(profiles, capabilities = UNAVAILABLE) {
         operation_id: {type: 'string', description: 'For get_owner_reply or get_owner_instruction: exact reference from application state, never invented.'},
         task_id: {type: 'string', description: 'For reply/delivery reads of a particular earlier task: exact task_state ID. Otherwise use session_label for its latest instruction.'},
         history: {type: 'boolean', description: 'True for session reply/history reads.'},
+        reply_detail: {type: 'string', enum: ['brief', 'full'], description: 'Reply presentation only. Default brief. Use full only when the caller requests more, the full reply, or exact details.'},
         selection: {type: 'object', properties: {anchor: {enum: ['start', 'end']}, index: {type: 'integer', minimum: 1, maximum: 6}, role: {enum: ['any', 'user', 'assistant']}}, required: ['anchor', 'index', 'role'], additionalProperties: false},
         missing: {type: 'string', enum: ['target', 'message', 'request'], description: 'For clarify_owner_request only.'},
         response_text: {type: 'string', maxLength: 1200, description: 'For respond: the exact concise spoken answer, grounded in application state. No claims of a new action.'},
@@ -466,7 +468,7 @@ function buildRealtimeRouterTool(profiles, capabilities = UNAVAILABLE) {
     };
     const fields = tool.parameters.properties;
     const child = Object.fromEntries(['action', 'session_label', 'message', 'message_source', 'draft_id',
-      'notify_when_complete', 'history', 'selection'].map(key => [key, structuredClone(fields[key])]));
+      'notify_when_complete', 'history', 'selection', 'reply_detail'].map(key => [key, structuredClone(fields[key])]));
     child.action.enum = ACTIONS.filter(name => actions.includes(name));
     child.message_source.enum = ['caller', 'draft', 'reference', 'delegation'];
     child.authorization_text = {type: 'string', maxLength: 2800, description: 'Exact current caller excerpt authorizing reference/delegated delivery; never fetched text.'};
@@ -717,7 +719,7 @@ class OpenAIRealtimeClient extends EventEmitter {
         const snapshot = resultSnapshot({success: true, result});
         this.ownerTaskMemory.update(task, {reply_result: snapshot, work_state: snapshot.turn_status, speech_state: 'pending'});
         const started = this._requestOwnerStatusSpeech(renderPlan([{action: 'get_owner_reply',
-          session_label: task.session_label, state: 'read', result: snapshot}]));
+          session_label: task.session_label, reply_detail: task.reply_detail, state: 'read', result: snapshot}]));
         if (!started) return false;
         return Promise.resolve(this.ownerSpeechCompletion || started).then(outcome => {
           // Only the downstream player can report played. A legacy request
@@ -1177,7 +1179,7 @@ class OpenAIRealtimeClient extends EventEmitter {
     this.ownerHistorySelection = selected || null;
   }
 
-  _requestNativeReadback(result, announceSession = false) {
+  _requestNativeReadback(result, announceSession = false, detail = 'brief') {
     this._rememberNativeReadback(result);
     const selected = result.history.selection;
     const message = selected ? result.history.selectedMessage : result.history.latestTurn?.reply;
@@ -1187,8 +1189,8 @@ class OpenAIRealtimeClient extends EventEmitter {
       const prefix = selected ? `${label}, earlier ${message.role === 'user' ? 'user message' : 'reply'}: `
         : ['inProgress', 'active', 'running', 'busy'].includes(status) ? `${label} is still working. Its latest saved reply says: `
           : ['failed', 'interrupted', 'unknown'].includes(status) ? `${label}, turn ${status}. Its saved reply says: ` : `${label}: `;
-      return this._requestOwnerStatusSpeech(prefix + message.text.slice(0, 4000) +
-        (message.clipped || message.text.length > 4000 ? ' That is a partial excerpt.' : ''));
+      return this._requestOwnerStatusSpeech(prefix + spokenReply(message.text.slice(0, 4000),
+        {detail, clipped: message.clipped || message.text.length > 4000}));
     }
     // A successful native read already supplied the answer. Worker limitations,
     // old spoken refusals and routing instructions cannot reinterpret that read.
@@ -1806,7 +1808,7 @@ class OpenAIRealtimeClient extends EventEmitter {
         'OWNER_SESSION_TARGET_AMBIGUOUS'].includes(outputs[0]?.code)) {
         const label = handledCalls[0].sessionLabel;
         this._requestOwnerStatusSpeech(outputs[0].code === 'OWNER_SESSION_NOT_ENROLLED' && label
-          ? `${label} is not enrolled. Which session do you want?`
+          ? missingSessionSpeech(label, handledCalls[0].action === 'request_owner_instruction')
           : label ? `${label} does not identify one enrolled session. Please clarify its name.`
             : 'Which enrolled session do you mean? Please say its exact name.');
         return;
@@ -1850,7 +1852,7 @@ class OpenAIRealtimeClient extends EventEmitter {
       }
       if (handledCalls.length === 1 && ['inspect_owner_session', 'get_owner_reply'].includes(handledCalls[0].action) &&
           outputs[0]?.success === true && (outputs[0]?.result?.history?.latestTurn || outputs[0]?.result?.history?.selection)) {
-        this._requestNativeReadback(outputs[0].result);
+        this._requestNativeReadback(outputs[0].result, false, handledCalls[0].replyDetail);
         return;
       }
       if (handledCalls.length === 1 && handledCalls[0].action === 'inspect_owner_session' &&
@@ -1992,7 +1994,7 @@ class OpenAIRealtimeClient extends EventEmitter {
           }
           const args = {action: action.action, session_label: action.session_label,
             message: action.message, message_source: 'caller', operation_id: action.operation_id,
-            history: action.history, selection: action.selection,
+            history: action.history, selection: action.selection, reply_detail: action.reply_detail,
             notify_when_complete: action.notify_when_complete === true};
           const result = await this._handleToolCall({name: 'route_turn', call_id: action.id,
             arguments: JSON.stringify(args)}, {sendOutput: false, ownerPlanAction: action});
@@ -2035,6 +2037,7 @@ class OpenAIRealtimeClient extends EventEmitter {
     let legacyTask;
     let actionInvoked = false;
     const typedOwnerRoute = toolName === 'route_turn' && isOwnerSessionConversation(this.capabilities);
+    const replyDetail = args.reply_detail === 'full' ? 'full' : 'brief';
     if (typedOwnerRoute && args.action === 'execute_owner_plan') {
       const handled = await this._handleOwnerPlan(args, callId, callerTranscript);
       this.emit('tool.completed', {call: {...call, name: 'execute_owner_plan'}, args: {},
@@ -2054,8 +2057,8 @@ class OpenAIRealtimeClient extends EventEmitter {
         respond: ['response_text', 'proposed_message'], clarify_owner_request: ['missing', 'session_label'],
         propose_owner_message: ['session_label', 'message'],
         request_owner_instruction: ['session_label', 'message', 'notify_when_complete'],
-        inspect_owner_session: ['session_label', 'history', 'selection'],
-        get_owner_reply: ['operation_id', 'session_label', 'task_id', 'notify_when_complete'],
+        inspect_owner_session: ['session_label', 'history', 'selection', 'reply_detail'],
+        get_owner_reply: ['operation_id', 'session_label', 'task_id', 'notify_when_complete', 'reply_detail'],
         get_owner_instruction: ['operation_id', 'session_label', 'task_id'], list_owner_sessions: ['session_label'], end_call: [],
       }[action] || [];
       const selected = Object.fromEntries(fields.filter(key => Object.hasOwn(parameters, key)).map(key => [key, parameters[key]]));
@@ -2199,6 +2202,7 @@ class OpenAIRealtimeClient extends EventEmitter {
       }
     }
 
+    delete args.reply_detail;
     if (output) {
       // The route was handled above without invoking an application action.
     } else if (args._parse_error) {
@@ -2291,6 +2295,11 @@ class OpenAIRealtimeClient extends EventEmitter {
     if (output?.success === true && args.notify_when_complete === true &&
         ['request_owner_instruction', 'get_owner_reply'].includes(toolName)) {
       const operation = toolName === 'request_owner_instruction' ? output.operation_id : args.operation_id;
+      if (toolName === 'get_owner_reply' && replyDetail === 'full') {
+        const original = this.ownerTaskMemory.value.tasks.find(t =>
+          t.action === 'request_owner_instruction' && t.operation_id === operation);
+        if (original) this.ownerTaskMemory.update(original, {reply_detail: 'full'});
+      }
       if (/^job_[a-f0-9]{64}$/.test(operation || '') &&
           output.result?.history?.latestTurn?.status !== 'completed') this.ownerReplyWatch.start(operation);
     }
@@ -2318,7 +2327,7 @@ class OpenAIRealtimeClient extends EventEmitter {
       routed,
     });
     return { output, routed, action: toolName,
-      sessionLabel: validLabel(args.session_label) ? args.session_label : null };
+      sessionLabel: validLabel(args.session_label) ? args.session_label : null, replyDetail };
   }
 
   _flushNotice() {
