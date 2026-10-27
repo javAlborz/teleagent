@@ -1,14 +1,38 @@
 'use strict';
 
+// Presentation names only. Unknown emoji are disclosed, never guessed or
+// silently omitted. Native reply bytes and quoted commands remain untouched.
+const symbolNames = new Map(Object.entries({
+  '🍌': 'banana emoji', '👍': 'thumbs-up emoji', '👎': 'thumbs-down emoji',
+  '🔴': 'red circle emoji', '🟠': 'orange circle emoji', '🟡': 'yellow circle emoji',
+  '🟢': 'green circle emoji', '🔵': 'blue circle emoji', '🟣': 'purple circle emoji',
+  '⚫': 'black circle emoji', '⚪': 'white circle emoji', '✅': 'check mark emoji',
+  '❌': 'cross mark emoji', '❤️': 'red heart emoji', '❤': 'heart symbol',
+  '🙂': 'slightly smiling face emoji', '😀': 'grinning face emoji', '😂': 'face with tears of joy emoji',
+  '🎉': 'party popper emoji', '🚀': 'rocket emoji', '🔥': 'fire emoji',
+  '✓': 'check mark symbol', '✔': 'check mark symbol',
+}));
+const graphemes = new Intl.Segmenter('en', {granularity: 'grapheme'});
+function spokenSymbols(text) {
+  return [...graphemes.segment(text)].map(({segment}) => {
+    const name = symbolNames.get(segment);
+    if (name) return ` ${name} `;
+    if (/[\p{Extended_Pictographic}\p{Regional_Indicator}]/u.test(segment) || /[0-9#*]\uFE0F?\u20E3/u.test(segment)) {
+      return ' an emoji whose exact symbol is in the saved reply ';
+    }
+    return segment;
+  }).join('').replace(/\s+/g, ' ').trim();
+}
+
 // Presentation only: keep the original reply in application state. Commands are
 // indivisible preview units, so a shortened read never speaks half a command.
 function replyUnits(text) {
   return String(text || '').split(/(```[^\n]*\n[\s\S]*?```|`[^`\n]+`)/g).flatMap((part, index) => {
     if (index % 2) return [part.startsWith('```')
       ? part.replace(/^```[^\n]*\n/, '').replace(/```$/, '').trim() : part.slice(1, -1)];
-    return part.replace(/\[([^\]\n]+)\]\(https?:\/\/[^\s)]+\)/g, '$1')
+    return spokenSymbols(part.replace(/\[([^\]\n]+)\]\(https?:\/\/[^\s)]+\)/g, '$1')
       .replace(/^\s{0,3}#{1,6}\s+/gm, '').replace(/\*\*([^*]+)\*\*/g, '$1')
-      .trim().split(/\s+/).filter(Boolean);
+      .trim()).split(/\s+/).filter(Boolean);
   }).filter(Boolean);
 }
 

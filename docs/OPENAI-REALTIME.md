@@ -25,6 +25,18 @@ text stays available to the conversation. A small first synthesis segment lets
 long readbacks start before the rest is generated. Timing records separate
 synthesis attempts and duration from audio duration without retaining audio.
 
+Repeating a history read uses its exact saved task snapshot; it does not require
+an instruction-delivery receipt or silently substitute another session's result.
+A new latest-history request still reads the named session. Once an instruction
+has been sent, its reply remains bound to that operation, including uncertain
+delivery and unfinished work.
+
+The shared reply formatter names common emoji in speech, including banana and
+colored-circle replies. Unknown emoji are identified as symbols available in the
+saved text, without guessing their meaning. Original native text and quoted
+commands are preserved. Server playback records do not establish what the owner
+heard on the handset.
+
 If Alpha reports creating another agent session, a question about the new
 agent's reply must read that new session. Alpha's creation report does not prove
 that the new session is enrolled or supply its reply. The host discovers new
@@ -52,6 +64,16 @@ Repeated identical literal message text in one caller turn is accepted when it
 has identical bytes at every occurrence. This handles “those three sessions …
 one, two and three respectively” without choosing between differently cased,
 punctuated or transformed spans. Every plan is validated before its first send.
+
+A multi-session plan accounts for continued caller fragments as well as its
+first sentence. When a supplied target/message has ambiguous sending intent,
+the plan can retain that exact caller text with `defer: true` and ask whether to
+send it. This creates no native delivery. The retained task survives application
+state reload and cannot be collected as a completed task. A clear subsequent
+request such as “send it then” references that unsent task with fresh caller
+authorization. Status questions never send it, and prior accepted or uncertain
+instructions cannot be silently repeated. Clear new send requests keep the
+existing native-session policy without an extra confirmation.
 
 ## Extensions and profiles
 
