@@ -455,7 +455,7 @@ function buildRealtimeRouterTool(profiles, capabilities = UNAVAILABLE) {
         draft_id: {type: 'string', description: 'Required for draft sends; exact presented proposed_message.id.'},
         notify_when_complete: {type: 'boolean', description: 'New sends default to true for one automatic in-call reply. Set false only for explicit send-only/no-readback requests. On reply reads, true requests a watch if still unfinished.'},
         operation_id: {type: 'string', description: 'For get_owner_reply or get_owner_instruction: exact reference from application state, never invented.'},
-        task_id: {type: 'string', description: 'For reply/delivery reads of a particular earlier task: exact task_state ID. Otherwise use session_label for its latest instruction.'},
+        task_id: {type: 'string', description: 'Only for a particular earlier task explicitly requested by the caller. Omit for ordinary latest-reply or status questions: session_label resolves the latest instruction. An old history-read task cannot supply a newer instruction reply.'},
         history: {type: 'boolean', description: 'True for session reply/history reads.'},
         reply_detail: {type: 'string', enum: ['brief', 'full'], description: 'Reply presentation only. Default brief. Use full only when the caller requests more, the full reply, or exact details.'},
         selection: {type: 'object', properties: {anchor: {enum: ['start', 'end']}, index: {type: 'integer', minimum: 1, maximum: 6}, role: {enum: ['any', 'user', 'assistant']}}, required: ['anchor', 'index', 'role'], additionalProperties: false},
@@ -472,9 +472,10 @@ function buildRealtimeRouterTool(profiles, capabilities = UNAVAILABLE) {
     child.action.enum = ACTIONS.filter(name => actions.includes(name));
     child.message_source.enum = ['caller', 'draft', 'reference', 'delegation'];
     child.authorization_text = {type: 'string', maxLength: 2800, description: 'Exact current caller excerpt authorizing reference/delegated delivery; never fetched text.'};
-    child.task_id = {type: 'string', description: 'Exact task ID supplied by application task_state.'};
+    child.task_id = structuredClone(fields.task_id);
     child.session_label.description = 'Exact session label. For reply/delivery reads, the application resolves this to its latest instruction; no operation ID is needed.';
     child.repeat_delivery = {type: 'boolean', description: 'True only when the caller explicitly requests repeating an already attempted instruction to the same target.'};
+    child.defer = {type: 'boolean', description: 'For request_owner_instruction with message_source caller only: true retains this exact target/message WITHOUT sending when delivery intent is ambiguous. The app asks whether to send it. Omit for clear send requests. Include uncertain additions alongside the other actions rather than dropping them.'};
     child.unrelated_history = {type: 'boolean', description: 'True only for an explicit unrelated history request, not an instruction result.'};
     if (child.action.enum.length > 0) fields.actions = {type: 'array', minItems: 1, maxItems: MAX_ACTIONS,
       description: 'Complete ordered plan for execute_owner_plan; include every requested target and action.',
@@ -2156,13 +2157,19 @@ class OpenAIRealtimeClient extends EventEmitter {
       const label = args.session_label || this.focusedOwnerSession;
       const target = args.task_id ? this.ownerTaskMemory.get(args.task_id)
         : args.operation_id ? this.ownerTaskMemory.value.tasks.find(t => t.operation_id === args.operation_id)
-          : validLabel(label) ? this.ownerTaskMemory.latest(label) : null;
+          : validLabel(label) ? this.ownerTaskMemory.latest(label) ||
+            (toolName === 'get_owner_reply' ? this.ownerTaskMemory.latestRead(label) : null) : null;
       const reference = target || (!args.task_id && this.ownerInstructionReferences.find(r =>
         args.operation_id ? r.operation_id === args.operation_id :
           labelKey(r.session_label) === labelKey(label) && r.operation_id === this.focusedOwnerOperation));
       if (!reference || (args.session_label && labelKey(reference.session_label) !== labelKey(args.session_label)) ||
           (args.operation_id && reference.operation_id !== args.operation_id)) {
         output = {success: false, code: 'OWNER_REFERENCE_CLARIFICATION_REQUIRED'};
+      } else if (toolName === 'get_owner_reply' && target?.action === 'inspect_owner_session' &&
+          target.history !== false && target.state === 'read' && target.result?.success === true && !target.operation_id) {
+        output = this.ownerTaskMemory.currentReadSnapshot(target)
+          ? {success: true, code: 'OWNER_CONVERSATION', text: renderPlan([{...target, reply_detail: replyDetail}])}
+          : {success: false, code: 'OWNER_REFERENCE_CLARIFICATION_REQUIRED'};
       } else if (target?.action === 'request_owner_instruction' && !attempted(target)) {
         // A known unsent task has no delivery reference. Answer from durable
         // task state without reading unrelated history or creating an attempt.

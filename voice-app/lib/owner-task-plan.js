@@ -67,11 +67,22 @@ class OwnerTaskMemory {
     return [...this.value.tasks].reverse().find(t => t.action === 'request_owner_instruction' &&
       labelKey(t.session_label) === labelKey(label));
   }
+  latestRead(label) {
+    return [...this.value.tasks].reverse().find(t => t.action === 'inspect_owner_session' &&
+      t.history !== false && t.state === 'read' && t.result?.success === true &&
+      !t.operation_id && labelKey(t.session_label) === labelKey(label));
+  }
+  currentReadSnapshot(task) {
+    const newer = this.latest(task.session_label);
+    return task.action === 'inspect_owner_session' && task.history !== false && task.state === 'read' &&
+      task.result?.success === true && !task.operation_id &&
+      (!newer || this.value.tasks.indexOf(newer) < this.value.tasks.indexOf(task));
+  }
   reserve(actions, turnKey, singleActionId = null) {
     const prior = this.value.tasks.filter(t => t.turn_key === turnKey);
     if (prior.length) return prior;
     // Retain unfinished records; evict the oldest finished/read snapshots first.
-    const protectedState = new Set(['pending', 'dispatching', 'outcome_unknown', 'submitted_unconfirmed']);
+    const protectedState = new Set(['pending', 'clarification_required', 'dispatching', 'outcome_unknown', 'submitted_unconfirmed']);
     while (this.value.tasks.length + actions.length > 96) {
       const index = this.value.tasks.findIndex(t => !protectedState.has(t.state) &&
         (t.state !== 'accepted' || ['completed', 'failed', 'interrupted'].includes(t.work_state)));
@@ -106,6 +117,11 @@ class OwnerTaskMemory {
   update(task, patch) { Object.assign(task, patch); this.commit(); }
   context() {
     return {selected_sessions: this.value.selected_sessions, groups: this.value.groups,
+      latest_instruction_tasks: [...new Set(this.value.tasks.filter(t => t.action === 'request_owner_instruction')
+        .map(t => labelKey(t.session_label)))].map(label => {
+        const task = this.latest(label);
+        return {session_label: task.session_label, task_id: task.id, state: task.state};
+      }),
       tasks: this.value.tasks.slice(-48).map(t => ({id: t.id, session_label: t.session_label,
         action: t.action, message: t.message, state: t.state,
         result: t.reply_result || t.result, replacement: t.replacement || null,
@@ -121,6 +137,10 @@ function validatePlan(plan, {transcript, labels, memory, draft, awaitingMessage}
   const actions = plan.actions.map((item, index) => {
     if (!item || !ACTIONS.includes(item.action)) fail('OWNER_PLAN_ACTION_INVALID');
     const action = {action: item.action};
+    if (item.defer !== undefined && (typeof item.defer !== 'boolean' ||
+        item.action !== 'request_owner_instruction' || item.message_source !== 'caller')) {
+      fail('OWNER_PLAN_DEFER_INVALID');
+    }
     if (item.reply_detail !== undefined) {
       if (!['inspect_owner_session', 'get_owner_reply'].includes(item.action) ||
           !['brief', 'full'].includes(item.reply_detail)) fail('OWNER_PLAN_READBACK_INVALID');
@@ -132,9 +152,16 @@ function validatePlan(plan, {transcript, labels, memory, draft, awaitingMessage}
         notify_when_complete: item.notify_when_complete === true};
       const target = item.task_id ? memory.get(item.task_id)
         : item.operation_id ? memory.value.tasks.find(t => t.operation_id === item.operation_id)
-          : validLabel(item.session_label) ? memory.latest(item.session_label) : null;
+          : validLabel(item.session_label) ? memory.latest(item.session_label) ||
+            (item.action === 'get_owner_reply' ? memory.latestRead(item.session_label) : null) : null;
       if (!target || (item.session_label && labelKey(item.session_label) !== labelKey(target.session_label)) ||
           (item.operation_id && item.operation_id !== target.operation_id)) fail('OWNER_PLAN_REFERENCE_INVALID');
+      if (item.action === 'get_owner_reply' && target.action === 'inspect_owner_session' &&
+          target.history !== false && target.state === 'read' && target.result?.success === true && !target.operation_id) {
+        if (!memory.currentReadSnapshot(target)) fail('OWNER_PLAN_REFERENCE_SUPERSEDED');
+        return {...action, action: 'inspect_owner_session', session_label: target.session_label,
+          history: true, snapshot_task_id: target.id};
+      }
       if (target.action === 'request_owner_instruction' && !attempted(target)) {
         return {...action, session_label: target.session_label, unsent_task_id: target.id};
       }
@@ -188,6 +215,7 @@ function validatePlan(plan, {transcript, labels, memory, draft, awaitingMessage}
     Object.assign(action, {message, message_source: source,
       reference_task_id: source === 'reference' ? item.task_id : null,
       authorization_text: item.authorization_text || null, notify_when_complete: item.notify_when_complete !== false});
+    if (item.defer === true) action.defer = true;
     plannedSends.set(labelKey(action.session_label), {label: action.session_label, index});
     return action;
   });
@@ -223,6 +251,18 @@ async function runPlan(tasks, {memory, execute, current, delay = ms => new Promi
   for (const task of tasks) {
     if (!current()) break;
     if (task.state !== 'pending') continue;
+    if (task.defer) {
+      memory.update(task, {state: 'clarification_required'});
+      continue;
+    }
+    if (task.snapshot_task_id) {
+      const snapshot = memory.get(task.snapshot_task_id);
+      if (!snapshot || !memory.currentReadSnapshot(snapshot) ||
+          labelKey(snapshot.session_label) !== labelKey(task.session_label)) {
+        memory.update(task, {state: 'failed', result: {success: false, code: 'OWNER_PLAN_REFERENCE_INVALID'}});
+      } else memory.update(task, {state: 'read', result: copy(snapshot.result)});
+      continue;
+    }
     const source = task.source_task_id && memory.get(task.source_task_id);
     if (task.unsent_task_id || (source && !attempted(source))) {
       memory.update(task, {state: 'not_sent', result: {success: false, code: 'OWNER_INSTRUCTION_NOT_SENT'}});
@@ -285,6 +325,9 @@ function renderPlan(tasks) {
         (task.operation_id && task.operation_id === send.operation_id)));
     if (justSent && result.success && !result.reply &&
         !['failed', 'interrupted'].includes(result.turn_status)) return null;
+    if (task.state === 'clarification_required') {
+      return `${label}: I have not sent ${JSON.stringify(task.message)}. Did you want me to send it?`;
+    }
     if (task.state === 'pending') return `${label}: not sent or checked yet; that part is still pending.`;
     if (task.state === 'not_sent') return `${label}: that instruction was not sent, so there is no result for it.`;
     if (task.action === 'request_owner_instruction' || task.action === 'get_owner_instruction') {
