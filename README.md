@@ -4,6 +4,10 @@ Voice interface for Claude Code and OpenAI Codex over SIP.
 
 Teleagent is the maintained continuation of the old Claude Phone project for the Hermes phone stack. The CLI command remains `claude-phone` for compatibility.
 
+For an existing Hermes installation, start with [Maintaining Teleagent](docs/MAINTAINING.md)
+and the current host operations runbook. The standalone quick start below is
+not the signed Hermes upgrade or recovery procedure.
+
 ## What It Does
 
 - Inbound calls: call an extension and talk to Claude or Codex

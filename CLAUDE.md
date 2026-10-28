@@ -26,41 +26,32 @@ unit-tested approval path. It is not the active policy for enrolled personal
 session forwarding in this release. Never forge handset evidence to implement
 the native policy; its controller-only forwarding route records no approval.
 
+## Maintainer starting point
+
+Read [Maintaining Teleagent](docs/MAINTAINING.md) for the repository boundaries,
+call-path map, test selection, release sequence and handoff requirements. Source
+merges, signed candidates, installed readiness and handset acceptance are
+separate facts. Obtain live state from the installed operator and current host
+runbooks; this guide is not an installation or recovery script.
+
 ## Product shape
 
-- Extensions `1`–`6` directly select Claude Haiku/Sonnet/Opus or Codex
-  Luna/Terra/Sol profiles. These legacy calls use the configured STT and TTS
-  services.
-- Extensions `7` and `77` use OpenAI Realtime for a full-duplex conductor.
-  They do not depend on the Zeus TTS/STT services. `7` starts a thread and `77`
-  resumes its durable phone state.
-- The Realtime conductor orchestrates the six Claude/Codex profiles; it is not
-  itself a shell or a privileged agent.
-- The first Codex-only pilot uses extensions `4`, `5`, `6`, `7`, `44`, `55`,
-  `66`, and `77`.
-  Keep Claude extensions `1`–`3` and `11`–`33` unrouted until their workspace,
-  credential, and full two-provider activation checks are accepted. In that
-  pilot, the Realtime conductor lists only Codex profiles.
-- Outbound calls durably notify the caller about results and alerts.
-- The native OpenAI SIP gateway is a separate, dormant canary until its public
-  ingress, PBX authentication, provider configuration, and activation gates
-  have been reviewed explicitly.
-
-Hermes' model map is:
-
-| Fresh | Resume | Profile | Production phone boundary |
-| --- | --- | --- | --- |
-| `1` | `11` | Claude Haiku | read-only, fastest tier |
-| `2` | `22` | Claude Sonnet | read-only, stronger tier |
-| `3` | `33` | Claude Opus | read-only, strongest tier |
-| `4` | `44` | Codex GPT-5.6 Luna | read-only, low reasoning |
-| `5` | `55` | Codex GPT-5.6 Terra | read-only, medium reasoning |
-| `6` | `66` | Codex GPT-5.6 Sol | read-only, high reasoning |
-| `7` | `77` | OpenAI Realtime conductor | read-only typed tools |
-
-Model tier changes reasoning quality, not authority. Every production phone job
-is forced read-only. Mutating, target-session, deployment, and root work are
-unavailable until the independently attested authority described below exists.
+- Extensions `7` and `77` use OpenAI Realtime for a full-duplex conductor. `7`
+  starts a phone thread; `77` resumes durable phone state. They do not depend on
+  the legacy STT/TTS path.
+- The conductor can inspect enrolled personal Codex/Claude sessions and forward
+  an authenticated caller's instruction using the native-session policy above.
+  Enrollment and exact native identity are checked by the private broker.
+- Managed provider jobs are a separate, read-only execution lane. Managed
+  Claude/provider extensions must remain inactive until their matching host
+  activation gates are accepted. Reading or forwarding to an enrolled personal
+  Claude session does not activate a managed Claude worker.
+- Runtime model names, profiles and routed extensions come from the reviewed
+  configuration and selected release. Changing a model does not expand authority.
+- The native public OpenAI SIP gateway remains a separate dormant canary until
+  its ingress, PBX authentication and activation gates are explicitly reviewed.
+- Outbound notification support in the source is not proof that its host lane
+  is activated or that a callback reached a handset.
 
 ## Architecture and trust boundaries
 
@@ -83,6 +74,9 @@ Asterisk private PBX
                        +--> private worker-session Unix-socket proxy
                        |       +--> worker-owned tmux sessions only
                        |
+                       +--> exact enrolled owner-session broker
+                       |       +--> existing personal Codex/Claude sessions
+                       |
                        + - - retired privileged-action proxy boundary
 
 exact-rule root broker (separate, dormant, and inaccessible to the controller)
@@ -93,15 +87,18 @@ The important split is capability-based:
 - `voice-app` owns SIP/media, the Realtime API key, and durable phone state. It
   has no approval signing key, privileged-action bearer, sudo access,
   root-broker socket, general `/ask` bearer, or provider credentials.
-- `claude-api-server` is the private controller. It owns durable executor state
-  but production service hardening removes phone approval verifier trust and
-  privileged-proxy access. It is not public ingress.
+- `claude-api-server` is the private controller. It owns durable managed executor
+  state and scoped owner-session routing. Retired privileged-proxy access remains
+  unavailable. It is not public ingress.
 - `teleagent-worker` owns the bounded Claude/Codex workspace and provider
   processes. The controller reaches it only through the fixed root-owned
   launcher. Agent prompts go over stdin, never process argv.
 - The worker-session broker runs as `teleagent-worker`, sees only its dedicated
   tmux socket and approved workspace roots, and receives no controller or root
   credential.
+- The owner-session broker resolves enrolled native identities, preserves native
+  permissions, and records delivery/completion separately. It must not use
+  worker enrollment or broad tmux access as a substitute for that exact binding.
 - The privileged-action broker runs separately as root, accepts only a private
   Unix socket, verifies signed canonical plans, and executes exact reviewed argv
   without a shell. Conversational agents never receive sudo or this socket.
@@ -154,11 +151,12 @@ requires `AGENT_API_TRANSPORT=systemd-unix`. Docker
 Compose explicitly blanks the general and legacy Claude bearer inside
 `voice-app`.
 
-Phone mutation, target-session delivery, and privileged work are production
-disabled. Voice always constructs `AgentJobBroker` without a capability issuer
-or privileged bridge, so these requests fail before an approval can authorize
-execution. The retained capability primitives describe the future two-phase
-protocol, not a production activation path:
+The managed `AgentJobBroker` path has no capability issuer or privileged bridge;
+managed mutation and retired privileged execution stay unavailable. Enrolled
+personal-session forwarding uses its separate native-session policy and broker.
+Do not add a keypad prompt to that route based on the historical protocol below.
+The retained attested capability primitives describe the historical/future
+approval path, not authorization to activate a service:
 
 1. Store the exact normalized request and canonical execution plan.
 2. Have an independently isolated PBX attester, not `voice-app`, play the exact
@@ -177,19 +175,17 @@ protocol, not a production activation path:
    the durable work item. Raw capabilities and reusable credentials are never
    persisted.
 
-Dormant `telereq1`, `teleattest1`, and `telecap2` fixture contracts plus the
-attester state machine make this three-key protocol testable. The source controller now imports a separately gated owner-session runtime;
-its root-owned enable file and three-key epoch remain absent from production.
-The source ARI adapter has no installed service wiring and does not close the
-PBX promotion blocker. Managed jobs and retired privileged paths remain unchanged. See
-`docs/PBX-APPROVAL-ATTESTATION-CONTRACT.md`.
+The `telereq1`, `teleattest1` and `telecap2` contracts remain unit-tested
+historical approval machinery. Installed ARI/attester services also participate
+in owned shutdown and recovery; their presence does not imply that current
+native-session forwarding requires an extra approval. Preserve these identities,
+keys and signed proofs through the matching host authorities. See
+`docs/PBX-APPROVAL-ATTESTATION-CONTRACT.md` for the attested protocol.
 
-Any future call-start integration must durably invalidate an old approval arm
-before it starts a new call, then replay the exact prompt before re-arming. The
-current dormant attester supports signed, same-request supersession with an
-atomic durable replacement claim, but production controller/call-start wiring
-and real PBX recovery proofs remain part of the promotion blocker. Early, clipped, cleared,
-backpressured, lost, mismatched, or timed-out audio never authorizes execution.
+If that approval path is explicitly reactivated in a future reviewed policy,
+call-start must invalidate an old arm and replay the exact prompt before rearming.
+Early, clipped, cleared, lost, mismatched or timed-out evidence never authorizes
+execution. Native forwarding never manufactures attested handset evidence.
 
 Dial `9` is the independent emergency path. A STOPPED response is truthful only
 after every configured execution plane has durably accepted the panic and is
@@ -262,9 +258,10 @@ individual npm package directories are not standalone source closures.
 
 ## Development workflow
 
-Use Node 22.13+ for the aggregate repository validation. The API, privileged
-broker, and voice packages declare Node 20+; the native SIP package declares
-Node 22.13+.
+Use Node 24 for aggregate validation, matching CI and the committed service
+package engines. Read the lockfiles before installing dependencies. On Hermes,
+first inspect whole-host headroom and use `scripts/hermes-safe-test` serially;
+its limits do not make overlapping agent workloads safe.
 
 ```bash
 npm test
@@ -298,27 +295,29 @@ development environment report ready.
 placeholders. Secrets belong in ignored mode-`0600` files or systemd
 `LoadCredential`, never Git, command argv, logs, transcripts, or agent prompts.
 No approval private key belongs in voice. Production controller and root trust
-anchors for the retired phone signer must remain absent/revoked. A future
-private key belongs only inside the independently attested controller authority;
-executor/root verifiers receive only its public key.
+anchors for the retired phone signer must remain absent/revoked. Attested signing
+keys stay with their reviewed controller/attester authority; executor/root
+verifiers receive only the corresponding public key. Preserve installed recovery
+keys through the matching host procedures.
 
-Useful local checks:
+On the managed Hermes installation, start with the installed authenticated
+operator. Storage inspection writes a small dry-run receipt but deletes nothing:
 
 ```bash
-curl -fsS http://127.0.0.1:3000/api/realtime-health
-sudo curl --unix-socket /run/teleagent-controller/controller.sock http://localhost/health
-npm run voice-history -- --limit 500
-npm run voice-control -- status
+sudo teleagent-ops status
+sudo teleagent-ops storage
 ```
 
 New host services are sentinel-gated and installed disabled. Source readiness
 does not authorize identity migration, provider login, port cutover, DNS,
 Cloudflare Tunnel, OpenAI webhook subscription, SIP routing, service start, or
-creation of an activation sentinel. Keep the native SIP/controller/root path
-dormant until every documented manual gate and real call-path canary passes.
+creation of an activation sentinel. Existing private controller/native-session
+services have their own established activation state; preserve it. New or dormant
+public SIP and privileged lanes remain gated by their documented acceptance.
 
 ## Documentation
 
+- [Maintaining Teleagent](docs/MAINTAINING.md)
 - [README.md](README.md)
 - [docs/OPENAI-REALTIME.md](docs/OPENAI-REALTIME.md)
 - [docs/PRIVILEGED-ACTIONS.md](docs/PRIVILEGED-ACTIONS.md)
