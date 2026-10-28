@@ -69,6 +69,12 @@ bounded run. Run commands serially through `scripts/hermes-safe-test`; do not
 start nested agents, extra tmux workflows or a local image build to accelerate
 validation. See `.github/workflows/teleagent-pr-validation.yml` for exact checks.
 
+Dependency advisories can change after a candidate was signed. Recheck current
+production dependency audits before preparing its deployment. Keep a necessary
+patch narrow, update both the declared override and lockfile, and require the
+full hosted checks. A runtime dependency change needs a new signed candidate;
+do not relabel an older bundle or treat its earlier clean scan as current proof.
+
 ## Complete a release without accumulating artifacts
 
 1. Merge the exact checked app revision. Determine whether the change affects
