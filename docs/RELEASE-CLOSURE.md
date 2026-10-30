@@ -3,10 +3,24 @@
 Status: source-side build contract. This document and the tools under
 `scripts/release/` do not authorize installation or activation.
 
-## Dormant CI evidence lane
+## Retired CI evidence lane
+
+The legacy Hephaestus evidence job was retired on 2026-10-30. Its job condition
+is permanently false, so a manual dispatch cannot queue work on the old guest.
+The build contract and its non-promotable restrictions below are retained as
+historical source evidence; they are not the current release procedure.
+
+Use [Maintaining Teleagent](MAINTAINING.md) and the separate
+[release authority](https://github.com/javAlborz/teleagent-release-authority).
+V85 already passed independent hosted image builds and comparison (run
+40518980758), SBOM comparison (40519606599), fresh scan (40519422756), complete
+bundle comparison (40520185621), and protected release decision (40521260431).
+All those jobs used standard `ubuntu-24.04` GitHub-hosted runners in the public
+authority repository. Retiring this old lane does not change signing policy,
+host activation, provider credentials, or the installed service.
 
 `.github/workflows/teleagent-release-candidate.yml` is a manual, default-branch
-evidence workflow. It is restricted to the exact repo-scoped
+historical evidence workflow. Its retained contract restricts it to the exact repo-scoped
 `hephaestus-ci-build-vm01-teleagent` runner with the `self-hosted`, `Linux`,
 `X64`, `ci-build`, and `teleagent` labels. Third-party Actions use immutable
 commit SHAs (`actions/checkout` v6.0.2 and `actions/upload-artifact` v7.0.1),
