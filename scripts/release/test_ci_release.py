@@ -837,8 +837,9 @@ class CiReleaseTests(unittest.TestCase):
                     root / "dirty-evidence",
                 )
 
-    def test_workflow_is_manual_pinned_least_privilege_and_guest_only(self) -> None:
+    def test_retired_workflow_cannot_schedule_legacy_guest(self) -> None:
         workflow = WORKFLOW.read_text("utf-8")
+        self.assertIn("    if: >-\n      false &&\n", workflow)
         self.assertIn("  workflow_dispatch:\n", workflow)
         self.assertNotRegex(workflow, r"(?m)^  (?:pull_request|push|schedule):")
         self.assertIn("group: teleagent-release-candidate", workflow)

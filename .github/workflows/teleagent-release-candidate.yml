@@ -12,7 +12,10 @@ permissions:
 
 jobs:
   build-release-evidence:
+    # Retired 2026-10-30. Current releases use the separate hosted release
+    # authority; retain this non-promotable contract for historical evidence.
     if: >-
+      false &&
       github.repository == 'javAlborz/teleagent' &&
       github.event_name == 'workflow_dispatch' &&
       github.ref == 'refs/heads/main'
