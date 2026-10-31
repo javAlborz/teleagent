@@ -1741,3 +1741,42 @@ test('a connection deadline retries once before any conversation, and old socket
   instances[0].serverSend({type: 'session.updated', session: {id: 'stale'}});
   assert.equal(client.connected, true); assert.equal(client.ws, instances[1]); client.close();
 });
+
+test('typed group and activity queries reach the read-only inventory and produce fixed speech', async t => {
+  const {VoiceToolController} = require('../lib/voice-tool-controller');
+  const calls = []; const observedAt = new Date().toISOString();
+  const controller = new VoiceToolController({agentBridge: {
+    getRuntimeCapabilities: async () => ownerCapabilities,
+    ownerSessionAction: async (action, body) => {
+      calls.push({action, body});
+      assert.equal(action, 'inventory'); assert.deepEqual(body, {});
+      return {success: true, result: {observedAt, groupingAvailable: true,
+        groups: [{id: '$8', name: 'main'}], sessions: [{id: 'os_phoneA2', label: 'phoneA2',
+          provider: 'codex', activity: 'active', availability: 'available', observedAt,
+          groupIds: ['$8'], membershipBasis: 'resume_launch'}]}};
+    },
+  }});
+  const client = await createConnectedClient({capabilities: ownerCapabilities,
+    toolHandler: (name, args, context) => controller.handle(name, args, context)});
+  t.after(() => client.close());
+  client.prepareCallerTurn('Which sessions are active in the main group?');
+  await client._handleResponseDone({output: [ownerRoute('group-active', 'list_owner_sessions', {
+    view: 'sessions', tmux_group: 'main', active_only: true,
+    selected_sessions: ['phoneA2'], group_name: 'untrusted selection',
+  })]});
+  assert.deepEqual(calls, [{action: 'inventory', body: {}}]);
+  assert.match(client.nextVerifiedSpeech.text, /phoneA2, codex, active, launched in main/);
+  assert.deepEqual(client.ownerGroupInventoryQuery, {view: 'sessions', tmux_group: 'main', active_only: true});
+  assert.equal(client.focusedOwnerOperation, null);
+  assert.equal(client.ownerTaskMemory.context().tasks.length, 0);
+  assert.deepEqual(client.ownerTaskMemory.context().selected_sessions, []);
+});
+
+test('group inventory unavailable produces a truthful fixed response without falling back to enrollment', async t => {
+  const client = await createConnectedClient({capabilities: ownerCapabilities,
+    toolHandler: async () => ({success: false, code: 'OWNER_GROUPS_UNAVAILABLE'})});
+  t.after(() => client.close());
+  client.prepareCallerTurn('List sessions in main.');
+  await client._handleResponseDone({output: [ownerRoute('missing-groups', 'list_owner_sessions', {tmux_group: 'main'})]});
+  assert.equal(client.nextVerifiedSpeech.text, 'The current tmux groups could not be checked.');
+});

@@ -46,6 +46,7 @@ function createOwnerSessionServer(broker) {
         let result;
         if (req.method === 'GET' && req.url === '/v1/health') result = broker.health();
         else if (req.method === 'GET' && req.url === '/v1/sessions') result = broker.list();
+        else if (req.method === 'GET' && req.url === '/v1/inventory') result = await broker.inventory();
         else if (req.method === 'POST' && req.url === '/v1/inspect') {
           exact(body, ['id', 'history', ...(Object.hasOwn(body, 'selection') ? ['selection'] : [])]);
           const selection = require('./owner-session-history').validateSelection(body.selection);

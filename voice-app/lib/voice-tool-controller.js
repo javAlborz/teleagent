@@ -1,6 +1,7 @@
 'use strict';
 
 const {makeOperationId} = require('./owner-task-plan');
+const {queryInventory} = require('./owner-inventory');
 const { URL } = require('node:url');
 const {
   UNAVAILABLE, isToolAvailable, readControllerCapabilities, toolCapability, unavailableResult,
@@ -132,6 +133,16 @@ class VoiceToolController {
   }
 
   async _listOwnerSessions(args) {
+    if (args.session_label === undefined) {
+      let response;
+      try { response = await this.agentBridge.ownerSessionAction('inventory', {}); }
+      catch { /* no raw transport errors in voice output */ }
+      if (response?.success !== true) return { success: false, code: 'OWNER_SESSION_INVENTORY_UNAVAILABLE' };
+      return { success: true, result: queryInventory(response.result, args) };
+    }
+    if (args.view !== undefined || args.tmux_group !== undefined || args.active_only !== undefined) {
+      return { success: false, code: 'OWNER_INVENTORY_QUERY_INVALID' };
+    }
     const sessions = await this._ownerSessionInventory();
     const label = args.session_label;
     if (label !== undefined && (typeof label !== 'string' ||
