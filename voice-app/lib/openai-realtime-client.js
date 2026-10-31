@@ -3,6 +3,7 @@
 const { labelKey, validLabel, verbatimMessageSpan, checkOwnerInstruction, ownerDialogueContext, OWNER_DIALOGUE_INSTRUCTIONS } = require('./owner-call-intent');
 const { OwnerReplyWatch } = require('./owner-reply-watch');
 const {spokenReply, missingSessionSpeech} = require('./owner-readback');
+const {inventorySpeech} = require('./owner-inventory');
 const {OwnerTaskMemory, validatePlan, runPlan, renderPlan, resultSnapshot, makeOperationId, attempted, MAX_ACTIONS, ACTIONS} = require('./owner-task-plan');
 const { OwnerDecisionRouter, OWNER_DECISION_MODEL } = require('./owner-decision-router');
 
@@ -127,8 +128,8 @@ function buildRealtimeTools(profiles) {
   };
   return [
     { type: 'function', name: 'list_owner_sessions',
-      description: 'Check whether a named personal session exists using session_label, or omit it to list enrolled personal Codex/Claude sessions. Use this for “Is there a session called phone A?”. For reading or messaging, directly use inspect_owner_session or request_owner_instruction. Enrollment is not proof of liveness. This inventory is separate from managed phone jobs.',
-      parameters: { type: 'object', properties: { session_label: { type: 'string', maxLength: 80 } }, additionalProperties: false } },
+      description: 'Check whether a named personal session exists using session_label, or omit it to list enrolled personal Codex/Claude sessions. Use this for “Is there a session called phone A?”. For reading or messaging, directly use inspect_owner_session or request_owner_instruction. Without session_label, fetch current personal tmux groups and sampled activity of enrolled agents. Use view groups to list tmux groups; view sessions to list agents; tmux_group to show members of an exact group; active_only true for active agents or groups containing them. Unknown activity is not idle. Codex group placement is a resume-launch association, not proof of its displayed conversation. This is separate from managed phone jobs.',
+      parameters: { type: 'object', properties: { session_label: { type: 'string', maxLength: 80 }, view: { enum: ['groups', 'sessions'] }, tmux_group: { type: 'string', maxLength: 80 }, active_only: { type: 'boolean' } }, additionalProperties: false } },
     { type: 'function', name: 'inspect_owner_session',
       description: 'Read the recent messages or status of a named existing personal Codex/Claude session. Use history true for reply/output questions. For first/previous/second-to-last messages use selection with anchor start/end, one-based index and role any/user/assistant. Never answer an ordinal request with the latest reply. This includes “did it reply?”, “any output?”, and “recheck” after reading a reply. Resolve it/the session from the application-owned focused personal session. Delivery receipts cannot answer these questions. Supply session_label using the enrolled name. Never invent or supply an id. The app resolves the label and reads the session within this action; no preliminary list is needed. Never substitute phone transcripts or managed-session records.',
       parameters: { type: 'object', properties: { session_label: { type: 'string', maxLength: 80 }, history: { type: 'boolean' }, selection: { type: 'object', properties: { anchor: { enum: ['start', 'end'] }, index: { type: 'integer', minimum: 1, maximum: 6 }, role: { enum: ['any', 'user', 'assistant'] } }, required: ['anchor', 'index', 'role'], additionalProperties: false } }, required: ['session_label'], additionalProperties: false } },
@@ -449,6 +450,9 @@ function buildRealtimeRouterTool(profiles, capabilities = UNAVAILABLE) {
     parameters: {
       type: 'object', properties: {
         action: {type: 'string', enum: actions},
+        view: {type: 'string', enum: ['groups', 'sessions'], description: 'For list_owner_sessions: groups lists current personal tmux sessions as groups; sessions lists enrolled agents with sampled activity.'},
+        tmux_group: {type: 'string', maxLength: 80, description: 'For list_owner_sessions only: exact tmux group name to inspect. Never a message target or a caller-defined selection set.'},
+        active_only: {type: 'boolean', description: 'For list_owner_sessions only: true lists active agents or groups with active agents; unknown observations remain explicitly unknown.'},
         session_label: {type: 'string', maxLength: 80, description: 'Exact known or spoken target; resolve it/that session from application focus.'},
         message: {type: 'string', maxLength: 1200, description: 'ONLY the message body intended for the target. Exclude addressing words and requests to read back. Copy caller wording verbatim; never answer the forwarded question.'},
         message_source: {type: 'string', enum: ['caller', 'draft'], description: 'Required for sending: caller when message is copied from the current caller turn; draft only for an explicitly presented application draft.'},
@@ -1133,6 +1137,15 @@ class OpenAIRealtimeClient extends EventEmitter {
   }
 
   _requestOwnerInventorySpeech(result) {
+    if (['groups', 'sessions'].includes(result.view)) {
+      this.ownerGroupInventoryQuery = {view: result.view, ...(result.query_group ? {tmux_group: result.query_group} : {}),
+        active_only: result.active_only};
+      const rendered = inventorySpeech(result, this.ownerGroupInventoryCursor,
+        /\b(?:next|remaining|rest|more)\b/i.test(this.latestUserTranscript || ''));
+      this.ownerGroupInventoryCursor = rendered.cursor;
+      this._requestOwnerStatusSpeech(rendered.text);
+      return true;
+    }
     const sessions = result.sessions;
     if (!Array.isArray(sessions) || sessions.length > 32 || sessions.some(s =>
       typeof s?.label !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9 ._-]{0,79}$/.test(s.label))) return false;
@@ -1824,6 +1837,16 @@ class OpenAIRealtimeClient extends EventEmitter {
       }
       if (handledCalls.length === 1 && handledCalls[0].action === 'list_owner_sessions' &&
           outputs[0]?.success === true && this._requestOwnerInventorySpeech(outputs[0].result || {})) return;
+      if (handledCalls.length === 1 && handledCalls[0].action === 'list_owner_sessions' && outputs[0]?.success !== true) {
+        const messages = {
+          OWNER_GROUP_NOT_FOUND: 'No personal tmux group has that name. Ask me to list groups.',
+          OWNER_GROUP_AMBIGUOUS: 'That group name is ambiguous. Please use the exact group name.',
+          OWNER_GROUPS_UNAVAILABLE: 'The current tmux groups could not be checked.',
+          OWNER_INVENTORY_QUERY_INVALID: 'Please ask for groups, sessions in a group, or active sessions.',
+        };
+        this._requestOwnerStatusSpeech(messages[outputs[0]?.code] || 'The current group and activity inventory is unavailable.');
+        return;
+      }
       // Owner delivery state is not a managed read-only job. Give its status
       // a fixed, short rendering rather than letting generic job instructions
       // reinterpret acceptance as inability to send or task completion.
@@ -2045,7 +2068,7 @@ class OpenAIRealtimeClient extends EventEmitter {
         output: handled.output, durationMs: Date.now() - startedAt, routed: true});
       return handled;
     }
-    if (typedOwnerRoute && args.selected_sessions) {
+    if (typedOwnerRoute && args.selected_sessions && args.action !== 'list_owner_sessions') {
       try { this.ownerTaskMemory.select(args.selected_sessions, args.group_name); }
       catch (error) { return {output: {success: false, code: error.code}, routed: true, action: args.action}; }
     }
@@ -2060,7 +2083,7 @@ class OpenAIRealtimeClient extends EventEmitter {
         request_owner_instruction: ['session_label', 'message', 'notify_when_complete'],
         inspect_owner_session: ['session_label', 'history', 'selection', 'reply_detail'],
         get_owner_reply: ['operation_id', 'session_label', 'task_id', 'notify_when_complete', 'reply_detail'],
-        get_owner_instruction: ['operation_id', 'session_label', 'task_id'], list_owner_sessions: ['session_label'], end_call: [],
+        get_owner_instruction: ['operation_id', 'session_label', 'task_id'], list_owner_sessions: ['session_label', 'view', 'tmux_group', 'active_only'], end_call: [],
       }[action] || [];
       const selected = Object.fromEntries(fields.filter(key => Object.hasOwn(parameters, key)).map(key => [key, parameters[key]]));
       args = {action, arguments_json: JSON.stringify(selected)};

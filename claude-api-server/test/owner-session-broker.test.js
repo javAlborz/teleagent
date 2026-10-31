@@ -69,6 +69,35 @@ test('catalog lists enrollment and live inspection strips paths and redacts hist
   assert.doesNotMatch(JSON.stringify(result), /native.sock|\/tmp\/|secret/);
 });
 
+test('group inventory verifies native identity without fetching messages or submitting input', async t => {
+  const {broker, state} = await fixture(t);
+  broker.topology = async () => ({available: true, groups: [{id: '$1', name: 'main'}],
+    memberships: {os_fixture: {groups: ['$1'], basis: 'resume_launch'}}});
+  const result = await broker.inventory();
+  assert.equal(result.sessions[0].activity, 'idle');
+  assert.deepEqual(result.sessions[0].groupIds, ['$1']);
+  assert.deepEqual(state.calls.filter(c => c.id).map(c => c.method), ['initialize', 'thread/loaded/list', 'thread/read']);
+  assert.doesNotMatch(JSON.stringify(result), /private|native.sock|sessionFingerprint|\/tmp\//);
+  state.cwd = '/';
+  const changed = await broker.inventory();
+  assert.equal(changed.sessions[0].activity, 'unknown');
+  assert.equal(changed.sessions[0].availability, 'unavailable');
+});
+
+test('inventory times out a stalled native read, releases its slot and keeps panic responsive', async t => {
+  const {broker, state} = await fixture(t);
+  broker.topology = async () => ({available: true, groups: [], memberships: {}});
+  let release;
+  state.pause = new Promise(resolve => {release = resolve;});
+  t.after(() => release());
+  const pending = broker.inventory();
+  assert.equal(broker.panic().locked, true);
+  const result = await pending;
+  assert.equal(result.sessions[0].activity, 'unknown');
+  assert.equal(broker.busy, false);
+  await assert.rejects(broker.inventory(), {code: 'OWNER_SESSION_PANIC_LOCKED'});
+});
+
 test('broker carries the persisted native input ID into an exact reply read after reconnect', async t => {
   const {broker, store, state} = await fixture(t);
   const prepared = await broker.prepare({id: 'os_fixture', operationId: 'job_nativereply', message: 'Name a color.'});

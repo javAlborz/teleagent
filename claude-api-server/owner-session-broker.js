@@ -5,6 +5,8 @@ const { OwnerClaudeClient } = require('./owner-claude-client');
 const { inspectOwnerSession, requestPlan, deliverOwnerSession, hash } = require('./owner-session-delivery');
 const { sessionError } = require('./owner-session-endpoint');
 const { exact } = require('./owner-session-catalog');
+const { readTmuxGroups } = require('./owner-tmux-groups');
+const { collectInventory } = require('./owner-session-inventory');
 
 function nativeClient(entry) {
   return entry.provider === 'codex' ? new OwnerCodexClient({ endpoint: entry.endpoint })
@@ -16,10 +18,11 @@ function nativeClient(entry) {
 // one admission slot. Its service must also hold an exclusive lifetime lock.
 class OwnerSessionBroker {
   constructor({ catalog, store, authority, clientFactory = nativeClient, assertAdmission = null, assertBoundary = null,
-    nativePermissions = false }) {
+    nativePermissions = false, topology = readTmuxGroups }) {
     this.catalog = catalog; this.store = store; this.authority = authority;
     this.assertBoundary = assertBoundary;
     this.nativePermissions = nativePermissions === true;
+    this.topology = topology;
     this.clientFactory = clientFactory; this.assertAdmission = assertAdmission; this.busy = false; this.closing = false;
   }
   async serial(work) {
@@ -29,16 +32,22 @@ class OwnerSessionBroker {
     this.busy = true;
     try { return await work(); } finally { this.busy = false; }
   }
-  async session(id, work) {
+  async session(id, work, timeoutMs = null) {
     const entry = this.catalog.get(id);
     const client = this.clientFactory(entry);
-    try {
+    let timer;
+    const connected = async () => {
       await client.connect();
       const session = await inspectOwnerSession(client, entry.provider, entry.sessionId);
       this.catalog.assertEntry(entry, client, session);
       const assertEnrolled = () => this.catalog.assertEntry(entry, client, session);
       return await work({ entry, client, session, assertEnrolled });
-    } finally { client.close(); }
+    };
+    try {
+      return timeoutMs === null ? await connected() : await Promise.race([connected(), new Promise((_, reject) => {
+        timer = setTimeout(() => reject(sessionError('OWNER_INVENTORY_TIMEOUT')), timeoutMs);
+      })]);
+    } finally { clearTimeout(timer); client.close(); }
   }
   health() {
     if (this.closing || !this.authority || typeof this.assertBoundary !== 'function' || this.store.isLocked()) {
@@ -52,6 +61,17 @@ class OwnerSessionBroker {
     // Inventory is enrollment, not a claim that every session is still running.
     return this.catalog.entries().map(({ id, label, provider }) => ({ id, label, provider,
       availability: 'unchecked' }));
+  }
+  inventory() {
+    return this.serial(async () => {
+      const entries = this.catalog.entries();
+      const result = await collectInventory(entries, {
+        topology: rows => this.topology(rows, this.catalog.catalog),
+        inspect: (id, timeoutMs) => this.session(id, ({ session }) => session.status, timeoutMs),
+      });
+      this.catalog.assertCurrent();
+      return result;
+    });
   }
   inspect(id, { history = false, selection = null } = {}) {
     return this.serial(() => this.session(id, async ({ entry, client, session, assertEnrolled }) => {

@@ -39,6 +39,17 @@ test('panic or host admission refusal fences even otherwise valid phone requests
   await assert.rejects(api.handle('list', {}), /locked/);
 });
 
+test('group inventory is read-only and cannot accept caller-selected host commands or sockets', async () => {
+  let calls = 0;
+  const api = createOwnerPhoneApi({assertUnlocked() {}, coordinator: {store: {assertUnlocked() {}}},
+    broker: {inventory: async () => {calls++; return {groups: [], sessions: []};}}});
+  assert.deepEqual(await api.handle('inventory', {}), {groups: [], sessions: []});
+  for (const input of [{command: 'send-keys'}, {socket: '/tmp/other'}, {id: 'os_invented'}]) {
+    await assert.rejects(api.handle('inventory', input));
+  }
+  assert.equal(calls, 1);
+});
+
 test('authority epochs require three distinct Ed25519 public keys with exact roles', () => {
   const input = { version: 1, epoch: 'a'.repeat(64) };
   for (const role of ['arm', 'pbx', 'execution']) input[role] = { keyId: role,

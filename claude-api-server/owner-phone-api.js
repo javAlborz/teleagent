@@ -11,6 +11,10 @@ function createOwnerPhoneApi({ broker, coordinator, assertUnlocked }) {
   return Object.freeze({
     async handle(action, body) {
       assertUnlocked(); coordinator.store.assertUnlocked();
+      if (action === 'inventory') {
+        exact(body, []);
+        return broker.inventory();
+      }
       if (action === 'list') {
         exact(body, []);
         return { sessions: await broker.list(), scope: 'explicitly_enrolled_owner_sessions',
@@ -62,7 +66,7 @@ function createOwnerPhoneApi({ broker, coordinator, assertUnlocked }) {
 }
 
 function installOwnerPhoneRoutes(app, getRuntime) {
-  for (const action of ['list', 'inspect', 'request', 'status', 'reply', 'cancel']) {
+  for (const action of ['list', 'inventory', 'inspect', 'request', 'status', 'reply', 'cancel']) {
     app.post(`/voice-control/owner/${action}`, async (req, res) => {
       try {
         const runtime = getRuntime();

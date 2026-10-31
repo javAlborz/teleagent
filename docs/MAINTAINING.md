@@ -41,6 +41,41 @@ permissions. The phone does not answer native approval prompts or classify
 arbitrary instructions into safe and unsafe actions. Preserve exact enrollment,
 call authentication, durable dispatch, completion evidence and panic boundaries.
 
+## Personal tmux groups and activity
+
+On the phone, a **group** is a personal tmux session; a **session** is an enrolled
+native Codex/Claude conversation. Ask “list groups,” “list sessions in main,” or
+“which sessions are active?” The existing `list_owner_sessions` action supports
+`view: groups|sessions`, `tmux_group`, and `active_only`. A `session_label` query
+remains a cheap enrollment check and cannot be combined with those filters.
+Five entries are spoken at a time; “next groups/sessions” continues the same
+query. A changed inventory restarts pagination instead of silently skipping rows.
+
+The owner broker's read-only inventory samples native status serially within a
+six-second budget. Active means native active/busy, not token streaming or
+proof of progress. Failed, timed-out and unvisited observations remain unknown;
+they are never counted as idle. Group membership never changes enrollment,
+selection, permissions or message delivery. Caller-defined selection sets in
+`task_state.groups` remain a separate conversation concept.
+
+`owner-tmux-groups.js` reads only fixed tmux metadata from the owner's default
+local socket and bounded process metadata. Org/protected panes are excluded;
+no terminal contents, paths, PIDs, socket names or transcripts reach the phone.
+Claude placement uses its exact registered native process. A shared Codex daemon
+cannot locate its frontends: an exact live frontend `resume UUID` establishes
+only a **launch association**, spoken as “launched in.” It does not prove the UI
+still displays that conversation after an in-app switch. Sessions started without
+that identifier remain “group unknown.” Groups with no enrolled members are
+still listed; this is not discovery or enrollment of every process on the host.
+
+The new controller and voice code must ship together. The host release review
+must admit the fixed `/usr/bin/tmux` metadata operation and socket access inside
+the owner broker's existing sandbox; never expose the socket to voice or workers.
+Unavailable tmux metadata leaves native activity usable and reports grouping as
+unavailable. The application closure includes both new host inventory modules.
+Source tests and read-only host observations do not install this feature or prove
+handset acceptance.
+
 ## Investigate and validate
 
 1. Verify current selection and authenticated readiness with `teleagent-ops`.
