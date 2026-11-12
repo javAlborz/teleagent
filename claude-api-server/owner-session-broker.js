@@ -62,11 +62,13 @@ class OwnerSessionBroker {
     return this.catalog.entries().map(({ id, label, provider }) => ({ id, label, provider,
       availability: 'unchecked' }));
   }
-  inventory() {
+  context() { return this.inventory({ sampleActivity: false }); }
+  inventory({ sampleActivity = true } = {}) {
     return this.serial(async () => {
       const entries = this.catalog.entries();
       const result = await collectInventory(entries, {
         topology: rows => this.topology(rows, this.catalog.catalog),
+        ...(sampleActivity ? {} : {budgetMs: 0}),
         inspect: (id, timeoutMs) => this.session(id, ({ session }) => session.status, timeoutMs),
       });
       this.catalog.assertCurrent();

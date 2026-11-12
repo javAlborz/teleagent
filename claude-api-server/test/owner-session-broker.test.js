@@ -370,3 +370,23 @@ test('bound reply verifies durable plan, identity and admission without deliveri
   await assert.rejects(broker.reply({ id: prepared.id, request: prepared.request }), { code: 'OWNER_SESSION_CAPACITY' });
   assert.ok(state.calls.every(c => !['turn/start', 'turn/steer'].includes(c.method)));
 });
+
+
+test('context API refreshes group metadata without connecting to native agents', async t => {
+  const {broker, state, root} = await fixture(t);
+  let group = 'infra';
+  broker.topology = async () => ({available: true, groups: [{id: '$1', name: group}],
+    memberships: {os_fixture: {groups: ['$1'], basis: 'resume_launch'}}});
+  const call = await api(t, broker, root);
+  const first = await call('GET', '/v1/context');
+  assert.equal(first.status, 200);
+  assert.equal(first.body.result.groups[0].name, 'infra');
+  assert.equal(first.body.result.sessions[0].activity, 'unknown');
+  assert.equal(first.body.result.sessions[0].availability, 'unchecked');
+  group = 'media';
+  assert.equal((await call('GET', '/v1/context')).body.result.groups[0].name, 'media');
+  assert.deepEqual(state.calls, []);
+  assert.doesNotMatch(JSON.stringify(first), /native.sock|sessionFingerprint|endpoint|sessionId/);
+  broker.catalog.assertCurrent = () => {throw Object.assign(new Error('changed'), {code: 'OWNER_CATALOG_CHANGED'});};
+  assert.equal((await call('GET', '/v1/context')).body.code, 'OWNER_CATALOG_CHANGED');
+});

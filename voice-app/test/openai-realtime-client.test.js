@@ -1780,3 +1780,48 @@ test('group inventory unavailable produces a truthful fixed response without fal
   await client._handleResponseDone({output: [ownerRoute('missing-groups', 'list_owner_sessions', {tmux_group: 'main'})]});
   assert.equal(client.nextVerifiedSpeech.text, 'The current tmux groups could not be checked.');
 });
+
+
+test('each decision sees refreshed lookup context and a lookup response does not select or dispatch', async t => {
+  let current = {available: true, labels: ['pkmnhost'], groupingAvailable: true,
+    sessions: [{label: 'pkmnhost', groups: ['infra'], membershipBasis: 'resume_launch'}]};
+  const requests = [], actions = [];
+  const client = await createConnectedClient({capabilities: ownerCapabilities, ownerSessionLabels: ['stale'],
+    refreshOwnerSessionContext: async () => current,
+    ownerDecisionRouter: {decide: async request => {
+      requests.push(request);
+      return {calls: [ownerRoute('lookup', 'respond', {response_text: 'Do you mean pkmnhost?'})]};
+    }}, toolHandler: async (...args) => actions.push(args)});
+  t.after(() => client.close());
+  client.prepareCallerTurn('Do we have Pokemon or PKMN in infra?'); client.requestRoutedResponse();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(requests[0].instructions, /"labels":\["pkmnhost"\]/);
+  assert.match(requests[0].instructions, /"groups":\["infra"\]/);
+  assert.deepEqual(client.ownerSessionLabels, ['pkmnhost']);
+  assert.equal(client.focusedOwnerSession, null);
+  assert.deepEqual(actions, []);
+  current = {available: false, labels: []};
+  client.responseActive = false; client.nextVerifiedSpeech = null;
+  client.prepareCallerTurn('Check again'); client.requestRoutedResponse();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(client.ownerSessionLabels, []);
+  assert.match(requests[1].instructions, /"session_inventory_hint":\{"available":false,"labels":\[\]\}/);
+  assert.deepEqual(actions, []);
+});
+
+for (const termination of ['interrupt', 'close']) test(`a ${termination} during inventory refresh cannot revive a decision`, async t => {
+  let release, decisions = 0, actions = 0;
+  const client = await createConnectedClient({capabilities: ownerCapabilities,
+    refreshOwnerSessionContext: () => new Promise(resolve => {release = resolve;}),
+    ownerDecisionRouter: {decide: async () => {decisions++; throw new Error('must not run');}},
+    toolHandler: async () => {actions++;}});
+  t.after(() => client.close());
+  client.prepareCallerTurn('Send apple to alpha'); client.requestRoutedResponse();
+  await new Promise(resolve => setImmediate(resolve));
+  if (termination === 'close') client.close();
+  else {client.cancelResponse({discardOutput: true}); client.prepareCallerTurn('Never mind.');}
+  release({available: true, labels: ['alpha']});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(decisions, 0); assert.equal(actions, 0);
+  assert.deepEqual(client.ownerSessionLabels, []);
+});

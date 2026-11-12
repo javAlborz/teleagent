@@ -74,3 +74,15 @@ test('operation reply uses the stored request and target, rejects injected ident
   await assert.rejects(api.handle('reply', { operationId: 'job_' + 'b'.repeat(64) }), { code: 'OWNER_PHONE_OPERATION_NOT_FOUND' });
   assert.equal(calls.length, 1);
 });
+
+
+test('lookup context accepts no commands or target arguments', async () => {
+  let calls = 0;
+  const api = createOwnerPhoneApi({assertUnlocked() {}, coordinator: {store: {assertUnlocked() {}}},
+    broker: {context: async () => {calls++; return {groups: [], sessions: []};}}});
+  assert.deepEqual(await api.handle('context', {}), {groups: [], sessions: []});
+  for (const input of [{command: 'send-keys'}, {socket: '/tmp/other'}, {id: 'os_invented'}]) {
+    await assert.rejects(api.handle('context', input));
+  }
+  assert.equal(calls, 1);
+});

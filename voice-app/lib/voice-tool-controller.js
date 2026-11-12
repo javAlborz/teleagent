@@ -121,12 +121,32 @@ class VoiceToolController {
     return sessions;
   }
 
-  async ownerSessionContext() {
+  async ownerSessionContext({withGroups = false} = {}) {
     if (!this.capabilities.ownerSessionsAvailable) return { available: false, labels: [] };
     try {
       const sessions = await this._ownerSessionInventory();
       // Labels are pronunciation/routing context, never cached delivery authority.
-      return { available: true, labels: [...new Set(sessions.map((entry) => entry.label))] };
+      const context = { available: true, labels: [...new Set(sessions.map((entry) => entry.label))] };
+      if (withGroups) {
+        try {
+          const response = await this.agentBridge.ownerSessionAction('context', {});
+          if (response?.success !== true) throw new Error('context unavailable');
+          const inventory = queryInventory(response.result, {});
+          // A catalog change between reads must not pair old names with new groups.
+          if (sessions.length !== inventory.sessions.length || sessions.some(entry =>
+            !inventory.sessions.some(s => s.id === entry.id && s.label === entry.label))) {
+            throw new Error('context changed');
+          }
+          context.sessions = inventory.sessions.map(s => ({label: s.label,
+            groups: inventory.groups.filter(g => s.groupIds.includes(g.id)).map(g => g.name),
+            membershipBasis: s.membershipBasis}));
+          context.groupingAvailable = inventory.groupingAvailable;
+          context.observedAt = inventory.observedAt;
+        } catch {
+          context.groupingAvailable = false;
+        }
+      }
+      return context;
     } catch {
       return { available: false, labels: [] };
     }

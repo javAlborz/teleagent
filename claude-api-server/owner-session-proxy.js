@@ -4,7 +4,7 @@ const http = require('node:http');
 const { sessionError } = require('./owner-session-endpoint');
 const SOCKET_PATH = '/run/teleagent-owner-session/broker.sock';
 const ROUTES = new Set(['/v1/reply', '/v1/inspect', '/v1/prepare', '/v1/deliver', '/v1/forward', '/v1/result', '/v1/panic']);
-const READ_ROUTES = new Set(['/v1/sessions', '/v1/health', '/v1/inventory']);
+const READ_ROUTES = new Set(['/v1/sessions', '/v1/health', '/v1/inventory', '/v1/context']);
 
 // Controller-only client. In particular, a lost /deliver response is not retried.
 // The caller retains operationId+planHash and asks /result for durable evidence.
@@ -46,6 +46,7 @@ function createOwnerSessionProxy({ socketPath = SOCKET_PATH, timeoutMs = 15000 }
   }
   return Object.freeze({ health: () => call('/v1/health'), list: () => call('/v1/sessions'),
     inventory: () => call('/v1/inventory'),
+    context: () => call('/v1/context'),
     inspect: (id, history = false, selection = null) => call('/v1/inspect', { id, history, ...(selection ? { selection } : {}) }),
     reply: (input) => call('/v1/reply', input),
     prepare: (input) => call('/v1/prepare', input), deliver: (input) => call('/v1/deliver', input),
