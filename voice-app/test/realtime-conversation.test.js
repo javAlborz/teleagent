@@ -1563,21 +1563,31 @@ test('an explicit callback thread cannot cross caller identities', async (t) => 
 });
 
 
-test('call startup supplies enrolled owner labels to both routing and transcription without native reads', async (t) => {
+test('call startup supplies labels and refreshable group context without native reads', async (t) => {
   const fixture = createCallFixture(t);
   const actions = [];
   fixture.jobBroker.agentBridge.getRuntimeCapabilities = async () => ({ ...READY_CAPABILITIES, ownerSessionsAvailable: true });
   fixture.jobBroker.agentBridge.ownerSessionAction = async (action) => {
     actions.push(action);
-    assert.equal(action, 'list');
-    return { success: true, result: { sessions: [{ id: 'os_private', label: 'teletest', cwd: '/private/path' }] } };
+    assert.ok(['list', 'context'].includes(action));
+    const sessions = [{id: 'os_private', label: 'teletest', provider: 'codex', cwd: '/private/path',
+      activity: 'unknown', availability: 'unchecked', observedAt: null,
+      groupIds: ['$1'], membershipBasis: 'resume_launch'}];
+    return {success: true, result: action === 'list' ? {sessions}
+      : {sessions, groups: [{id: '$1', name: actions.length > 2 ? 'media' : 'infra'}],
+        groupingAvailable: true, observedAt: new Date().toISOString()}};
   };
   await runRealtimeConversation(fixture.endpoint, fixture.dialog, 'call-owner-vocabulary', {
     audioForkServer: fixture.audioForkServer, stateStore: fixture.stateStore,
     jobBroker: fixture.jobBroker, callerId: '1001', openaiClientFactory: fixture.openaiClientFactory,
   });
   const options = fixture.getRealtimeClient().options;
-  assert.deepEqual(actions, ['list']);
+  assert.deepEqual(actions, ['list', 'context']);
+  assert.deepEqual(options.ownerSessionContext.sessions,
+    [{label: 'teletest', groups: ['infra'], membershipBasis: 'resume_launch'}]);
+  assert.equal((await options.refreshOwnerSessionContext()).sessions[0].groups[0], 'media');
+  assert.deepEqual(actions, ['list', 'context', 'list', 'context']);
+  assert.doesNotMatch(JSON.stringify(options.ownerSessionContext), /os_private|private\/path/);
   assert.ok(options.transcriptionKeywords.includes('teletest'));
   assert.match(options.transcriptionPrompt, /teletest/);
   assert.match(options.instructions, /enrolled labels are \["teletest"\]/);
