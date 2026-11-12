@@ -719,3 +719,37 @@ test('named membership checks use verified enrollment and never inspect or send'
   assert.equal(failed.code, 'OWNER_SESSION_INVENTORY_UNAVAILABLE');
   assert.doesNotMatch(JSON.stringify(failed), /private detail/);
 });
+
+
+test('lookup context contains verified labels and groups but no native metadata or activity claims', async t => {
+  const {controller} = configureNamedOwner(t);
+  await controller.refreshCapabilities();
+  const calls = [];
+  const raw = {groups: [{id: '$1', name: 'infra'}], groupingAvailable: true,
+    observedAt: new Date().toISOString(), sessions: [{id: 'os_teletest', label: 'teletest', provider: 'codex',
+      groupIds: ['$1'], membershipBasis: 'resume_launch', activity: 'unknown', availability: 'unchecked',
+      observedAt: null, endpoint: 'private', cwd: '/private', sessionId: 'secret'}]};
+  controller.agentBridge.ownerSessionAction = async action => {
+    calls.push(action);
+    return {success: true, result: action === 'list' ? {sessions: raw.sessions} : raw};
+  };
+  const context = await controller.ownerSessionContext({withGroups: true});
+  assert.deepEqual(context, {available: true, labels: ['teletest'], groupingAvailable: true,
+    observedAt: raw.observedAt, sessions: [{label: 'teletest', groups: ['infra'], membershipBasis: 'resume_launch'}]});
+  assert.deepEqual(calls, ['list', 'context']);
+  assert.doesNotMatch(JSON.stringify(context), /private|secret|os_teletest|activity|endpoint/);
+});
+
+test('failed or mismatched group snapshots keep verified names without claiming group membership', async t => {
+  const {controller} = configureNamedOwner(t);
+  await controller.refreshCapabilities();
+  for (const result of [null, {groups: [], sessions: [], groupingAvailable: true, observedAt: new Date().toISOString()}]) {
+    controller.agentBridge.ownerSessionAction = async action => {
+      if (action === 'list') return {success: true, result: {sessions: [{id: 'os_test', label: 'test', provider: 'codex'}]}};
+      if (!result) throw new Error('private transport details');
+      return {success: true, result};
+    };
+    assert.deepEqual(await controller.ownerSessionContext({withGroups: true}),
+      {available: true, labels: ['test'], groupingAvailable: false});
+  }
+});

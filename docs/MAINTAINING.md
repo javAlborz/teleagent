@@ -76,6 +76,22 @@ unavailable. The application closure includes both new host inventory modules.
 Source tests and read-only host observations do not install this feature or prove
 handset acceptance.
 
+## Conversational session lookup
+
+Before each personal-session decision, the phone refreshes a small verified
+context of enrolled labels and observed group associations. The broker's
+`/v1/context` read obtains topology without native agent RPC, history or activity
+sampling. It rechecks the catalog; a mismatch between enrollment and topology
+reads drops group hints. Failed context reads remain unavailable, not an empty
+inventory. Context is not delivery authority or evidence that an agent is active.
+
+Exploratory questions such as “Do we have Pokemon or P K M N?” use that context
+to suggest matching enrolled labels and ask for clarification. They do not read
+out unrelated sessions, select recipients or send messages. Explicit list,
+page, group and active-status requests keep the inventory action. A later send
+still resolves the exact enrolled target and passes the existing dispatch gates.
+Caller interruption or hangup during refresh discards that pending decision.
+
 ## Investigate and validate
 
 1. Verify current selection and authenticated readiness with `teleagent-ops`.
