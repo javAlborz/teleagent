@@ -1,6 +1,6 @@
 # Teleagent
 
-Voice interface for Claude Code and OpenAI Codex over SIP.
+Talk to Claude Code and OpenAI Codex over a SIP phone.
 
 Teleagent is the maintained continuation of the old Claude Phone project for the Hermes phone stack. The CLI command remains `claude-phone` for compatibility.
 
@@ -22,7 +22,7 @@ not the signed Hermes upgrade or recovery procedure.
 - At least one agent CLI: authenticated Claude Code, authenticated Codex, or both
 - macOS or Linux
 
-## Quick Start
+## Standalone setup
 
 ### 1. Install
 
@@ -38,9 +38,9 @@ This installs dependencies, clones the repo to `~/.claude-phone-cli`, and create
 claude-phone setup
 ```
 
-The setup wizard supports:
+The setup wizard exposes the following roles. The voice and controller must run together in the guarded single-host deployment; split-host voice routing is retired.
 
-- `Voice Server`: voice services only
+- `Voice Server`: legacy role; split-host routing is retired
 - `API Server`: Claude/Codex bridge only
 - `Both`: all-in-one single-machine install
 
@@ -50,6 +50,10 @@ profiles when a SIP device is created. Existing configs migrate as Claude-only
 until the provider selection is changed explicitly.
 
 ### 3. Start
+
+Voice activation is guarded by the host service and the promotion gates in
+[the phone-agent architecture](docs/PHONE-AGENT-ARCHITECTURE.md). Installing the
+CLI and completing setup alone do not authorize or activate a voice deployment.
 
 ```bash
 claude-phone start
